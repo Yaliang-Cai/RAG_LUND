@@ -1,0 +1,115 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        // ==========================================
+        // RAG-Anything: DocBench Evaluation
+        // ==========================================
+        {
+            "name": "DocBench: Generate Answers (Doc 0-5)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/rag-anything/evaluate_local/DocBench/evaluate.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/rag-anything/evaluate_local/DocBench",
+            "args": [
+                "--mode", "generate",
+                "--start_id", "0",
+                "--end_id", "5"
+            ],
+            "python": "${workspaceFolder}/lightrag/.venv/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/rag-anything:${workspaceFolder}/LightRAG",
+                "MINERU_GPU_MEMORY_UTILIZATION": "0.05"
+            },
+            "justMyCode": false,
+            "stopOnEntry": false,
+            "showReturnValue": true
+        },
+        {
+            "name": "DocBench: Generate Single Document",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/rag-anything/evaluate_local/DocBench/evaluate.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/rag-anything/evaluate_local/DocBench",
+            "args": [
+                "--mode", "generate",
+                "--start_id", "0",
+                "--end_id", "1"
+            ],
+            "python": "${workspaceFolder}/lightrag/.venv/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/rag-anything:${workspaceFolder}/LightRAG",
+                "MINERU_GPU_MEMORY_UTILIZATION": "0.05"
+            },
+            "justMyCode": false,
+            "stopOnEntry": false,
+            "showReturnValue": true
+        },
+        
+        // ==========================================
+        // RAG-Anything: Debug 核心组件
+        // ==========================================
+        {
+            "name": "RAG-Anything: Debug Local RAG",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/rag-anything/raganything/services/local_rag.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/rag-anything",
+            "python": "${workspaceFolder}/lightrag/.venv/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/rag-anything:${workspaceFolder}/LightRAG"
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "RAG-Anything: Debug Processor",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/rag-anything/raganything/processor.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/rag-anything",
+            "python": "${workspaceFolder}/lightrag/.venv/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/rag-anything:${workspaceFolder}/LightRAG"
+            },
+            "justMyCode": false
+        },
+        
+        // ==========================================
+        // LightRAG: Debug 核心引擎
+        // ==========================================
+        {
+            "name": "LightRAG: Debug Engine",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/LightRAG/lightrag/lightrag.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/LightRAG",
+            "python": "${workspaceFolder}/lightrag/.venv/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/LightRAG"
+            },
+            "justMyCode": false
+        },
+        
+        // ==========================================
+        // 通用：Debug 当前文件
+        // ==========================================
+        {
+            "name": "Debug: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}",
+            "python": "${workspaceFolder}/lightrag/.venv/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/rag-anything:${workspaceFolder}/LightRAG"
+            },
+            "justMyCode": false,
+            "stopOnEntry": false
+        }
+    ]
+}

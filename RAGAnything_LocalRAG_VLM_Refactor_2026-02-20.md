@@ -1,0 +1,425 @@
+# RAGAnything LocalRAG VLM 重构记录
+
+- 日期：2026-02-20
+- 状态：已完成（本轮）
+- 范围：`local_rag.py`、`evaluate.py`、`examples/raganything_local_v2.py`
+- 不在范围：`raganything/query.py`（保持不改）
+
+## 一、相较改造前的核心变化
+
+### 1) 消息组织与提示词
+
+- 改造前：query 阶段存在本地系统提示叠加与引用提醒注入，存在重复与冲突风险。
+- 改造后：
+  - 不再使用本地 `base_system_prompt` 兜底，也不注入 `citation_reminder`。
+  - 从最终 user 文本里拆分 LightRAG 结构：
+    - `---Role--- ... ---Instructions---` 进入 system
+    - `---Context--- ...` 进入 user 文本
+  - 问题只保留一次（`User Question` 在 user 末尾）。
+  - 若结构化解析失败，回退发送原始 messages（不阻断）。
+
+### 2) 图像来源与路径噪声清理
+
+- 改造前：图像路径可能从不期望区域传播，且实体/关系中有路径噪声。
+- 改造后：
+  - 仅依据 chunk 区 `Image Path: ...` 建立路径映射与图片候选。
+  - entity 区路径型实体直接删除（`Image Path` / 完整路径 / 文件名）。
+  - relation 路径端点替换规则：
+    - 可映射 -> `[VLM_IMAGE_n]`
+    - 不可映射 -> `[IMAGE_ENTITY]`
+  - chunk 区处理为“保留原路径 + 追加标记”：
+    - `Image Path: /a/b/c.jpg`
+    - `[VLM_IMAGE_n]`
+
+### 3) 装箱与超长处理
+
+- 改造前：逻辑与目标不一致（曾出现按标记位置插图）。
+- 改造后：
+  - 装箱策略固定为：图片在前、文本在后。
+  - 图片去重后按 marker 顺序加入。
+  - 超长仅通过降图重试：`10 -> 8 -> 6 -> 4 -> 2`。
+  - 不做文本裁剪。
+
+### 4) 模型端点与多模态 JSON
+
+- 改造前：text/vision 配置边界不清晰，调用参数存在重复过滤代码。
+- 改造后：
+  - 拆分并解析 text/vision 端点：
+    - `vllm_api_base/key/llm_model_name`
+    - `vision_vllm_api_base/key/vision_model_name`
+  - `internvl2` 模型名自动触发 `prompt_internvl2` 覆盖。
+  - 入库多模态分析支持 `json_schema`（可开关），失败自动降级重试。
+
+## 二、文件级变更
+
+### A. `raganything/services/local_rag.py`
+
+- 新增与整理：
+  - context 结构化解析与清洗函数（entity/relation/chunk）
+  - 图像路径映射与 basename 匹配
+  - 图片前置装箱函数
+  - 上下文超长重试函数
+  - text/vision 端点解析与 internvl2 提示词开关
+- 精简与去重：
+  - 删除未使用参数 `vlm_max_text_chars`
+  - 删除未使用导入 `List`
+  - 删除未使用中间变量 `fence_open_start`
+  - 统一内部 kwargs 过滤函数，去掉重复代码块
+  - raw messages 回退调用收敛为单一路径
+
+### B. `evaluate_local/DocBench/evaluate.py`
+
+- 对齐 `LocalRagSettings` 新字段（text/vision 同步赋值）。
+- `--dump_final_messages` 调试钩子使用 `service.vision_client`。
+- 删除重复的 `PROMPTS.update(PROMPTS_INTERNVL2)`（已由 local_rag 自动处理）。
+- 删除对已移除参数 `vlm_max_text_chars` 的设置。
+- 删除未使用变量 `rag_cleaned`。
+- 删除未使用导入 `Optional`。
+
+### C. `examples/raganything_local_v2.py`
+
+- 删除冗余的 vision 回写赋值（`from_env` 已含回退逻辑）。
+- 注释更新为“示例参数，不影响 local_rag 通用能力”。
+
+## 三、当前确认点
+
+1. `[VLM_IMAGE_n]` 是 rag-anything 既有约定（非 LightRAG 原生），用于图文对位装箱。
+2. 当前保留策略是：chunk 路径不替换，仅追加 `[VLM_IMAGE_n]`。
+3. 关系不可映射路径端点占位符已统一为 `[IMAGE_ENTITY]`。
+4. 本轮未修改 `query.py`。
+
+## 四、验证记录
+
+- 语法校验通过：
+  - `raganything/services/local_rag.py`
+  - `evaluate_local/DocBench/evaluate.py`
+  - `examples/raganything_local_v2.py`
+- 无未使用导入（针对本轮 3 个改动文件逐一检查）。
+
+- 行数（本轮结束）：
+  - `local_rag.py`: 1054
+  - `evaluate.py`: 894
+  - `raganything_local_v2.py`: 85
+
+## 五、最终复核（2026-02-20）
+
+1. `local_rag.py`：
+   - 核心链路闭环：配置 -> 端点解析 -> text/vision client -> query/ingest 分支。
+   - 路径清洗与图像映射逻辑一致：entity 删除、relation 替换、chunk 追加标记。
+   - 装箱策略固定：图片前置、文本后置；超长仅降图重试。
+2. `evaluate.py`：
+   - 与 `LocalRagSettings` 字段对齐，`dump_final_messages` 使用 `vision_client`。
+   - 无重复 prompt 覆盖代码，无冗余参数设置。
+3. `raganything_local_v2.py`：
+   - 保持示例脚本定位，删除冗余回写配置，仅保留必要参数与调用流程。
+
+
+## 增量更新（2026-02-20 14:46:51）
+
+本次增量主要覆盖 `raganything/services/local_rag.py`，并同步检查 `evaluate.py` 与 `examples/raganything_local_v2.py` 的调用兼容性。
+
+### 1) Query 侧可观测性增强
+- 增加 ingest 阶段 JSON Schema 相关日志：
+  - `Vision ingest schema check: enabled=..., prompt_has_json=..., using_schema=...`
+  - `Vision ingest calling with response_format=json_schema (strict=...)`
+  - `Vision ingest json_schema call succeeded.`
+
+### 2) System/User 组装清理
+- 清理空的 `Additional Instructions:` 行，避免空模板污染 system。
+- 处理 `User Question` 重复问题：
+  - 预清理旧问句块；
+  - 拼装前再次清理残留 `User Question` 行。
+
+### 3) Context 解析降级策略
+- 不再把 `Reference Document List` 作为清洗前置硬依赖。
+- 当 `entity/relation` JSON-lines 解析失败时，进入 degraded 模式：
+  - 打 warning；
+  - 保留原区块；
+  - 不回退 raw messages。
+
+### 4) JSON-lines 调试日志
+- 新增 `entity/relation` 行级解析日志：
+  - section 名称；
+  - 行号；
+  - 失败行片段（snippet）；
+  - 异常信息。
+
+### 5) 待继续验证项
+- `context parsing failed` 的触发链路是否已完全可定位。
+- 超长重试是否需要扩展到 `0` 图兜底策略。
+
+## 增量更新（2026-02-23，Token Budget 解释）
+
+### 预算公式
+available_chunk_tokens = max_total_tokens - (sys_prompt_tokens + kg_context_tokens + query_tokens + buffer_tokens)
+
+### 各项含义
+- max_total_tokens：总预算（LightRAG QueryParam.max_total_tokens）。
+- sys_prompt_tokens：系统提示模板本身的 token 消耗（上下文留空，仅计算模板和响应类型等固定开销）。
+- kg_context_tokens：KG 区块 token 消耗（由 entity + relation 组成，按模板拼接后再编码统计；不含 chunks，不含 reference list）。
+- query_tokens：用户问题文本 token 消耗。
+- buffer_tokens：固定安全预留（当前实现为 200），用于 reference list 和波动余量。
+
+### 与实体/关系裁剪的关系
+- 先按 max_entity_tokens、max_relation_tokens 对实体和关系做裁剪。
+- 再基于裁剪后的 entity/relation 拼接 pre_kg_context 并计算 kg_context_tokens。
+- 所以 kg_context_tokens 不是“配置上限本身”，而是“裁剪后真实格式化文本的 token 占用”。
+
+### 代码位置
+- 实体/关系裁剪：lightrag/lightrag/operate.py（约 3685-3718 行）。
+- 预算计算与 available_chunk_tokens：lightrag/lightrag/operate.py（约 3923-3945 行）。
+
+## 增量计划（2026-02-23，Ingest 非 image 也启用 JSON Schema）
+
+> 说明：本节仅记录计划，暂未执行代码改动。
+
+### 目标
+- 仅修改 `raganything/services/local_rag.py`。
+- 不修改官方核心文件（`modalprocessors.py`、`query.py`、`prompt.py`）。
+- 在入库阶段（ingest）让 table/equation/generic 的结构化 JSON 任务也可使用 `response_format=json_schema`。
+
+### 计划改动点（仅 local_rag）
+1. 抽取“入库结构化任务识别”函数（显式判定 ingest + JSON 结构任务）。
+2. 抽取统一 schema 构造函数，复用当前 `detailed_description + entity_info` 结构。
+3. 将“无 image_data 的 ingest 调用”从直接回退文本调用改为：
+   - 先尝试带 schema 调用；
+   - 若失败，自动移除 `response_format` 再重试一次。
+4. 保持 query 分支逻辑不变（不影响 VLM enhanced query 的现有行为）。
+
+### 参数与兼容策略
+- 初始保持 `strict=False`、`additionalProperties=True`，优先保证兼容与成功率。
+- 若后续稳定，再评估 `strict=True` 与 `additionalProperties=False` 的收紧策略。
+
+### 可观测性补充
+- 增加 ingest 侧日志：
+  - 任务类型（image / table / equation / generic）
+  - 是否使用 schema
+  - schema 首次成功/失败
+  - fallback 重试结果
+- 增加阶段性统计：
+  - schema_success_rate
+  - schema_fallback_rate
+
+### 风险与预期
+- 预期不影响 query 速度与行为。
+- ingest 速度可能小幅下降；若 schema 失败率高，单条请求可能出现一次重试开销。
+- 改动范围小，回滚简单（仅 local_rag 单文件）。
+
+## 增量计划补充（2026-02-23，统一 Query 输出上限）
+
+> 说明：本节仅记录计划，暂未执行代码改动。
+
+### 目标
+- 将 enhanced 与 non-enhanced 两条 query 回答路径的 `max_tokens` 输出上限统一。
+- 优先方案：统一为 `2048`，降低 400 风险并保持可读回答长度。
+
+### 现状
+- non-enhanced（文本 query）使用 `settings.max_tokens`（当前默认 8192）。
+- enhanced（VLM query）使用 `settings.vision_max_tokens`（当前默认 2048）。
+- 两条路径上限不一致，会导致行为差异和排障复杂度增加。
+
+### 计划改动（仅 local_rag）
+1. 为 query 回答统一单一输出上限配置（建议统一到 2048）。
+2. non-enhanced 与 enhanced 均读取同一上限值。
+3. ingest 路径单独统一输出上限为 8192（image / 非 image 保持一致，不与 query 共用）。
+4. 增加启动日志，明确打印两条 query 路径使用的最终 `max_tokens`。
+
+### 取值建议
+- 先使用 `2048`：在大多数问答场景下够用，且可明显降低超长风险。
+- 如后续需要长文回答，可按场景放宽到 `3072`，不建议默认回到 `8192`。
+
+### 当前决议（2026-02-23）
+- query：enhanced 与 non-enhanced 统一为 2048（降低回答阶段超长风险）。
+- ingest：image 与非 image 统一为 8192（保证多模态入库描述信息充分）。
+
+## 增量计划补充（2026-02-23，local_rag 侧兼容 `\n[VLM_IMAGE_n]`，不改 query.py）
+
+> 说明：本节仅记录方案，暂未执行代码改动。
+
+### 背景判断（复核结论）
+- 当前链路是：`query.py` 先把 `Image Path: ...` 替换成 `Image Path: ...\n[VLM_IMAGE_n]`，再交给 `local_rag.py` 二次解析。
+- `local_rag.py` 的 entity/relation 解析是 JSON-lines（每行一个 JSON），若标记换行进入 JSON 行，`json.loads(line)` 会失败。
+- 因此，路径 entity 删除/relation 端点替换目前是“有条件生效”（解析成功时才生效），并非稳定生效。
+
+### 目标
+- 不修改官方 `query.py`。
+- 仅修改 `local_rag.py`，让现有 `\n[VLM_IMAGE_n]` 也能稳定进入清洗流程。
+- 保持“chunk 作为图例真源”，避免重复打标和重复改写。
+
+### 计划改动（仅 local_rag）
+1. **预归一化（解析前）**
+   - 在 context 解析前，将 `\n[VLM_IMAGE_n]` 规范为同一行标记（例如空格连接），避免打断 JSON-lines。
+2. **先 chunk 后 entity/relation**
+   - 先解析 chunk，建立 `path -> marker` 映射（图例真源）。
+   - 再解析 entity/relation：
+     - entity：路径型实体删除；
+     - relation：路径端点优先映射到 `[VLM_IMAGE_n]`，失败回退 `[IMAGE_ENTITY]`。
+3. **去掉重复打标**
+   - 不再对 chunk 二次重打标；优先复用上游已有 marker，减少二次改写副作用。
+4. **降级策略**
+   - entity/relation 任一解析失败时，不 raw 回退；
+   - 保留可解析区块的处理结果，未解析区块保留原文，保证主流程可用。
+
+### 可观测性
+- 增加日志字段：
+  - `markers_normalized_count`
+  - `chunk_parse_ok`
+  - `entity_parse_ok`
+  - `relation_parse_ok`
+  - `path_marker_map_size`
+
+### 预期收益
+- 降低 `entity JSON-lines invalid / relation JSON-lines invalid` 触发率。
+- 在不改 `query.py` 的前提下，稳定恢复“路径 entity 删除 + relation 端点替换”能力。
+- 降低链路复杂度（不再先去标记再重打标）。
+
+## 执行记录（2026-02-23，已落地到 local_rag.py）
+
+### 1) Ingest 非 image 启用 JSON Schema（已执行）
+- `vision_model_func` 中新增 ingest 任务识别（`image/table/equation/generic/query`）。
+- 非 image ingest（table/equation/generic）也会按条件启用 `response_format=json_schema`。
+- schema 失败会自动移除 `response_format` 并重试一次。
+- 保持 query 分支行为不变（messages 分支仍为 enhanced query 路径）。
+
+### 2) Query / Ingest 输出上限统一（已执行）
+- 新增：
+  - `query_max_tokens`（默认 2048）
+  - `ingest_max_tokens`（默认 8192）
+- query（enhanced + non-enhanced）统一使用 `query_max_tokens`。
+- ingest（image + 非 image）统一使用 `ingest_max_tokens`。
+- 启动日志新增：`Token caps configured: query_max_tokens=..., ingest_max_tokens=..., vlm_enable_json_schema=...`。
+
+### 3) 兼容 `\\n[VLM_IMAGE_n]`（仅改 local_rag，已执行）
+- 解析前预归一化：将 `\\n[VLM_IMAGE_n]` 规范为同一行 marker，避免 JSON-lines 断行。
+- 先解析 chunk，建立 `path -> marker` 图例映射，再处理 entity/relation。
+- 去掉 chunk 二次重打标，优先复用上游 marker。
+- entity/relation 任一解析失败时，不 raw 回退，保留原区块继续流程。
+
+### 4) 新增可观测日志字段（已执行）
+- context 清洗日志包含：
+  - `markers_normalized_count`
+  - `chunk_parse_ok`
+  - `entity_parse_ok`
+  - `relation_parse_ok`
+  - `path_marker_map_size`
+- ingest schema 侧日志包含：
+  - `task_type`
+  - `using_schema`
+  - `schema_success_rate`
+  - `schema_fallback_rate`
+
+## 最终复核（2026-02-23）
+
+### 覆盖文件
+- `raganything/services/local_rag.py`（已改）
+- `evaluate_local/DocBench/evaluate.py`（已改）
+- `examples/raganything_local_v2.py`（本轮无需改）
+
+### 结果
+- 语法检查通过：
+  - `python -m py_compile raganything/services/local_rag.py`
+  - `python -m py_compile evaluate_local/DocBench/evaluate.py`
+  - `python -m py_compile examples/raganything_local_v2.py`
+- token 配置已统一到新字段：
+  - query：`query_max_tokens=2048`
+  - ingest：`ingest_max_tokens=8192`
+- 兼容 `\n[VLM_IMAGE_n]` 的 local_rag 清洗链路与可观测日志已落地。
+- evaluate 已切换到新字段（不再写入旧字段 `max_tokens/vision_max_tokens`）。
+
+### 当前代码行数
+- `raganything/services/local_rag.py`: 1322
+- `evaluate_local/DocBench/evaluate.py`: 902
+- `examples/raganything_local_v2.py`: 85
+
+## 执行记录补充（2026-02-23，non-enhanced 与 enhanced 消息组织统一）
+
+### 变更目标
+- 统一 non-enhanced 文本 query 与 enhanced query 的消息组织方式：
+  - `system`：仅放 Role/Goal/Instructions 等系统指令
+  - `user`：放 Context + User Question
+- 不新增 `text_query_repacked=true/false` 日志（按要求关闭）。
+
+### 已执行修改（仅 `local_rag.py`）
+- 新增 `_clean_context_for_user_text(...)`：统一清理 `User Question` 和末尾提示句。
+- 新增 `_try_repack_text_query(system_prompt, prompt)`：
+  - 从 LightRAG 文本 query 的 `system_prompt` 中拆分 `---Context---`
+  - 组装为新的 `final_system` + `final_user`
+- 在 `build_llm_model_func(...)` 中接入重组逻辑：
+  - 可重组时按“system 指令 + user 上下文/问题”发送
+  - 不可重组时保持原发送路径（兼容回退）
+- enhanced 分支复用 `_clean_context_for_user_text(...)`，去掉重复清理代码。
+- 修正配置注释语义：
+  - `vlm_max_images` 标注为 enhanced query 图片上限
+  - `vlm_enable_json_schema` 标注为 ingest 结构化输出开关
+
+### 相较未改动前的功能变化
+- non-enhanced 不再是“几乎全部内容放 system、query 放 user”。
+- non-enhanced 与 enhanced 现在在消息结构上对齐，行为更一致，便于排障和对比。
+- 未引入额外冗余开关与日志字段，保留最小必要改动。
+
+### 本轮检查结论
+- 三个目标文件功能正常、无语法错误：
+  - `raganything/services/local_rag.py`
+  - `evaluate_local/DocBench/evaluate.py`
+  - `examples/raganything_local_v2.py`
+- 检查命令：
+  - `python -m py_compile raganything/services/local_rag.py evaluate_local/DocBench/evaluate.py examples/raganything_local_v2.py`
+- 文本编码清理：已去除 `local_rag.py` 与本记录文件的 UTF-8 BOM 头。
+- 冗余性复查：
+  - `evaluate.py` 已使用新 token 字段（`query_max_tokens/ingest_max_tokens`），无旧字段残留调用。
+  - `raganything_local_v2.py` 保持示例最小参数集，无需额外改动。
+
+## 执行记录补充（2026-02-23，keyword_extraction 官方对齐）
+
+### 本次已执行改动（仅 `raganything/services/local_rag.py`）
+- 在 `build_llm_model_func` 中按官方语义处理 `keyword_extraction`：先从 kwargs 中读取并移除该内部参数。
+- 当 `keyword_extraction=True` 时，设置 `response_format=GPTKeywordExtractionFormat`（与 LightRAG 官方关键词抽取契约一致）。
+- 关键词抽取请求改为在 `response_format` 存在时走 `client.chat.completions.parse(...)`，其余请求继续走 `create(...)`。
+- 对 parse 结果统一序列化为 JSON 字符串返回（优先 `model_dump_json()`），保持与上游 `json_repair.loads(...)` 兼容。
+- 保留 `_strip_internal_openai_kwargs`，不删除该函数；仅修正其在关键词抽取路径上的使用方式。
+
+### 相较改动前的行为变化
+- 改动前：`keyword_extraction` 被过滤后无任何专门处理，关键词抽取无结构化约束。
+- 改动后：关键词抽取具备官方一致的结构化输出约束，降低 `low_level_keywords is empty` 的非预期触发概率。
+
+### 本次校验
+- 语法校验通过：
+  - `python -m py_compile raganything/services/local_rag.py`
+
+## 官方对齐审计（基于当前代码）
+
+### 仍为自定义实现（不属于 LightRAG 默认 wrapper）
+- 文本 query 的 system/user 重组。
+- VLM query 前 context 二次清洗与重排。
+- ingest schema 判定、注入、失败回退。
+- InternVL2 prompt override。
+- 自定义 `llm_model_func/vision_model_func` 注入。
+- text/vision 双端点解析与双客户端初始化（`_resolve_text_endpoint/_resolve_vision_endpoint`）。
+- 本地 embedding/rerank 模型加载与 `rerank_model_func` 注入。
+- query 阶段 VLM 上下文过长时的降图重试策略。
+
+### 其余主要链路仍使用官方
+- 关键词提取、KG 检索、实体/关系/chunk 构建、query 主流程由 LightRAG 官方 `operate.py` 执行。
+- `raganything/query.py`、`modalprocessors.py`、`prompt.py` 本次未改，继续沿用官方逻辑。
+
+## 最终复检（2026-02-23，keyword_extraction 对齐后）
+
+### 本次相较未改动前的功能变更
+- `raganything/services/local_rag.py`：关键词抽取路径改为官方语义对齐。
+  - 读取并消费内部参数 `keyword_extraction`。
+  - 关键词抽取时启用 `response_format=GPTKeywordExtractionFormat`。
+  - 结构化输出时使用 `chat.completions.parse(...)` 并返回可被上游 JSON 解析的字符串。
+- `evaluate_local/DocBench/evaluate.py`：本轮未新增功能改动，仅与现有参数路径复核兼容。
+- `examples/raganything_local_v2.py`：本轮未新增功能改动，仅复核调用兼容。
+
+### 三文件最终检查结果
+- 语法检查通过：
+  - `python -m py_compile raganything/services/local_rag.py`
+  - `python -m py_compile evaluate_local/DocBench/evaluate.py`
+  - `python -m py_compile examples/raganything_local_v2.py`
+- 关键路径检查通过：
+  - 关键词抽取结构化开关、parse 分支与 ingest schema 分支互不冲突。
+  - query 重组、VLM 清洗、ingest schema 回退、InternVL2 prompt override、自定义注入保持原有行为。
+
+### 说明
+- 本轮保持“最小改动”原则：仅调整关键词抽取链路，不扩展新配置项，不引入额外分支复杂度。

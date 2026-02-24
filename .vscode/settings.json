@@ -1,0 +1,51 @@
+
+
+
+
+{
+    // Python 解释器
+    "python.defaultInterpreterPath": "${workspaceFolder}/lightrag/.venv/bin/python",
+    
+    // Python 分析路径（让 IntelliSense 能找到 rag-anything 和 LightRAG）
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/rag-anything",
+        "${workspaceFolder}/LightRAG"
+    ],
+    
+    // 自动补全设置
+    "python.autoComplete.extraPaths": [
+        "${workspaceFolder}/rag-anything",
+        "${workspaceFolder}/LightRAG"
+    ],
+    
+    // 代码格式化
+    "editor.formatOnSave": true,
+    "python.formatting.provider": "black",
+    
+    // 文件关联
+    "files.associations": {
+        "*.py": "python"
+    },
+    
+    // 排除不需要的文件
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        "**/.pytest_cache": true,
+        "**/.venv": false,  // 显示 .venv 以便管理
+        "**/.git": true
+    },
+    
+    // 搜索排除
+    "search.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        "**/.venv/lib": true,
+        "**/node_modules": true
+    },
+    
+    // Terminal 设置
+    "terminal.integrated.env.linux": {
+        "PYTHONPATH": "${workspaceFolder}/rag-anything:${workspaceFolder}/LightRAG"
+    }
+}

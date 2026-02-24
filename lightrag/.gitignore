@@ -1,0 +1,88 @@
+# Python-related files
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.tgz
+*.tar.gz
+*.ini
+
+# Virtual Environment
+.venv/
+venv/
+
+# llm and embedding model
+*.gguf
+
+# tokenizer offline cache
+tiktoken_cache/
+
+# Enviroment Variable Files
+.env
+
+# 忽略 LightRAG 运行生成的图谱数据文件夹
+dickens_ollama/
+
+# Build / Distribution
+dist/
+build/
+site/
+
+# Logs / Reports
+*.log
+*.log.*
+*.logfire
+*.coverage/
+log/
+
+# Caches
+.cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.gradio/
+.history/
+temp/
+
+# IDE / Editor Files
+.idea/
+.vscode/
+.vscode/settings.json
+
+# Framework-specific files
+local_neo4jWorkDir/
+neo4jWorkDir/
+
+# Data & Storage
+inputs/
+output/
+rag_storage/
+data/
+
+# Evaluation results
+lightrag/evaluation/results/
+
+# Miscellaneous
+.DS_Store
+TODO.md
+ignore_this.txt
+*.ignore.*
+
+# Project-specific files
+/dickens*/
+/book.txt
+download_models_hf.py
+
+# Frontend build output (built during PyPI release)
+/lightrag/api/webui/
+
+# temporary test files in project root
+/test_*
+
+# Cline files
+memory-bank
+.claude/CLAUDE.md
+.claude/
+
+# Claude Code
+CLAUDE.md

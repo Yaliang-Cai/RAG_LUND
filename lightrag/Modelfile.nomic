@@ -1,0 +1,6 @@
+# 指向你下载好的本地文件
+FROM ./nomic-embed-text-v1.5.f16.gguf
+
+# Embedding 模型通常不需要复杂的 TEMPLATE 和 SYSTEM
+# 但可以设置一些基础参数
+PARAMETER num_ctx 8192
