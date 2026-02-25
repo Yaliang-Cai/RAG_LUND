@@ -742,19 +742,32 @@ else:
 ```
 
 **Step 2.5**（预算分配，完全重写）：
+
+核心语义：先切出 top `chunk_top_k` 的 window（不分类型），window 里有几个 mm 就选几个；文本 budget 先从 window 内取，不足则从 window 外按 rerank 顺序补充。
+
 ```python
-mm_chunks = [c for c in unique_chunks if c.get("is_multimodal")]
-text_chunks = [c for c in unique_chunks if not c.get("is_multimodal")]
-text_budget = max(chunk_top_k - multimodal_top_k, 0)    # = 7（chunk_top_k=10, top_k=3）
-selected_text = text_chunks[:text_budget]
-unique_chunks = sorted(mm_chunks + selected_text, key=lambda c: c.get("rerank_score", 0), reverse=True)
+top_window     = unique_chunks[:chunk_top_k]      # 先切 top-10（类型无关）
+remaining_pool = unique_chunks[chunk_top_k:]       # 10名以外备用
+
+selected_mm    = [c for c in top_window if c.get("is_multimodal")]
+text_in_window = [c for c in top_window if not c.get("is_multimodal")]
+
+text_budget    = max(chunk_top_k - multimodal_top_k, 0)   # = 7
+selected_text  = text_in_window[:text_budget]
+# 若 window 里文本不足，从 remaining_pool 中补充文本 chunk
+if len(selected_text) < text_budget:
+    extra = [c for c in remaining_pool if not c.get("is_multimodal")]
+    selected_text += extra[:text_budget - len(selected_text)]
+
+unique_chunks = sorted(selected_mm + selected_text,
+                       key=lambda c: c.get("rerank_score", 0), reverse=True)
 budgets_applied = True
-# 日志：Context composition: 9 multimodal (3 with images, 6 text-only) + 7/7 text chunks
+# 日志示例：Context composition: 10 multimodal (3 with images, 7 text-only) + 7/7 text chunks
 ```
 
 **Step 3**（chunk_top_k 截断，条件跳过）：
 ```python
-if not budgets_applied:   # multimodal_top_k 激活时跳过，避免把 16 个 chunks 压回 10
+if not budgets_applied:   # multimodal_top_k 激活时跳过
     if query_param.chunk_top_k is not None and query_param.chunk_top_k > 0:
         ...
 ```
@@ -773,16 +786,25 @@ def replace_image_path(match):
 
 `aquery_vlm_enhanced()` 传递 `image_cap = kwargs["multimodal_top_k"]` 给该函数。
 
-### 最终 context 组成（以 multimodal_top_k=3, chunk_top_k=10 为例）
+### 最终 context 组成（chunk_top_k=10, multimodal_top_k=3）
 
-设全量 pool 含 9 个多模态 chunk + 若干文本 chunk：
+设 top-10 window 含 9 mm + 1 text，remaining pool 含更多 text：
 
-| 部分 | 数量 | 说明 |
+| 部分 | 数量 | 来源 |
 |------|------|------|
-| 多模态 chunk（附图） | min(9, 3) = 3 | 排名最高的 3 个，图片 base64 附送 VLM |
-| 多模态 chunk（纯文本） | 9 - 3 = 6 | 降级，VLM 描述文字进入 context，不附图 |
-| 文本 chunk | min(text_pool, 7) | 独立配额，从全量 rerank 结果中取 |
-| **总计** | **≤ 16** | 不受 chunk_top_k=10 截断（budgets_applied=True）|
+| 多模态 chunk（附图） | min(9, 3) = 3 | top-10 window 内的 mm，rerank 最高的 3 个 |
+| 多模态 chunk（纯文本降级） | 9 - 3 = 6 | top-10 window 内的 mm，rank 4-9 |
+| 文本 chunk | 7 | window 内 1 个 + remaining pool 补 6 个 |
+| **总计** | **16** | |
+
+设 top-10 全为 mm（如实测 80 chunks 中 72 mm 的场景）：
+
+| 部分 | 数量 | 来源 |
+|------|------|------|
+| 多模态 chunk（附图） | 3 | top-10 window mm，rank 1-3 |
+| 多模态 chunk（纯文本降级） | 7 | top-10 window mm，rank 4-10 |
+| 文本 chunk | 7 | 全部来自 remaining pool |
+| **总计** | **17** | |
 
 ### `constants.py` 补正
 
@@ -797,10 +819,27 @@ def replace_image_path(match):
 
 | 文件 | 改动 |
 |------|------|
-| `lightrag/lightrag/utils.py` | Step 1/2.5/3 重写（+40 -26 行） |
+| `lightrag/lightrag/utils.py` | Step 1/2.5/3 重写（含 top-window 语义修正，见下方补丁记录）|
 | `lightrag/lightrag/operate.py` | `is_multimodal` 传播（+4 行） |
 | `rag-anything/raganything/query.py` | max_images 封顶、top_k defaults（+39 -12 行） |
 | `rag-anything/raganything/constants.py` | 路径更新、DEFAULT_UPLOAD_DIR 删除 |
 | `rag-anything/raganything/raganything_local.py` | 删除（移至 examples） |
 | `rag-anything/examples/raganything_local.py` | 新增（从 raganything/ 移入） |
 | `.vscode/launch.json` | zhb debug 配置路径修正 |
+
+---
+
+## 补丁（0039c63，multimodal budget split top-window 修正）
+
+### 问题
+
+上一版 Step 2.5 从整个 rerank pool 取所有 mm_chunks（实测 80 chunks 中 72 个均为多模态，全部进入 context），而非从 top `chunk_top_k` 的 window 内取。导致日志出现 `72 multimodal (3 with images, 69 text-only)`，context 共 77 chunks。
+
+### 修正（`lightrag/lightrag/utils.py`）
+
+将"先分 mm/text 再分别取"改为"先切 top-window 再分"：
+
+- `selected_mm = top_window 内的 mm chunks`（上限自然为 chunk_top_k）
+- `selected_text`：先取 window 内文本，不足 text_budget 时从 window 外的 remaining_pool 按 rerank 顺序补文本 chunk
+
+修正后实测（80 chunks，72mm+8text）：`Context composition: 10 multimodal (3 with images, 7 text-only) + 7/7 text chunks`
