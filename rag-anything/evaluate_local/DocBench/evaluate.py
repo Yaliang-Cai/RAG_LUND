@@ -88,6 +88,10 @@ DOCBENCH_QUERY_PARAMS = {
     "mode": "hybrid",
     "top_k": 30,
     "chunk_top_k": 50,
+    "vlm_enhanced": True,
+    "max_total_tokens": 25000,
+    "max_entity_tokens": 4000,
+    "max_relation_tokens": 5000,
 }
 
 # ==========================================
@@ -313,7 +317,7 @@ async def generate_answers(
     settings.temperature = 0.0
     settings.query_max_tokens = 2048
     settings.ingest_max_tokens = 8192
-    settings.vlm_max_images = 10
+    settings.vlm_max_images = 5
     settings.vlm_enable_json_schema = True
     
     # 只创建一次 service
