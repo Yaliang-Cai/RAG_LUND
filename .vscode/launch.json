@@ -118,7 +118,7 @@
             "type": "debugpy",
             "request": "launch",
             // 这里指定调试 local_rag.py，哪怕你没打开这个文件也能跑
-            "program": "${workspaceFolder}/examples/raganything_local.py", 
+            "program": "${workspaceFolder}/rag-anything/examples/raganything_local.py", 
             "console": "integratedTerminal",
             "python": "/home/h50056787/miniconda3/envs/lightRAG/bin/python",
             "args": [
@@ -126,7 +126,8 @@
                 "-i", "Debug_Test_Space"
             ],
             "env": {
-                "PATH": "/home/h50056787/miniconda3/envs/lightRAG/bin:${env:PATH}"
+                "PATH": "/home/h50056787/miniconda3/envs/lightRAG/bin:${env:PATH}",
+                "MINERU_VLLM_GPU_MEMORY_UTILIZATION": "0.15"
             }
         }
 

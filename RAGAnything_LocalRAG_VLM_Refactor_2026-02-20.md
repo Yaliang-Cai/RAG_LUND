@@ -440,40 +440,44 @@ available_chunk_tokens = max_total_tokens - (sys_prompt_tokens + kg_context_toke
 
 ---
 
-### T1：多模态 chunk 名额上限（`multimodal_top_k`）
+### T1：多模态图片上限（`multimodal_top_k`）
 
 #### 背景
-多模态 chunk 与纯文本 chunk 共享 `chunk_top_k` 名额，无上限时多模态 chunk 可能占满全部名额，挤出高相关性文本 chunk，且不受控地把大量图片发给 VLM。
+多模态 chunk 的内容字段含 `Image Path: ...` 行，VLM 增强查询时会把这些路径替换为 base64 图片。无上限时大量图片会被发给 VLM，占用 context window 并增加延迟。此外，多模态 chunk 与文本 chunk 共享 `chunk_top_k` 名额，若多模态 chunk 排名靠前则会挤出高相关性纯文本原文。
 
-#### 改动
+#### 最终语义（v2，初始实现已更新见下方增量记录）
+
+- `multimodal_top_k`：**仅控制发给 VLM 的图片数量上限**，不限制 context 中的 chunk 数量
+- 所有多模态 chunk 均进入 context（排名前 `multimodal_top_k` 个附图，其余降级为纯文本 VLM 描述）
+- 纯文本 chunk 获得独立配额：`chunk_top_k - multimodal_top_k` 个，从全量 rerank 结果中取最相关的
+- 最终 context 总量 = 全部 mm_chunks + min(text_pool, chunk_top_k - multimodal_top_k) 个文本 chunk
+
+#### 初始改动（`base.py`、`utils.py`、`query.py`）
 
 **`lightrag/lightrag/base.py`（L171）**
 - 在 `QueryParam` 中新增字段：
   ```python
   multimodal_top_k: int | None = None
   ```
-  默认 `None` 表示不启用分离（向后兼容）。启用时：多模态 chunk 数量上限为该值，剩余 `chunk_top_k` 配额全部分配给纯文本 chunk。
-
-**`lightrag/lightrag/utils.py`（`process_chunks_unified()` 内部）**
-- 在 rerank 过滤后、`chunk_top_k` 截断前，插入步骤 2.5：
-  ```python
-  # 2.5 Multimodal-aware chunk selection
-  if multimodal_top_k is not None:
-      mm_chunks  = [c for c in unique_chunks if c.get(“is_multimodal”)]
-      txt_chunks = [c for c in unique_chunks if not c.get(“is_multimodal”)]
-      selected_mm   = mm_chunks[:multimodal_top_k]
-      remaining     = (chunk_top_k or len(unique_chunks)) - len(selected_mm)
-      selected_text = txt_chunks[:max(remaining, 0)]
-      unique_chunks = selected_mm + selected_text
-      unique_chunks.sort(key=lambda c: c.get(“rerank_score”, 0), reverse=True)
-  ```
+  默认 `None`（向后兼容）。
 
 **`rag-anything/raganything/query.py`（`aquery_vlm_enhanced()`）**
-- 在 `QueryParam` 构造前注入默认值：
+- 在 `QueryParam` 构造前注入默认值，并传递 `max_images` 给图片扫描函数：
   ```python
   kwargs.setdefault(“multimodal_top_k”, DEFAULT_MULTIMODAL_TOP_K)  # = 3
+  image_cap = kwargs[“multimodal_top_k”]
+  enhanced_prompt, images_found = await self._process_image_paths_for_vlm(
+      raw_prompt, max_images=image_cap
+  )
   ```
-- 新增导入：`from raganything.constants import DEFAULT_MULTIMODAL_TOP_K`
+- `_process_image_paths_for_vlm(prompt, max_images=None)`：新增 `max_images` 参数，在 `replace_image_path` 回调中按出现顺序计数，达到上限后剩余路径保留为纯文本，不附图。
+- `aquery()` 中补充默认值注入（确保直接调用也遵循 constants 配置）：
+  ```python
+  kwargs.setdefault(“top_k”, DEFAULT_TOP_K)
+  kwargs.setdefault(“chunk_top_k”, DEFAULT_CHUNK_TOP_K)
+  ```
+
+> 注：`utils.py` 的 Step 2.5 逻辑自初始提交后已完全重写，见下方增量记录。
 
 ---
 
@@ -605,7 +609,7 @@ if _is_file_or_folder_path(source) or _is_file_or_folder_path(target):
   - 批处理：`DEFAULT_MAX_CONCURRENT_FILES`、`DEFAULT_SUPPORTED_FILE_EXTENSIONS`
   - 上下文提取：`DEFAULT_CONTEXT_WINDOW`、`DEFAULT_CONTEXT_MODE` 等
   - 图像验证：`DEFAULT_MAX_IMAGE_SIZE_MB=50`、`SUPPORTED_IMAGE_EXTENSIONS`
-  - 查询：`DEFAULT_TOP_K=15`、`DEFAULT_CHUNK_TOP_K=30`
+  - 查询：`DEFAULT_TOP_K=20`、`DEFAULT_CHUNK_TOP_K=10`
   - 本地部署：模型路径（通用名替换硬编码服务器路径）、端点、token 上限、VLM 参数、日志
 
 **同步更新的文件**
@@ -660,9 +664,9 @@ if _is_file_or_folder_path(source) or _is_file_or_folder_path(target):
 
 | 文件 | 行数 |
 |------|------|
-| `raganything/constants.py` | 121（新建，`DEFAULT_UPLOAD_DIR` 已删除） |
+| `raganything/constants.py` | ~117（新建；注：`DEFAULT_UPLOAD_DIR` 在 7b483f3 commit message 中声称删除但实际漏删，后续增量记录中已修正）|
 | `lightrag/lightrag/base.py` | +6 行（新增字段） |
-| `lightrag/lightrag/utils.py` | +12 行（步骤 2.5） |
+| `lightrag/lightrag/utils.py` | +12 行（步骤 2.5 初始版本，后续已重写） |
 | `lightrag/lightrag/operate.py` | +32 行（函数 + 两处过滤调用） |
 | `raganything/query.py` | +2 行（导入 + setdefault） |
 | `server/templates/index.html` | ~470（完全重写）|
@@ -697,8 +701,106 @@ parser 写出路径 ≠ server 查找路径：server 假设文件在 `{output_di
 
 ### `DEFAULT_UPLOAD_DIR` 删除
 
-原本 `constants.py` 定义 `DEFAULT_UPLOAD_DIR = "./uploads"`，`app.py` 用它作为上传暂存目录。改用 `tempfile.mkstemp()` 后不再需要持久化上传目录，`DEFAULT_UPLOAD_DIR` 从 `constants.py` 和 `app.py` 中一并删除。`UPLOAD_DIR` 全局变量及 `mkdir()` 调用同步移除。
+`app.py` 改用 `tempfile.mkstemp()` 后不再需要持久化上传目录。`DEFAULT_UPLOAD_DIR` 从 `app.py` 和 `constants.py` 中一并删除，`UPLOAD_DIR` 全局变量及 `mkdir()` 调用同步移除。
+**注**：7b483f3 commit message 描述了此删除，但 constants.py 的实际改动未包含在该提交内，已在后续增量记录中补正。
 
 ### 新增辅助函数
 
 `_compute_doc_id(name: str) -> str`：与 `local_rag.py` 中 `_safe_doc_id()` 逻辑一致，将文件名转为合法 doc_id，全为非法字符时 fallback MD5 hex。
+
+---
+
+## 增量更新（2026-02-25，multimodal_top_k 语义重设计 + is_multimodal 传播修复）
+
+### 背景
+
+调试发现 T1 初始实现存在三个 bug，导致 `multimodal_top_k` 功能完全失效：
+
+1. **`is_multimodal` 字段在检索时被丢弃**（`operate.py`）：round-robin merge 重建 chunk dict 时只保留 `content`、`file_path`、`chunk_id` 三个字段，`is_multimodal` 被截断，`process_chunks_unified` 始终看到 `is_multimodal=False`
+2. **`_process_image_paths_for_vlm` 无图片上限**（`query.py`）：即使 `process_chunks_unified` 正确过滤了 mm_chunks，该函数仍会扫描 raw_prompt 全文中所有 `Image Path:` 模式并全部发送图片，绕过了 multimodal_top_k 的约束
+3. **T1 初始逻辑语义错误**（`utils.py`）：将超出 multimodal_top_k 的多模态 chunk 整体丢弃（总 context 从 10 缩减到 4），而不是保留为纯文本降级
+
+### `is_multimodal` 传播修复（`lightrag/lightrag/operate.py`）
+
+**4 处 dict 重建位置均补充字段**：
+
+- `_get_vector_context()`（L3496）：`chunk_with_metadata` 字典新增 `"is_multimodal": result.get("is_multimodal", False)`
+- `_merge_all_chunks()` round-robin（L3911、L3926、L3941，三处分支）：每处 `merged_chunks.append({...})` 新增 `"is_multimodal": chunk.get("is_multimodal", False)`
+
+### `multimodal_top_k` 语义重设计（`lightrag/lightrag/utils.py`）
+
+**新语义**：`multimodal_top_k` 仅控制发给 VLM 的图片数量，不限制 context chunk 数量。
+
+**`process_chunks_unified()` 三处改动**：
+
+**Step 1**（rerank top_n）：
+```python
+if getattr(query_param, "multimodal_top_k", None) is not None:
+    rerank_top_k = len(unique_chunks)   # 保留全量，确保文本 chunk 有足够候选
+else:
+    rerank_top_k = query_param.chunk_top_k or len(unique_chunks)
+```
+
+**Step 2.5**（预算分配，完全重写）：
+```python
+mm_chunks = [c for c in unique_chunks if c.get("is_multimodal")]
+text_chunks = [c for c in unique_chunks if not c.get("is_multimodal")]
+text_budget = max(chunk_top_k - multimodal_top_k, 0)    # = 7（chunk_top_k=10, top_k=3）
+selected_text = text_chunks[:text_budget]
+unique_chunks = sorted(mm_chunks + selected_text, key=lambda c: c.get("rerank_score", 0), reverse=True)
+budgets_applied = True
+# 日志：Context composition: 9 multimodal (3 with images, 6 text-only) + 7/7 text chunks
+```
+
+**Step 3**（chunk_top_k 截断，条件跳过）：
+```python
+if not budgets_applied:   # multimodal_top_k 激活时跳过，避免把 16 个 chunks 压回 10
+    if query_param.chunk_top_k is not None and query_param.chunk_top_k > 0:
+        ...
+```
+
+### 图片上限硬封顶（`rag-anything/raganything/query.py`）
+
+`_process_image_paths_for_vlm(prompt, max_images=None)` 新增 `max_images` 参数：
+
+```python
+def replace_image_path(match):
+    nonlocal images_processed
+    if max_images is not None and images_processed >= max_images:
+        return match.group(0)   # 达到上限：保留路径文字，不附图
+    ...
+```
+
+`aquery_vlm_enhanced()` 传递 `image_cap = kwargs["multimodal_top_k"]` 给该函数。
+
+### 最终 context 组成（以 multimodal_top_k=3, chunk_top_k=10 为例）
+
+设全量 pool 含 9 个多模态 chunk + 若干文本 chunk：
+
+| 部分 | 数量 | 说明 |
+|------|------|------|
+| 多模态 chunk（附图） | min(9, 3) = 3 | 排名最高的 3 个，图片 base64 附送 VLM |
+| 多模态 chunk（纯文本） | 9 - 3 = 6 | 降级，VLM 描述文字进入 context，不附图 |
+| 文本 chunk | min(text_pool, 7) | 独立配额，从全量 rerank 结果中取 |
+| **总计** | **≤ 16** | 不受 chunk_top_k=10 截断（budgets_applied=True）|
+
+### `constants.py` 补正
+
+- 路径前缀更新：`./output` → `./rag-anything/output`（工作区根目录运行时正确解析）
+- `DEFAULT_UPLOAD_DIR` 真正删除（7b483f3 的 commit message 声称删除，但实际未改文件）
+
+### 文件移动
+
+`raganything/raganything_local.py` → `raganything/examples/raganything_local.py`（示例脚本移至 examples 目录）
+
+### 改动文件汇总
+
+| 文件 | 改动 |
+|------|------|
+| `lightrag/lightrag/utils.py` | Step 1/2.5/3 重写（+40 -26 行） |
+| `lightrag/lightrag/operate.py` | `is_multimodal` 传播（+4 行） |
+| `rag-anything/raganything/query.py` | max_images 封顶、top_k defaults（+39 -12 行） |
+| `rag-anything/raganything/constants.py` | 路径更新、DEFAULT_UPLOAD_DIR 删除 |
+| `rag-anything/raganything/raganything_local.py` | 删除（移至 examples） |
+| `rag-anything/examples/raganything_local.py` | 新增（从 raganything/ 移入） |
+| `.vscode/launch.json` | zhb debug 配置路径修正 |

@@ -2728,7 +2728,13 @@ async def process_chunks_unified(
 
     # 1. Apply reranking if enabled and query is provided
     if query_param.enable_rerank and query and unique_chunks:
-        rerank_top_k = query_param.chunk_top_k or len(unique_chunks)
+        # When multimodal_top_k is active we need text chunks beyond the normal
+        # chunk_top_k window, so score and return ALL candidates here; the
+        # mm/text budget split in Step 2.5 applies the final caps.
+        if getattr(query_param, "multimodal_top_k", None) is not None:
+            rerank_top_k = len(unique_chunks)
+        else:
+            rerank_top_k = query_param.chunk_top_k or len(unique_chunks)
         unique_chunks = await apply_rerank_if_enabled(
             query=query,
             retrieved_docs=unique_chunks,
@@ -2762,36 +2768,44 @@ async def process_chunks_unified(
             if not unique_chunks:
                 return []
 
-    # 2.5 Multimodal-aware chunk selection
+    # 2.5 Multimodal-aware budget split
+    # ALL multimodal chunks enter context (top multimodal_top_k get images,
+    # the rest are downgraded to text-only by _process_image_paths_for_vlm).
+    # Text chunks get their own dedicated budget: chunk_top_k - multimodal_top_k,
+    # drawn from the full rerank-sorted pool.
     multimodal_top_k = getattr(query_param, "multimodal_top_k", None)
+    budgets_applied = False
     if multimodal_top_k is not None:
         mm_chunks = [c for c in unique_chunks if c.get("is_multimodal")]
         text_chunks = [c for c in unique_chunks if not c.get("is_multimodal")]
 
-        selected_mm = mm_chunks[:multimodal_top_k]
+        chunk_top_k = query_param.chunk_top_k or len(unique_chunks)
+        text_budget = max(chunk_top_k - multimodal_top_k, 0)
+        selected_text = text_chunks[:text_budget]
 
-        budget = query_param.chunk_top_k or len(unique_chunks)
-        remaining_budget = budget - len(selected_mm)
-        selected_text = text_chunks[: max(remaining_budget, 0)]
-
-        # Merge and sort by rerank_score (preserve relevance order)
-        unique_chunks = selected_mm + selected_text
-        unique_chunks.sort(
-            key=lambda c: c.get("rerank_score", 0), reverse=True
+        # Re-merge, preserving descending rerank score order
+        unique_chunks = sorted(
+            mm_chunks + selected_text,
+            key=lambda c: c.get("rerank_score", 0),
+            reverse=True,
         )
+        budgets_applied = True
 
+        mm_with_img = min(len(mm_chunks), multimodal_top_k)
         logger.info(
-            f"Multimodal-aware selection: {len(selected_mm)} multimodal + "
-            f"{len(selected_text)} text chunks (multimodal_top_k={multimodal_top_k})"
+            f"Context composition: {len(mm_chunks)} multimodal "
+            f"({mm_with_img} with images, {len(mm_chunks) - mm_with_img} text-only) "
+            f"+ {len(selected_text)}/{text_budget} text chunks"
         )
 
-    # 3. Apply chunk_top_k limiting if specified
-    if query_param.chunk_top_k is not None and query_param.chunk_top_k > 0:
-        if len(unique_chunks) > query_param.chunk_top_k:
-            unique_chunks = unique_chunks[: query_param.chunk_top_k]
-        logger.debug(
-            f"Kept chunk_top-k: {len(unique_chunks)} chunks (deduplicated original: {origin_count})"
-        )
+    # 3. Apply chunk_top_k limiting (skipped when multimodal budgets already applied)
+    if not budgets_applied:
+        if query_param.chunk_top_k is not None and query_param.chunk_top_k > 0:
+            if len(unique_chunks) > query_param.chunk_top_k:
+                unique_chunks = unique_chunks[: query_param.chunk_top_k]
+            logger.debug(
+                f"Kept chunk_top-k: {len(unique_chunks)} chunks (deduplicated original: {origin_count})"
+            )
 
     # 4. Token-based final truncation
     tokenizer = global_config.get("tokenizer")

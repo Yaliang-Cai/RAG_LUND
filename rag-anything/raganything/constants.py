@@ -12,10 +12,9 @@ Usage:
 # =============================================================================
 # Directory defaults
 # =============================================================================
-DEFAULT_OUTPUT_DIR = "./output"
-DEFAULT_WORKING_DIR_ROOT = "./rag_workspace"
-DEFAULT_UPLOAD_DIR = "./uploads"
-DEFAULT_LOG_DIR = "./logs"
+DEFAULT_OUTPUT_DIR = "./rag-anything/output"
+DEFAULT_WORKING_DIR_ROOT = "./rag-anything/rag_workspace"
+DEFAULT_LOG_DIR = "./rag-anything/logs"
 
 # =============================================================================
 # Parser configuration
