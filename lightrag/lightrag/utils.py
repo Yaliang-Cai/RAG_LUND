@@ -2776,25 +2776,37 @@ async def process_chunks_unified(
     multimodal_top_k = getattr(query_param, "multimodal_top_k", None)
     budgets_applied = False
     if multimodal_top_k is not None:
-        mm_chunks = [c for c in unique_chunks if c.get("is_multimodal")]
-        text_chunks = [c for c in unique_chunks if not c.get("is_multimodal")]
-
         chunk_top_k = query_param.chunk_top_k or len(unique_chunks)
+
+        # Primary window: top chunk_top_k chunks regardless of type
+        top_window = unique_chunks[:chunk_top_k]
+        remaining_pool = unique_chunks[chunk_top_k:]
+
+        selected_mm = [c for c in top_window if c.get("is_multimodal")]
+        text_in_window = [c for c in top_window if not c.get("is_multimodal")]
+
+        # Text gets a dedicated budget: chunk_top_k - multimodal_top_k.
+        # Fill from the top window first; if still short, pull more text
+        # chunks from the remaining pool (ranked by rerank score).
         text_budget = max(chunk_top_k - multimodal_top_k, 0)
-        selected_text = text_chunks[:text_budget]
+        selected_text = text_in_window[:text_budget]
+        if len(selected_text) < text_budget:
+            extra_needed = text_budget - len(selected_text)
+            extra_text = [c for c in remaining_pool if not c.get("is_multimodal")]
+            selected_text = selected_text + extra_text[:extra_needed]
 
         # Re-merge, preserving descending rerank score order
         unique_chunks = sorted(
-            mm_chunks + selected_text,
+            selected_mm + selected_text,
             key=lambda c: c.get("rerank_score", 0),
             reverse=True,
         )
         budgets_applied = True
 
-        mm_with_img = min(len(mm_chunks), multimodal_top_k)
+        mm_with_img = min(len(selected_mm), multimodal_top_k)
         logger.info(
-            f"Context composition: {len(mm_chunks)} multimodal "
-            f"({mm_with_img} with images, {len(mm_chunks) - mm_with_img} text-only) "
+            f"Context composition: {len(selected_mm)} multimodal "
+            f"({mm_with_img} with images, {len(selected_mm) - mm_with_img} text-only) "
             f"+ {len(selected_text)}/{text_budget} text chunks"
         )
 
