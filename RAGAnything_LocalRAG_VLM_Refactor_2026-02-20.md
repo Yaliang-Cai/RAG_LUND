@@ -597,15 +597,15 @@ if _is_file_or_folder_path(source) or _is_file_or_folder_path(target):
 
 #### 改动
 
-**`rag-anything/raganything/constants.py`（新建，~122 行）**
+**`rag-anything/raganything/constants.py`（新建，~121 行）**
 - 集中定义所有默认值，分为 8 个区段：
-  - 目录：`DEFAULT_WORKING_DIR`、`DEFAULT_OUTPUT_DIR`、`DEFAULT_WORKING_DIR_ROOT`、`DEFAULT_UPLOAD_DIR`、`DEFAULT_LOG_DIR`
+  - 目录：`DEFAULT_OUTPUT_DIR`、`DEFAULT_WORKING_DIR_ROOT`、`DEFAULT_LOG_DIR`
   - 解析器：`DEFAULT_PARSER`、`DEFAULT_PARSE_METHOD`、`DEFAULT_CONTENT_FORMAT` 等
   - 多模态：`DEFAULT_ENABLE_*_PROCESSING`、`DEFAULT_MULTIMODAL_TOP_K=3`
   - 批处理：`DEFAULT_MAX_CONCURRENT_FILES`、`DEFAULT_SUPPORTED_FILE_EXTENSIONS`
   - 上下文提取：`DEFAULT_CONTEXT_WINDOW`、`DEFAULT_CONTEXT_MODE` 等
   - 图像验证：`DEFAULT_MAX_IMAGE_SIZE_MB=50`、`SUPPORTED_IMAGE_EXTENSIONS`
-  - 查询：`DEFAULT_TOP_K=15`、`DEFAULT_CHUNK_TOP_K=30`、`DEFAULT_MAX_TOP_K`、`DEFAULT_MAX_CHUNK_TOP_K`
+  - 查询：`DEFAULT_TOP_K=15`、`DEFAULT_CHUNK_TOP_K=30`
   - 本地部署：模型路径（通用名替换硬编码服务器路径）、端点、token 上限、VLM 参数、日志
 
 **同步更新的文件**
@@ -614,7 +614,7 @@ if _is_file_or_folder_path(source) or _is_file_or_folder_path(target):
 |------|---------|
 | `raganything/config.py` | 所有 `default=...` 字面量替换为 `constants` 导入 |
 | `raganything/services/local_rag.py` | `LocalRagSettings` 所有 `field(default=...)` 替换；硬编码模型路径替换为 `BAAI/bge-m3` / `BAAI/bge-reranker-v2-m3` |
-| `server/app.py` | `DEFAULT_UPLOAD_DIR`、`DEFAULT_MAX_TOP_K`、`DEFAULT_MAX_CHUNK_TOP_K`、`DEFAULT_TOP_K`、`DEFAULT_CHUNK_TOP_K` 来自 constants |
+| `server/app.py` | `DEFAULT_TOP_K`、`DEFAULT_CHUNK_TOP_K`、`DEFAULT_SUPPORTED_FILE_EXTENSIONS` 来自 constants |
 | `raganything/utils.py` | `validate_image_file()` 默认参数和 `image_extensions` 列表来自 constants |
 | `raganything/query.py` | `DEFAULT_MULTIMODAL_TOP_K` 来自 constants |
 
@@ -660,9 +660,45 @@ if _is_file_or_folder_path(source) or _is_file_or_folder_path(target):
 
 | 文件 | 行数 |
 |------|------|
-| `raganything/constants.py` | 122（新建） |
+| `raganything/constants.py` | 121（新建，`DEFAULT_UPLOAD_DIR` 已删除） |
 | `lightrag/lightrag/base.py` | +6 行（新增字段） |
 | `lightrag/lightrag/utils.py` | +12 行（步骤 2.5） |
 | `lightrag/lightrag/operate.py` | +32 行（函数 + 两处过滤调用） |
 | `raganything/query.py` | +2 行（导入 + setdefault） |
 | `server/templates/index.html` | ~470（完全重写）|
+
+---
+
+## 增量更新（2026-02-25，server/app.py 后端优化）
+
+### 改动范围
+
+唯一修改文件：`rag-anything/server/app.py`
+
+### 问题根因
+
+parser 写出路径 ≠ server 查找路径：server 假设文件在 `{output_dir}/{doc_id}/hybrid_auto/`，但 parser 实际写入 `{output_dir}/{file_stem}/hybrid_auto/`。当 `doc_id != file_stem` 时文件找不到（用户传入自定义 `doc_id`、文件名含特殊字符等场景）。
+
+### 核心修复
+
+- `/ingest` 传入 `workspace_output = output_dir/{final_doc_id}` 作为 parser 的 `output_dir`，parser 写入 `output/{doc_id}/{stem}/hybrid_auto/`
+- `_find_md_in_hybrid_auto()` 和 `/files/{doc_id}` 改用 `rglob("hybrid_auto/*.md")` 递归查找，同时兼容旧格式数据（`{doc_id}/hybrid_auto/` 也能被 rglob 命中）
+
+### 其他修复
+
+| 问题 | 修复方式 |
+|------|---------|
+| `_find_md_in_hybrid_auto()`、`list_workspace_files()`、`list_workspaces()` 每次请求重复 `LocalRagSettings.from_env()` | 改用 `service.settings`（通过依赖注入传入） |
+| 模糊匹配返回 `candidates[0]` 前未排序，结果不稳定 | 改为 `sorted(rglob(...))` 后再过滤取第一个 |
+| `doc_id` 直接拼入路径，存在路径穿越风险 | 所有接受 `doc_id` 的函数均加 `".."/"/"\\` 校验，返回 400 |
+| 上传文件未做扩展名校验 | 对照 `DEFAULT_SUPPORTED_FILE_EXTENSIONS` 构建 `SUPPORTED_EXTENSIONS` 集合，不合法返回 400 |
+| ingest 成功/失败后上传文件未清理，磁盘持续增长 | 改用 `tempfile.mkstemp(suffix=file_ext)` 写临时文件，`finally` 块确保清理 |
+| `/workspaces` 不显示是否有解析结果 | 新增 `has_files` 字段，通过 `rglob` 检测是否存在 `hybrid_auto/*.md` |
+
+### `DEFAULT_UPLOAD_DIR` 删除
+
+原本 `constants.py` 定义 `DEFAULT_UPLOAD_DIR = "./uploads"`，`app.py` 用它作为上传暂存目录。改用 `tempfile.mkstemp()` 后不再需要持久化上传目录，`DEFAULT_UPLOAD_DIR` 从 `constants.py` 和 `app.py` 中一并删除。`UPLOAD_DIR` 全局变量及 `mkdir()` 调用同步移除。
+
+### 新增辅助函数
+
+`_compute_doc_id(name: str) -> str`：与 `local_rag.py` 中 `_safe_doc_id()` 逻辑一致，将文件名转为合法 doc_id，全为非法字符时 fallback MD5 hex。

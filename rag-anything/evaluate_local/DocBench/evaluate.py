@@ -313,7 +313,6 @@ async def generate_answers(
     settings.temperature = 0.0
     settings.query_max_tokens = 2048
     settings.ingest_max_tokens = 8192
-    settings.vlm_max_images = 10
     settings.vlm_enable_json_schema = True
     
     # 只创建一次 service

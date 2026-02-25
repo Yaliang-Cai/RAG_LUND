@@ -31,7 +31,26 @@ from openai import AsyncOpenAI
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from raganything import RAGAnything, RAGAnythingConfig
-from raganything.constants import DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_BACKUP_COUNT
+from raganything.constants import (
+    DEFAULT_LOG_MAX_BYTES,
+    DEFAULT_LOG_BACKUP_COUNT,
+    DEFAULT_TIKTOKEN_CACHE_DIR,
+    DEFAULT_EMBEDDING_MODEL_PATH,
+    DEFAULT_RERANK_MODEL_PATH,
+    DEFAULT_WORKING_DIR_ROOT,
+    DEFAULT_OUTPUT_DIR,
+    DEFAULT_LOG_DIR,
+    DEFAULT_VLLM_API_BASE,
+    DEFAULT_VLLM_API_KEY,
+    DEFAULT_LLM_MODEL_NAME,
+    DEFAULT_DEVICE,
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_MAX_TOKEN_SIZE,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_QUERY_MAX_TOKENS,
+    DEFAULT_INGEST_MAX_TOKENS,
+    DEFAULT_VLM_ENABLE_JSON_SCHEMA,
+)
 
 _MODEL_CACHE: Dict[str, Any] = {}
 _INTERNAL_OPENAI_KWARGS = {"hashing_kv", "keyword_extraction", "enable_cot"}
@@ -39,26 +58,6 @@ _INTERNAL_OPENAI_KWARGS = {"hashing_kv", "keyword_extraction", "enable_cot"}
 
 @dataclass
 class LocalRagSettings:
-    from raganything.constants import (
-        DEFAULT_TIKTOKEN_CACHE_DIR,
-        DEFAULT_EMBEDDING_MODEL_PATH,
-        DEFAULT_RERANK_MODEL_PATH,
-        DEFAULT_WORKING_DIR_ROOT,
-        DEFAULT_OUTPUT_DIR,
-        DEFAULT_LOG_DIR,
-        DEFAULT_VLLM_API_BASE,
-        DEFAULT_VLLM_API_KEY,
-        DEFAULT_LLM_MODEL_NAME,
-        DEFAULT_DEVICE,
-        DEFAULT_EMBEDDING_DIM,
-        DEFAULT_MAX_TOKEN_SIZE,
-        DEFAULT_TEMPERATURE,
-        DEFAULT_QUERY_MAX_TOKENS,
-        DEFAULT_INGEST_MAX_TOKENS,
-        DEFAULT_VLM_MAX_IMAGES,
-        DEFAULT_VLM_ENABLE_JSON_SCHEMA,
-    )
-
     tiktoken_cache_dir: str = DEFAULT_TIKTOKEN_CACHE_DIR
     embedding_model_path: str = DEFAULT_EMBEDDING_MODEL_PATH
     rerank_model_path: str = DEFAULT_RERANK_MODEL_PATH
@@ -82,30 +81,10 @@ class LocalRagSettings:
     query_max_tokens: int = DEFAULT_QUERY_MAX_TOKENS
     ingest_max_tokens: int = DEFAULT_INGEST_MAX_TOKENS
 
-    vlm_max_images: int = DEFAULT_VLM_MAX_IMAGES
     vlm_enable_json_schema: bool = DEFAULT_VLM_ENABLE_JSON_SCHEMA
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
-        from raganything.constants import (
-            DEFAULT_TIKTOKEN_CACHE_DIR,
-            DEFAULT_EMBEDDING_MODEL_PATH,
-            DEFAULT_RERANK_MODEL_PATH,
-            DEFAULT_WORKING_DIR_ROOT,
-            DEFAULT_OUTPUT_DIR,
-            DEFAULT_LOG_DIR,
-            DEFAULT_VLLM_API_BASE,
-            DEFAULT_VLLM_API_KEY,
-            DEFAULT_LLM_MODEL_NAME,
-            DEFAULT_DEVICE,
-            DEFAULT_EMBEDDING_DIM,
-            DEFAULT_MAX_TOKEN_SIZE,
-            DEFAULT_TEMPERATURE,
-            DEFAULT_QUERY_MAX_TOKENS,
-            DEFAULT_INGEST_MAX_TOKENS,
-            DEFAULT_VLM_MAX_IMAGES,
-        )
-
         vllm_base = os.getenv("VLLM_API_BASE", DEFAULT_VLLM_API_BASE)
         vllm_key = os.getenv("VLLM_API_KEY", DEFAULT_VLLM_API_KEY)
         llm_name = os.getenv("LLM_MODEL_NAME", DEFAULT_LLM_MODEL_NAME)
@@ -139,9 +118,8 @@ class LocalRagSettings:
             ingest_max_tokens=int(
                 os.getenv("RAGANYTHING_INGEST_MAX_TOKENS", str(DEFAULT_INGEST_MAX_TOKENS))
             ),
-            vlm_max_images=int(os.getenv("RAGANYTHING_VLM_MAX_IMAGES", str(DEFAULT_VLM_MAX_IMAGES))),
             vlm_enable_json_schema=os.getenv(
-                "RAGANYTHING_VLM_ENABLE_JSON_SCHEMA", "true"
+                "RAGANYTHING_VLM_ENABLE_JSON_SCHEMA", str(DEFAULT_VLM_ENABLE_JSON_SCHEMA)
             ).lower()
             in {"1", "true", "yes", "y", "on"},
         )
@@ -246,116 +224,6 @@ def build_rerank_func(reranker_model: CrossEncoder, logger: logging.Logger):
     return rerank_func
 
 
-_IMAGE_EXT_GROUP = r"(?:jpg|jpeg|png|gif|bmp|webp|tiff|tif)"
-# 仅匹配上下文里的 “Image Path: xxx.jpg” 行。
-_IMAGE_PATH_LINE_RE = re.compile(
-    rf"Image Path:\s*([^\r\n]*?\.(?:{_IMAGE_EXT_GROUP}))",
-    re.IGNORECASE,
-)
-_CHUNK_PATH_WITH_MARKER_RE = re.compile(
-    rf"Image Path:\s*([^\r\n]*?\.(?:{_IMAGE_EXT_GROUP}))(?:\s*\[VLM_IMAGE_(\d+)\])?",
-    re.IGNORECASE,
-)
-_VLM_IMAGE_MARKER_RE = re.compile(r"\[VLM_IMAGE_(\d+)\]")
-_VLM_IMAGE_MARKER_NEWLINE_RE = re.compile(r"\s*\n\s*(\[VLM_IMAGE_\d+\])")
-_FULL_PATH_RE = re.compile(
-    rf"(?:[A-Za-z]:)?(?:[/\\][^/\\\r\n\"'`]+)+\.(?:{_IMAGE_EXT_GROUP})$",
-    re.IGNORECASE,
-)
-_BASENAME_RE = re.compile(
-    rf"[^/\\\s\"'`]+\.(?:{_IMAGE_EXT_GROUP})$",
-    re.IGNORECASE,
-)
-
-
-def _normalize_path_for_match(value: str) -> str:
-    # 统一路径格式，便于做去重和映射。
-    return value.strip().strip("\"'").replace("\\", "/").rstrip(".")
-
-
-def _path_basename(value: str) -> str:
-    normalized = _normalize_path_for_match(value)
-    if "/" in normalized:
-        return normalized.rsplit("/", 1)[-1]
-    return normalized
-
-
-def _is_image_path_like(value: str) -> bool:
-    if not value:
-        return False
-    raw = value.strip().strip("\"'")
-    lower = raw.lower()
-    if lower in {"image path", "image_path"}:
-        return True
-    return bool(_FULL_PATH_RE.match(raw) or _BASENAME_RE.match(raw))
-
-
-def _collect_user_content_items(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # 统一收集 user 里的 text/image_url 两类内容。
-    items: list[dict[str, Any]] = []
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict):
-                    items.append(item)
-        elif isinstance(content, str):
-            items.append({"type": "text", "text": content})
-    return items
-
-
-def _extract_query_text_from_prompt(raw_text: str) -> str:
-    # 从拼接后的 user 文本中提取真实问题（兼容两种标签）。
-    user_query_match = re.search(
-        r"---User Query---\s*(.*?)\s*$",
-        raw_text,
-        re.DOTALL,
-    )
-    if user_query_match:
-        candidate = user_query_match.group(1).strip()
-        if candidate:
-            return candidate
-
-    user_question_matches = re.findall(
-        r"User Question:\s*(.+?)(?:\n|$)",
-        raw_text,
-        re.IGNORECASE,
-    )
-    if user_question_matches:
-        candidate = user_question_matches[-1].strip()
-        if candidate:
-            return candidate
-
-    return ""
-
-
-def _strip_embedded_query_block(raw_text: str) -> str:
-    # 去掉旧 query 块，避免最终请求中问题重复出现。
-    text = re.sub(
-        r"\n*---User Query---[\s\S]*$",
-        "",
-        raw_text,
-        flags=re.IGNORECASE,
-    )
-    # 对 "User Question:" 用“最后一次出现”截断，兼容多段消息拼接。
-    user_question_matches = list(
-        re.finditer(r"User Question\s*:", text, flags=re.IGNORECASE)
-    )
-    if user_question_matches:
-        text = text[: user_question_matches[-1].start()]
-
-    # 兜底清理残留尾句。
-    text = re.sub(
-        r"\n*Please answer based on the (?:provided )?context and images\.?\s*$",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    return text.rstrip()
-
-
 def _extract_last_context_segment(raw_text: str) -> tuple[str, str]:
     # 只取最后一个 ---Context---，避免命中示例或前序模板。
     context_idx = raw_text.rfind("---Context---")
@@ -364,354 +232,6 @@ def _extract_last_context_segment(raw_text: str) -> tuple[str, str]:
     prefix = raw_text[:context_idx].strip()
     context = raw_text[context_idx:].strip()
     return prefix, context
-
-
-def _locate_fenced_block(
-    text: str, heading_regex: str, start_pos: int = 0
-) -> Optional[dict[str, int]]:
-    # 定位某个标题后面的 fenced block（```...```）。
-    heading_match = re.search(heading_regex, text[start_pos:], re.IGNORECASE)
-    if not heading_match:
-        return None
-
-    heading_start = start_pos + heading_match.start()
-    search_start = start_pos + heading_match.end()
-    open_match = re.search(r"```(?:[a-zA-Z0-9_+-]+)?\s*\n", text[search_start:])
-    if not open_match:
-        return None
-
-    body_start = search_start + open_match.end()
-    close_match = re.search(r"\n```", text[body_start:])
-    if not close_match:
-        return None
-
-    body_end = body_start + close_match.start()
-    block_end = body_start + close_match.end()
-    return {
-        "heading_start": heading_start,
-        "body_start": body_start,
-        "body_end": body_end,
-        "block_end": block_end,
-    }
-
-
-def _parse_json_lines(
-    block_text: str,
-    logger: Optional[logging.Logger] = None,
-    section_name: str = "unknown",
-) -> Optional[list[dict[str, Any]]]:
-    # LightRAG 这里是“每行一个 JSON 对象”的格式。
-    objs: list[dict[str, Any]] = []
-    for line_no, raw_line in enumerate(block_text.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except Exception as exc:
-            if logger:
-                logger.warning(
-                    "VLM context parse: %s JSON-lines invalid at line %s, snippet=%r, error=%s",
-                    section_name,
-                    line_no,
-                    line[:200],
-                    exc,
-                )
-            return None
-        if isinstance(obj, dict):
-            objs.append(obj)
-        else:
-            if logger:
-                logger.warning(
-                    "VLM context parse: %s JSON-lines invalid at line %s, non-dict JSON type=%s",
-                    section_name,
-                    line_no,
-                    type(obj).__name__,
-                )
-            return None
-    return objs
-
-
-def _dump_json_lines(items: list[dict[str, Any]]) -> str:
-    return "\n".join(json.dumps(item, ensure_ascii=False) for item in items)
-
-
-def _extract_path_image_pairs(
-    user_content_items: list[dict[str, Any]]
-) -> dict[str, str]:
-    # 建立“图片路径 -> data URL”的映射，后续用于 [VLM_IMAGE_n] 对位。
-    path_to_url: dict[str, str] = {}
-    recent_paths: list[str] = []
-    all_paths: list[str] = []
-    all_image_urls: list[str] = []
-
-    for item in user_content_items:
-        if item.get("type") == "text":
-            text = str(item.get("text", ""))
-            matches = [m.strip() for m in _IMAGE_PATH_LINE_RE.findall(text)]
-            if matches:
-                recent_paths.extend(matches)
-                all_paths.extend(matches)
-        elif item.get("type") == "image_url":
-            image_payload = item.get("image_url", {})
-            if isinstance(image_payload, dict):
-                url = str(image_payload.get("url", "")).strip()
-                if url:
-                    all_image_urls.append(url)
-                    if recent_paths:
-                        candidate = _normalize_path_for_match(recent_paths[-1])
-                        if candidate and candidate not in path_to_url:
-                            path_to_url[candidate] = url
-
-    if not all_paths:
-        return path_to_url
-
-    if len(path_to_url) < len(all_image_urls):
-        fallback_paths = [_normalize_path_for_match(p) for p in all_paths]
-        used_paths = set(path_to_url.keys())
-        used_urls = set(path_to_url.values())
-        unused_urls: list[str] = []
-        for url in all_image_urls:
-            if url in used_urls:
-                continue
-            unused_urls.append(url)
-            used_urls.add(url)
-
-        image_idx = 0
-        for path in fallback_paths:
-            if image_idx >= len(unused_urls):
-                break
-            if path in used_paths:
-                continue
-            url = unused_urls[image_idx]
-            path_to_url[path] = url
-            used_paths.add(path)
-            image_idx += 1
-
-    return path_to_url
-
-
-def _normalize_vlm_marker_newlines(text: str) -> tuple[str, int]:
-    # 将换行 marker 归一成同行 marker，避免打断 JSON-lines。
-    normalized, count = _VLM_IMAGE_MARKER_NEWLINE_RE.subn(r" \1", text)
-    return normalized, count
-
-
-def _strip_trailing_vlm_marker(value: str) -> tuple[str, Optional[int]]:
-    # 将 "... [VLM_IMAGE_n]" 还原为原文本，并返回 n。
-    text = value.strip()
-    match = re.search(r"\s*\[VLM_IMAGE_(\d+)\]\s*$", text)
-    if not match:
-        return text, None
-    marker = int(match.group(1))
-    stripped = text[: match.start()].rstrip()
-    return stripped, marker
-
-
-def _extract_chunk_path_markers(chunk_block: str) -> list[tuple[str, Optional[int]]]:
-    items: list[tuple[str, Optional[int]]] = []
-    for match in _CHUNK_PATH_WITH_MARKER_RE.finditer(chunk_block):
-        path = match.group(1).strip()
-        marker_str = match.group(2)
-        marker = int(marker_str) if marker_str else None
-        items.append((path, marker))
-    return items
-
-
-def _resolve_marker_for_value(value: str, path_to_marker: dict[str, int]) -> Optional[int]:
-    # 先精确匹配全路径，再尝试 basename 匹配。
-    normalized = _normalize_path_for_match(value)
-    if normalized in path_to_marker:
-        return path_to_marker[normalized]
-
-    basename = _path_basename(normalized)
-    if not basename:
-        return None
-
-    candidates = {
-        marker
-        for path, marker in path_to_marker.items()
-        if _path_basename(path).lower() == basename.lower()
-    }
-    if len(candidates) == 1:
-        return next(iter(candidates))
-    return None
-
-
-def _sanitize_context_for_vlm(
-    context_text: str,
-    user_content_items: list[dict[str, Any]],
-    logger: logging.Logger,
-) -> Optional[dict[str, Any]]:
-    # 解析 LightRAG context 四段结构；解析失败就回退原始消息。
-    normalized_context, markers_normalized_count = _normalize_vlm_marker_newlines(
-        context_text
-    )
-
-    entity_heading = r"Knowledge Graph Data\s*\(Entity\)\s*:"
-    relation_heading = r"Knowledge Graph Data\s*\(Relationship\)\s*:"
-    chunk_heading = r"Document Chunks\s*\(Each\s+(?:entry|enrty)\s+has.*?\)\s*:"
-
-    entity_block = _locate_fenced_block(normalized_context, entity_heading)
-    if not entity_block:
-        logger.warning("VLM context parse failed: entity section not found or fence missing.")
-        return None
-    relation_block = _locate_fenced_block(
-        normalized_context, relation_heading, entity_block["block_end"]
-    )
-    if not relation_block:
-        logger.warning("VLM context parse failed: relation section not found or fence missing.")
-        return None
-    chunk_block = _locate_fenced_block(
-        normalized_context, chunk_heading, relation_block["block_end"]
-    )
-    if not chunk_block:
-        logger.warning("VLM context parse failed: chunk section not found or fence missing.")
-        return None
-
-    chunk_body = normalized_context[chunk_block["body_start"] : chunk_block["body_end"]]
-    chunk_path_markers = _extract_chunk_path_markers(chunk_body)
-    path_to_image_url = _extract_path_image_pairs(user_content_items)
-
-    marker_to_image_url: dict[int, str] = {}
-    path_to_marker: dict[str, int] = {}
-    seen_urls: set[str] = set()
-    next_marker = 1
-    for raw_path, upstream_marker in chunk_path_markers:
-        normalized = _normalize_path_for_match(raw_path)
-        if normalized in path_to_marker:
-            continue
-        image_url = path_to_image_url.get(normalized)
-        if not image_url:
-            continue
-        if image_url in seen_urls:
-            continue
-        marker = upstream_marker
-        if marker is None or marker in marker_to_image_url:
-            marker = next_marker
-            while marker in marker_to_image_url:
-                marker += 1
-        next_marker = max(next_marker, marker + 1)
-        marker_to_image_url[marker] = image_url
-        path_to_marker[normalized] = marker
-        seen_urls.add(image_url)
-
-    entity_raw_body = normalized_context[entity_block["body_start"] : entity_block["body_end"]]
-    relation_raw_body = normalized_context[
-        relation_block["body_start"] : relation_block["body_end"]
-    ]
-    entity_json_lines = _parse_json_lines(
-        entity_raw_body, logger=logger, section_name="entity"
-    )
-    relation_json_lines = _parse_json_lines(
-        relation_raw_body, logger=logger, section_name="relation"
-    )
-
-    # 实体区：优先做路径实体清理；若 JSON-lines 非法则保留原文，不中断流程。
-    cleaned_entity_body = entity_raw_body
-    cleaned_entities_count: Optional[int] = None
-    entity_parse_ok = entity_json_lines is not None
-    if entity_json_lines is None:
-        logger.warning("VLM context parse degraded: entity JSON-lines invalid, keeping original entity block.")
-    else:
-        cleaned_entities: list[dict[str, Any]] = []
-        for entity in entity_json_lines:
-            name = str(entity.get("entity", entity.get("entity_name", ""))).strip()
-            name, _ = _strip_trailing_vlm_marker(name)
-            if _is_image_path_like(name):
-                continue
-            cleaned_entities.append(entity)
-        cleaned_entity_body = _dump_json_lines(cleaned_entities)
-        cleaned_entities_count = len(cleaned_entities)
-
-    # 关系区：优先做路径端点替换；若 JSON-lines 非法则保留原文，不中断流程。
-    cleaned_relation_body = relation_raw_body
-    cleaned_relations_count: Optional[int] = None
-    relation_parse_ok = relation_json_lines is not None
-    if relation_json_lines is None:
-        logger.warning("VLM context parse degraded: relation JSON-lines invalid, keeping original relation block.")
-    else:
-        cleaned_relations: list[dict[str, Any]] = []
-        for rel in relation_json_lines:
-            rel_copy = dict(rel)
-            for key in ("entity1", "entity2", "source_entity", "target_entity"):
-                if key not in rel_copy:
-                    continue
-                endpoint = str(rel_copy.get(key, "")).strip()
-                endpoint, endpoint_marker = _strip_trailing_vlm_marker(endpoint)
-                if not _is_image_path_like(endpoint):
-                    continue
-                marker = _resolve_marker_for_value(endpoint, path_to_marker)
-                if marker is None and endpoint_marker in marker_to_image_url:
-                    marker = endpoint_marker
-                if marker is not None:
-                    rel_copy[key] = f"[VLM_IMAGE_{marker}]"
-                else:
-                    rel_copy[key] = "[IMAGE_ENTITY]"
-            cleaned_relations.append(rel_copy)
-        cleaned_relation_body = _dump_json_lines(cleaned_relations)
-        cleaned_relations_count = len(cleaned_relations)
-
-    rebuilt = (
-        normalized_context[: entity_block["body_start"]]
-        + cleaned_entity_body
-        + normalized_context[entity_block["body_end"] : relation_block["body_start"]]
-        + cleaned_relation_body
-        + normalized_context[relation_block["body_end"] : chunk_block["body_start"]]
-        + chunk_body
-        + normalized_context[chunk_block["body_end"] :]
-    )
-    logger.info(
-        "VLM context cleanup applied: markers_normalized_count=%s, chunk_parse_ok=%s, entity_parse_ok=%s, relation_parse_ok=%s, path_marker_map_size=%s, entities=%s, relations=%s, mapped_images=%s",
-        markers_normalized_count,
-        True,
-        entity_parse_ok,
-        relation_parse_ok,
-        len(path_to_marker),
-        cleaned_entities_count if cleaned_entities_count is not None else "kept-original",
-        cleaned_relations_count if cleaned_relations_count is not None else "kept-original",
-        len(marker_to_image_url),
-    )
-    return {"context_text": rebuilt, "marker_to_image_url": marker_to_image_url}
-
-
-def _build_content_parts_from_markers(
-    context_text: str,
-    marker_to_image_url: dict[int, str],
-    max_images: int,
-) -> list[dict[str, Any]]:
-    # 装箱策略：图片统一放在前面，文本放在最后。
-    allowed_marker_list = sorted(marker_to_image_url.keys())[: max(max_images, 0)]
-    allowed_markers = set(allowed_marker_list)
-    content: list[dict[str, Any]] = []
-
-    for marker in allowed_marker_list:
-        url = marker_to_image_url.get(marker)
-        if not url:
-            continue
-        content.append({"type": "image_url", "image_url": {"url": url}})
-
-    def _keep_allowed_marker(match: re.Match[str]) -> str:
-        marker = int(match.group(1))
-        if marker in allowed_markers:
-            return match.group(0)
-        return ""
-
-    text_payload = _VLM_IMAGE_MARKER_RE.sub(_keep_allowed_marker, context_text).strip()
-    if text_payload:
-        content.append({"type": "text", "text": text_payload})
-
-    return content
-
-
-def _is_context_length_error(exc: Exception) -> bool:
-    # 兼容不同后端的“上下文超长”报错文本。
-    msg = str(exc).lower()
-    return (
-        "maximum model length" in msg
-        or "prompt (length" in msg
-        or "context length" in msg
-    )
 
 
 def _drop_empty_additional_instructions(text: str) -> str:
@@ -928,63 +448,6 @@ def build_vision_model_func(
 ):
     llm_fallback = build_llm_model_func(settings, client, logger, model_name)
     schema_stats = {"total": 0, "success": 0, "fallback": 0}
-
-    async def _call_query_with_retries(
-        final_system: str,
-        final_user_text: str,
-        marker_to_image_url: dict[int, str],
-        cleaned_kwargs: dict[str, Any],
-    ) -> str:
-        # 超长时按 10->8->6->4->2 的图片上限递减重试。
-        base_cap = max(settings.vlm_max_images, 0)
-        planned_caps = [base_cap, 8, 6, 4, 2]
-        caps: list[int] = []
-        for cap in planned_caps:
-            normalized_cap = max(cap, 0)
-            if normalized_cap > base_cap:
-                continue
-            if normalized_cap not in caps:
-                caps.append(normalized_cap)
-        if not caps:
-            caps = [0]
-
-        last_exc: Optional[Exception] = None
-        for idx, cap in enumerate(caps):
-            content = _build_content_parts_from_markers(
-                final_user_text,
-                marker_to_image_url,
-                cap,
-            )
-            if not content:
-                content = [{"type": "text", "text": final_user_text}]
-
-            final_messages: list[dict[str, Any]] = []
-            if final_system.strip():
-                final_messages.append({"role": "system", "content": final_system})
-            final_messages.append({"role": "user", "content": content})
-            try:
-                response = await client.chat.completions.create(
-                    model=model_name,
-                    messages=final_messages,
-                    temperature=settings.temperature,
-                    max_tokens=settings.query_max_tokens,
-                    **cleaned_kwargs,
-                )
-                return response.choices[0].message.content
-            except Exception as exc:
-                last_exc = exc
-                if idx < len(caps) - 1 and _is_context_length_error(exc):
-                    logger.warning(
-                        "VLM context too long, retrying with fewer images (%s -> %s)",
-                        cap,
-                        caps[idx + 1],
-                    )
-                    continue
-                raise
-
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("VLM query failed without exception details")
 
     async def vision_model_func(
         prompt,

@@ -9,7 +9,7 @@ from typing import List
 from lightrag.utils import get_env_value
 
 from raganything.constants import (
-    DEFAULT_WORKING_DIR,
+    DEFAULT_WORKING_DIR_ROOT,
     DEFAULT_PARSE_METHOD,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_PARSER,
@@ -37,7 +37,7 @@ class RAGAnythingConfig:
 
     # Directory Configuration
     # ---
-    working_dir: str = field(default=get_env_value("WORKING_DIR", DEFAULT_WORKING_DIR, str))
+    working_dir: str = field(default=get_env_value("WORKING_DIR", DEFAULT_WORKING_DIR_ROOT, str))
     """Directory where RAG storage and cache files are stored."""
 
     # Parser Configuration
