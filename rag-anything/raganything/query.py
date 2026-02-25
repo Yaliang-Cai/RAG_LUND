@@ -12,6 +12,7 @@ from pathlib import Path
 from lightrag import QueryParam
 from lightrag.utils import always_get_an_event_loop
 from raganything.prompt import PROMPTS
+from raganything.constants import DEFAULT_MULTIMODAL_TOP_K
 from raganything.utils import (
     get_processor_for_type,
     encode_image_to_base64,
@@ -336,6 +337,9 @@ class QueryMixin:
             delattr(self, "_current_images_base64")
 
         # 1. Get original retrieval prompt (without generating final answer)
+        # Cap multimodal chunks to top 3 so only the highest-relevance images
+        # get sent to VLM; remaining chunk budget goes to text chunks.
+        kwargs.setdefault("multimodal_top_k", DEFAULT_MULTIMODAL_TOP_K)
         query_param = QueryParam(mode=mode, only_need_prompt=True, **kwargs)
         raw_prompt = await self.lightrag.aquery(query, param=query_param)
 

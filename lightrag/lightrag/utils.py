@@ -2762,6 +2762,29 @@ async def process_chunks_unified(
             if not unique_chunks:
                 return []
 
+    # 2.5 Multimodal-aware chunk selection
+    multimodal_top_k = getattr(query_param, "multimodal_top_k", None)
+    if multimodal_top_k is not None:
+        mm_chunks = [c for c in unique_chunks if c.get("is_multimodal")]
+        text_chunks = [c for c in unique_chunks if not c.get("is_multimodal")]
+
+        selected_mm = mm_chunks[:multimodal_top_k]
+
+        budget = query_param.chunk_top_k or len(unique_chunks)
+        remaining_budget = budget - len(selected_mm)
+        selected_text = text_chunks[: max(remaining_budget, 0)]
+
+        # Merge and sort by rerank_score (preserve relevance order)
+        unique_chunks = selected_mm + selected_text
+        unique_chunks.sort(
+            key=lambda c: c.get("rerank_score", 0), reverse=True
+        )
+
+        logger.info(
+            f"Multimodal-aware selection: {len(selected_mm)} multimodal + "
+            f"{len(selected_text)} text chunks (multimodal_top_k={multimodal_top_k})"
+        )
+
     # 3. Apply chunk_top_k limiting if specified
     if query_param.chunk_top_k is not None and query_param.chunk_top_k > 0:
         if len(unique_chunks) > query_param.chunk_top_k:

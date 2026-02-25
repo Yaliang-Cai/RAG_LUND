@@ -31,6 +31,7 @@ from openai import AsyncOpenAI
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from raganything import RAGAnything, RAGAnythingConfig
+from raganything.constants import DEFAULT_LOG_MAX_BYTES, DEFAULT_LOG_BACKUP_COUNT
 
 _MODEL_CACHE: Dict[str, Any] = {}
 _INTERNAL_OPENAI_KWARGS = {"hashing_kv", "keyword_extraction", "enable_cot"}
@@ -38,77 +39,107 @@ _INTERNAL_OPENAI_KWARGS = {"hashing_kv", "keyword_extraction", "enable_cot"}
 
 @dataclass
 class LocalRagSettings:
-    tiktoken_cache_dir: str = "/data/h50056787/workspaces/lightrag/tiktoken_cache"
-    embedding_model_path: str = "/data/h50056787/models/bge-m3"
-    rerank_model_path: str = "/data/h50056787/models/bge-reranker-v2-m3"
+    from raganything.constants import (
+        DEFAULT_TIKTOKEN_CACHE_DIR,
+        DEFAULT_EMBEDDING_MODEL_PATH,
+        DEFAULT_RERANK_MODEL_PATH,
+        DEFAULT_WORKING_DIR_ROOT,
+        DEFAULT_OUTPUT_DIR,
+        DEFAULT_LOG_DIR,
+        DEFAULT_VLLM_API_BASE,
+        DEFAULT_VLLM_API_KEY,
+        DEFAULT_LLM_MODEL_NAME,
+        DEFAULT_DEVICE,
+        DEFAULT_EMBEDDING_DIM,
+        DEFAULT_MAX_TOKEN_SIZE,
+        DEFAULT_TEMPERATURE,
+        DEFAULT_QUERY_MAX_TOKENS,
+        DEFAULT_INGEST_MAX_TOKENS,
+        DEFAULT_VLM_MAX_IMAGES,
+        DEFAULT_VLM_ENABLE_JSON_SCHEMA,
+    )
 
-    working_dir_root: str = "./rag_workspace"
-    output_dir: str = "./output"
-    log_dir: str = "./logs"
-    
-    vllm_api_base: str = "http://localhost:8001/v1"
-    vllm_api_key: str = "EMPTY"
-    llm_model_name: str = "Qwen/Qwen2-VL-7B-Instruct"
-    vision_vllm_api_base: str = "http://localhost:8001/v1"
-    vision_vllm_api_key: str = "EMPTY"
-    vision_model_name: str = "Qwen/Qwen2-VL-7B-Instruct"
-    device: str = "cuda:0"
+    tiktoken_cache_dir: str = DEFAULT_TIKTOKEN_CACHE_DIR
+    embedding_model_path: str = DEFAULT_EMBEDDING_MODEL_PATH
+    rerank_model_path: str = DEFAULT_RERANK_MODEL_PATH
 
-    embedding_dim: int = 1024
-    
-    # Embedding 模型限制
-    max_token_size: int = 8192
-    
-    # 生成参数
-    temperature: float = 0.0
-    query_max_tokens: int = 2048
-    ingest_max_tokens: int = 8192
+    working_dir_root: str = DEFAULT_WORKING_DIR_ROOT
+    output_dir: str = DEFAULT_OUTPUT_DIR
+    log_dir: str = DEFAULT_LOG_DIR
 
-    # 多模态参数
-    vlm_max_images: int = 10  # enhanced query 阶段的图片上限
-    vlm_enable_json_schema: bool = True  # ingest 阶段结构化输出开关
+    vllm_api_base: str = DEFAULT_VLLM_API_BASE
+    vllm_api_key: str = DEFAULT_VLLM_API_KEY
+    llm_model_name: str = DEFAULT_LLM_MODEL_NAME
+    vision_vllm_api_base: str = DEFAULT_VLLM_API_BASE
+    vision_vllm_api_key: str = DEFAULT_VLLM_API_KEY
+    vision_model_name: str = DEFAULT_LLM_MODEL_NAME
+    device: str = DEFAULT_DEVICE
+
+    embedding_dim: int = DEFAULT_EMBEDDING_DIM
+    max_token_size: int = DEFAULT_MAX_TOKEN_SIZE
+
+    temperature: float = DEFAULT_TEMPERATURE
+    query_max_tokens: int = DEFAULT_QUERY_MAX_TOKENS
+    ingest_max_tokens: int = DEFAULT_INGEST_MAX_TOKENS
+
+    vlm_max_images: int = DEFAULT_VLM_MAX_IMAGES
+    vlm_enable_json_schema: bool = DEFAULT_VLM_ENABLE_JSON_SCHEMA
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
+        from raganything.constants import (
+            DEFAULT_TIKTOKEN_CACHE_DIR,
+            DEFAULT_EMBEDDING_MODEL_PATH,
+            DEFAULT_RERANK_MODEL_PATH,
+            DEFAULT_WORKING_DIR_ROOT,
+            DEFAULT_OUTPUT_DIR,
+            DEFAULT_LOG_DIR,
+            DEFAULT_VLLM_API_BASE,
+            DEFAULT_VLLM_API_KEY,
+            DEFAULT_LLM_MODEL_NAME,
+            DEFAULT_DEVICE,
+            DEFAULT_EMBEDDING_DIM,
+            DEFAULT_MAX_TOKEN_SIZE,
+            DEFAULT_TEMPERATURE,
+            DEFAULT_QUERY_MAX_TOKENS,
+            DEFAULT_INGEST_MAX_TOKENS,
+            DEFAULT_VLM_MAX_IMAGES,
+        )
+
+        vllm_base = os.getenv("VLLM_API_BASE", DEFAULT_VLLM_API_BASE)
+        vllm_key = os.getenv("VLLM_API_KEY", DEFAULT_VLLM_API_KEY)
+        llm_name = os.getenv("LLM_MODEL_NAME", DEFAULT_LLM_MODEL_NAME)
+
         return cls(
-            tiktoken_cache_dir=os.getenv("TIKTOKEN_CACHE_DIR", "/data/h50056787/workspaces/lightrag/tiktoken_cache"),
-            embedding_model_path=os.getenv("RAGANYTHING_EMBEDDING_MODEL_PATH", "/data/h50056787/models/bge-m3"),
-            rerank_model_path=os.getenv("RAGANYTHING_RERANK_MODEL_PATH", "/data/h50056787/models/bge-reranker-v2-m3"),
-            log_dir=os.getenv("RAGANYTHING_LOG_DIR", "./logs"),
-            vllm_api_base=os.getenv("VLLM_API_BASE", "http://localhost:8001/v1"),
-            vllm_api_key=os.getenv("VLLM_API_KEY", "EMPTY"),
-            llm_model_name=os.getenv("LLM_MODEL_NAME", "Qwen/Qwen2-VL-7B-Instruct"),
-            vision_vllm_api_base=os.getenv(
-                "VISION_VLLM_API_BASE",
-                os.getenv("VLLM_API_BASE", "http://localhost:8001/v1"),
-            ),
-            vision_vllm_api_key=os.getenv(
-                "VISION_VLLM_API_KEY",
-                os.getenv("VLLM_API_KEY", "EMPTY"),
-            ),
-            vision_model_name=os.getenv(
-                "VISION_MODEL_NAME",
-                os.getenv("LLM_MODEL_NAME", "Qwen/Qwen2-VL-7B-Instruct"),
-            ),
-            device=os.getenv("RAGANYTHING_DEVICE", "cuda:0"),
-            working_dir_root=os.getenv("RAGANYTHING_WORKDIR_ROOT", "./rag_workspace"),
-            output_dir=os.getenv("RAGANYTHING_OUTPUT_DIR", "./output"),
-            embedding_dim=int(os.getenv("RAGANYTHING_EMBEDDING_DIM", "1024")),
-            max_token_size=int(os.getenv("RAGANYTHING_MAX_TOKEN_SIZE", "8192")),
-            temperature=float(os.getenv("RAGANYTHING_TEMPERATURE", "0.0")),
+            tiktoken_cache_dir=os.getenv("TIKTOKEN_CACHE_DIR", DEFAULT_TIKTOKEN_CACHE_DIR),
+            embedding_model_path=os.getenv("RAGANYTHING_EMBEDDING_MODEL_PATH", DEFAULT_EMBEDDING_MODEL_PATH),
+            rerank_model_path=os.getenv("RAGANYTHING_RERANK_MODEL_PATH", DEFAULT_RERANK_MODEL_PATH),
+            log_dir=os.getenv("RAGANYTHING_LOG_DIR", DEFAULT_LOG_DIR),
+            vllm_api_base=vllm_base,
+            vllm_api_key=vllm_key,
+            llm_model_name=llm_name,
+            vision_vllm_api_base=os.getenv("VISION_VLLM_API_BASE", vllm_base),
+            vision_vllm_api_key=os.getenv("VISION_VLLM_API_KEY", vllm_key),
+            vision_model_name=os.getenv("VISION_MODEL_NAME", llm_name),
+            device=os.getenv("RAGANYTHING_DEVICE", DEFAULT_DEVICE),
+            working_dir_root=os.getenv("RAGANYTHING_WORKDIR_ROOT", DEFAULT_WORKING_DIR_ROOT),
+            output_dir=os.getenv("RAGANYTHING_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
+            embedding_dim=int(os.getenv("RAGANYTHING_EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM))),
+            max_token_size=int(os.getenv("RAGANYTHING_MAX_TOKEN_SIZE", str(DEFAULT_MAX_TOKEN_SIZE))),
+            temperature=float(os.getenv("RAGANYTHING_TEMPERATURE", str(DEFAULT_TEMPERATURE))),
             query_max_tokens=int(
                 os.getenv(
                     "RAGANYTHING_QUERY_MAX_TOKENS",
                     os.getenv(
                         "RAGANYTHING_VISION_MAX_TOKENS",
-                        os.getenv("RAGANYTHING_MAX_TOKENS", "2048"),
+                        os.getenv("RAGANYTHING_MAX_TOKENS", str(DEFAULT_QUERY_MAX_TOKENS)),
                     ),
                 )
             ),
             ingest_max_tokens=int(
-                os.getenv("RAGANYTHING_INGEST_MAX_TOKENS", "8192")
+                os.getenv("RAGANYTHING_INGEST_MAX_TOKENS", str(DEFAULT_INGEST_MAX_TOKENS))
             ),
-            vlm_max_images=int(os.getenv("RAGANYTHING_VLM_MAX_IMAGES", "10")),
+            vlm_max_images=int(os.getenv("RAGANYTHING_VLM_MAX_IMAGES", str(DEFAULT_VLM_MAX_IMAGES))),
             vlm_enable_json_schema=os.getenv(
                 "RAGANYTHING_VLM_ENABLE_JSON_SCHEMA", "true"
             ).lower()
@@ -141,8 +172,8 @@ def configure_logging(settings: LocalRagSettings) -> logging.Logger:
                     "class": "logging.handlers.RotatingFileHandler",
                     "formatter": "detailed",
                     "filename": str(log_file_path),
-                    "maxBytes": 10 * 1024 * 1024,
-                    "backupCount": 5,
+                    "maxBytes": DEFAULT_LOG_MAX_BYTES,
+                    "backupCount": DEFAULT_LOG_BACKUP_COUNT,
                     "encoding": "utf-8",
                 },
             },
@@ -966,9 +997,11 @@ def build_vision_model_func(
         history_messages = history_messages or []
         cleaned_kwargs = _strip_internal_openai_kwargs(kwargs)
 
-        # 问答阶段：在发送给 VLM 前做本地清洗与重组
+        # 问答阶段：直接透传 query.py 构建好的多模态消息给 VLM
+        # （图片数量已在检索阶段由 multimodal_top_k 控制，
+        #   路径实体已在索引阶段被过滤，无需查询时二次处理）
         if messages:
-            async def _call_raw_messages() -> str:
+            try:
                 response = await client.chat.completions.create(
                     model=model_name,
                     messages=messages,
@@ -977,59 +1010,6 @@ def build_vision_model_func(
                     **cleaned_kwargs,
                 )
                 return response.choices[0].message.content
-
-            upstream_system = ""
-            for msg in messages:
-                if isinstance(msg, dict) and msg.get("role") == "system":
-                    upstream_system = str(msg.get("content", "")).strip()
-                    break
-
-            user_content_items = _collect_user_content_items(messages)
-            all_user_text = "\n".join(
-                str(item.get("text", ""))
-                for item in user_content_items
-                if item.get("type") == "text"
-            )
-            extracted_query = _extract_query_text_from_prompt(all_user_text)
-            stripped_text = _strip_embedded_query_block(all_user_text)
-            role_prefix, context_segment = _extract_last_context_segment(stripped_text)
-
-            if not context_segment:
-                logger.warning("VLM context extraction failed, sending raw messages.")
-                return await _call_raw_messages()
-
-            sanitized = _sanitize_context_for_vlm(
-                context_segment,
-                user_content_items,
-                logger,
-            )
-
-            if sanitized is None:
-                logger.warning(
-                    "LightRAG context section parsing failed, sending raw messages."
-                )
-                return await _call_raw_messages()
-
-            final_system = _compose_final_system(role_prefix, upstream_system)
-            cleaned_context = _clean_context_for_user_text(sanitized["context_text"])
-            marker_to_image_url = sanitized["marker_to_image_url"]
-
-            if extracted_query:
-                final_user_text = (
-                    f"{cleaned_context}\n\n"
-                    f"User Question: {extracted_query}\n\n"
-                    "Please answer based on the provided context and images."
-                )
-            else:
-                final_user_text = cleaned_context
-
-            try:
-                return await _call_query_with_retries(
-                    final_system,
-                    final_user_text,
-                    marker_to_image_url,
-                    cleaned_kwargs,
-                )
             except Exception as exc:
                 logger.error(f"Vision LLM Error (Query): {exc}")
                 raise

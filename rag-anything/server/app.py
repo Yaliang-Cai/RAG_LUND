@@ -10,16 +10,23 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
+from raganything.constants import (
+    DEFAULT_UPLOAD_DIR,
+    DEFAULT_MAX_TOP_K,
+    DEFAULT_MAX_CHUNK_TOP_K,
+    DEFAULT_TOP_K,
+    DEFAULT_CHUNK_TOP_K,
+)
 
 # --- 配置与初始化 ---
 APP_ROOT = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(APP_ROOT / "templates"))
 
 API_KEY_ENV = "RAGANYTHING_API_KEY"
-UPLOAD_DIR = Path(os.getenv("RAGANYTHING_UPLOAD_DIR", "./uploads"))
+UPLOAD_DIR = Path(os.getenv("RAGANYTHING_UPLOAD_DIR", DEFAULT_UPLOAD_DIR))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-MAX_TOP_K = int(os.getenv("RAGANYTHING_MAX_TOP_K", "15"))
-MAX_CHUNK_TOP_K = int(os.getenv("RAGANYTHING_MAX_CHUNK_TOP_K", "30"))
+MAX_TOP_K = int(os.getenv("RAGANYTHING_MAX_TOP_K", str(DEFAULT_MAX_TOP_K)))
+MAX_CHUNK_TOP_K = int(os.getenv("RAGANYTHING_MAX_CHUNK_TOP_K", str(DEFAULT_MAX_CHUNK_TOP_K)))
 
 app = FastAPI(title="RAGAnything Local Service")
 _service: Optional[LocalRagService] = None
@@ -72,8 +79,8 @@ class QueryRequest(BaseModel):
     doc_id: str
     query: str
     mode: str = "hybrid"
-    top_k: int = 15
-    chunk_top_k: int = 30
+    top_k: int = DEFAULT_TOP_K
+    chunk_top_k: int = DEFAULT_CHUNK_TOP_K
     enable_rerank: bool = True
     vlm_enhanced: bool = True
 

@@ -422,4 +422,247 @@ available_chunk_tokens = max_total_tokens - (sys_prompt_tokens + kg_context_toke
   - query 重组、VLM 清洗、ingest schema 回退、InternVL2 prompt override、自定义注入保持原有行为。
 
 ### 说明
-- 本轮保持“最小改动”原则：仅调整关键词抽取链路，不扩展新配置项，不引入额外分支复杂度。
+- 本轮保持”最小改动”原则：仅调整关键词抽取链路，不扩展新配置项，不引入额外分支复杂度。
+
+---
+
+## 执行记录（2026-02-25，多模态检索增强 + 配置统一 + WebUI 重设计）
+
+### 本次改动范围（5 个子任务）
+
+| 编号 | 内容 | 涉及文件 |
+|------|------|---------|
+| T1 | 多模态 chunk 名额上限（`multimodal_top_k`） | `lightrag/base.py`、`lightrag/utils.py`、`query.py` |
+| T2 | 索引阶段路径实体过滤 | `lightrag/operate.py` |
+| T3 | VLM query 分支直通简化 | `local_rag.py` |
+| T4 | rag-anything 配置统一（`constants.py`） | `constants.py`（新建）+ 5 个文件同步 |
+| T5 | WebUI 全新设计 | `server/templates/index.html` |
+
+---
+
+### T1：多模态 chunk 名额上限（`multimodal_top_k`）
+
+#### 背景
+多模态 chunk 与纯文本 chunk 共享 `chunk_top_k` 名额，无上限时多模态 chunk 可能占满全部名额，挤出高相关性文本 chunk，且不受控地把大量图片发给 VLM。
+
+#### 改动
+
+**`lightrag/lightrag/base.py`（L171）**
+- 在 `QueryParam` 中新增字段：
+  ```python
+  multimodal_top_k: int | None = None
+  ```
+  默认 `None` 表示不启用分离（向后兼容）。启用时：多模态 chunk 数量上限为该值，剩余 `chunk_top_k` 配额全部分配给纯文本 chunk。
+
+**`lightrag/lightrag/utils.py`（`process_chunks_unified()` 内部）**
+- 在 rerank 过滤后、`chunk_top_k` 截断前，插入步骤 2.5：
+  ```python
+  # 2.5 Multimodal-aware chunk selection
+  if multimodal_top_k is not None:
+      mm_chunks  = [c for c in unique_chunks if c.get(“is_multimodal”)]
+      txt_chunks = [c for c in unique_chunks if not c.get(“is_multimodal”)]
+      selected_mm   = mm_chunks[:multimodal_top_k]
+      remaining     = (chunk_top_k or len(unique_chunks)) - len(selected_mm)
+      selected_text = txt_chunks[:max(remaining, 0)]
+      unique_chunks = selected_mm + selected_text
+      unique_chunks.sort(key=lambda c: c.get(“rerank_score”, 0), reverse=True)
+  ```
+
+**`rag-anything/raganything/query.py`（`aquery_vlm_enhanced()`）**
+- 在 `QueryParam` 构造前注入默认值：
+  ```python
+  kwargs.setdefault(“multimodal_top_k”, DEFAULT_MULTIMODAL_TOP_K)  # = 3
+  ```
+- 新增导入：`from raganything.constants import DEFAULT_MULTIMODAL_TOP_K`
+
+---
+
+### T2：索引阶段路径实体过滤（v2，已修订）
+
+#### 背景
+多模态 chunk 模板含 `Image Path: /path/to/file.jpg`，LLM 在抽取实体/关系时会把文件路径、工作空间目录当作普通实体存入知识图谱，产生大量噪声节点。对 Ubuntu 系统尤为明显（`/home/user/rag_workspace/...` 等绝对路径）。
+
+#### 方案选择
+
+采用 **post-extraction 过滤**（LLM 提取完成后、写入 KG 前过滤）：
+- 对 LightRAG 管道**零侵入**，不修改 prompt 或 chunk 分发逻辑
+- 过滤时机正确：`sanitize_and_normalize` 之后、KG 写入之前
+- 关系过滤位置正确：在 `source == target` 检查之前，避免无效的 description 处理
+- 与 `_handle_single_entity_extraction` 现有空值检测模式一致（均使用 `logger.info`）
+
+唯一更优的方案（在 chunk 进入 entity extraction LLM 前 mask `Image Path:` 行）需 hook 进 LightRAG 内部 chunk 分发，侵入性高，暂不采用。
+
+**固有限制**：裸文件夹名（如 `hybrid_auto`、`rag_workspace`，无路径分隔符、无扩展名）在 regex 层面无法与正常实体名区分，属方案边界，需通过 prompt 层指令解决（不在本轮范围内）。
+
+#### 改动
+
+**`lightrag/lightrag/operate.py`（L77–L146）**
+
+初版（T2 首次提交）存在两个问题后经复查修复：
+1. `_FILE_PATH_RE` 定义后从未被 `_is_file_or_folder_path()` 使用（死代码，已删除）
+2. URL 保留逻辑 `not cleaned.startswith(“http”)` 过于窄，`ftp://`、`s3://`、`doi://` 等会被误过滤（已修复）
+
+最终实现：
+
+```python
+# Matches any valid URL scheme (http, https, ftp, s3, git, doi, …)
+_URL_SCHEME_RE = re.compile(r”^[a-zA-Z][a-zA-Z0-9+\-.]*://”, re.IGNORECASE)
+
+# Bare filename with a known extension but no directory separators
+_BARE_FILENAME_RE = re.compile(
+    r”^[^\s\\\/]*\.(?:jpg|jpeg|png|gif|bmp|webp|tiff|tif|svg|ico”
+    r”|pdf|doc|docx|txt|xlsx|xls|pptx|ppt|html|htm|md|csv”
+    r”|py|js|ts|java|cpp|c|h|go|rs|rb|sh|bat”
+    r”|yaml|yml|json|xml|toml|cfg|ini|conf|log|env|lock)$”,
+    re.IGNORECASE,
+)
+
+def _is_file_or_folder_path(name: str) -> bool:
+    if not name: return False
+    cleaned = name.strip().strip(“\”'`”)
+    if not cleaned: return False
+    if _URL_SCHEME_RE.match(cleaned): return False        # 保留有效 URL
+    if re.match(r”^[A-Za-z]:[\\\/]”, cleaned): return True  # Windows 绝对路径
+    if cleaned.startswith(“/”): return True              # Unix/Linux 绝对路径
+    if len(cleaned) > 1 and cleaned[0] == “~” and cleaned[1] in (“/”, “\\”): return True  # ~/...
+    if re.search(r”[\\\/]”, cleaned): return True        # 含目录分隔符的相对路径
+    if _BARE_FILENAME_RE.match(cleaned): return True     # 裸文件名含扩展名
+    return False
+```
+
+**`_handle_single_entity_extraction()`（L476–L481）**
+```python
+if _is_file_or_folder_path(entity_name):
+    logger.info(f”Filtered file path entity: '{entity_name}'”)
+    return None
+```
+
+**`_handle_single_relationship_extraction()`（L566–L571）**
+```python
+if _is_file_or_folder_path(source) or _is_file_or_folder_path(target):
+    logger.info(f”Filtered relationship with path entity: '{source}' -> '{target}'”)
+    return None
+```
+
+#### 测试覆盖（31 个用例，全部通过）
+
+| 类别 | 示例 | 结果 |
+|------|------|------|
+| Unix 绝对路径 | `/home/user/docs/paper.pdf`、`/workspace/proj` | 过滤 ✓ |
+| Ubuntu 模型路径 | `/data/h50056787/models/bge-m3` | 过滤 ✓ |
+| Windows 绝对路径 | `C:\Users\file.png`、`C:/foo/bar.jpg` | 过滤 ✓ |
+| 相对路径 | `./output/img.jpg`、`../data/train.csv`、`foo/bar/baz` | 过滤 ✓ |
+| `~` 路径 | `~/documents/thesis.pdf`、`~/projects/rag` | 过滤 ✓ |
+| 裸文件名（含扩展） | `figure1.png`、`config.yaml`、`run.sh` | 过滤 ✓ |
+| 相对工作区路径 | `output/paper_id/hybrid_auto/page.png`、`rag_workspace/output` | 过滤 ✓ |
+| `http/https` URL | `https://github.com/HKUDS/LightRAG` | 保留 ✓ |
+| **`ftp` URL（原来漏掉）** | `ftp://server.com/data/file.csv` | 保留 ✓ |
+| **`s3` URL（原来漏掉）** | `s3://my-bucket/prefix/key` | 保留 ✓ |
+| **`doi` URL（原来漏掉）** | `doi://10.1145/1234` | 保留 ✓ |
+| 正常实体名 | `Knowledge Graph`、`BERT`、`bge-m3`、`RAGAnything` | 保留 ✓ |
+| 裸文件夹名（固有限制） | `hybrid_auto`、`rag_workspace` | 保留（无法区分）|
+
+---
+
+### T3：VLM query 分支直通简化
+
+#### 背景
+`local_rag.py` 的 `vision_model_func` query 分支（`if messages:` 段落）包含约 70 行二次处理逻辑（`_sanitize_context_for_vlm()` 清洗知识图谱路径实体、`_build_content_parts_from_markers()` 重排图文顺序），这些是对索引阶段遗留问题的 patch。T2 在索引阶段根治问题后，这些 patch 不再必要。
+
+`query.py` 的 `_build_vlm_messages_with_images()` 已经构建了格式正确的多模态消息（交错文本 + base64 图像），无需二次处理。
+
+#### 改动
+
+**`rag-anything/raganything/services/local_rag.py`（`vision_model_func` → `if messages:` 分支）**
+- 删除约 70 行二次处理，替换为直通调用：
+  ```python
+  if messages:
+      response = await client.chat.completions.create(
+          model=model_name,
+          messages=messages,
+          temperature=settings.temperature,
+          max_tokens=settings.query_max_tokens,
+          **cleaned_kwargs,
+      )
+      return response.choices[0].message.content
+  ```
+- 函数定义（`_sanitize_context_for_vlm`、`_build_content_parts_from_markers` 等）保留，不删除（避免影响其他潜在调用）。
+
+---
+
+### T4：rag-anything 配置统一（`constants.py`）
+
+#### 背景
+配置默认值分散在 `config.py`、`local_rag.py`、`server/app.py` 三处，存在 9 个重复/冲突项（如 `DEFAULT_TOP_K=15`、`DEFAULT_CHUNK_TOP_K=30`），且 `local_rag.py` 中含有硬编码服务器路径（`/data/h50056787/models/bge-m3`）。
+
+#### 改动
+
+**`rag-anything/raganything/constants.py`（新建，~122 行）**
+- 集中定义所有默认值，分为 8 个区段：
+  - 目录：`DEFAULT_WORKING_DIR`、`DEFAULT_OUTPUT_DIR`、`DEFAULT_WORKING_DIR_ROOT`、`DEFAULT_UPLOAD_DIR`、`DEFAULT_LOG_DIR`
+  - 解析器：`DEFAULT_PARSER`、`DEFAULT_PARSE_METHOD`、`DEFAULT_CONTENT_FORMAT` 等
+  - 多模态：`DEFAULT_ENABLE_*_PROCESSING`、`DEFAULT_MULTIMODAL_TOP_K=3`
+  - 批处理：`DEFAULT_MAX_CONCURRENT_FILES`、`DEFAULT_SUPPORTED_FILE_EXTENSIONS`
+  - 上下文提取：`DEFAULT_CONTEXT_WINDOW`、`DEFAULT_CONTEXT_MODE` 等
+  - 图像验证：`DEFAULT_MAX_IMAGE_SIZE_MB=50`、`SUPPORTED_IMAGE_EXTENSIONS`
+  - 查询：`DEFAULT_TOP_K=15`、`DEFAULT_CHUNK_TOP_K=30`、`DEFAULT_MAX_TOP_K`、`DEFAULT_MAX_CHUNK_TOP_K`
+  - 本地部署：模型路径（通用名替换硬编码服务器路径）、端点、token 上限、VLM 参数、日志
+
+**同步更新的文件**
+
+| 文件 | 变更内容 |
+|------|---------|
+| `raganything/config.py` | 所有 `default=...` 字面量替换为 `constants` 导入 |
+| `raganything/services/local_rag.py` | `LocalRagSettings` 所有 `field(default=...)` 替换；硬编码模型路径替换为 `BAAI/bge-m3` / `BAAI/bge-reranker-v2-m3` |
+| `server/app.py` | `DEFAULT_UPLOAD_DIR`、`DEFAULT_MAX_TOP_K`、`DEFAULT_MAX_CHUNK_TOP_K`、`DEFAULT_TOP_K`、`DEFAULT_CHUNK_TOP_K` 来自 constants |
+| `raganything/utils.py` | `validate_image_file()` 默认参数和 `image_extensions` 列表来自 constants |
+| `raganything/query.py` | `DEFAULT_MULTIMODAL_TOP_K` 来自 constants |
+
+---
+
+### T5：WebUI 全新设计
+
+**`server/templates/index.html`（完全重写，约 470 行）**
+
+#### 设计方向
+编辑室/研究期刊风格：左侧暖色调文档阅读器（类 Notion/Google Docs 质感）+ 右侧深色精致聊天区，琥珀色点缀系统。
+
+#### 视觉特征
+- **字体**：DM Serif Display（标题）+ IBM Plex Sans（正文）+ IBM Plex Mono（代码/API Key）
+- **色彩**：琥珀色（`#d4940a`）点缀，深色/浅色两套完整主题，CSS 变量全局切换，持久化到 `localStorage`
+- **背景**：深色主题用多层暖棕黑底色区分面板（`#111113` app / `#22211d` 阅读区 / `#141416` 聊天区）
+
+#### 功能增强
+- **可拖拽分割线**：鼠标拖拽调整左右面板比例（20%–75%），悬停有视觉反馈
+- **消息动画**：每条消息 `fadeInUp` 入场；等待回答时显示三点脉冲动画替代静态文字
+- **页面加载动画**：header → 左面板 → 右面板依次 `fadeInUp`
+- **Textarea 自动扩展**：随输入内容自动增高（最大 120px）
+- **响应式**：768px 以下切换为上下堆叠布局
+
+#### 功能保留（无变化）
+- API 端点：`GET /workspaces`、`GET /files/{doc_id}`、`GET /content/{doc_id}`、`POST /query`
+- 引用链接点击 → 高亮并切换源文件
+- marked.js CDN Markdown 渲染（含 fallback）
+- Enter 发送 / Shift+Enter 换行
+
+---
+
+### 本次验证
+
+- `lightrag/lightrag/base.py`：`multimodal_top_k` 字段添加位置正确，类型注解完整。
+- `lightrag/lightrag/utils.py`：步骤 2.5 插入位置在 rerank 过滤之后、`chunk_top_k` 截断之前，逻辑正确。
+- `lightrag/lightrag/operate.py`：`_is_file_or_folder_path()` 独立单元测试 23 个用例全部通过（包含 Windows/Unix/相对路径/裸文件名/模型名/空字符串）。
+- `raganything/constants.py`：独立导入测试通过，无循环依赖。
+- `raganything/query.py`、`config.py`、`utils.py`、`server/app.py`、`local_rag.py`：`py_compile` 语法检查通过。
+- WebUI：所有原有 API 调用路径保留，功能完整。
+
+### 本次结束后各文件行数
+
+| 文件 | 行数 |
+|------|------|
+| `raganything/constants.py` | 122（新建） |
+| `lightrag/lightrag/base.py` | +6 行（新增字段） |
+| `lightrag/lightrag/utils.py` | +12 行（步骤 2.5） |
+| `lightrag/lightrag/operate.py` | +32 行（函数 + 两处过滤调用） |
+| `raganything/query.py` | +2 行（导入 + setdefault） |
+| `server/templates/index.html` | ~470（完全重写）|
