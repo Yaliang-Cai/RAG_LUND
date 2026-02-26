@@ -42,8 +42,11 @@ async def process_with_rag(service: LocalRagService, file_path: str, doc_id: str
         service.logger.info(f"Query {i}/{len(queries)}: {query}")
         service.logger.info(f"{'='*80}")
 
+        # 这里是示例参数（便于演示），不影响 local_rag 的通用能力。
         query_param = {
             "mode": "hybrid",
+            "top_k": 15,
+            "chunk_top_k": 60,
             "enable_rerank": True,
             "vlm_enhanced": True,
         }
@@ -51,10 +54,10 @@ async def process_with_rag(service: LocalRagService, file_path: str, doc_id: str
         result = await service.query(final_doc_id, query, **query_param)
         service.logger.info(f"\n✅ Answer:\n{result}\n")
 
-        # if "[" in result and "]" in result:
-        #     service.logger.info("✓ Reference detected")
-        # else:
-        #     service.logger.warning("⚠ No reference found")
+        if "[" in result and "]" in result:
+            service.logger.info("✓ Reference detected")
+        else:
+            service.logger.warning("⚠ No reference found")
 
 
 # ==========================================
