@@ -12,6 +12,11 @@ from pathlib import Path
 from lightrag import QueryParam
 from lightrag.utils import always_get_an_event_loop
 from raganything.prompt import PROMPTS
+from raganything.constants import (
+    DEFAULT_MULTIMODAL_TOP_K,
+    DEFAULT_TOP_K,
+    DEFAULT_CHUNK_TOP_K,
+)
 from raganything.utils import (
     get_processor_for_type,
     encode_image_to_base64,
@@ -123,6 +128,11 @@ class QueryMixin:
                     "No LightRAG instance available. Please process documents first or provide a pre-initialized LightRAG instance.",
                 )
             )
+
+        # Apply constants defaults so direct aquery() calls behave consistently
+        # with the server API (these are no-ops when the caller passes explicitly)
+        kwargs.setdefault("top_k", DEFAULT_TOP_K)
+        kwargs.setdefault("chunk_top_k", DEFAULT_CHUNK_TOP_K)
 
         # Check if VLM enhanced query should be used
         vlm_enhanced = kwargs.pop("vlm_enhanced", None)
@@ -336,14 +346,19 @@ class QueryMixin:
             delattr(self, "_current_images_base64")
 
         # 1. Get original retrieval prompt (without generating final answer)
+        # Cap multimodal chunks to DEFAULT_MULTIMODAL_TOP_K so only the
+        # highest-relevance images get sent to VLM; remaining chunk budget
+        # goes to text chunks.
+        kwargs.setdefault("multimodal_top_k", DEFAULT_MULTIMODAL_TOP_K)
+        image_cap: int = kwargs["multimodal_top_k"]
         query_param = QueryParam(mode=mode, only_need_prompt=True, **kwargs)
         raw_prompt = await self.lightrag.aquery(query, param=query_param)
 
         self.logger.debug("Retrieved raw prompt from LightRAG")
 
-        # 2. Extract and process image paths
+        # 2. Extract and process image paths, hard-capped to image_cap
         enhanced_prompt, images_found = await self._process_image_paths_for_vlm(
-            raw_prompt
+            raw_prompt, max_images=image_cap
         )
 
         if not images_found:
@@ -534,12 +549,17 @@ class QueryMixin:
 
         return description
 
-    async def _process_image_paths_for_vlm(self, prompt: str) -> tuple[str, int]:
+    async def _process_image_paths_for_vlm(
+        self, prompt: str, max_images: int | None = None
+    ) -> tuple[str, int]:
         """
-        Process image paths in prompt, keeping original paths and adding VLM markers
+        Process image paths in prompt, keeping original paths and adding VLM markers.
+        At most max_images images are encoded and sent to VLM; excess paths are
+        left as plain text.
 
         Args:
             prompt: Original prompt
+            max_images: Maximum number of images to encode. None means no cap.
 
         Returns:
             tuple: (processed prompt, image count)
@@ -558,10 +578,17 @@ class QueryMixin:
 
         # First, let's see what matches we find
         matches = re.findall(image_path_pattern, prompt)
-        self.logger.info(f"Found {len(matches)} image path matches in prompt")
+        self.logger.info(
+            f"Found {len(matches)} image path matches in prompt"
+            + (f", capped to {max_images}" if max_images is not None else "")
+        )
 
         def replace_image_path(match):
             nonlocal images_processed
+
+            # Hard cap: leave excess image paths as plain text
+            if max_images is not None and images_processed >= max_images:
+                return match.group(0)
 
             image_path = match.group(1).strip()
             self.logger.debug(f"Processing image path: '{image_path}'")

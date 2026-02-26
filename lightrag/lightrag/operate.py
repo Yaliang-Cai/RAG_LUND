@@ -74,6 +74,77 @@ from dotenv import load_dotenv
 # the OS environment variables take precedence over the .env file
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
 
+import re as _re
+
+# Matches any valid URL scheme (http, https, ftp, s3, git, doi, arxiv, etc.)
+# Used to preserve legitimate hyperlinks from source documents.
+_URL_SCHEME_RE = _re.compile(r"^[a-zA-Z][a-zA-Z0-9+\-.]*://", _re.IGNORECASE)
+
+# Bare filename with a known file/code extension but no directory separators.
+# Catches artifacts like "figure1.png", "config.yaml", "run.sh".
+_BARE_FILENAME_RE = _re.compile(
+    r"^[^\s\\\/]*\.(?:"
+    r"jpg|jpeg|png|gif|bmp|webp|tiff|tif|svg|ico"
+    r"|pdf|doc|docx|txt|xlsx|xls|pptx|ppt|html|htm|md|csv"
+    r"|py|js|ts|java|cpp|c|h|go|rs|rb|sh|bat"
+    r"|yaml|yml|json|xml|toml|cfg|ini|conf|log|env|lock"
+    r")$",
+    _re.IGNORECASE,
+)
+
+
+def _is_file_or_folder_path(name: str) -> bool:
+    """Return True if *name* looks like a filesystem path or bare filename.
+
+    Used during entity/relationship extraction to suppress file-system
+    artifacts from being stored as knowledge-graph nodes.  Covers both
+    Windows and Linux/macOS (Ubuntu) path conventions.
+
+    Preserved (returns False):
+    - Valid URLs with any scheme: http://, https://, ftp://, s3://, doi://, …
+    - Plain words and phrases with no path separators or file extensions.
+
+    Filtered (returns True):
+    - Windows absolute paths:     C:\\foo\\bar  /  C:/foo/bar
+    - Unix/Linux absolute paths:  /home/user/docs  /  /workspace/project
+    - Home-dir paths:             ~/projects/rag
+    - Relative paths:             ./output  /  ../data  /  foo/bar/baz
+    - Any string containing \\ or / that is not a URL
+    - Bare filenames with known extensions: figure.png, config.yaml, run.sh
+    """
+    if not name:
+        return False
+    cleaned = name.strip().strip("\"'`")
+    if not cleaned:
+        return False
+
+    # ── Preserve valid URLs (http, https, ftp, s3, git, doi, arxiv, …) ──────
+    if _URL_SCHEME_RE.match(cleaned):
+        return False
+
+    # ── Windows absolute path: C:\... or C:/... ──────────────────────────────
+    if _re.match(r"^[A-Za-z]:[\\\/]", cleaned):
+        return True
+
+    # ── Unix/Linux absolute path: /foo/bar/... ───────────────────────────────
+    if cleaned.startswith("/"):
+        return True
+
+    # ── Home-directory shorthand: ~/... or ~\... ─────────────────────────────
+    if len(cleaned) > 1 and cleaned[0] == "~" and cleaned[1] in ("/", "\\"):
+        return True
+
+    # ── Any relative or mixed path containing a directory separator ──────────
+    # Catches: ./output, ../data, foo/bar, workspace\project, etc.
+    if _re.search(r"[\\\/]", cleaned):
+        return True
+
+    # ── Bare filename with a known file/code extension ───────────────────────
+    if _BARE_FILENAME_RE.match(cleaned):
+        return True
+
+    return False
+
 
 def _truncate_entity_identifier(
     identifier: str, limit: int, chunk_key: str, identifier_role: str
@@ -402,6 +473,13 @@ async def _handle_single_entity_extraction(
             )
             return None
 
+        # Filter out file/folder path entities
+        if _is_file_or_folder_path(entity_name):
+            logger.info(
+                f"Filtered file path entity: '{entity_name}'"
+            )
+            return None
+
         # Process entity type with same cleaning pipeline
         entity_type = sanitize_and_normalize_extracted_text(
             record_attributes[2], remove_inner_quotes=True
@@ -482,6 +560,13 @@ async def _handle_single_relationship_extraction(
         if not target:
             logger.info(
                 f"Empty target entity found after sanitization. Original: '{record_attributes[2]}'"
+            )
+            return None
+
+        # Filter out relationships involving file path entities
+        if _is_file_or_folder_path(source) or _is_file_or_folder_path(target):
+            logger.info(
+                f"Filtered relationship with path entity: '{source}' -> '{target}'"
             )
             return None
 
@@ -3408,6 +3493,7 @@ async def _get_vector_context(
                     "file_path": result.get("file_path", "unknown_source"),
                     "source_type": "vector",  # Mark the source type
                     "chunk_id": result.get("id"),  # Add chunk_id for deduplication
+                    "is_multimodal": result.get("is_multimodal", False),
                 }
                 valid_chunks.append(chunk_with_metadata)
 
@@ -3825,6 +3911,7 @@ async def _merge_all_chunks(
                         "content": chunk["content"],
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
+                        "is_multimodal": chunk.get("is_multimodal", False),
                     }
                 )
 
@@ -3839,6 +3926,7 @@ async def _merge_all_chunks(
                         "content": chunk["content"],
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
+                        "is_multimodal": chunk.get("is_multimodal", False),
                     }
                 )
 
@@ -3853,6 +3941,7 @@ async def _merge_all_chunks(
                         "content": chunk["content"],
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
+                        "is_multimodal": chunk.get("is_multimodal", False),
                     }
                 )
 

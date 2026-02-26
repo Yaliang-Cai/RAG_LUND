@@ -422,49 +422,424 @@ available_chunk_tokens = max_total_tokens - (sys_prompt_tokens + kg_context_toke
   - query 重组、VLM 清洗、ingest schema 回退、InternVL2 prompt override、自定义注入保持原有行为。
 
 ### 说明
-- 本轮保持“最小改动”原则：仅调整关键词抽取链路，不扩展新配置项，不引入额外分支复杂度。
+- 本轮保持”最小改动”原则：仅调整关键词抽取链路，不扩展新配置项，不引入额外分支复杂度。
 
-## 执行更新（2026-02-24，本轮最终）
+---
 
-### 本轮复核文件
-- `raganything/services/local_rag.py`
-- `evaluate_local/DocBench/evaluate.py`
-- `examples/raganything_local_v2.py`（仅做兼容复核，无代码修改）
+## 执行记录（2026-02-25，多模态检索增强 + 配置统一 + WebUI 重设计）
 
-### 相较未改动版本的核心变化
-1. **Enhanced 与 Non-enhanced 的 Context 重组规则已对齐**
-   - enhanced 分支不再使用“上游消息原样直传”。
-   - enhanced 与 non-enhanced 均复用 `_try_repack_text_query(...)`：
-     - `system`：Role/Goal/Instructions（enhanced 额外前置 upstream system）。
-     - `user`：`---Context---` + 单次 `User Question`。
-   - 兼容两种问题来源：`---User Query---` 与 `User Question:`。
-   - 清理时会剥离嵌入的 `---User Query---` 段，避免问题重复。
+### 本次改动范围（5 个子任务）
 
-2. **查询侧清洗链路简化**
-   - 已移除 enhanced query 的 entity/relation/chunk 二次解析与改写逻辑。
-   - 不再做路径实体删除、relation 端点替换、chunk 二次打标。
-   - 降低 JSON-lines 解析降级带来的不稳定性。
+| 编号 | 内容 | 涉及文件 |
+|------|------|---------|
+| T1 | 多模态 chunk 名额上限（`multimodal_top_k`） | `lightrag/base.py`、`lightrag/utils.py`、`query.py` |
+| T2 | 索引阶段路径实体过滤 | `lightrag/operate.py` |
+| T3 | VLM query 分支直通简化 | `local_rag.py` |
+| T4 | rag-anything 配置统一（`constants.py`） | `constants.py`（新建）+ 5 个文件同步 |
+| T5 | WebUI 全新设计 | `server/templates/index.html` |
 
-3. **图片重试策略改为按 base_cap 动态递减**
-   - 由固定序列改为 `base_cap/5` 步长递减。
-   - 最终必含 `0` 图兜底尝试。
-   - 新增真实发送图片数日志：
-     - `VLM request image count: sent=... (cap=..., available=..., attempt=.../...)`
+---
 
-4. **DocBench 评测参数同步更新**
-   - `vlm_enhanced=True`
-   - `max_total_tokens=25000`
-   - `max_entity_tokens=4000`
-   - `max_relation_tokens=5000`
-   - `settings.vlm_max_images=5`
+### T1：多模态图片上限（`multimodal_top_k`）
 
-### 结论（本轮）
-- enhanced 已与 non-enhanced 对齐到同一套 Context 重组规则。
-- enhanced 保留的唯一结构差异是多模态装箱：图片内容仍在 user content 前部，文本在后部。
-- 代码结构较前一版更短、更直接，功能边界更清晰。
+#### 背景
+多模态 chunk 的内容字段含 `Image Path: ...` 行，VLM 增强查询时会把这些路径替换为 base64 图片。无上限时大量图片会被发给 VLM，占用 context window 并增加延迟。此外，多模态 chunk 与文本 chunk 共享 `chunk_top_k` 名额，若多模态 chunk 排名靠前则会挤出高相关性纯文本原文。
 
-### 校验
-- 语法检查通过：
-  - `python -m py_compile raganything/services/local_rag.py`
-  - `python -m py_compile evaluate_local/DocBench/evaluate.py`
-  - `python -m py_compile examples/raganything_local_v2.py`
+#### 最终语义（v2，初始实现已更新见下方增量记录）
+
+- `multimodal_top_k`：**仅控制发给 VLM 的图片数量上限**，不限制 context 中的 chunk 数量
+- 所有多模态 chunk 均进入 context（排名前 `multimodal_top_k` 个附图，其余降级为纯文本 VLM 描述）
+- 纯文本 chunk 获得独立配额：`chunk_top_k - multimodal_top_k` 个，从全量 rerank 结果中取最相关的
+- 最终 context 总量 = 全部 mm_chunks + min(text_pool, chunk_top_k - multimodal_top_k) 个文本 chunk
+
+#### 初始改动（`base.py`、`utils.py`、`query.py`）
+
+**`lightrag/lightrag/base.py`（L171）**
+- 在 `QueryParam` 中新增字段：
+  ```python
+  multimodal_top_k: int | None = None
+  ```
+  默认 `None`（向后兼容）。
+
+**`rag-anything/raganything/query.py`（`aquery_vlm_enhanced()`）**
+- 在 `QueryParam` 构造前注入默认值，并传递 `max_images` 给图片扫描函数：
+  ```python
+  kwargs.setdefault(“multimodal_top_k”, DEFAULT_MULTIMODAL_TOP_K)  # = 3
+  image_cap = kwargs[“multimodal_top_k”]
+  enhanced_prompt, images_found = await self._process_image_paths_for_vlm(
+      raw_prompt, max_images=image_cap
+  )
+  ```
+- `_process_image_paths_for_vlm(prompt, max_images=None)`：新增 `max_images` 参数，在 `replace_image_path` 回调中按出现顺序计数，达到上限后剩余路径保留为纯文本，不附图。
+- `aquery()` 中补充默认值注入（确保直接调用也遵循 constants 配置）：
+  ```python
+  kwargs.setdefault(“top_k”, DEFAULT_TOP_K)
+  kwargs.setdefault(“chunk_top_k”, DEFAULT_CHUNK_TOP_K)
+  ```
+
+> 注：`utils.py` 的 Step 2.5 逻辑自初始提交后已完全重写，见下方增量记录。
+
+---
+
+### T2：索引阶段路径实体过滤（v2，已修订）
+
+#### 背景
+多模态 chunk 模板含 `Image Path: /path/to/file.jpg`，LLM 在抽取实体/关系时会把文件路径、工作空间目录当作普通实体存入知识图谱，产生大量噪声节点。对 Ubuntu 系统尤为明显（`/home/user/rag_workspace/...` 等绝对路径）。
+
+#### 方案选择
+
+采用 **post-extraction 过滤**（LLM 提取完成后、写入 KG 前过滤）：
+- 对 LightRAG 管道**零侵入**，不修改 prompt 或 chunk 分发逻辑
+- 过滤时机正确：`sanitize_and_normalize` 之后、KG 写入之前
+- 关系过滤位置正确：在 `source == target` 检查之前，避免无效的 description 处理
+- 与 `_handle_single_entity_extraction` 现有空值检测模式一致（均使用 `logger.info`）
+
+唯一更优的方案（在 chunk 进入 entity extraction LLM 前 mask `Image Path:` 行）需 hook 进 LightRAG 内部 chunk 分发，侵入性高，暂不采用。
+
+**固有限制**：裸文件夹名（如 `hybrid_auto`、`rag_workspace`，无路径分隔符、无扩展名）在 regex 层面无法与正常实体名区分，属方案边界，需通过 prompt 层指令解决（不在本轮范围内）。
+
+#### 改动
+
+**`lightrag/lightrag/operate.py`（L77–L146）**
+
+初版（T2 首次提交）存在两个问题后经复查修复：
+1. `_FILE_PATH_RE` 定义后从未被 `_is_file_or_folder_path()` 使用（死代码，已删除）
+2. URL 保留逻辑 `not cleaned.startswith(“http”)` 过于窄，`ftp://`、`s3://`、`doi://` 等会被误过滤（已修复）
+
+最终实现：
+
+```python
+# Matches any valid URL scheme (http, https, ftp, s3, git, doi, …)
+_URL_SCHEME_RE = re.compile(r”^[a-zA-Z][a-zA-Z0-9+\-.]*://”, re.IGNORECASE)
+
+# Bare filename with a known extension but no directory separators
+_BARE_FILENAME_RE = re.compile(
+    r”^[^\s\\\/]*\.(?:jpg|jpeg|png|gif|bmp|webp|tiff|tif|svg|ico”
+    r”|pdf|doc|docx|txt|xlsx|xls|pptx|ppt|html|htm|md|csv”
+    r”|py|js|ts|java|cpp|c|h|go|rs|rb|sh|bat”
+    r”|yaml|yml|json|xml|toml|cfg|ini|conf|log|env|lock)$”,
+    re.IGNORECASE,
+)
+
+def _is_file_or_folder_path(name: str) -> bool:
+    if not name: return False
+    cleaned = name.strip().strip(“\”'`”)
+    if not cleaned: return False
+    if _URL_SCHEME_RE.match(cleaned): return False        # 保留有效 URL
+    if re.match(r”^[A-Za-z]:[\\\/]”, cleaned): return True  # Windows 绝对路径
+    if cleaned.startswith(“/”): return True              # Unix/Linux 绝对路径
+    if len(cleaned) > 1 and cleaned[0] == “~” and cleaned[1] in (“/”, “\\”): return True  # ~/...
+    if re.search(r”[\\\/]”, cleaned): return True        # 含目录分隔符的相对路径
+    if _BARE_FILENAME_RE.match(cleaned): return True     # 裸文件名含扩展名
+    return False
+```
+
+**`_handle_single_entity_extraction()`（L476–L481）**
+```python
+if _is_file_or_folder_path(entity_name):
+    logger.info(f”Filtered file path entity: '{entity_name}'”)
+    return None
+```
+
+**`_handle_single_relationship_extraction()`（L566–L571）**
+```python
+if _is_file_or_folder_path(source) or _is_file_or_folder_path(target):
+    logger.info(f”Filtered relationship with path entity: '{source}' -> '{target}'”)
+    return None
+```
+
+#### 测试覆盖（31 个用例，全部通过）
+
+| 类别 | 示例 | 结果 |
+|------|------|------|
+| Unix 绝对路径 | `/home/user/docs/paper.pdf`、`/workspace/proj` | 过滤 ✓ |
+| Ubuntu 模型路径 | `/data/h50056787/models/bge-m3` | 过滤 ✓ |
+| Windows 绝对路径 | `C:\Users\file.png`、`C:/foo/bar.jpg` | 过滤 ✓ |
+| 相对路径 | `./output/img.jpg`、`../data/train.csv`、`foo/bar/baz` | 过滤 ✓ |
+| `~` 路径 | `~/documents/thesis.pdf`、`~/projects/rag` | 过滤 ✓ |
+| 裸文件名（含扩展） | `figure1.png`、`config.yaml`、`run.sh` | 过滤 ✓ |
+| 相对工作区路径 | `output/paper_id/hybrid_auto/page.png`、`rag_workspace/output` | 过滤 ✓ |
+| `http/https` URL | `https://github.com/HKUDS/LightRAG` | 保留 ✓ |
+| **`ftp` URL（原来漏掉）** | `ftp://server.com/data/file.csv` | 保留 ✓ |
+| **`s3` URL（原来漏掉）** | `s3://my-bucket/prefix/key` | 保留 ✓ |
+| **`doi` URL（原来漏掉）** | `doi://10.1145/1234` | 保留 ✓ |
+| 正常实体名 | `Knowledge Graph`、`BERT`、`bge-m3`、`RAGAnything` | 保留 ✓ |
+| 裸文件夹名（固有限制） | `hybrid_auto`、`rag_workspace` | 保留（无法区分）|
+
+---
+
+### T3：VLM query 分支直通简化
+
+#### 背景
+`local_rag.py` 的 `vision_model_func` query 分支（`if messages:` 段落）包含约 70 行二次处理逻辑（`_sanitize_context_for_vlm()` 清洗知识图谱路径实体、`_build_content_parts_from_markers()` 重排图文顺序），这些是对索引阶段遗留问题的 patch。T2 在索引阶段根治问题后，这些 patch 不再必要。
+
+`query.py` 的 `_build_vlm_messages_with_images()` 已经构建了格式正确的多模态消息（交错文本 + base64 图像），无需二次处理。
+
+#### 改动
+
+**`rag-anything/raganything/services/local_rag.py`（`vision_model_func` → `if messages:` 分支）**
+- 删除约 70 行二次处理，替换为直通调用：
+  ```python
+  if messages:
+      response = await client.chat.completions.create(
+          model=model_name,
+          messages=messages,
+          temperature=settings.temperature,
+          max_tokens=settings.query_max_tokens,
+          **cleaned_kwargs,
+      )
+      return response.choices[0].message.content
+  ```
+- 函数定义（`_sanitize_context_for_vlm`、`_build_content_parts_from_markers` 等）保留，不删除（避免影响其他潜在调用）。
+
+---
+
+### T4：rag-anything 配置统一（`constants.py`）
+
+#### 背景
+配置默认值分散在 `config.py`、`local_rag.py`、`server/app.py` 三处，存在 9 个重复/冲突项（如 `DEFAULT_TOP_K=15`、`DEFAULT_CHUNK_TOP_K=30`），且 `local_rag.py` 中含有硬编码服务器路径（`/data/h50056787/models/bge-m3`）。
+
+#### 改动
+
+**`rag-anything/raganything/constants.py`（新建，~121 行）**
+- 集中定义所有默认值，分为 8 个区段：
+  - 目录：`DEFAULT_OUTPUT_DIR`、`DEFAULT_WORKING_DIR_ROOT`、`DEFAULT_LOG_DIR`
+  - 解析器：`DEFAULT_PARSER`、`DEFAULT_PARSE_METHOD`、`DEFAULT_CONTENT_FORMAT` 等
+  - 多模态：`DEFAULT_ENABLE_*_PROCESSING`、`DEFAULT_MULTIMODAL_TOP_K=3`
+  - 批处理：`DEFAULT_MAX_CONCURRENT_FILES`、`DEFAULT_SUPPORTED_FILE_EXTENSIONS`
+  - 上下文提取：`DEFAULT_CONTEXT_WINDOW`、`DEFAULT_CONTEXT_MODE` 等
+  - 图像验证：`DEFAULT_MAX_IMAGE_SIZE_MB=50`、`SUPPORTED_IMAGE_EXTENSIONS`
+  - 查询：`DEFAULT_TOP_K=20`、`DEFAULT_CHUNK_TOP_K=10`
+  - 本地部署：模型路径（通用名替换硬编码服务器路径）、端点、token 上限、VLM 参数、日志
+
+**同步更新的文件**
+
+| 文件 | 变更内容 |
+|------|---------|
+| `raganything/config.py` | 所有 `default=...` 字面量替换为 `constants` 导入 |
+| `raganything/services/local_rag.py` | `LocalRagSettings` 所有 `field(default=...)` 替换；硬编码模型路径替换为 `BAAI/bge-m3` / `BAAI/bge-reranker-v2-m3` |
+| `server/app.py` | `DEFAULT_TOP_K`、`DEFAULT_CHUNK_TOP_K`、`DEFAULT_SUPPORTED_FILE_EXTENSIONS` 来自 constants |
+| `raganything/utils.py` | `validate_image_file()` 默认参数和 `image_extensions` 列表来自 constants |
+| `raganything/query.py` | `DEFAULT_MULTIMODAL_TOP_K` 来自 constants |
+
+---
+
+### T5：WebUI 全新设计
+
+**`server/templates/index.html`（完全重写，约 470 行）**
+
+#### 设计方向
+编辑室/研究期刊风格：左侧暖色调文档阅读器（类 Notion/Google Docs 质感）+ 右侧深色精致聊天区，琥珀色点缀系统。
+
+#### 视觉特征
+- **字体**：DM Serif Display（标题）+ IBM Plex Sans（正文）+ IBM Plex Mono（代码/API Key）
+- **色彩**：琥珀色（`#d4940a`）点缀，深色/浅色两套完整主题，CSS 变量全局切换，持久化到 `localStorage`
+- **背景**：深色主题用多层暖棕黑底色区分面板（`#111113` app / `#22211d` 阅读区 / `#141416` 聊天区）
+
+#### 功能增强
+- **可拖拽分割线**：鼠标拖拽调整左右面板比例（20%–75%），悬停有视觉反馈
+- **消息动画**：每条消息 `fadeInUp` 入场；等待回答时显示三点脉冲动画替代静态文字
+- **页面加载动画**：header → 左面板 → 右面板依次 `fadeInUp`
+- **Textarea 自动扩展**：随输入内容自动增高（最大 120px）
+- **响应式**：768px 以下切换为上下堆叠布局
+
+#### 功能保留（无变化）
+- API 端点：`GET /workspaces`、`GET /files/{doc_id}`、`GET /content/{doc_id}`、`POST /query`
+- 引用链接点击 → 高亮并切换源文件
+- marked.js CDN Markdown 渲染（含 fallback）
+- Enter 发送 / Shift+Enter 换行
+
+---
+
+### 本次验证
+
+- `lightrag/lightrag/base.py`：`multimodal_top_k` 字段添加位置正确，类型注解完整。
+- `lightrag/lightrag/utils.py`：步骤 2.5 插入位置在 rerank 过滤之后、`chunk_top_k` 截断之前，逻辑正确。
+- `lightrag/lightrag/operate.py`：`_is_file_or_folder_path()` 独立单元测试 23 个用例全部通过（包含 Windows/Unix/相对路径/裸文件名/模型名/空字符串）。
+- `raganything/constants.py`：独立导入测试通过，无循环依赖。
+- `raganything/query.py`、`config.py`、`utils.py`、`server/app.py`、`local_rag.py`：`py_compile` 语法检查通过。
+- WebUI：所有原有 API 调用路径保留，功能完整。
+
+### 本次结束后各文件行数
+
+| 文件 | 行数 |
+|------|------|
+| `raganything/constants.py` | ~117（新建；注：`DEFAULT_UPLOAD_DIR` 在 7b483f3 commit message 中声称删除但实际漏删，后续增量记录中已修正）|
+| `lightrag/lightrag/base.py` | +6 行（新增字段） |
+| `lightrag/lightrag/utils.py` | +12 行（步骤 2.5 初始版本，后续已重写） |
+| `lightrag/lightrag/operate.py` | +32 行（函数 + 两处过滤调用） |
+| `raganything/query.py` | +2 行（导入 + setdefault） |
+| `server/templates/index.html` | ~470（完全重写）|
+
+---
+
+## 增量更新（2026-02-25，server/app.py 后端优化）
+
+### 改动范围
+
+唯一修改文件：`rag-anything/server/app.py`
+
+### 问题根因
+
+parser 写出路径 ≠ server 查找路径：server 假设文件在 `{output_dir}/{doc_id}/hybrid_auto/`，但 parser 实际写入 `{output_dir}/{file_stem}/hybrid_auto/`。当 `doc_id != file_stem` 时文件找不到（用户传入自定义 `doc_id`、文件名含特殊字符等场景）。
+
+### 核心修复
+
+- `/ingest` 传入 `workspace_output = output_dir/{final_doc_id}` 作为 parser 的 `output_dir`，parser 写入 `output/{doc_id}/{stem}/hybrid_auto/`
+- `_find_md_in_hybrid_auto()` 和 `/files/{doc_id}` 改用 `rglob("hybrid_auto/*.md")` 递归查找，同时兼容旧格式数据（`{doc_id}/hybrid_auto/` 也能被 rglob 命中）
+
+### 其他修复
+
+| 问题 | 修复方式 |
+|------|---------|
+| `_find_md_in_hybrid_auto()`、`list_workspace_files()`、`list_workspaces()` 每次请求重复 `LocalRagSettings.from_env()` | 改用 `service.settings`（通过依赖注入传入） |
+| 模糊匹配返回 `candidates[0]` 前未排序，结果不稳定 | 改为 `sorted(rglob(...))` 后再过滤取第一个 |
+| `doc_id` 直接拼入路径，存在路径穿越风险 | 所有接受 `doc_id` 的函数均加 `".."/"/"\\` 校验，返回 400 |
+| 上传文件未做扩展名校验 | 对照 `DEFAULT_SUPPORTED_FILE_EXTENSIONS` 构建 `SUPPORTED_EXTENSIONS` 集合，不合法返回 400 |
+| ingest 成功/失败后上传文件未清理，磁盘持续增长 | 改用 `tempfile.mkstemp(suffix=file_ext)` 写临时文件，`finally` 块确保清理 |
+| `/workspaces` 不显示是否有解析结果 | 新增 `has_files` 字段，通过 `rglob` 检测是否存在 `hybrid_auto/*.md` |
+
+### `DEFAULT_UPLOAD_DIR` 删除
+
+`app.py` 改用 `tempfile.mkstemp()` 后不再需要持久化上传目录。`DEFAULT_UPLOAD_DIR` 从 `app.py` 和 `constants.py` 中一并删除，`UPLOAD_DIR` 全局变量及 `mkdir()` 调用同步移除。
+**注**：7b483f3 commit message 描述了此删除，但 constants.py 的实际改动未包含在该提交内，已在后续增量记录中补正。
+
+### 新增辅助函数
+
+`_compute_doc_id(name: str) -> str`：与 `local_rag.py` 中 `_safe_doc_id()` 逻辑一致，将文件名转为合法 doc_id，全为非法字符时 fallback MD5 hex。
+
+---
+
+## 增量更新（2026-02-25，multimodal_top_k 语义重设计 + is_multimodal 传播修复）
+
+### 背景
+
+调试发现 T1 初始实现存在三个 bug，导致 `multimodal_top_k` 功能完全失效：
+
+1. **`is_multimodal` 字段在检索时被丢弃**（`operate.py`）：round-robin merge 重建 chunk dict 时只保留 `content`、`file_path`、`chunk_id` 三个字段，`is_multimodal` 被截断，`process_chunks_unified` 始终看到 `is_multimodal=False`
+2. **`_process_image_paths_for_vlm` 无图片上限**（`query.py`）：即使 `process_chunks_unified` 正确过滤了 mm_chunks，该函数仍会扫描 raw_prompt 全文中所有 `Image Path:` 模式并全部发送图片，绕过了 multimodal_top_k 的约束
+3. **T1 初始逻辑语义错误**（`utils.py`）：将超出 multimodal_top_k 的多模态 chunk 整体丢弃（总 context 从 10 缩减到 4），而不是保留为纯文本降级
+
+### `is_multimodal` 传播修复（`lightrag/lightrag/operate.py`）
+
+**4 处 dict 重建位置均补充字段**：
+
+- `_get_vector_context()`（L3496）：`chunk_with_metadata` 字典新增 `"is_multimodal": result.get("is_multimodal", False)`
+- `_merge_all_chunks()` round-robin（L3911、L3926、L3941，三处分支）：每处 `merged_chunks.append({...})` 新增 `"is_multimodal": chunk.get("is_multimodal", False)`
+
+### `multimodal_top_k` 语义重设计（`lightrag/lightrag/utils.py`）
+
+**新语义**：`multimodal_top_k` 仅控制发给 VLM 的图片数量，不限制 context chunk 数量。
+
+**`process_chunks_unified()` 三处改动**：
+
+**Step 1**（rerank top_n）：
+```python
+if getattr(query_param, "multimodal_top_k", None) is not None:
+    rerank_top_k = len(unique_chunks)   # 保留全量，确保文本 chunk 有足够候选
+else:
+    rerank_top_k = query_param.chunk_top_k or len(unique_chunks)
+```
+
+**Step 2.5**（预算分配，完全重写）：
+
+核心语义：先切出 top `chunk_top_k` 的 window（不分类型），window 里有几个 mm 就选几个；文本 budget 先从 window 内取，不足则从 window 外按 rerank 顺序补充。
+
+```python
+top_window     = unique_chunks[:chunk_top_k]      # 先切 top-10（类型无关）
+remaining_pool = unique_chunks[chunk_top_k:]       # 10名以外备用
+
+selected_mm    = [c for c in top_window if c.get("is_multimodal")]
+text_in_window = [c for c in top_window if not c.get("is_multimodal")]
+
+text_budget    = max(chunk_top_k - multimodal_top_k, 0)   # = 7
+selected_text  = text_in_window[:text_budget]
+# 若 window 里文本不足，从 remaining_pool 中补充文本 chunk
+if len(selected_text) < text_budget:
+    extra = [c for c in remaining_pool if not c.get("is_multimodal")]
+    selected_text += extra[:text_budget - len(selected_text)]
+
+unique_chunks = sorted(selected_mm + selected_text,
+                       key=lambda c: c.get("rerank_score", 0), reverse=True)
+budgets_applied = True
+# 日志示例：Context composition: 10 multimodal (3 with images, 7 text-only) + 7/7 text chunks
+```
+
+**Step 3**（chunk_top_k 截断，条件跳过）：
+```python
+if not budgets_applied:   # multimodal_top_k 激活时跳过
+    if query_param.chunk_top_k is not None and query_param.chunk_top_k > 0:
+        ...
+```
+
+### 图片上限硬封顶（`rag-anything/raganything/query.py`）
+
+`_process_image_paths_for_vlm(prompt, max_images=None)` 新增 `max_images` 参数：
+
+```python
+def replace_image_path(match):
+    nonlocal images_processed
+    if max_images is not None and images_processed >= max_images:
+        return match.group(0)   # 达到上限：保留路径文字，不附图
+    ...
+```
+
+`aquery_vlm_enhanced()` 传递 `image_cap = kwargs["multimodal_top_k"]` 给该函数。
+
+### 最终 context 组成（chunk_top_k=10, multimodal_top_k=3）
+
+设 top-10 window 含 9 mm + 1 text，remaining pool 含更多 text：
+
+| 部分 | 数量 | 来源 |
+|------|------|------|
+| 多模态 chunk（附图） | min(9, 3) = 3 | top-10 window 内的 mm，rerank 最高的 3 个 |
+| 多模态 chunk（纯文本降级） | 9 - 3 = 6 | top-10 window 内的 mm，rank 4-9 |
+| 文本 chunk | 7 | window 内 1 个 + remaining pool 补 6 个 |
+| **总计** | **16** | |
+
+设 top-10 全为 mm（如实测 80 chunks 中 72 mm 的场景）：
+
+| 部分 | 数量 | 来源 |
+|------|------|------|
+| 多模态 chunk（附图） | 3 | top-10 window mm，rank 1-3 |
+| 多模态 chunk（纯文本降级） | 7 | top-10 window mm，rank 4-10 |
+| 文本 chunk | 7 | 全部来自 remaining pool |
+| **总计** | **17** | |
+
+### `constants.py` 补正
+
+- 路径前缀更新：`./output` → `./rag-anything/output`（工作区根目录运行时正确解析）
+- `DEFAULT_UPLOAD_DIR` 真正删除（7b483f3 的 commit message 声称删除，但实际未改文件）
+
+### 文件移动
+
+`raganything/raganything_local.py` → `raganything/examples/raganything_local.py`（示例脚本移至 examples 目录）
+
+### 改动文件汇总
+
+| 文件 | 改动 |
+|------|------|
+| `lightrag/lightrag/utils.py` | Step 1/2.5/3 重写（含 top-window 语义修正，见下方补丁记录）|
+| `lightrag/lightrag/operate.py` | `is_multimodal` 传播（+4 行） |
+| `rag-anything/raganything/query.py` | max_images 封顶、top_k defaults（+39 -12 行） |
+| `rag-anything/raganything/constants.py` | 路径更新、DEFAULT_UPLOAD_DIR 删除 |
+| `rag-anything/raganything/raganything_local.py` | 删除（移至 examples） |
+| `rag-anything/examples/raganything_local.py` | 新增（从 raganything/ 移入） |
+| `.vscode/launch.json` | zhb debug 配置路径修正 |
+
+---
+
+## 补丁（0039c63，multimodal budget split top-window 修正）
+
+### 问题
+
+上一版 Step 2.5 从整个 rerank pool 取所有 mm_chunks（实测 80 chunks 中 72 个均为多模态，全部进入 context），而非从 top `chunk_top_k` 的 window 内取。导致日志出现 `72 multimodal (3 with images, 69 text-only)`，context 共 77 chunks。
+
+### 修正（`lightrag/lightrag/utils.py`）
+
+将"先分 mm/text 再分别取"改为"先切 top-window 再分"：
+
+- `selected_mm = top_window 内的 mm chunks`（上限自然为 chunk_top_k）
+- `selected_text`：先取 window 内文本，不足 text_budget 时从 window 外的 remaining_pool 按 rerank 顺序补文本 chunk
+
+修正后实测（80 chunks，72mm+8text）：`Context composition: 10 multimodal (3 with images, 7 text-only) + 7/7 text chunks`

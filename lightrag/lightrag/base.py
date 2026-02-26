@@ -168,6 +168,13 @@ class QueryParam:
     containing citation information for the retrieved content.
     """
 
+    multimodal_top_k: int | None = None
+    """Maximum number of multimodal chunks to keep after reranking.
+    When set, multimodal chunks (is_multimodal=True) are capped at this number
+    and the remaining chunk_top_k budget goes to text-only chunks.
+    Default None means no separation (backward compatible).
+    """
+
 
 @dataclass
 class StorageNameSpace(ABC):

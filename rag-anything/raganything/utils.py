@@ -8,6 +8,7 @@ import base64
 from typing import Dict, List, Any, Tuple
 from pathlib import Path
 from lightrag.utils import logger
+from raganything.constants import DEFAULT_MAX_IMAGE_SIZE_MB, SUPPORTED_IMAGE_EXTENSIONS
 
 
 def separate_content(
@@ -75,7 +76,7 @@ def encode_image_to_base64(image_path: str) -> str:
         return ""
 
 
-def validate_image_file(image_path: str, max_size_mb: int = 50) -> bool:
+def validate_image_file(image_path: str, max_size_mb: int = None) -> bool:
     """
     Validate if a file is a valid image file
 
@@ -86,6 +87,9 @@ def validate_image_file(image_path: str, max_size_mb: int = 50) -> bool:
     Returns:
         bool: True if valid, False otherwise
     """
+    if max_size_mb is None:
+        max_size_mb = DEFAULT_MAX_IMAGE_SIZE_MB
+
     try:
         path = Path(image_path)
 
@@ -99,19 +103,8 @@ def validate_image_file(image_path: str, max_size_mb: int = 50) -> bool:
             return False
 
         # Check file extension
-        image_extensions = [
-            ".jpg",
-            ".jpeg",
-            ".png",
-            ".gif",
-            ".bmp",
-            ".webp",
-            ".tiff",
-            ".tif",
-        ]
-
         path_lower = str(path).lower()
-        has_valid_extension = any(path_lower.endswith(ext) for ext in image_extensions)
+        has_valid_extension = any(path_lower.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS)
         logger.debug(
             f"File extension check - path: {path_lower}, valid: {has_valid_extension}"
         )

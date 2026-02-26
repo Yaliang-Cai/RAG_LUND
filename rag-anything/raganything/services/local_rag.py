@@ -31,6 +31,26 @@ from openai import AsyncOpenAI
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from raganything import RAGAnything, RAGAnythingConfig
+from raganything.constants import (
+    DEFAULT_LOG_MAX_BYTES,
+    DEFAULT_LOG_BACKUP_COUNT,
+    DEFAULT_TIKTOKEN_CACHE_DIR,
+    DEFAULT_EMBEDDING_MODEL_PATH,
+    DEFAULT_RERANK_MODEL_PATH,
+    DEFAULT_WORKING_DIR_ROOT,
+    DEFAULT_OUTPUT_DIR,
+    DEFAULT_LOG_DIR,
+    DEFAULT_VLLM_API_BASE,
+    DEFAULT_VLLM_API_KEY,
+    DEFAULT_LLM_MODEL_NAME,
+    DEFAULT_DEVICE,
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_MAX_TOKEN_SIZE,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_QUERY_MAX_TOKENS,
+    DEFAULT_INGEST_MAX_TOKENS,
+    DEFAULT_VLM_ENABLE_JSON_SCHEMA,
+)
 
 _MODEL_CACHE: Dict[str, Any] = {}
 _INTERNAL_OPENAI_KWARGS = {"hashing_kv", "keyword_extraction", "enable_cot"}
@@ -38,79 +58,68 @@ _INTERNAL_OPENAI_KWARGS = {"hashing_kv", "keyword_extraction", "enable_cot"}
 
 @dataclass
 class LocalRagSettings:
-    tiktoken_cache_dir: str = "/data/h50056787/workspaces/lightrag/tiktoken_cache"
-    embedding_model_path: str = "/data/h50056787/models/bge-m3"
-    rerank_model_path: str = "/data/h50056787/models/bge-reranker-v2-m3"
+    tiktoken_cache_dir: str = DEFAULT_TIKTOKEN_CACHE_DIR
+    embedding_model_path: str = DEFAULT_EMBEDDING_MODEL_PATH
+    rerank_model_path: str = DEFAULT_RERANK_MODEL_PATH
 
-    working_dir_root: str = "./rag_workspace"
-    output_dir: str = "./output"
-    log_dir: str = "./logs"
-    
-    vllm_api_base: str = "http://localhost:8001/v1"
-    vllm_api_key: str = "EMPTY"
-    llm_model_name: str = "OpenGVLab/InternVL2-26B-AWQ"
-    vision_vllm_api_base: str = "http://localhost:8001/v1"
-    vision_vllm_api_key: str = "EMPTY"
-    vision_model_name: str = "OpenGVLab/InternVL2-26B-AWQ"
-    device: str = "cuda:0"
+    working_dir_root: str = DEFAULT_WORKING_DIR_ROOT
+    output_dir: str = DEFAULT_OUTPUT_DIR
+    log_dir: str = DEFAULT_LOG_DIR
 
-    embedding_dim: int = 1024
-    
-    # Embedding 模型限制
-    max_token_size: int = 8192
-    
-    # 生成参数
-    temperature: float = 0.0
-    query_max_tokens: int = 2048
-    ingest_max_tokens: int = 8192
+    vllm_api_base: str = DEFAULT_VLLM_API_BASE
+    vllm_api_key: str = DEFAULT_VLLM_API_KEY
+    llm_model_name: str = DEFAULT_LLM_MODEL_NAME
+    vision_vllm_api_base: str = DEFAULT_VLLM_API_BASE
+    vision_vllm_api_key: str = DEFAULT_VLLM_API_KEY
+    vision_model_name: str = DEFAULT_LLM_MODEL_NAME
+    device: str = DEFAULT_DEVICE
 
-    # 多模态参数
-    vlm_max_images: int = 10  # enhanced query 阶段的图片上限
-    vlm_enable_json_schema: bool = True  # ingest 阶段结构化输出开关
+    embedding_dim: int = DEFAULT_EMBEDDING_DIM
+    max_token_size: int = DEFAULT_MAX_TOKEN_SIZE
+
+    temperature: float = DEFAULT_TEMPERATURE
+    query_max_tokens: int = DEFAULT_QUERY_MAX_TOKENS
+    ingest_max_tokens: int = DEFAULT_INGEST_MAX_TOKENS
+
+    vlm_enable_json_schema: bool = DEFAULT_VLM_ENABLE_JSON_SCHEMA
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
+        vllm_base = os.getenv("VLLM_API_BASE", DEFAULT_VLLM_API_BASE)
+        vllm_key = os.getenv("VLLM_API_KEY", DEFAULT_VLLM_API_KEY)
+        llm_name = os.getenv("LLM_MODEL_NAME", DEFAULT_LLM_MODEL_NAME)
+
         return cls(
-            tiktoken_cache_dir=os.getenv("TIKTOKEN_CACHE_DIR", "/data/h50056787/workspaces/lightrag/tiktoken_cache"),
-            embedding_model_path=os.getenv("RAGANYTHING_EMBEDDING_MODEL_PATH", "/data/h50056787/models/bge-m3"),
-            rerank_model_path=os.getenv("RAGANYTHING_RERANK_MODEL_PATH", "/data/h50056787/models/bge-reranker-v2-m3"),
-            log_dir=os.getenv("RAGANYTHING_LOG_DIR", "./logs"),
-            vllm_api_base=os.getenv("VLLM_API_BASE", "http://localhost:8001/v1"),
-            vllm_api_key=os.getenv("VLLM_API_KEY", "EMPTY"),
-            llm_model_name=os.getenv("LLM_MODEL_NAME", "OpenGVLab/InternVL2-26B-AWQ"),
-            vision_vllm_api_base=os.getenv(
-                "VISION_VLLM_API_BASE",
-                os.getenv("VLLM_API_BASE", "http://localhost:8001/v1"),
-            ),
-            vision_vllm_api_key=os.getenv(
-                "VISION_VLLM_API_KEY",
-                os.getenv("VLLM_API_KEY", "EMPTY"),
-            ),
-            vision_model_name=os.getenv(
-                "VISION_MODEL_NAME",
-                os.getenv("LLM_MODEL_NAME", "OpenGVLab/InternVL2-26B-AWQ"),
-            ),
-            device=os.getenv("RAGANYTHING_DEVICE", "cuda:0"),
-            working_dir_root=os.getenv("RAGANYTHING_WORKDIR_ROOT", "./rag_workspace"),
-            output_dir=os.getenv("RAGANYTHING_OUTPUT_DIR", "./output"),
-            embedding_dim=int(os.getenv("RAGANYTHING_EMBEDDING_DIM", "1024")),
-            max_token_size=int(os.getenv("RAGANYTHING_MAX_TOKEN_SIZE", "8192")),
-            temperature=float(os.getenv("RAGANYTHING_TEMPERATURE", "0.0")),
+            tiktoken_cache_dir=os.getenv("TIKTOKEN_CACHE_DIR", DEFAULT_TIKTOKEN_CACHE_DIR),
+            embedding_model_path=os.getenv("RAGANYTHING_EMBEDDING_MODEL_PATH", DEFAULT_EMBEDDING_MODEL_PATH),
+            rerank_model_path=os.getenv("RAGANYTHING_RERANK_MODEL_PATH", DEFAULT_RERANK_MODEL_PATH),
+            log_dir=os.getenv("RAGANYTHING_LOG_DIR", DEFAULT_LOG_DIR),
+            vllm_api_base=vllm_base,
+            vllm_api_key=vllm_key,
+            llm_model_name=llm_name,
+            vision_vllm_api_base=os.getenv("VISION_VLLM_API_BASE", vllm_base),
+            vision_vllm_api_key=os.getenv("VISION_VLLM_API_KEY", vllm_key),
+            vision_model_name=os.getenv("VISION_MODEL_NAME", llm_name),
+            device=os.getenv("RAGANYTHING_DEVICE", DEFAULT_DEVICE),
+            working_dir_root=os.getenv("RAGANYTHING_WORKDIR_ROOT", DEFAULT_WORKING_DIR_ROOT),
+            output_dir=os.getenv("RAGANYTHING_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
+            embedding_dim=int(os.getenv("RAGANYTHING_EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM))),
+            max_token_size=int(os.getenv("RAGANYTHING_MAX_TOKEN_SIZE", str(DEFAULT_MAX_TOKEN_SIZE))),
+            temperature=float(os.getenv("RAGANYTHING_TEMPERATURE", str(DEFAULT_TEMPERATURE))),
             query_max_tokens=int(
                 os.getenv(
                     "RAGANYTHING_QUERY_MAX_TOKENS",
                     os.getenv(
                         "RAGANYTHING_VISION_MAX_TOKENS",
-                        os.getenv("RAGANYTHING_MAX_TOKENS", "2048"),
+                        os.getenv("RAGANYTHING_MAX_TOKENS", str(DEFAULT_QUERY_MAX_TOKENS)),
                     ),
                 )
             ),
             ingest_max_tokens=int(
-                os.getenv("RAGANYTHING_INGEST_MAX_TOKENS", "8192")
+                os.getenv("RAGANYTHING_INGEST_MAX_TOKENS", str(DEFAULT_INGEST_MAX_TOKENS))
             ),
-            vlm_max_images=int(os.getenv("RAGANYTHING_VLM_MAX_IMAGES", "10")),
             vlm_enable_json_schema=os.getenv(
-                "RAGANYTHING_VLM_ENABLE_JSON_SCHEMA", "true"
+                "RAGANYTHING_VLM_ENABLE_JSON_SCHEMA", str(DEFAULT_VLM_ENABLE_JSON_SCHEMA)
             ).lower()
             in {"1", "true", "yes", "y", "on"},
         )
@@ -141,8 +150,8 @@ def configure_logging(settings: LocalRagSettings) -> logging.Logger:
                     "class": "logging.handlers.RotatingFileHandler",
                     "formatter": "detailed",
                     "filename": str(log_file_path),
-                    "maxBytes": 10 * 1024 * 1024,
-                    "backupCount": 5,
+                    "maxBytes": DEFAULT_LOG_MAX_BYTES,
+                    "backupCount": DEFAULT_LOG_BACKUP_COUNT,
                     "encoding": "utf-8",
                 },
             },
@@ -215,25 +224,6 @@ def build_rerank_func(reranker_model: CrossEncoder, logger: logging.Logger):
     return rerank_func
 
 
-_VLM_IMAGE_MARKER_RE = re.compile(r"\[VLM_IMAGE_(\d+)\]")
-
-
-def _collect_user_content_items(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # 统一收集 user 里的 text/image_url 两类内容。
-    items: list[dict[str, Any]] = []
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict):
-                    items.append(item)
-        elif isinstance(content, str):
-            items.append({"type": "text", "text": content})
-    return items
-
-
 def _extract_last_context_segment(raw_text: str) -> tuple[str, str]:
     # 只取最后一个 ---Context---，避免命中示例或前序模板。
     context_idx = raw_text.rfind("---Context---")
@@ -242,45 +232,6 @@ def _extract_last_context_segment(raw_text: str) -> tuple[str, str]:
     prefix = raw_text[:context_idx].strip()
     context = raw_text[context_idx:].strip()
     return prefix, context
-
-
-def _build_content_parts_from_markers(
-    context_text: str,
-    marker_to_image_url: dict[int, str],
-    max_images: int,
-) -> list[dict[str, Any]]:
-    # 装箱策略：图片统一放在前面，文本放在最后。
-    allowed_marker_list = sorted(marker_to_image_url.keys())[: max(max_images, 0)]
-    allowed_markers = set(allowed_marker_list)
-    content: list[dict[str, Any]] = []
-
-    for marker in allowed_marker_list:
-        url = marker_to_image_url.get(marker)
-        if not url:
-            continue
-        content.append({"type": "image_url", "image_url": {"url": url}})
-
-    def _keep_allowed_marker(match: re.Match[str]) -> str:
-        marker = int(match.group(1))
-        if marker in allowed_markers:
-            return match.group(0)
-        return ""
-
-    text_payload = _VLM_IMAGE_MARKER_RE.sub(_keep_allowed_marker, context_text).strip()
-    if text_payload:
-        content.append({"type": "text", "text": text_payload})
-
-    return content
-
-
-def _is_context_length_error(exc: Exception) -> bool:
-    # 兼容不同后端的“上下文超长”报错文本。
-    msg = str(exc).lower()
-    return (
-        "maximum model length" in msg
-        or "prompt (length" in msg
-        or "context length" in msg
-    )
 
 
 def _drop_empty_additional_instructions(text: str) -> str:
@@ -313,11 +264,6 @@ def _compose_final_system(role_prefix: str, upstream_system: str) -> str:
 def _clean_context_for_user_text(context_text: str) -> str:
     # 清理上下文中残留问句/尾句，避免 query 重复。
     cleaned = context_text.strip()
-    cleaned = re.split(
-        r"(?im)^\s*---User Query---\s*$",
-        cleaned,
-        maxsplit=1,
-    )[0]
     cleaned = re.sub(
         r"(?im)^\s*User Question\s*:\s*.*$",
         "",
@@ -329,28 +275,6 @@ def _clean_context_for_user_text(context_text: str) -> str:
         cleaned,
     )
     return cleaned.strip()
-
-
-def _extract_query_from_vlm_text(raw_text: str, fallback_query: Any = "") -> str:
-    # 优先从 LightRAG 的 ---User Query--- 段提取，再回退到 User Question 行。
-    text = str(raw_text or "")
-
-    marker_query = re.search(
-        r"(?is)---User Query---\s*(.*?)\s*(?:\n\s*User Question\s*:|\Z)",
-        text,
-    )
-    if marker_query:
-        extracted = marker_query.group(1).strip()
-        if extracted:
-            return extracted
-
-    question_matches = re.findall(r"(?im)^\s*User Question\s*:\s*(.+?)\s*$", text)
-    if question_matches:
-        extracted = question_matches[-1].strip()
-        if extracted:
-            return extracted
-
-    return str(fallback_query or "").strip()
 
 
 def _try_repack_text_query(system_prompt: Any, prompt: Any) -> Optional[tuple[str, str]]:
@@ -525,72 +449,6 @@ def build_vision_model_func(
     llm_fallback = build_llm_model_func(settings, client, logger, model_name)
     schema_stats = {"total": 0, "success": 0, "fallback": 0}
 
-    async def _call_query_with_retries(
-        final_system: str,
-        final_user_text: str,
-        marker_to_image_url: dict[int, str],
-        cleaned_kwargs: dict[str, Any],
-    ) -> str:
-        # 超长时按 base_cap/5 的步长递减重试，并确保最终尝试 0 图。
-        base_cap = max(settings.vlm_max_images, 0)
-        step = max(1, (base_cap + 4) // 5)
-        caps = list(range(base_cap, -1, -step))
-        if not caps:
-            caps = [0]
-        elif caps[-1] != 0:
-            caps.append(0)
-
-        last_exc: Optional[Exception] = None
-        for idx, cap in enumerate(caps):
-            content = _build_content_parts_from_markers(
-                final_user_text,
-                marker_to_image_url,
-                cap,
-            )
-            if not content:
-                content = [{"type": "text", "text": final_user_text}]
-            sent_images = sum(
-                1
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "image_url"
-            )
-            logger.info(
-                "VLM request image count: sent=%s (cap=%s, available=%s, attempt=%s/%s)",
-                sent_images,
-                cap,
-                len(marker_to_image_url),
-                idx + 1,
-                len(caps),
-            )
-
-            final_messages: list[dict[str, Any]] = []
-            if final_system.strip():
-                final_messages.append({"role": "system", "content": final_system})
-            final_messages.append({"role": "user", "content": content})
-            try:
-                response = await client.chat.completions.create(
-                    model=model_name,
-                    messages=final_messages,
-                    temperature=settings.temperature,
-                    max_tokens=settings.query_max_tokens,
-                    **cleaned_kwargs,
-                )
-                return response.choices[0].message.content
-            except Exception as exc:
-                last_exc = exc
-                if idx < len(caps) - 1 and _is_context_length_error(exc):
-                    logger.warning(
-                        "VLM context too long, retrying with fewer images (%s -> %s)",
-                        cap,
-                        caps[idx + 1],
-                    )
-                    continue
-                raise
-
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("VLM query failed without exception details")
-
     async def vision_model_func(
         prompt,
         system_prompt=None,
@@ -602,9 +460,11 @@ def build_vision_model_func(
         history_messages = history_messages or []
         cleaned_kwargs = _strip_internal_openai_kwargs(kwargs)
 
-        # 问答阶段：在发送给 VLM 前做本地清洗与重组
+        # 问答阶段：直接透传 query.py 构建好的多模态消息给 VLM
+        # （图片数量已在检索阶段由 multimodal_top_k 控制，
+        #   路径实体已在索引阶段被过滤，无需查询时二次处理）
         if messages:
-            async def _call_raw_messages() -> str:
+            try:
                 response = await client.chat.completions.create(
                     model=model_name,
                     messages=messages,
@@ -613,66 +473,6 @@ def build_vision_model_func(
                     **cleaned_kwargs,
                 )
                 return response.choices[0].message.content
-
-            upstream_system = ""
-            for msg in messages:
-                if isinstance(msg, dict) and msg.get("role") == "system":
-                    upstream_system = str(msg.get("content", "")).strip()
-                    break
-
-            user_content_items = _collect_user_content_items(messages)
-            merged_user_text = "".join(
-                str(item.get("text", ""))
-                for item in user_content_items
-                if item.get("type") == "text"
-            ).strip()
-            if not merged_user_text:
-                logger.warning(
-                    "VLM message repack produced empty text payload, sending raw messages."
-                )
-                return await _call_raw_messages()
-
-            repack_source = merged_user_text
-            if "---User Query---" in repack_source:
-                repack_source = re.split(
-                    r"(?im)^\s*---User Query---\s*$",
-                    repack_source,
-                    maxsplit=1,
-                )[0].strip()
-
-            extracted_query = _extract_query_from_vlm_text(merged_user_text, prompt)
-            repacked = _try_repack_text_query(repack_source, extracted_query)
-            if repacked:
-                repacked_system, repacked_user = repacked
-                final_system = _compose_final_system(repacked_system, upstream_system)
-                final_user_text = repacked_user
-            else:
-                final_system = upstream_system
-                final_user_text = merged_user_text
-
-            marker_to_image_url: dict[int, str] = {}
-            seen_urls: set[str] = set()
-            for item in user_content_items:
-                if item.get("type") != "image_url":
-                    continue
-                image_payload = item.get("image_url", {})
-                url = ""
-                if isinstance(image_payload, dict):
-                    url = str(image_payload.get("url", "")).strip()
-                elif image_payload:
-                    url = str(image_payload).strip()
-                if not url or url in seen_urls:
-                    continue
-                marker_to_image_url[len(marker_to_image_url) + 1] = url
-                seen_urls.add(url)
-
-            try:
-                return await _call_query_with_retries(
-                    final_system,
-                    final_user_text,
-                    marker_to_image_url,
-                    cleaned_kwargs,
-                )
             except Exception as exc:
                 logger.error(f"Vision LLM Error (Query): {exc}")
                 raise
