@@ -1,4 +1,4 @@
-# RAGAnything LocalRAG VLM 重构记录
+﻿# RAGAnything LocalRAG VLM 重构记录
 
 - 日期：2026-02-20
 - 状态：已完成（本轮）
@@ -423,6 +423,52 @@ available_chunk_tokens = max_total_tokens - (sys_prompt_tokens + kg_context_toke
 
 ### 说明
 - 本轮保持”最小改动”原则：仅调整关键词抽取链路，不扩展新配置项，不引入额外分支复杂度。
+
+## 执行更新（2026-02-24，本轮最终）
+
+### 本轮复核文件
+- `raganything/services/local_rag.py`
+- `evaluate_local/DocBench/evaluate.py`
+- `examples/raganything_local_v2.py`（仅做兼容复核，无代码修改）
+
+### 相较未改动版本的核心变化
+1. **Enhanced 与 Non-enhanced 的 Context 重组规则已对齐**
+   - enhanced 分支不再使用“上游消息原样直传”。
+   - enhanced 与 non-enhanced 均复用 `_try_repack_text_query(...)`：
+     - `system`：Role/Goal/Instructions（enhanced 额外前置 upstream system）。
+     - `user`：`---Context---` + 单次 `User Question`。
+   - 兼容两种问题来源：`---User Query---` 与 `User Question:`。
+   - 清理时会剥离嵌入的 `---User Query---` 段，避免问题重复。
+
+2. **查询侧清洗链路简化**
+   - 已移除 enhanced query 的 entity/relation/chunk 二次解析与改写逻辑。
+   - 不再做路径实体删除、relation 端点替换、chunk 二次打标。
+   - 降低 JSON-lines 解析降级带来的不稳定性。
+
+3. **图片重试策略改为按 base_cap 动态递减**
+   - 由固定序列改为 `base_cap/5` 步长递减。
+   - 最终必含 `0` 图兜底尝试。
+   - 新增真实发送图片数日志：
+     - `VLM request image count: sent=... (cap=..., available=..., attempt=.../...)`
+
+4. **DocBench 评测参数同步更新**
+   - `vlm_enhanced=True`
+   - `max_total_tokens=25000`
+   - `max_entity_tokens=4000`
+   - `max_relation_tokens=5000`
+   - `settings.vlm_max_images=5`
+
+### 结论（本轮）
+- enhanced 已与 non-enhanced 对齐到同一套 Context 重组规则。
+- enhanced 保留的唯一结构差异是多模态装箱：图片内容仍在 user content 前部，文本在后部。
+- 代码结构较前一版更短、更直接，功能边界更清晰。
+
+### 校验
+- 语法检查通过：
+  - `python -m py_compile raganything/services/local_rag.py`
+  - `python -m py_compile evaluate_local/DocBench/evaluate.py`
+  - `python -m py_compile examples/raganything_local_v2.py`
+
 
 ---
 
