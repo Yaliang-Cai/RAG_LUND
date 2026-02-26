@@ -973,10 +973,12 @@
     async function refreshWorkspaces() {
       const apiKey = document.getElementById("apiKey").value.trim();
       if (!apiKey) {
+        localStorage.removeItem('rag-api-key');
         setWorkspacePlaceholder("Enter API key to start");
         resetWorkspaceView();
         return;
       }
+      localStorage.setItem('rag-api-key', apiKey);
       resetWorkspaceView();
       setWorkspacePlaceholder("Loading...", true);
       try {
@@ -1148,7 +1150,15 @@
     };
 
     /* ── Init ── */
-    setWorkspacePlaceholder("Enter API key to start");
+    (function restoreApiKey() {
+      const saved = localStorage.getItem('rag-api-key');
+      if (saved) {
+        document.getElementById("apiKey").value = saved;
+        refreshWorkspaces();
+      } else {
+        setWorkspacePlaceholder("Enter API key to start");
+      }
+    })();
   </script>
 </body>
 </html>
