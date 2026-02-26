@@ -89,6 +89,7 @@ DOCBENCH_QUERY_PARAMS = {
     "top_k": 30,
     "chunk_top_k": 50,
     "vlm_enhanced": True,
+    "multimodal_top_k": 5,
     "max_total_tokens": 25000,
     "max_entity_tokens": 4000,
     "max_relation_tokens": 5000,
@@ -317,7 +318,6 @@ async def generate_answers(
     settings.temperature = 0.0
     settings.query_max_tokens = 2048
     settings.ingest_max_tokens = 8192
-    settings.vlm_max_images = 5
     settings.vlm_enable_json_schema = True
     
     # 只创建一次 service
@@ -411,6 +411,10 @@ async def generate_answers(
                                     mode=DOCBENCH_QUERY_PARAMS["mode"],
                                     top_k=DOCBENCH_QUERY_PARAMS["top_k"],
                                     chunk_top_k=DOCBENCH_QUERY_PARAMS["chunk_top_k"],
+                                    multimodal_top_k=DOCBENCH_QUERY_PARAMS.get("multimodal_top_k"),
+                                    max_total_tokens=DOCBENCH_QUERY_PARAMS["max_total_tokens"],
+                                    max_entity_tokens=DOCBENCH_QUERY_PARAMS["max_entity_tokens"],
+                                    max_relation_tokens=DOCBENCH_QUERY_PARAMS["max_relation_tokens"],
                                     only_need_prompt=True,
                                 )
                                 raw_prompt_result = await rag.lightrag.aquery(

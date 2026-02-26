@@ -18,7 +18,6 @@ import logging
 import logging.config
 import os
 import argparse
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +50,7 @@ from raganything.constants import (
     DEFAULT_INGEST_MAX_TOKENS,
     DEFAULT_VLM_ENABLE_JSON_SCHEMA,
 )
+from raganything.query_message_repack import repack_query_messages
 
 _MODEL_CACHE: Dict[str, Any] = {}
 _INTERNAL_OPENAI_KWARGS = {"hashing_kv", "keyword_extraction", "enable_cot"}
@@ -107,13 +107,7 @@ class LocalRagSettings:
             max_token_size=int(os.getenv("RAGANYTHING_MAX_TOKEN_SIZE", str(DEFAULT_MAX_TOKEN_SIZE))),
             temperature=float(os.getenv("RAGANYTHING_TEMPERATURE", str(DEFAULT_TEMPERATURE))),
             query_max_tokens=int(
-                os.getenv(
-                    "RAGANYTHING_QUERY_MAX_TOKENS",
-                    os.getenv(
-                        "RAGANYTHING_VISION_MAX_TOKENS",
-                        os.getenv("RAGANYTHING_MAX_TOKENS", str(DEFAULT_QUERY_MAX_TOKENS)),
-                    ),
-                )
+                os.getenv("RAGANYTHING_QUERY_MAX_TOKENS", str(DEFAULT_QUERY_MAX_TOKENS))
             ),
             ingest_max_tokens=int(
                 os.getenv("RAGANYTHING_INGEST_MAX_TOKENS", str(DEFAULT_INGEST_MAX_TOKENS))
@@ -224,86 +218,6 @@ def build_rerank_func(reranker_model: CrossEncoder, logger: logging.Logger):
     return rerank_func
 
 
-def _extract_last_context_segment(raw_text: str) -> tuple[str, str]:
-    # 只取最后一个 ---Context---，避免命中示例或前序模板。
-    context_idx = raw_text.rfind("---Context---")
-    if context_idx < 0:
-        return "", raw_text.strip()
-    prefix = raw_text[:context_idx].strip()
-    context = raw_text[context_idx:].strip()
-    return prefix, context
-
-
-def _drop_empty_additional_instructions(text: str) -> str:
-    # 删除空的 "Additional Instructions" 行，避免空模板进入 system。
-    out_lines: list[str] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        match = re.match(
-            r"^(?:\d+\.\s*)?Additional Instructions:\s*(.*)$",
-            line,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            payload = match.group(1).strip()
-            if payload.lower() in {"", "{user_prompt}", "none", "null", "n/a"}:
-                continue
-        out_lines.append(raw_line)
-    return "\n".join(out_lines).strip()
-
-
-def _compose_final_system(role_prefix: str, upstream_system: str) -> str:
-    # 组合最终 system：优先保留 LightRAG 结构化指令，并把上游 system 前置。
-    role_text = _drop_empty_additional_instructions(role_prefix.strip())
-    upstream_text = upstream_system.strip()
-    if role_text and upstream_text:
-        return f"{upstream_text}\n\n{role_text}"
-    return role_text or upstream_text
-
-
-def _clean_context_for_user_text(context_text: str) -> str:
-    # 清理上下文中残留问句/尾句，避免 query 重复。
-    cleaned = context_text.strip()
-    cleaned = re.sub(
-        r"(?im)^\s*User Question\s*:\s*.*$",
-        "",
-        cleaned,
-    )
-    cleaned = re.sub(
-        r"(?im)^\s*Please answer based on the (?:provided )?context(?: and images)?\.?\s*$",
-        "",
-        cleaned,
-    )
-    return cleaned.strip()
-
-
-def _try_repack_text_query(system_prompt: Any, prompt: Any) -> Optional[tuple[str, str]]:
-    # 将 LightRAG 文本 query 从“全量 system”重组为“system 指令 + user 上下文/问题”。
-    raw_system = str(system_prompt or "").strip()
-    if "---Context---" not in raw_system:
-        return None
-
-    role_prefix, context_segment = _extract_last_context_segment(raw_system)
-    if not role_prefix or not context_segment:
-        return None
-
-    final_system = _compose_final_system(role_prefix, "")
-    cleaned_context = _clean_context_for_user_text(context_segment)
-    if not cleaned_context:
-        return None
-
-    question = str(prompt or "").strip()
-    if question:
-        final_user = (
-            f"{cleaned_context}\n\n"
-            f"User Question: {question}\n\n"
-            "Please answer based on the provided context."
-        )
-    else:
-        final_user = cleaned_context
-    return final_system, final_user
-
-
 def _build_modal_analysis_response_format() -> dict[str, Any]:
     # 统一的结构化输出 schema（保持兼容优先）。
     return {
@@ -395,7 +309,11 @@ def build_llm_model_func(
         if keyword_extraction:
             cleaned_kwargs["response_format"] = GPTKeywordExtractionFormat
         messages = []
-        repacked = _try_repack_text_query(system_prompt, prompt)
+        repacked = repack_query_messages(
+            system_prompt,
+            prompt,
+            has_images=False,
+        )
         if repacked:
             final_system, final_user = repacked
             if final_system:
@@ -668,14 +586,6 @@ class LocalRagService:
             self.settings.ingest_max_tokens,
             self.settings.vlm_enable_json_schema,
         )
-        legacy_query_cap = getattr(self.settings, "max_tokens", None)
-        legacy_vision_cap = getattr(self.settings, "vision_max_tokens", None)
-        if legacy_query_cap is not None or legacy_vision_cap is not None:
-            self.logger.warning(
-                "Legacy token caps detected (max_tokens=%s, vision_max_tokens=%s). Please migrate to query_max_tokens/ingest_max_tokens.",
-                legacy_query_cap,
-                legacy_vision_cap,
-            )
 
         self.text_client = AsyncOpenAI(api_key=text_key, base_url=text_base)
         self.vision_client = AsyncOpenAI(api_key=vision_key, base_url=vision_base)

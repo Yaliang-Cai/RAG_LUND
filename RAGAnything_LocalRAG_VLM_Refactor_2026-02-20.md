@@ -1,5 +1,15 @@
 # RAGAnything LocalRAG VLM 重构记录
 
+## 0. 防错原则（必须遵守）
+
+- 不能只做 `py_compile` 语法检查；必须补做“链路一致性 + 关键分支行为”检查。
+- 每次改动都要验证：
+  - `enhanced / non-enhanced` 是否在预期场景下保持同构（仅保留必要差异）。
+  - fallback 分支是否会遗留上游参数，造成隐性预算/行为偏差。
+  - 文本重组是否处理边界格式（例如换行导致的 marker/占位符断裂）。
+- 反例复盘（本项目已发生）：曾出现“编译通过，但重组逻辑与原始 prompt 形态不契合”的问题（如换行场景下占位符处理偏差）。
+- 以后执行标准：参考同事做法，至少包含轻量行为断言或等价链路检查，不允许仅以“能编译”作为完成标准。
+
 - 日期：2026-02-20
 - 状态：已完成（本轮）
 - 范围：`local_rag.py`、`evaluate.py`、`examples/raganything_local_v2.py`
@@ -954,3 +964,130 @@ def replace_image_path(match):
 - `selected_text`：先取 window 内文本，不足 text_budget 时从 window 外的 remaining_pool 按 rerank 顺序补文本 chunk
 
 修正后实测（80 chunks，72mm+8text）：`Context composition: 10 multimodal (3 with images, 7 text-only) + 7/7 text chunks`
+
+## 执行记录补充（2026-02-26，完成 2026-02-25 待行动项）
+
+### 本轮目标（已完成）
+- enhanced 与 non-enhanced 统一使用同一套 `system/user` 重组规则。
+- 尾句规则统一为单一 helper 控制：
+  - 有图：`Please answer based on the context and images provided.`
+  - 无图：`Please answer based on the context provided.`
+- enhanced 无图回退时与 non-enhanced 保持一致（不再保留额外控图参数影响检索预算）。
+
+### 代码落地
+- 新增 `raganything/query_message_repack.py`：
+  - 抽取公共 helper：`repack_query_messages(...)`、`build_answer_suffix(...)`。
+  - 统一清理逻辑：仅取最后一个 `---Context---`，清理 `---User Query---`、`User Question/User Query` 行、历史尾句模板、空 `Additional Instructions`。
+- `raganything/services/local_rag.py`：
+  - 删除本地重复的文本重组函数，改为复用 `query_message_repack.py`。
+  - non-enhanced 文本问答走统一 helper，减少重复代码和分叉行为。
+- `raganything/query.py`：
+  - enhanced 消息构建改为复用同一 helper。
+  - 保持“有图时图片在 user content 最前”。
+  - 修复无图回退一致性：fallback 到文本 query 时移除 `multimodal_top_k`，保证与 non-enhanced 检索预算一致。
+- `evaluate_local/DocBench/evaluate.py`：
+  - 删除失效字段 `settings.vlm_max_images`。
+  - 改为在 `DOCBENCH_QUERY_PARAMS` 中使用 `multimodal_top_k` 控图（当前值 `5`）。
+
+### 与未改动前相比的功能变化
+- 由“两套消息组装逻辑”变为“一套共享消息组装逻辑”。
+- enhanced（无图）与 non-enhanced 的消息文本与尾句保持一致。
+- 控图参数从旧的本地设置项迁移为 query 参数语义（`multimodal_top_k`）。
+- 减少重复清理与重复拼接代码，调用链更短、更易排障。
+
+### 本轮校验
+- 语法检查通过：
+  - `raganything/query_message_repack.py`
+  - `raganything/query.py`
+  - `raganything/services/local_rag.py`
+  - `evaluate_local/DocBench/evaluate.py`
+- 行为校验（轻量）：
+  - `query_message_repack.py` 的重组与尾句选择已用样例断言验证。
+  - `query.py` 已静态确认 fallback 分支会去除 `multimodal_top_k`。
+
+## 三文件对照复核（2026-02-26，按“改前 vs 改后”）
+
+### 1) `raganything/raganything/services/local_rag.py`
+- 改前：
+  - non-enhanced 文本重组逻辑内嵌在本文件，多段 helper 与 enhanced 路径存在重复能力。
+- 改后：
+  - 删除本地重复 helper，统一复用 `query_message_repack.repack_query_messages(...)`。
+  - non-enhanced 问答的 system/user 重组、尾句规则与 enhanced 共用同一规则源。
+- 结果：
+  - 代码更短，重复逻辑减少，行为一致性更高。
+
+### 2) `raganything/raganything/query.py`
+- 改前：
+  - enhanced 的消息拼装与 non-enhanced 规则不一致，且无图回退会保留 `multimodal_top_k`。
+- 改后：
+  - `_build_vlm_messages_with_images(...)` 改为复用 `repack_query_messages(...)`，统一尾句规则。
+  - 保留增强模式“图片在前、文本在后”。
+  - 无图回退时显式移除 `multimodal_top_k`，避免影响文本检索预算。
+- 结果：
+  - enhanced / non-enhanced 在“无图场景”对齐，逻辑线条更清晰。
+
+### 3) `rag-anything/evaluate_local/DocBench/evaluate.py`
+- 改前：
+  - 使用失效字段 `settings.vlm_max_images`。
+  - `dump_raw_prompt` 的 QueryParam 与真实 query 参数集不完全一致。
+- 改后：
+  - 改为通过 `DOCBENCH_QUERY_PARAMS["multimodal_top_k"]` 控图。
+  - `dump_raw_prompt` 增加 `multimodal_top_k/max_total_tokens/max_entity_tokens/max_relation_tokens`，与真实 query 参数对齐。
+- 结果：
+  - 调试观测结果与实际执行链路一致，不会“看错 prompt”。
+
+### 本轮逻辑校验结论
+- 不是只做编译检查；已对关键行为做链路级复核：
+  - 尾句二选一与清理规则统一。
+  - enhanced 无图回退参数清理正确。
+  - evaluate 的 raw prompt 抓取参数与真实 query 对齐。
+- 结论：三文件当前改动保持“最小必要改动 + 行为一致 + 代码简化”。
+
+## 增量补充（2026-02-26，按当前决策去除旧 token 兼容 + 统一 optional system_prompt 空值语义）
+
+### 1) 去除旧 token 环境变量兼容链（`local_rag.py`）
+- 变更前：`query_max_tokens` 读取链为
+  `RAGANYTHING_QUERY_MAX_TOKENS -> RAGANYTHING_VISION_MAX_TOKENS -> RAGANYTHING_MAX_TOKENS`。
+- 变更后：仅保留
+  `RAGANYTHING_QUERY_MAX_TOKENS`（默认 `DEFAULT_QUERY_MAX_TOKENS`）。
+- 同时删除 legacy token 字段告警分支（`max_tokens/vision_max_tokens`）。
+
+### 2) enhanced optional system_prompt 与 Additional Instructions 空值语义对齐
+- 新增统一清理 helper：`normalize_optional_instruction_text(...)`。
+- 对 `{user_prompt}` / `none` / `null` / `n/a` / 空串按“无有效附加指令”处理。
+- enhanced 链路中，`optional system_prompt` 为空占位时不再拼接到最终 system。
+
+### 3) 当前建议与影响
+- 若环境里仍在设置 `RAGANYTHING_VISION_MAX_TOKENS` 或 `RAGANYTHING_MAX_TOKENS`，需要迁移为 `RAGANYTHING_QUERY_MAX_TOKENS`。
+- `raganything_local_v2.py` 与当前评测脚本均已使用新字段，不受影响。
+
+## 最终检查补充（2026-02-26，代码精简与逻辑复核）
+
+### 本轮对照“改前 vs 改后”结论
+- `local_rag.py`：
+  - 改前：文本重组 helper 分散在本文件，存在重复逻辑。
+  - 改后：统一复用 `query_message_repack.py`，删除重复 helper，保留单一路径。
+- `query.py`：
+  - 改前：enhanced 消息构建与 non-enhanced 规则存在分叉；无图回退会保留 `multimodal_top_k`。
+  - 改后：复用同一重组规则；无图回退显式移除 `multimodal_top_k`，与 non-enhanced 检索预算一致。
+- `evaluate.py`：
+  - 改前：使用无效字段 `settings.vlm_max_images`，raw prompt 参数与真实 query 不完全一致。
+  - 改后：统一使用 `DOCBENCH_QUERY_PARAMS["multimodal_top_k"]` 控图；`raw_prompt` 参数补齐 `multimodal_top_k/max_total_tokens/max_entity_tokens/max_relation_tokens`。
+- 环境变量读取：
+  - 改前：`query_max_tokens` 兼容链过长（含旧字段）。
+  - 改后：仅保留 `RAGANYTHING_QUERY_MAX_TOKENS`，去除旧兼容分支。
+
+### 本轮代码简洁性检查
+- 删除冗余函数与重复清理逻辑，避免双实现。
+- 保持 enhanced 仅保留必要差异（有图时图片前置）；无图场景与 non-enhanced 对齐。
+- 未新增临时测试脚本、未保留调试专用改动到业务目录。
+
+### 本轮验证记录
+- 语法检查通过：
+  - `python -m py_compile rag-anything/raganything/query_message_repack.py`
+  - `python -m py_compile rag-anything/raganything/query.py`
+  - `python -m py_compile rag-anything/raganything/services/local_rag.py`
+  - `python -m py_compile rag-anything/evaluate_local/DocBench/evaluate.py`
+- 逻辑检查通过（轻量断言）：
+  - `repack_query_messages(...)`：空 `Additional Instructions` 清理、尾句选择、`---User Query---` 清理符合预期。
+  - `query.py`：已确认 fallback 分支存在 `fallback_kwargs.pop("multimodal_top_k", None)`。

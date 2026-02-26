@@ -17,6 +17,11 @@ from raganything.constants import (
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
 )
+from raganything.query_message_repack import (
+    build_answer_suffix,
+    normalize_optional_instruction_text,
+    repack_query_messages,
+)
 from raganything.utils import (
     get_processor_for_type,
     encode_image_to_base64,
@@ -364,7 +369,10 @@ class QueryMixin:
         if not images_found:
             self.logger.info("No valid images found, falling back to normal query")
             # Fallback to normal query
-            query_param = QueryParam(mode=mode, **kwargs)
+            fallback_kwargs = dict(kwargs)
+            # Keep fallback behavior aligned with non-enhanced query path.
+            fallback_kwargs.pop("multimodal_top_k", None)
+            query_param = QueryParam(mode=mode, **fallback_kwargs)
             return await self.lightrag.aquery(
                 query, param=query_param, system_prompt=system_prompt
             )
@@ -641,7 +649,8 @@ class QueryMixin:
         self, enhanced_prompt: str, user_query: str, system_prompt: str
     ) -> List[Dict]:
         """
-        Build VLM message format, using markers to correspond images with text positions
+        Build VLM messages using the same text repack rule as non-enhanced query.
+        For enhanced mode, images are kept at the front of user content.
 
         Args:
             enhanced_prompt: Enhanced prompt with image markers
@@ -651,69 +660,53 @@ class QueryMixin:
             List[Dict]: VLM message format
         """
         images_base64 = getattr(self, "_current_images_base64", [])
+        has_images = bool(images_base64)
+        optional_system_prompt = normalize_optional_instruction_text(system_prompt)
 
-        if not images_base64:
-            # Pure text mode
+        base_system_prompt = "You are a helpful assistant that can analyze both text and image content to provide comprehensive answers."
+        upstream_system = (
+            f"{base_system_prompt}\n\n{optional_system_prompt}"
+            if optional_system_prompt
+            else base_system_prompt
+        )
+
+        repacked = repack_query_messages(
+            enhanced_prompt,
+            user_query,
+            upstream_system=upstream_system,
+            has_images=has_images,
+        )
+        if repacked:
+            final_system, final_user_text = repacked
+        else:
+            final_system = upstream_system
+            suffix = build_answer_suffix(has_images=has_images)
+            final_user_text = (
+                f"Context:\n{enhanced_prompt}\n\n"
+                f"User Question: {user_query}\n\n"
+                f"{suffix}"
+            )
+
+        if not has_images:
             return [
-                {
-                    "role": "user",
-                    "content": f"Context:\n{enhanced_prompt}\n\nUser Question: {user_query}",
-                }
+                {"role": "system", "content": final_system},
+                {"role": "user", "content": final_user_text},
             ]
 
-        # Build multimodal content
-        content_parts = []
-
-        # Split text at image markers and insert images
-        text_parts = enhanced_prompt.split("[VLM_IMAGE_")
-
-        for i, text_part in enumerate(text_parts):
-            if i == 0:
-                # First text part
-                if text_part.strip():
-                    content_parts.append({"type": "text", "text": text_part})
-            else:
-                # Find marker number and insert corresponding image
-                marker_match = re.match(r"(\d+)\](.*)", text_part, re.DOTALL)
-                if marker_match:
-                    image_num = (
-                        int(marker_match.group(1)) - 1
-                    )  # Convert to 0-based index
-                    remaining_text = marker_match.group(2)
-
-                    # Insert corresponding image
-                    if 0 <= image_num < len(images_base64):
-                        content_parts.append(
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{images_base64[image_num]}"
-                                },
-                            }
-                        )
-
-                    # Insert remaining text
-                    if remaining_text.strip():
-                        content_parts.append({"type": "text", "text": remaining_text})
-
-        # Add user question
-        content_parts.append(
+        # Keep all images before text payload in enhanced mode.
+        content_parts = [
             {
-                "type": "text",
-                "text": f"\n\nUser Question: {user_query}\n\nPlease answer based on the context and images provided.",
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
             }
-        )
-        base_system_prompt = "You are a helpful assistant that can analyze both text and image content to provide comprehensive answers."
-
-        if system_prompt:
-            full_system_prompt = base_system_prompt + " " + system_prompt
-        else:
-            full_system_prompt = base_system_prompt
+            for image_base64 in images_base64
+        ]
+        content_parts.append({"type": "text", "text": final_user_text})
 
         return [
             {
                 "role": "system",
-                "content": full_system_prompt,
+                "content": final_system,
             },
             {
                 "role": "user",
