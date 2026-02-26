@@ -1,4 +1,4 @@
-﻿# RAGAnything LocalRAG VLM 重构记录
+# RAGAnything LocalRAG VLM 重构记录
 
 - 日期：2026-02-20
 - 状态：已完成（本轮）
@@ -424,53 +424,118 @@ available_chunk_tokens = max_total_tokens - (sys_prompt_tokens + kg_context_toke
 ### 说明
 - 本轮保持”最小改动”原则：仅调整关键词抽取链路，不扩展新配置项，不引入额外分支复杂度。
 
-## 执行更新（2026-02-24，本轮最终）
+## 待行动补充（2026-02-25，统一尾句与 system/user 组装）
 
-### 本轮复核文件
-- `raganything/services/local_rag.py`
-- `evaluate_local/DocBench/evaluate.py`
-- `examples/raganything_local_v2.py`（仅做兼容复核，无代码修改）
+> 说明：本节是待执行计划，当前尚未提交代码改动。
 
-### 相较未改动版本的核心变化
-1. **Enhanced 与 Non-enhanced 的 Context 重组规则已对齐**
-   - enhanced 分支不再使用“上游消息原样直传”。
-   - enhanced 与 non-enhanced 均复用 `_try_repack_text_query(...)`：
-     - `system`：Role/Goal/Instructions（enhanced 额外前置 upstream system）。
-     - `user`：`---Context---` + 单次 `User Question`。
-   - 兼容两种问题来源：`---User Query---` 与 `User Question:`。
-   - 清理时会剥离嵌入的 `---User Query---` 段，避免问题重复。
+### 目标
+- enhanced（有图）尾句使用官方文案：`Please answer based on the context and images provided.`
+- non-enhanced 与 enhanced（无图）尾句统一为：`Please answer based on the context provided.`
+- 两条链路保持同一组装骨架，仅保留“有图/无图”必要差异。
+- 禁止尾句重复（同一请求中不能同时出现两种尾句）。
 
-2. **查询侧清洗链路简化**
-   - 已移除 enhanced query 的 entity/relation/chunk 二次解析与改写逻辑。
-   - 不再做路径实体删除、relation 端点替换、chunk 二次打标。
-   - 降低 JSON-lines 解析降级带来的不稳定性。
+### 计划改动点（仅 `raganything/services/local_rag.py`）
+1. 增加统一尾句选择逻辑（按是否携带图片二选一）。
+2. non-enhanced 路径固定使用 `context provided` 尾句。
+3. enhanced 路径：
+   - 有图：使用 `context and images provided` 尾句；
+   - 无图：与 non-enhanced 对齐，使用 `context provided` 尾句。
+4. 在拼接最终 user 文本前，先清理旧尾句模板，避免重复追加。
+5. system/user 重组规则保持一致：仅取最后一个 `---Context---`，并清理嵌入的 `---User Query---`、`User Question:`、历史尾句模板。
 
-3. **图片重试策略改为按 base_cap 动态递减**
-   - 由固定序列改为 `base_cap/5` 步长递减。
-   - 最终必含 `0` 图兜底尝试。
-   - 新增真实发送图片数日志：
-     - `VLM request image count: sent=... (cap=..., available=..., attempt=.../...)`
+### 我们自己追加的 prompt（计划保留）
+- `User Question: {query}`（统一追加在 user 文本末尾的问题位）。
+- 单一尾句（按模式二选一）：
+  - enhanced（有图）：`Please answer based on the context and images provided.`
+  - non-enhanced / enhanced（无图）：`Please answer based on the context provided.`
 
-4. **DocBench 评测参数同步更新**
-   - `vlm_enhanced=True`
-   - `max_total_tokens=25000`
-   - `max_entity_tokens=4000`
-   - `max_relation_tokens=5000`
-   - `settings.vlm_max_images=5`
+### 计划改动后组装示例（详细）
 
-### 结论（本轮）
-- enhanced 已与 non-enhanced 对齐到同一套 Context 重组规则。
-- enhanced 保留的唯一结构差异是多模态装箱：图片内容仍在 user content 前部，文本在后部。
-- 代码结构较前一版更短、更直接，功能边界更清晰。
+#### A) non-enhanced（文本问答）
 
-### 校验
-- 语法检查通过：
-  - `python -m py_compile raganything/services/local_rag.py`
-  - `python -m py_compile evaluate_local/DocBench/evaluate.py`
-  - `python -m py_compile examples/raganything_local_v2.py`
+- `system`（示例结构）
+```text
+---Role---
+...（来自 LightRAG 的角色说明）
 
+---Goal---
+...（来自 LightRAG 的任务目标）
 
----
+---Instructions---
+...（来自 LightRAG 的指令约束；空 Additional Instructions 会被清理）
+```
+
+- `user`（示例结构）
+```text
+---Context---
+...（Knowledge Graph Data / Document Chunks / Reference Document List）
+
+User Question: {query}
+
+Please answer based on the context provided.
+```
+
+#### B) enhanced（有图）
+
+- `system`（示例结构）
+```text
+You are a helpful assistant that can analyze both text and image content to provide comprehensive answers.
+
+---Role---
+...（来自 LightRAG 的角色说明）
+
+---Goal---
+...（来自 LightRAG 的任务目标）
+
+---Instructions---
+...（来自 LightRAG 的指令约束）
+```
+
+- `user`（示例结构，multimodal content）
+```text
+[
+  {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}},
+  {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}},
+  ...,
+  {
+    "type": "text",
+    "text": "---Context---\n...\n[VLM_IMAGE_1]\n...\n\nUser Question: {query}\n\nPlease answer based on the context and images provided."
+  }
+]
+```
+
+#### C) enhanced（无图，回退文本）
+
+- 对齐要求：与 non-enhanced 完全一致（同一套 system/user 重组规则与同一尾句）。
+
+- `system`（示例结构）
+```text
+---Role---
+...（来自 LightRAG 的角色说明）
+
+---Goal---
+...（来自 LightRAG 的任务目标）
+
+---Instructions---
+...（来自 LightRAG 的指令约束）
+```
+
+- `user`（示例结构）
+```text
+---Context---
+...（Knowledge Graph Data / Document Chunks / Reference Document List）
+
+User Question: {query}
+
+Please answer based on the context provided.
+```
+
+### 一致性判定标准（验收）
+- non-enhanced 与 enhanced（无图）的 system/user 文本应一致。
+- enhanced（有图）与 non-enhanced 的唯一必要差异：
+  1) user 前部包含 `image_url` 列表；
+  2) system 前置一条多模态能力提示。
+- 不应再出现同一请求中两种尾句并存。
 
 ## 执行记录（2026-02-25，多模态检索增强 + 配置统一 + WebUI 重设计）
 
