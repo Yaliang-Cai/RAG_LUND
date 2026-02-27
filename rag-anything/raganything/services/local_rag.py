@@ -53,7 +53,12 @@ from raganything.constants import (
 from raganything.query_message_repack import repack_query_messages
 
 _MODEL_CACHE: Dict[str, Any] = {}
-_INTERNAL_OPENAI_KWARGS = {"hashing_kv", "keyword_extraction", "enable_cot"}
+_INTERNAL_OPENAI_KWARGS = {
+    "hashing_kv",
+    "keyword_extraction",
+    "enable_cot",
+    "max_tokens",
+}
 
 
 @dataclass
@@ -319,10 +324,7 @@ def build_llm_model_func(
         history_messages = history_messages or []
         keyword_extraction = bool(kwargs.pop("keyword_extraction", False))
         cleaned_kwargs = _strip_internal_openai_kwargs(kwargs)
-        requested_max_tokens = cleaned_kwargs.pop("max_tokens", None)
-        if requested_max_tokens is not None:
-            max_tokens = int(requested_max_tokens)
-        elif _is_entity_extraction_call(system_prompt, prompt):
+        if _is_entity_extraction_call(system_prompt, prompt):
             max_tokens = settings.ingest_max_tokens
         else:
             max_tokens = settings.query_max_tokens

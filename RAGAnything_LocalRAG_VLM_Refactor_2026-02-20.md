@@ -1431,3 +1431,26 @@ def replace_image_path(match):
 - 新增图片 token 对齐脚本（仅测 image token）：
   - `rag-anything/examples/image_token_alignment_test.py`
   - 用途：对比“本地估算”与“vLLM prompt_tokens 差分”。
+
+## 增量更新（2026-02-27，移除调用层 max_tokens 覆盖）
+
+### 背景
+
+- 当前链路已明确分离：
+  - query 走 `query_max_tokens`
+  - ingest/抽取走 `ingest_max_tokens`
+- 用户要求移除调用层显式 `max_tokens` 覆盖能力，避免冗余与行为不透明。
+
+### 代码调整
+
+- 文件：`rag-anything/raganything/services/local_rag.py`
+  - `build_llm_model_func(...)` 中删除 `requested_max_tokens` 分支。
+  - 新增 `max_tokens` 到 `_INTERNAL_OPENAI_KWARGS`，统一丢弃调用层传入的 `max_tokens`。
+  - 保持默认策略：
+    - 实体抽取调用：`ingest_max_tokens`
+    - 其余问答调用：`query_max_tokens`
+
+### 校验
+
+- `python -m py_compile raganything/services/local_rag.py` 通过。
+- 代码检索确认已无调用层 `max_tokens` 覆盖入口。
