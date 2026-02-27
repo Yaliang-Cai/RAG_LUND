@@ -23,4 +23,3 @@ python -m vllm.entrypoints.openai.api_server \
     --dtype float16 \
     --quantization awq \
     --enforce-eager \
-    --limit-mm-per-prompt '{"image": 10}'

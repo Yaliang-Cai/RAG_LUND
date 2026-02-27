@@ -1,6 +1,8 @@
 from __future__ import annotations
 from functools import partial
 from pathlib import Path
+import unicodedata
+import hashlib
 
 import asyncio
 import json
@@ -64,10 +66,16 @@ from lightrag.constants import (
     DEFAULT_FILE_PATH_MORE_PLACEHOLDER,
     DEFAULT_MAX_FILE_PATHS,
     DEFAULT_ENTITY_NAME_MAX_LENGTH,
+    DEFAULT_IMAGE_TOKEN_ESTIMATE_PER_IMAGE,
 )
 from lightrag.kg.shared_storage import get_storage_keyed_lock
 import time
 from dotenv import load_dotenv
+
+try:
+    from PIL import Image as PILImage
+except Exception:  # pragma: no cover - optional dependency
+    PILImage = None
 
 # use the .env that is inside the current folder
 # allows to use different .env file for each lightrag instance
@@ -93,57 +101,457 @@ _BARE_FILENAME_RE = _re.compile(
 )
 
 
-def _is_file_or_folder_path(name: str) -> bool:
-    """Return True if *name* looks like a filesystem path or bare filename.
+# Common inline math / LaTeX signals to avoid false path filtering.
+_LATEX_CMD_RE = _re.compile(
+    r"\\(?:mathbf|mathcal|frac|sum|prod|sqrt|alpha|beta|gamma|delta|epsilon|varepsilon|mathbb|mathrm|text)\b",
+    _re.IGNORECASE,
+)
+_LATEX_DELIM_RE = _re.compile(r"(\\\(|\\\)|\\\[|\\\]|\$[^$]+\$)")
 
-    Used during entity/relationship extraction to suppress file-system
-    artifacts from being stored as knowledge-graph nodes.  Covers both
-    Windows and Linux/macOS (Ubuntu) path conventions.
+# Common slash phrases that are not filesystem paths.
+_SLASH_PHRASE_WHITELIST = {
+    "and/or",
+    "input/output",
+    "output/input",
+    "read/write",
+    "yes/no",
+    "on/off",
+}
 
-    Preserved (returns False):
-    - Valid URLs with any scheme: http://, https://, ftp://, s3://, doi://, …
-    - Plain words and phrases with no path separators or file extensions.
+# Layout/structure metadata that should not enter the knowledge graph as entities.
+_LAYOUT_METADATA_ENTITIES = {
+    "page index",
+    "page number",
+    "footer content",
+    "header content",
+    "page footnote",
+    "page footnote content",
+    "bounding box",
+    "bounding box coordinates",
+    "reference type",
+    "token type",
+    "token types",
+}
 
-    Filtered (returns True):
-    - Windows absolute paths:     C:\\foo\\bar  /  C:/foo/bar
-    - Unix/Linux absolute paths:  /home/user/docs  /  /workspace/project
-    - Home-dir paths:             ~/projects/rag
-    - Relative paths:             ./output  /  ../data  /  foo/bar/baz
-    - Any string containing \\ or / that is not a URL
-    - Bare filenames with known extensions: figure.png, config.yaml, run.sh
-    """
+# Generic low-information residues.
+_GENERIC_NOISE_ENTITIES = {
+    "a",
+    "an",
+    "the",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "of",
+    "in",
+    "on",
+    "to",
+    "for",
+    "by",
+    "and",
+    "or",
+    "et",
+    "new",
+    "related",
+    "none",
+    "null",
+    "n/a",
+    "na",
+    "tr",
+    "rt",
+    "tt",
+    "xt",
+    "etc",
+}
+
+_TABLE_FIGURE_LABEL_RE = _re.compile(r"^(?:table|figure|fig)\s*\d+$", _re.IGNORECASE)
+
+_PATH_SEGMENT_SPLIT_RE = _re.compile(r"[\\/]+")
+_PATH_SEGMENT_TOKEN_RE = _re.compile(r"[_\-\s]+")
+_CONTENT_WINDOWS_PATH_RE = _re.compile(r"(?<!\w)[A-Za-z]:[\\/][^\s\"'`<>|]+")
+_CONTENT_POSIX_PATH_RE = _re.compile(r"(?<!\w)/(?:[^\s\"'`<>|]+)")
+_CONTENT_REL_PATH_RE = _re.compile(r"(?<!\w)(?:\.{1,2}|~)[\\/][^\s\"'`<>|]+")
+_IMAGE_PATH_LINE_RE = _re.compile(r"(?im)^\s*image path\s*:\s*(.+?)\s*$")
+_QUERY_IMAGE_PATH_RE = _re.compile(
+    r"Image Path:\s*([^\r\n]*?\.(?:jpg|jpeg|png|gif|bmp|webp|tiff|tif))",
+    _re.IGNORECASE,
+)
+
+
+def _looks_like_math_expression(text: str) -> bool:
+    """Return True for common math/LaTeX formatted strings."""
+    if _LATEX_CMD_RE.search(text):
+        return True
+    if _LATEX_DELIM_RE.search(text):
+        return True
+    return False
+
+
+def _classify_file_or_folder_path(name: str) -> tuple[bool, str]:
+    """Classify whether *name* is path-like and return (is_path, reason_code)."""
     if not name:
-        return False
+        return False, "empty"
+
     cleaned = name.strip().strip("\"'`")
     if not cleaned:
-        return False
+        return False, "empty"
 
-    # ── Preserve valid URLs (http, https, ftp, s3, git, doi, arxiv, …) ──────
+    lower = cleaned.lower()
+
+    # NOT_PATH whitelist (highest priority)
     if _URL_SCHEME_RE.match(cleaned):
-        return False
+        return False, "url_scheme_whitelist"
+    if _looks_like_math_expression(cleaned):
+        return False, "math_whitelist"
+    if lower in _SLASH_PHRASE_WHITELIST or _re.match(r"^[A-Za-z]/[A-Za-z]$", cleaned):
+        return False, "slash_phrase_whitelist"
 
-    # ── Windows absolute path: C:\... or C:/... ──────────────────────────────
-    if _re.match(r"^[A-Za-z]:[\\\/]", cleaned):
-        return True
-
-    # ── Unix/Linux absolute path: /foo/bar/... ───────────────────────────────
+    # HARD_PATH rules
+    if _re.match(r"^[A-Za-z]:[\\/]", cleaned):
+        return True, "win_abs"
+    if _re.match(r"^(?:\\\\|//)[^\\/\s]+[\\/][^\\/\s]+", cleaned):
+        return True, "unc_abs"
     if cleaned.startswith("/"):
-        return True
-
-    # ── Home-directory shorthand: ~/... or ~\... ─────────────────────────────
-    if len(cleaned) > 1 and cleaned[0] == "~" and cleaned[1] in ("/", "\\"):
-        return True
-
-    # ── Any relative or mixed path containing a directory separator ──────────
-    # Catches: ./output, ../data, foo/bar, workspace\project, etc.
-    if _re.search(r"[\\\/]", cleaned):
-        return True
-
-    # ── Bare filename with a known file/code extension ───────────────────────
+        return True, "posix_abs"
+    if cleaned.startswith(("./", "../", "~/", ".\\", "..\\", "~\\")):
+        return True, "relative_prefix"
     if _BARE_FILENAME_RE.match(cleaned):
-        return True
+        return True, "bare_filename"
 
-    return False
+    return False, "not_path"
+
+
+def _entity_lexical_key(text: str) -> str:
+    key = _re.sub(r"[_\-\s]+", " ", text.strip()).casefold()
+    return _re.sub(r"\s+", " ", key).strip()
+
+
+def _extract_path_fragment_keys(path_text: str) -> set[str]:
+    if not path_text:
+        return set()
+    try:
+        normalized = unicodedata.normalize("NFKC", str(path_text))
+    except Exception:
+        normalized = str(path_text)
+
+    parts = [p for p in _PATH_SEGMENT_SPLIT_RE.split(normalized) if p]
+    fragment_keys: set[str] = set()
+    for part in parts:
+        token = part.strip().strip("\"'`")
+        if not token or token in {".", ".."}:
+            continue
+
+        # Remove file extension for leaf path token
+        if "." in token and not token.startswith("."):
+            stem = token.rsplit(".", 1)[0]
+            if stem:
+                token = stem
+
+        token = _PATH_SEGMENT_TOKEN_RE.sub(" ", token)
+        key = _entity_lexical_key(token)
+        if not key:
+            continue
+
+        # Skip trivial path atoms
+        if len(key) <= 2 and key.isalpha():
+            continue
+        if key.isdigit():
+            continue
+
+        fragment_keys.add(key)
+
+    return fragment_keys
+
+
+def _extract_path_like_strings_from_text(source_text: str) -> set[str]:
+    if not source_text:
+        return set()
+    try:
+        normalized = unicodedata.normalize("NFKC", str(source_text))
+    except Exception:
+        normalized = str(source_text)
+
+    candidates: set[str] = set()
+
+    # Prioritize explicit "Image Path: ..." lines from chunk templates.
+    for match in _IMAGE_PATH_LINE_RE.finditer(normalized):
+        raw = match.group(1).strip().strip("\"'`")
+        if not raw:
+            continue
+        raw = raw.split("[", 1)[0].strip()
+        if not raw or _URL_SCHEME_RE.match(raw):
+            continue
+        candidates.add(raw)
+
+    for pattern in (
+        _CONTENT_WINDOWS_PATH_RE,
+        _CONTENT_POSIX_PATH_RE,
+        _CONTENT_REL_PATH_RE,
+    ):
+        for match in pattern.finditer(normalized):
+            raw = match.group(0).strip().strip("\"'`")
+            if not raw or _URL_SCHEME_RE.match(raw):
+                continue
+            candidates.add(raw)
+
+    return candidates
+
+
+def _collect_path_fragment_keys(source_text: str = "") -> set[str]:
+    fragment_keys: set[str] = set()
+    for path_candidate in _extract_path_like_strings_from_text(source_text):
+        fragment_keys.update(_extract_path_fragment_keys(path_candidate))
+    return fragment_keys
+
+
+def _looks_like_acronym(word: str) -> bool:
+    if not word.isalpha():
+        return False
+    if not (2 <= len(word) <= 5):
+        return False
+    vowels = sum(ch in "aeiou" for ch in word.lower())
+    return vowels == 0
+
+
+def _normalize_entity_surface(name: str) -> str:
+    # Normalize Unicode and separator artifacts first.
+    normalized = unicodedata.normalize("NFKC", name or "")
+    normalized = _re.sub(r"(?<=\w)_(?=\w)", " ", normalized.strip())
+    normalized = _re.sub(r"(?<=\w)\s*-\s*(?=\w)", "-", normalized)
+    normalized = _re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return ""
+
+    # Rule-based case normalization (non-dictionary):
+    # - all-lower acronym-like tokens => uppercase (e.g., kglm -> KGLM)
+    # - all-lower phrases => title-case words
+    if normalized.islower():
+        words = normalized.split(" ")
+        if len(words) == 1 and _looks_like_acronym(words[0]):
+            return words[0].upper()
+        titled_words = []
+        for w in words:
+            if _looks_like_acronym(w):
+                titled_words.append(w.upper())
+            else:
+                titled_words.append(w.capitalize())
+        return " ".join(titled_words)
+
+    return normalized
+
+
+def _classify_low_quality_entity(
+    name: str,
+    path_fragment_keys: set[str] | None = None,
+) -> tuple[bool, str]:
+    if not name:
+        return True, "empty"
+    cleaned = name.strip()
+    key = _entity_lexical_key(cleaned)
+
+    if key:
+        if path_fragment_keys and key in path_fragment_keys:
+            return True, "path_fragment_from_source"
+    if key in _LAYOUT_METADATA_ENTITIES:
+        return True, "layout_metadata"
+    if key in _GENERIC_NOISE_ENTITIES:
+        return True, "generic_noise"
+    if _TABLE_FIGURE_LABEL_RE.match(cleaned):
+        return True, "table_figure_label"
+    if "published by" in key:
+        return True, "publisher_phrase_noise"
+    if len(key) <= 2 and key.isalpha():
+        return True, "short_alpha_noise"
+
+    return False, "ok"
+
+
+def _build_effective_history_messages(query_param: QueryParam) -> list[dict[str, str]]:
+    """Compose effective history payload from summary + raw turns."""
+    history_messages: list[dict[str, str]] = []
+
+    history_summary = str(getattr(query_param, "history_summary", "") or "").strip()
+    if history_summary:
+        history_messages.append(
+            {
+                "role": "assistant",
+                "content": f"Conversation summary:\n{history_summary}",
+            }
+        )
+
+    for msg in getattr(query_param, "conversation_history", []) or []:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role", "")).strip()
+        if role not in {"system", "user", "assistant"}:
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, (dict, list)):
+            content = json.dumps(content, ensure_ascii=False)
+        else:
+            content = str(content)
+        content = content.strip()
+        if not content:
+            continue
+        history_messages.append({"role": role, "content": content})
+
+    return history_messages
+
+
+def _estimate_history_tokens(
+    tokenizer: Tokenizer, history_messages: list[dict[str, str]]
+) -> int:
+    if not history_messages:
+        return 0
+    # Add a small structural overhead per message for role framing.
+    per_message_overhead = 4
+    total = 0
+    for msg in history_messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        total += len(tokenizer.encode(role))
+        total += len(tokenizer.encode(content))
+        total += per_message_overhead
+    return total
+
+
+def _history_messages_signature(history_messages: list[dict[str, str]]) -> str:
+    if not history_messages:
+        return ""
+    payload = json.dumps(history_messages, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+
+def _collect_image_paths_for_budget(chunks: list[dict], image_cap: int) -> list[str]:
+    if image_cap <= 0 or not chunks:
+        return []
+    seen_paths: set[str] = set()
+    image_paths: list[str] = []
+    for chunk in chunks:
+        content = str(chunk.get("content", "") or "")
+        for match in _QUERY_IMAGE_PATH_RE.finditer(content):
+            image_path = match.group(1).strip().strip("\"'`")
+            if not image_path or image_path in seen_paths:
+                continue
+            seen_paths.add(image_path)
+            image_paths.append(image_path)
+            if len(image_paths) >= image_cap:
+                return image_paths
+    return image_paths
+
+
+def _estimate_dynamic_patch_count(
+    width: int,
+    height: int,
+    min_dynamic_patch: int,
+    max_dynamic_patch: int,
+    use_thumbnail: bool,
+) -> int:
+    if width <= 0 or height <= 0:
+        return 1
+
+    image_ratio = width / height
+    candidate_ratios: list[tuple[int, int]] = []
+    for n in range(min_dynamic_patch, max_dynamic_patch + 1):
+        for i in range(1, n + 1):
+            if n % i != 0:
+                continue
+            j = n // i
+            candidate_ratios.append((i, j))
+
+    if not candidate_ratios:
+        return 1
+
+    candidate_ratios = sorted(set(candidate_ratios), key=lambda x: x[0] * x[1])
+    best = min(candidate_ratios, key=lambda x: abs(image_ratio - (x[0] / x[1])))
+    blocks = best[0] * best[1]
+    if use_thumbnail and blocks != 1:
+        blocks += 1
+    return blocks
+
+
+def _estimate_image_tokens_for_budget(
+    chunks: list[dict], query_param: QueryParam
+) -> tuple[int, int, int]:
+    multimodal_top_k = getattr(query_param, "multimodal_top_k", None)
+    if multimodal_top_k is None or multimodal_top_k <= 0:
+        return 0, 0, 0
+
+    image_paths = _collect_image_paths_for_budget(chunks, multimodal_top_k)
+    image_count = len(image_paths)
+    if image_count <= 0:
+        return 0, 0, 0
+
+    image_size = max(1, int(getattr(query_param, "image_size_for_token_estimate", 448)))
+    patch_size = max(1, int(getattr(query_param, "patch_size_for_token_estimate", 14)))
+    downsample_ratio = float(
+        max(0.0, getattr(query_param, "downsample_ratio_for_token_estimate", 0.5))
+    )
+    min_dynamic_patch = max(
+        1, int(getattr(query_param, "min_dynamic_patch_for_token_estimate", 1))
+    )
+    max_dynamic_patch = max(
+        min_dynamic_patch,
+        int(getattr(query_param, "max_dynamic_patch_for_token_estimate", 12)),
+    )
+    use_thumbnail = bool(getattr(query_param, "use_thumbnail_for_token_estimate", True))
+    wrapper_tokens = max(
+        0, int(getattr(query_param, "image_wrapper_tokens_per_image", 2))
+    )
+    fallback_per_image_tokens = int(
+        max(
+            0,
+            getattr(
+                query_param,
+                "image_token_estimate_per_image",
+                DEFAULT_IMAGE_TOKEN_ESTIMATE_PER_IMAGE,
+            ),
+        )
+    )
+
+    per_patch_tokens = int(((image_size // patch_size) ** 2) * (downsample_ratio**2))
+    if per_patch_tokens <= 0:
+        per_patch_tokens = max(1, fallback_per_image_tokens)
+
+    total_tokens = 0
+    fallback_count = 0
+    for image_path in image_paths:
+        path_obj = Path(image_path)
+        if PILImage is not None and path_obj.exists():
+            try:
+                with PILImage.open(path_obj) as image:
+                    width, height = image.size
+                patches = _estimate_dynamic_patch_count(
+                    width=width,
+                    height=height,
+                    min_dynamic_patch=min_dynamic_patch,
+                    max_dynamic_patch=max_dynamic_patch,
+                    use_thumbnail=use_thumbnail,
+                )
+                total_tokens += patches * per_patch_tokens + wrapper_tokens
+                continue
+            except Exception:
+                pass
+        fallback_count += 1
+        total_tokens += fallback_per_image_tokens
+
+    if fallback_count > 0:
+        logger.debug(
+            "Image token reserve fallback used for %s/%s images (path unreadable); fallback_per_image=%s",
+            fallback_count,
+            image_count,
+            fallback_per_image_tokens,
+        )
+
+    per_image_tokens = total_tokens // max(1, image_count)
+    return total_tokens, image_count, per_image_tokens
+
+
+def _is_file_or_folder_path(name: str) -> bool:
+    """Backward-compatible bool wrapper for path-like classification."""
+    is_path, _reason = _classify_file_or_folder_path(name)
+    return is_path
 
 
 def _truncate_entity_identifier(
@@ -452,6 +860,7 @@ async def _handle_single_entity_extraction(
     chunk_key: str,
     timestamp: int,
     file_path: str = "unknown_source",
+    path_fragment_keys: set[str] | None = None,
 ):
     if len(record_attributes) != 4 or "entity" not in record_attributes[0]:
         if len(record_attributes) > 1 and "entity" in record_attributes[0]:
@@ -465,6 +874,7 @@ async def _handle_single_entity_extraction(
         entity_name = sanitize_and_normalize_extracted_text(
             record_attributes[1], remove_inner_quotes=True
         )
+        entity_name = _normalize_entity_surface(entity_name)
 
         # Validate entity name after all cleaning steps
         if not entity_name or not entity_name.strip():
@@ -474,9 +884,19 @@ async def _handle_single_entity_extraction(
             return None
 
         # Filter out file/folder path entities
-        if _is_file_or_folder_path(entity_name):
+        is_path_entity, entity_path_reason = _classify_file_or_folder_path(entity_name)
+        if is_path_entity:
             logger.info(
-                f"Filtered file path entity: '{entity_name}'"
+                f"Filtered file path entity [reason={entity_path_reason}]: '{entity_name}'"
+            )
+            return None
+
+        is_low_quality_entity, low_quality_reason = _classify_low_quality_entity(
+            entity_name, path_fragment_keys=path_fragment_keys
+        )
+        if is_low_quality_entity:
+            logger.info(
+                f"Filtered low-quality entity [reason={low_quality_reason}]: '{entity_name}'"
             )
             return None
 
@@ -531,6 +951,7 @@ async def _handle_single_relationship_extraction(
     chunk_key: str,
     timestamp: int,
     file_path: str = "unknown_source",
+    path_fragment_keys: set[str] | None = None,
 ):
     if (
         len(record_attributes) != 5 or "relation" not in record_attributes[0]
@@ -549,6 +970,8 @@ async def _handle_single_relationship_extraction(
         target = sanitize_and_normalize_extracted_text(
             record_attributes[2], remove_inner_quotes=True
         )
+        source = _normalize_entity_surface(source)
+        target = _normalize_entity_surface(target)
 
         # Validate entity names after all cleaning steps
         if not source:
@@ -564,9 +987,33 @@ async def _handle_single_relationship_extraction(
             return None
 
         # Filter out relationships involving file path entities
-        if _is_file_or_folder_path(source) or _is_file_or_folder_path(target):
+        source_is_path, source_path_reason = _classify_file_or_folder_path(source)
+        target_is_path, target_path_reason = _classify_file_or_folder_path(target)
+        if source_is_path or target_is_path:
+            reason_parts = []
+            if source_is_path:
+                reason_parts.append(f"src:{source_path_reason}")
+            if target_is_path:
+                reason_parts.append(f"tgt:{target_path_reason}")
             logger.info(
-                f"Filtered relationship with path entity: '{source}' -> '{target}'"
+                f"Filtered relationship with path entity [reason={', '.join(reason_parts)}]: '{source}' -> '{target}'"
+            )
+            return None
+
+        source_is_low_quality, source_lq_reason = _classify_low_quality_entity(
+            source, path_fragment_keys=path_fragment_keys
+        )
+        target_is_low_quality, target_lq_reason = _classify_low_quality_entity(
+            target, path_fragment_keys=path_fragment_keys
+        )
+        if source_is_low_quality or target_is_low_quality:
+            reason_parts = []
+            if source_is_low_quality:
+                reason_parts.append(f"src:{source_lq_reason}")
+            if target_is_low_quality:
+                reason_parts.append(f"tgt:{target_lq_reason}")
+            logger.info(
+                f"Filtered relationship with low-quality entity [reason={', '.join(reason_parts)}]: '{source}' -> '{target}'"
             )
             return None
 
@@ -997,6 +1444,7 @@ async def _process_extraction_result(
     chunk_key: str,
     timestamp: int,
     file_path: str = "unknown_source",
+    source_text: str = "",
     tuple_delimiter: str = "<|#|>",
     completion_delimiter: str = "<|COMPLETE|>",
 ) -> tuple[dict, dict]:
@@ -1013,6 +1461,7 @@ async def _process_extraction_result(
     """
     maybe_nodes = defaultdict(list)
     maybe_edges = defaultdict(list)
+    path_fragment_keys = _collect_path_fragment_keys(source_text)
 
     if completion_delimiter not in result:
         logger.warning(
@@ -1080,7 +1529,11 @@ async def _process_extraction_result(
 
         # Try to parse as entity
         entity_data = await _handle_single_entity_extraction(
-            record_attributes, chunk_key, timestamp, file_path
+            record_attributes,
+            chunk_key,
+            timestamp,
+            file_path,
+            path_fragment_keys,
         )
         if entity_data is not None:
             truncated_name = _truncate_entity_identifier(
@@ -1095,7 +1548,11 @@ async def _process_extraction_result(
 
         # Try to parse as relationship
         relationship_data = await _handle_single_relationship_extraction(
-            record_attributes, chunk_key, timestamp, file_path
+            record_attributes,
+            chunk_key,
+            timestamp,
+            file_path,
+            path_fragment_keys,
         )
         if relationship_data is not None:
             truncated_source = _truncate_entity_identifier(
@@ -1141,6 +1598,7 @@ async def _rebuild_from_extraction_result(
         if chunk_data
         else "unknown_source"
     )
+    chunk_content = chunk_data.get("content", "") if chunk_data else ""
 
     # Call the shared processing function
     return await _process_extraction_result(
@@ -1148,6 +1606,7 @@ async def _rebuild_from_extraction_result(
         chunk_id,
         timestamp,
         file_path,
+        source_text=chunk_content,
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
     )
@@ -2949,6 +3408,7 @@ async def extract_entities(
             chunk_key,
             timestamp,
             file_path,
+            source_text=content,
             tuple_delimiter=context_base["tuple_delimiter"],
             completion_delimiter=context_base["completion_delimiter"],
         )
@@ -2972,6 +3432,7 @@ async def extract_entities(
                 chunk_key,
                 timestamp,
                 file_path,
+                source_text=content,
                 tuple_delimiter=context_base["tuple_delimiter"],
                 completion_delimiter=context_base["completion_delimiter"],
             )
@@ -3223,6 +3684,9 @@ async def kg_query(
     )
 
     # Handle cache
+    effective_history_messages = _build_effective_history_messages(query_param)
+    history_signature = _history_messages_signature(effective_history_messages)
+
     args_hash = compute_args_hash(
         query_param.mode,
         query,
@@ -3236,6 +3700,7 @@ async def kg_query(
         ll_keywords_str,
         query_param.user_prompt or "",
         query_param.enable_rerank,
+        history_signature,
     )
 
     cached_result = await handle_cache(
@@ -3252,7 +3717,7 @@ async def kg_query(
         response = await use_model_func(
             user_query,
             system_prompt=sys_prompt,
-            history_messages=query_param.conversation_history,
+            history_messages=effective_history_messages,
             enable_cot=True,
             stream=query_param.stream,
         )
@@ -3270,6 +3735,7 @@ async def kg_query(
                 "ll_keywords": ll_keywords_str,
                 "user_prompt": query_param.user_prompt or "",
                 "enable_rerank": query_param.enable_rerank,
+                "history_signature": history_signature,
             }
             await save_to_cache(
                 hashing_kv,
@@ -4028,13 +4494,40 @@ async def _build_context_str(
 
     # Calculate available tokens for text chunks
     query_tokens = len(tokenizer.encode(query))
+    history_messages = _build_effective_history_messages(query_param)
+    history_tokens = _estimate_history_tokens(tokenizer, history_messages)
+    image_tokens, image_count, per_image_tokens = _estimate_image_tokens_for_budget(
+        merged_chunks, query_param
+    )
     buffer_tokens = 200  # reserved for reference list and safety buffer
     available_chunk_tokens = max_total_tokens - (
-        sys_prompt_tokens + kg_context_tokens + query_tokens + buffer_tokens
+        sys_prompt_tokens
+        + kg_context_tokens
+        + query_tokens
+        + history_tokens
+        + image_tokens
+        + buffer_tokens
     )
+    if available_chunk_tokens < 0:
+        logger.warning(
+            "Chunk token budget below zero (%s); clamped to 0",
+            available_chunk_tokens,
+        )
+        available_chunk_tokens = 0
 
     logger.debug(
-        f"Token allocation - Total: {max_total_tokens}, SysPrompt: {sys_prompt_tokens}, Query: {query_tokens}, KG: {kg_context_tokens}, Buffer: {buffer_tokens}, Available for chunks: {available_chunk_tokens}"
+        "Token allocation - Total: %s, SysPrompt: %s, Query: %s, KG: %s, "
+        "History: %s, Image: %s (%s * %s), Buffer: %s, Available for chunks: %s",
+        max_total_tokens,
+        sys_prompt_tokens,
+        query_tokens,
+        kg_context_tokens,
+        history_tokens,
+        image_tokens,
+        image_count,
+        per_image_tokens,
+        buffer_tokens,
+        available_chunk_tokens,
     )
 
     # Apply token truncation to chunks using the dynamic limit
@@ -4926,13 +5419,38 @@ async def naive_query(
     # Calculate available tokens for chunks
     sys_prompt_tokens = len(tokenizer.encode(pre_sys_prompt))
     query_tokens = len(tokenizer.encode(query))
+    history_messages = _build_effective_history_messages(query_param)
+    history_tokens = _estimate_history_tokens(tokenizer, history_messages)
+    image_tokens, image_count, per_image_tokens = _estimate_image_tokens_for_budget(
+        chunks, query_param
+    )
     buffer_tokens = 200  # reserved for reference list and safety buffer
     available_chunk_tokens = max_total_tokens - (
-        sys_prompt_tokens + query_tokens + buffer_tokens
+        sys_prompt_tokens
+        + query_tokens
+        + history_tokens
+        + image_tokens
+        + buffer_tokens
     )
+    if available_chunk_tokens < 0:
+        logger.warning(
+            "Naive chunk token budget below zero (%s); clamped to 0",
+            available_chunk_tokens,
+        )
+        available_chunk_tokens = 0
 
     logger.debug(
-        f"Naive query token allocation - Total: {max_total_tokens}, SysPrompt: {sys_prompt_tokens}, Query: {query_tokens}, Buffer: {buffer_tokens}, Available for chunks: {available_chunk_tokens}"
+        "Naive query token allocation - Total: %s, SysPrompt: %s, Query: %s, "
+        "History: %s, Image: %s (%s * %s), Buffer: %s, Available for chunks: %s",
+        max_total_tokens,
+        sys_prompt_tokens,
+        query_tokens,
+        history_tokens,
+        image_tokens,
+        image_count,
+        per_image_tokens,
+        buffer_tokens,
+        available_chunk_tokens,
     )
 
     # Process chunks using unified processing with dynamic token limit
@@ -5014,6 +5532,9 @@ async def naive_query(
         return QueryResult(content=prompt_content, raw_data=raw_data)
 
     # Handle cache
+    effective_history_messages = history_messages
+    history_signature = _history_messages_signature(effective_history_messages)
+
     args_hash = compute_args_hash(
         query_param.mode,
         query,
@@ -5025,6 +5546,7 @@ async def naive_query(
         query_param.max_total_tokens,
         query_param.user_prompt or "",
         query_param.enable_rerank,
+        history_signature,
     )
     cached_result = await handle_cache(
         hashing_kv, args_hash, user_query, query_param.mode, cache_type="query"
@@ -5039,7 +5561,7 @@ async def naive_query(
         response = await use_model_func(
             user_query,
             system_prompt=sys_prompt,
-            history_messages=query_param.conversation_history,
+            history_messages=effective_history_messages,
             enable_cot=True,
             stream=query_param.stream,
         )
@@ -5055,6 +5577,7 @@ async def naive_query(
                 "max_total_tokens": query_param.max_total_tokens,
                 "user_prompt": query_param.user_prompt or "",
                 "enable_rerank": query_param.enable_rerank,
+                "history_signature": history_signature,
             }
             await save_to_cache(
                 hashing_kv,

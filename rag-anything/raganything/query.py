@@ -329,7 +329,7 @@ class QueryMixin:
             query: User query
             mode: Underlying LightRAG query mode
             system_prompt: Optional system prompt to include
-            **kwargs: Other query parameters
+            **kwargs: Other query parameters (e.g., conversation_history/history_summary)
 
         Returns:
             str: VLM query result
@@ -351,10 +351,11 @@ class QueryMixin:
             delattr(self, "_current_images_base64")
 
         # 1. Get original retrieval prompt (without generating final answer)
-        # Cap multimodal chunks to DEFAULT_MULTIMODAL_TOP_K so only the
-        # highest-relevance images get sent to VLM; remaining chunk budget
-        # goes to text chunks.
+        # Cap only how many image paths are converted to image inputs.
+        # Retrieval context itself remains strict rerank order.
         kwargs.setdefault("multimodal_top_k", DEFAULT_MULTIMODAL_TOP_K)
+        conversation_history = kwargs.get("conversation_history") or []
+        history_summary = kwargs.get("history_summary")
         image_cap: int = kwargs["multimodal_top_k"]
         query_param = QueryParam(mode=mode, only_need_prompt=True, **kwargs)
         raw_prompt = await self.lightrag.aquery(query, param=query_param)
@@ -381,7 +382,11 @@ class QueryMixin:
 
         # 3. Build VLM message format
         messages = self._build_vlm_messages_with_images(
-            enhanced_prompt, query, system_prompt
+            enhanced_prompt,
+            query,
+            system_prompt,
+            conversation_history=conversation_history,
+            history_summary=history_summary,
         )
 
         # 4. Call VLM for question answering
@@ -646,7 +651,12 @@ class QueryMixin:
         return enhanced_prompt, images_processed
 
     def _build_vlm_messages_with_images(
-        self, enhanced_prompt: str, user_query: str, system_prompt: str
+        self,
+        enhanced_prompt: str,
+        user_query: str,
+        system_prompt: str,
+        conversation_history: list[dict[str, Any]] | None = None,
+        history_summary: str | None = None,
     ) -> List[Dict]:
         """
         Build VLM messages using the same text repack rule as non-enhanced query.
@@ -687,11 +697,21 @@ class QueryMixin:
                 f"{suffix}"
             )
 
+        history_messages = self._build_query_history_messages(
+            conversation_history=conversation_history,
+            history_summary=history_summary,
+        )
+
         if not has_images:
-            return [
+            return (
+                [
                 {"role": "system", "content": final_system},
+                ]
+                + history_messages
+                + [
                 {"role": "user", "content": final_user_text},
-            ]
+                ]
+            )
 
         # Keep all images before text payload in enhanced mode.
         content_parts = [
@@ -703,16 +723,55 @@ class QueryMixin:
         ]
         content_parts.append({"type": "text", "text": final_user_text})
 
-        return [
-            {
-                "role": "system",
-                "content": final_system,
-            },
-            {
-                "role": "user",
-                "content": content_parts,
-            },
-        ]
+        return (
+            [
+                {
+                    "role": "system",
+                    "content": final_system,
+                },
+            ]
+            + history_messages
+            + [
+                {
+                    "role": "user",
+                    "content": content_parts,
+                },
+            ]
+        )
+
+    def _build_query_history_messages(
+        self,
+        conversation_history: list[dict[str, Any]] | None,
+        history_summary: str | None,
+    ) -> list[dict[str, str]]:
+        history_messages: list[dict[str, str]] = []
+
+        normalized_summary = normalize_optional_instruction_text(history_summary)
+        if normalized_summary:
+            history_messages.append(
+                {
+                    "role": "assistant",
+                    "content": f"Conversation summary:\n{normalized_summary}",
+                }
+            )
+
+        for msg in conversation_history or []:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role", "")).strip()
+            if role not in {"system", "user", "assistant"}:
+                continue
+            content = msg.get("content")
+            if isinstance(content, (dict, list)):
+                content = json.dumps(content, ensure_ascii=False)
+            else:
+                content = str(content or "")
+            content = content.strip()
+            if not content:
+                continue
+            history_messages.append({"role": role, "content": content})
+
+        return history_messages
 
     async def _call_vlm_with_multimodal_content(self, messages: List[Dict]) -> str:
         """

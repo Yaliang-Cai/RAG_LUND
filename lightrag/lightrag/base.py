@@ -25,6 +25,7 @@ from .constants import (
     DEFAULT_MAX_RELATION_TOKENS,
     DEFAULT_MAX_TOTAL_TOKENS,
     DEFAULT_HISTORY_TURNS,
+    DEFAULT_IMAGE_TOKEN_ESTIMATE_PER_IMAGE,
     DEFAULT_OLLAMA_MODEL_NAME,
     DEFAULT_OLLAMA_MODEL_TAG,
     DEFAULT_OLLAMA_MODEL_SIZE,
@@ -141,6 +142,9 @@ class QueryParam:
     Format: [{"role": "user/assistant", "content": "message"}].
     """
 
+    history_summary: str | None = None
+    """Optional condensed conversation summary sent to LLM context."""
+
     # TODO: deprecated. No longer used in the codebase, all conversation_history messages is send to LLM
     history_turns: int = int(os.getenv("HISTORY_TURNS", str(DEFAULT_HISTORY_TURNS)))
     """Number of complete conversation turns (user-assistant pairs) to consider in the response context."""
@@ -169,11 +173,41 @@ class QueryParam:
     """
 
     multimodal_top_k: int | None = None
-    """Maximum number of multimodal chunks to keep after reranking.
-    When set, multimodal chunks (is_multimodal=True) are capped at this number
-    and the remaining chunk_top_k budget goes to text-only chunks.
-    Default None means no separation (backward compatible).
+    """Maximum number of images to attach in VLM-enhanced answering.
+    Retrieval/chunk selection remains strict rerank order + chunk_top_k.
+    Chunks that are not sent as images still remain as text context.
+    Default None means no image cap override.
     """
+
+    image_token_estimate_per_image: int = int(
+        os.getenv(
+            "IMAGE_TOKEN_ESTIMATE_PER_IMAGE",
+            str(DEFAULT_IMAGE_TOKEN_ESTIMATE_PER_IMAGE),
+        )
+    )
+    """Fallback input-token reserve per image when image metadata cannot be read."""
+
+    image_size_for_token_estimate: int = int(
+        os.getenv("IMAGE_SIZE_FOR_TOKEN_ESTIMATE", "448")
+    )
+    patch_size_for_token_estimate: int = int(
+        os.getenv("PATCH_SIZE_FOR_TOKEN_ESTIMATE", "14")
+    )
+    downsample_ratio_for_token_estimate: float = float(
+        os.getenv("DOWNSAMPLE_RATIO_FOR_TOKEN_ESTIMATE", "0.5")
+    )
+    min_dynamic_patch_for_token_estimate: int = int(
+        os.getenv("MIN_DYNAMIC_PATCH_FOR_TOKEN_ESTIMATE", "1")
+    )
+    max_dynamic_patch_for_token_estimate: int = int(
+        os.getenv("MAX_DYNAMIC_PATCH_FOR_TOKEN_ESTIMATE", "12")
+    )
+    use_thumbnail_for_token_estimate: bool = (
+        os.getenv("USE_THUMBNAIL_FOR_TOKEN_ESTIMATE", "true").lower() == "true"
+    )
+    image_wrapper_tokens_per_image: int = int(
+        os.getenv("IMAGE_WRAPPER_TOKENS_PER_IMAGE", "2")
+    )
 
 
 @dataclass

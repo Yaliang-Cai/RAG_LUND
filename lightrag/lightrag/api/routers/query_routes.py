@@ -85,6 +85,11 @@ class QueryRequest(BaseModel):
         description="History messages are only sent to LLM for context, not used for retrieval. Format: [{'role': 'user/assistant', 'content': 'message'}].",
     )
 
+    history_summary: Optional[str] = Field(
+        default=None,
+        description="Optional summarized history text sent to LLM context (used to reduce raw multi-turn payload).",
+    )
+
     user_prompt: Optional[str] = Field(
         default=None,
         description="User-provided prompt for the query. If provided, this will be used instead of the default value from prompt template.",

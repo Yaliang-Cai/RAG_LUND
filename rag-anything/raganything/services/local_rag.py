@@ -294,6 +294,19 @@ def _should_use_ingest_schema(
     return use_schema, task_type, prompt_has_json, is_ingest_task
 
 
+def _is_entity_extraction_call(system_prompt: Any, prompt: Any) -> bool:
+    # LightRAG 索引抽取链路：extract + glean 两类 user prompt 共用同一 system role。
+    sys_text = str(system_prompt or "").lower()
+    user_text = str(prompt or "").lower()
+    return (
+        "knowledge graph specialist" in sys_text
+        and "extracting entities and relationships" in sys_text
+    ) or (
+        "extract entities and relationships from the input text" in user_text
+        or "based on the last extraction task" in user_text
+    )
+
+
 def build_llm_model_func(
     settings: LocalRagSettings,
     client: AsyncOpenAI,
@@ -306,6 +319,13 @@ def build_llm_model_func(
         history_messages = history_messages or []
         keyword_extraction = bool(kwargs.pop("keyword_extraction", False))
         cleaned_kwargs = _strip_internal_openai_kwargs(kwargs)
+        requested_max_tokens = cleaned_kwargs.pop("max_tokens", None)
+        if requested_max_tokens is not None:
+            max_tokens = int(requested_max_tokens)
+        elif _is_entity_extraction_call(system_prompt, prompt):
+            max_tokens = settings.ingest_max_tokens
+        else:
+            max_tokens = settings.query_max_tokens
         if keyword_extraction:
             cleaned_kwargs["response_format"] = GPTKeywordExtractionFormat
         messages = []
@@ -333,7 +353,7 @@ def build_llm_model_func(
                     model=model_name,
                     messages=messages,
                     temperature=settings.temperature,
-                    max_tokens=settings.query_max_tokens,
+                    max_tokens=max_tokens,
                     **cleaned_kwargs,
                 )
             else:
@@ -341,7 +361,7 @@ def build_llm_model_func(
                     model=model_name,
                     messages=messages,
                     temperature=settings.temperature,
-                    max_tokens=settings.query_max_tokens,
+                    max_tokens=max_tokens,
                     **cleaned_kwargs,
                 )
             message = response.choices[0].message

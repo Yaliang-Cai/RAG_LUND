@@ -1,19 +1,34 @@
+﻿## 固定执行流程（2026-02-27 新增，必须遵守）
+
+1. 修改前先读本文件
+- 先阅读本.md，确认当前阶段、保留项和禁用项。
+
+2. 修改后必须做逻辑级测试（不能只看编译）
+- 必测：主链路、一致性、边界、反例。
+
+3. 测试方式
+- 优先内联测试，不落地临时文件；若创建临时文件，测试后删除。
+
+4. 完成标准
+- 语法通过 + 逻辑通过 + 边界/反例通过，三者同时满足才算完成。
+
+5. 先查现有功能，再做增量完善
+- 修改前先检索同名/相近能力（如 normalize、filter、repack、token 预算），确认是否已实现。
+- 若已有实现，优先复用并最小改动；禁止平行新增冗余逻辑。
+
 # RAGAnything LocalRAG VLM 重构记录
 
-## 0. 防错原则（必须遵守）
+## 防错原则（必须遵守）
 
 - 不能只做 `py_compile` 语法检查；必须补做“链路一致性 + 关键分支行为”检查。
-- 每次改动都要验证：
-  - `enhanced / non-enhanced` 是否在预期场景下保持同构（仅保留必要差异）。
-  - fallback 分支是否会遗留上游参数，造成隐性预算/行为偏差。
-  - 文本重组是否处理边界格式（例如换行导致的 marker/占位符断裂）。
+- 每次改动都要验证：用边界情况，反例测试。
 - 反例复盘（本项目已发生）：曾出现“编译通过，但重组逻辑与原始 prompt 形态不契合”的问题（如换行场景下占位符处理偏差）。
 - 以后执行标准：参考同事做法，至少包含轻量行为断言或等价链路检查，不允许仅以“能编译”作为完成标准。
 
 - 日期：2026-02-20
 - 状态：已完成（本轮）
 - 范围：`local_rag.py`、`evaluate.py`、`examples/raganything_local_v2.py`
-- 不在范围：`raganything/query.py`（保持不改）
+
 
 ## 一、相较改造前的核心变化
 
@@ -1091,3 +1106,328 @@ def replace_image_path(match):
 - 逻辑检查通过（轻量断言）：
   - `repack_query_messages(...)`：空 `Additional Instructions` 清理、尾句选择、`---User Query---` 清理符合预期。
   - `query.py`：已确认 fallback 分支存在 `fallback_kwargs.pop("multimodal_top_k", None)`。
+
+## 增量更新（2026-02-27，Rerank-First + Image-Cap-Only）
+
+- chunk 选择改为：rerank -> chunk_top_k -> token 截断。
+- multimodal_top_k 仅用于图片转换阶段的图片上限，不再参与 chunk 分池。
+- 无图回退时移除 multimodal_top_k，回退行为与 non-enhanced 一致。
+- 已做逻辑测试：
+  - 反例验证通过（高分文本不再被提前排除）。
+  - 候选数量不再超过 chunk_top_k。
+  - 图片上限按 prompt 顺序生效。
+
+##  增量更新（2026-02-27，抽取与查询 token 上限分离）
+
+- 目标：将“索引实体抽取”上限提升到 8192，同时保持“query 回答”上限 2048。
+- 原状态（本地封装）：
+  - `llm_model_func` 固定使用 `query_max_tokens`，导致实体抽取也被限制在 2048。
+- 本次改动：
+  - 在 `raganything/services/local_rag.py` 增加 `_is_entity_extraction_call(system_prompt, prompt)` 识别 LightRAG 的 extract/glean 抽取请求。
+  - `llm_model_func` 的 `max_tokens` 选择逻辑改为：
+    - 若显式传入 `max_tokens`：优先使用传入值；
+    - 否则若判定为实体抽取：使用 `ingest_max_tokens`（当前默认 8192）；
+    - 其他情况：使用 `query_max_tokens`（当前默认 2048）。
+  - 同时先从 `cleaned_kwargs` 弹出 `max_tokens` 再统一注入，避免重复关键字冲突。
+- 行为结果：
+  - 索引实体抽取链路（含 continue/glean）默认按 8192 上限；
+  - query 文本/多模态回答链路保持 2048；
+  - 入库多模态分析链路继续使用 `ingest_max_tokens`（8192），不变。
+- 校验：
+  - `python -m py_compile raganything/services/local_rag.py` 通过。
+
+## 待改动需求（2026-02-27，Entity 去重与 entity_key 评估）
+
+### 需求背景与问题
+
+- 当前图谱主键仍以 `entity_name` 直接驱动（节点聚合、关系端点、向量索引均使用实体名）。
+- 同义写法/大小写/标点差异会造成“同一实体拆成多个节点”，影响：
+  - 图谱 merge 一致性（同实体被重复建点）；
+  - query 检索命中率（相关关系被分散）；
+  - 上下文拼装质量（实体信息割裂）。
+
+### 风险判断（为什么不能直接改主键）
+
+- 若直接把主键从 `entity_name` 切换到 `entity_key`，会影响全链路：
+  - `merge_nodes_and_edges` 的节点聚合键；
+  - 关系 `src_id/tgt_id` 的端点一致性；
+  - graph/vdb 的 upsert/get 键；
+  - query 侧实体/关系检索与最终展示映射。
+- 属于高风险重构，若一次到位易引入断链或回归。
+
+### 改动目标（先低风险）
+
+- 目标不是立即替换主键，而是“先提升去重质量且不破坏现有链路”：
+  - 保留 `entity_name` 作为当前主键与展示名；
+  - 新增 `entity_key` 作为内部归一键（NFKC + casefold + 空白/标点归一）用于别名对齐与去重判断；
+  - 在 merge 前做名称归并映射，减少重复实体落库。
+
+### 计划改动方案（分阶段）
+
+1. Phase-1（低风险，优先）
+- 新增 `entity_key` 计算函数（仅用于归并判定，不替换主键）。
+- 在 `merge_nodes_and_edges` 前增加轻量归并步骤：
+  - 同 `entity_key` 的候选进行合并；
+  - 关系端点同步按映射重写；
+  - 最终仍以统一后的 `entity_name` 进入现有 upsert 流程。
+- 日志增加归并统计（合并前后实体数、命中规则）。
+
+2. Phase-2（可选，谨慎）
+- 增加 alias 存储（可持久化）：
+  - 自动确认高置信别名映射；
+  - 低置信映射保留人工确认入口。
+- 用 alias 提升跨文档增量入库的一致性。
+
+3. Phase-3（暂不执行）
+- 评估是否将 `entity_key` 升级为主键（高风险，需要全链路联调后再决策）。
+
+### 验收标准（本需求）
+
+- 不破坏当前 query/ingest 行为与接口；
+- 图谱实体重复率下降（同义名拆点减少）；
+- 关系端点不丢失、查询结果不回退；
+- 通过语法检查 + 逻辑反例验证（别名、大小写、标点差异样本）。
+
+##  增量更新（2026-02-27，Entity 抽取精度清洗 + 去除 soft_path）
+
+### 改动目标
+
+- 解决 index 阶段 precision 不足：路径碎片、版面/结构元数据、表图编号、通用词残片进入图谱。
+- 移除 `soft_path` 规则，避免把 `foo/bar/baz` 这类非路径文本误判为路径。
+
+### 代码改动
+
+- 文件：`lightrag/lightrag/operate.py`
+- 1) 路径判定收敛
+  - 删除 `SOFT_PATH` 分支，仅保留硬规则：
+    - Windows/UNC/Unix 绝对路径
+    - 相对路径前缀 `./ ../ ~/`
+    - 裸文件名+扩展名
+  - 保留 `A/B`、`input/output` 等白名单短语不过滤。
+
+- 2) 实体名轻量归一（不改主键机制）
+  - 新增 `_normalize_entity_surface(...)`：
+    - `_` 连接词转空格（`Game_Boy -> Game Boy`）
+    - 词间连字符空格规范化（`side - scrolling -> side-scrolling`）
+    - NFKC 归一 + 规则化大小写（无硬编码词典）：
+      - 缩写样式（如 `kglm`）按规则归一为 `KGLM`
+      - 普通小写短语按词形归一（避免死板映射表）
+
+- 3) 低质量实体过滤
+  - 新增 `_classify_low_quality_entity(...)`，过滤类别：
+    - 路径碎片：基于当前 chunk `content` 内可识别路径动态提取并过滤（关注“碎片命中”，非完整路径字符串匹配）
+    - 版面结构元数据：`Page Number/Footer Content/Bounding Box/...`
+    - 表图编号（仅编号，不过滤超长标题）：
+      - `Table 1`
+      - `Figure 2`
+    - 通用词/残片：`a/et/None/xt/...`
+    - `published by` 类发布语残留
+  - 实体过滤记录 reason 到日志。
+
+- 4) 关系端点同步过滤
+  - 在关系抽取中，对 `src/tgt` 同步执行归一与低质量判定；
+  - 任一端点命中低质量规则则丢弃该关系并记录 reason。
+
+### 逻辑校验
+
+- 语法：`python -m py_compile lightrag/lightrag/operate.py` 通过。
+- 内联样例检查通过（未新增测试文件）：
+  - `projects/evaluate_local/docbench_results/y50056788` 这类路径碎片被按 chunk `content` 中路径动态命中并过滤；
+  - `images/mineru outputs/hybrid auto` 作为路径碎片同样可命中过滤（不再放行）；
+  - `Page Number` / `Table 1` / `a` 被正确过滤；
+  - `kglm -> KGLM`，`Game_Boy -> Game Boy` 归一正确；
+  - `foo/bar/baz` 在移除 soft_path 后不再按路径过滤。
+
+### 说明
+
+- 你确认“超长标题正常”，因此不再对 `Table 1: ...` 这类 caption 标题做实体层硬过滤。
+
+## 增量更新（2026-02-27，路径碎片过滤与 chunk content 对齐）
+
+### 背景
+
+- 发现真实链路中，实体/关系抽取来源于 chunk `content`，而不是 `file_path` 文本本身。
+- 仅基于 `file_path` 的碎片过滤会漏掉 `content` 中出现的路径碎片（如 `docbench_results`、`evaluate_local`）。
+
+### 本次修正
+
+- 文件：`lightrag/lightrag/operate.py`
+- 路径碎片键计算改为：仅从 chunk `content` 中的可识别路径提取，不再混入 `file_path`。
+- 识别来源包括：
+  - `Image Path: ...` 行；
+  - 文本中的 Windows/Unix/相对路径片段。
+- 抽取结果处理阶段对实体与关系端点复用同一组 `path_fragment_keys`，避免重复计算。
+
+### 上游抽取约束补充
+
+- 文件：`lightrag/lightrag/prompt.py`
+- 在 `entity_extraction_system_prompt` 中新增：
+  - 实体排除规则：不抽取路径/路径碎片/文件名/纯版面元数据；
+  - 关系排除规则：任一端点违规则不输出关系。
+  - 将关系规则中的 `above` 改为显式锚点：`Entity Exclusion Rules in Section 1 (Entity Extraction & Output)`，降低中小模型理解歧义。
+
+### 校验
+
+- 语法：
+  - `python -m py_compile lightrag/lightrag/operate.py`
+  - `python -m py_compile lightrag/lightrag/prompt.py`
+- 逻辑（内联，不落地测试文件）：
+  - 当 `file_path` 仅为 basename（如 `P19-1598.pdf`）时，仍可从 chunk `content` 的路径行提取 `evaluate_local/docbench_results/mineru_outputs/hybrid_auto/images` 等碎片并命中过滤；
+  - 不提供 `content` 路径时，上述碎片不会被误判；
+  - `input/output` 仍由白名单放行，`/images` 仍按路径命中，数学表达式白名单不受影响。
+
+## 增量更新（2026-02-27，接入 history/image token 预算 + enhanced 历史对齐）
+
+### 改动目标
+
+- 将 `history_tokens` / `image_tokens` 真正纳入 `available_chunk_tokens` 预算，不改变 rerank 与 chunk 选取逻辑顺序。
+- 为后续“summary history”预留正式接口，避免只能传整段原始多轮对话。
+- 让 enhanced 与 non-enhanced 在 history 行为上保持一致（都可带历史上下文）。
+
+### 代码改动
+
+- 文件：`lightrag/lightrag/base.py`
+  - `QueryParam` 新增：
+    - `history_summary`：历史摘要文本（可选）。
+    - `image_token_estimate_per_image`：读图失败时的单图 token 兜底值。
+    - 动态估算参数：
+      - `image_size_for_token_estimate`
+      - `patch_size_for_token_estimate`
+      - `downsample_ratio_for_token_estimate`
+      - `min_dynamic_patch_for_token_estimate`
+      - `max_dynamic_patch_for_token_estimate`
+      - `use_thumbnail_for_token_estimate`
+      - `image_wrapper_tokens_per_image`
+
+- 文件：`lightrag/lightrag/constants.py`
+  - 新增 `DEFAULT_IMAGE_TOKEN_ESTIMATE_PER_IMAGE = 1024`（读不到图片尺寸时使用）。
+
+- 文件：`lightrag/lightrag/operate.py`
+  - 新增统一历史构造：
+    - `_build_effective_history_messages(query_param)`：
+      - `history_summary`（若有）先转为一条 summary 历史消息；
+      - 再拼接清洗后的 `conversation_history`。
+  - 新增 token 估算：
+    - `_estimate_history_tokens(...)`
+    - `_estimate_image_tokens_for_budget(...)`
+      - 按 `Image Path:` 从 chunk 内容提取候选图；
+      - 按 `multimodal_top_k` 截断；
+      - 可读图时按动态 patch 估算：
+        - `num_image_token = (image_size // patch_size)^2 * downsample_ratio^2`
+        - `image_tokens_i = num_patches_i * num_image_token + wrapper_tokens`
+        - `use_thumbnail=true` 且 `blocks != 1` 时加 thumbnail patch
+      - 读图失败时回退 `image_token_estimate_per_image`。
+  - 两条查询链预算均已接入：
+    - KG 查询预算：
+      - `available_chunk_tokens = max_total_tokens - (sys + kg + query + history + image + buffer)`
+    - naive 查询预算：
+      - `available_chunk_tokens = max_total_tokens - (sys + query + history + image + buffer)`
+  - 缓存一致性补充：
+    - query cache 的 `args_hash` / `queryparam` 增加 `history_signature`，避免不同历史命中同一缓存。
+  - LLM 调用统一改为发送 `effective_history_messages`（不仅 raw conversation）。
+
+- 文件：`lightrag/lightrag/api/routers/query_routes.py`
+  - `QueryRequest` 新增 `history_summary` 入参（API 接口可直接传）。
+
+- 文件：`raganything/raganything/query.py`
+  - enhanced 路径读取并传递 `conversation_history/history_summary`。
+  - `_build_vlm_messages_with_images(...)` 支持注入历史消息：
+    - system 在前；
+    - history（summary + 对话）中间；
+    - 当前 user 在后（含图片时仍是 `image_url(base64)+text` 结构）。
+  - 不改变图像推理输入格式：仍是 `data:image/jpeg;base64,...`。
+
+### 关键行为说明
+
+- rerank、chunk_top_k、token 截断顺序保持不变，只是把 history/image 预算提前扣减。
+- 目前若未传 `conversation_history/history_summary`，这两项 token 默认是 0（你当前“没开 history”场景不受影响）。
+- enhanced 与 non-enhanced 都支持历史：
+  - non-enhanced：走 LightRAG `history_messages`；
+  - enhanced：最终多模态 `messages` 也会带同一份历史。
+
+### 校验
+
+- 语法通过：
+  - `lightrag/lightrag/constants.py`
+  - `lightrag/lightrag/base.py`
+  - `lightrag/lightrag/operate.py`
+  - `lightrag/lightrag/api/routers/query_routes.py`
+  - `raganything/raganything/query.py`
+- 逻辑校验：
+  - 已完成静态链路检查（预算项、history 注入点、enhanced/non-enhanced 对齐点）。
+  - 本机当前 shell 缺少运行依赖（如 `python-dotenv`），未完成端到端运行态回归；后续建议在项目 venv 下跑你现有 `evaluate.py` 的 0-1 样本进行最终行为确认。
+
+## 增量更新（2026-02-27，改动后复核结论）
+
+### 复核范围
+
+- `lightrag/lightrag/constants.py`
+- `lightrag/lightrag/base.py`
+- `lightrag/lightrag/api/routers/query_routes.py`
+- `lightrag/lightrag/operate.py`
+- `rag-anything/raganything/query.py`
+
+### 复核结果（相较未改动前）
+
+- 已接入预算项：
+  - `available_chunk_tokens` 现已扣减 `history_tokens` 与 `image_tokens`。
+  - KG/naive 两条查询链都已接入，且为同一预算思路。
+- History 接口已对齐：
+  - 新增 `history_summary`，支持“摘要 + 原始 history”混合输入。
+  - enhanced 与 non-enhanced 都可带历史上下文。
+- 图片消息格式保持不变：
+  - 仍使用 `{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}}`。
+  - 本次只新增“图片 token 预算估算”，不改推理消息协议。
+- 缓存一致性增强：
+  - query cache 增加 `history_signature`，避免不同 history 误命中同一缓存。
+
+### 简洁性与冗余说明
+
+- 本轮没有新增独立测试文件，也未引入临时运行文件。
+- 变更集中在预算与 history 接口接入，未改动 rerank 主逻辑顺序。
+
+## 增量更新（2026-02-27，再次复检）
+
+### 复检结论
+
+- 本轮改动文件再次完成语法检查（`py_compile`）并通过。
+- 预算链路确认：
+  - KG/naive 的 `available_chunk_tokens` 都已扣减 `history_tokens + image_tokens`。
+  - 未开启 history 时 `history_tokens = 0`；无图场景 `image_tokens = 0`。
+- 协议确认：
+  - enhanced 发送图片仍为 base64 `image_url`，未改消息协议。
+- 代码简洁性：
+  - 本轮未新增冗余分支与临时测试文件，保持最小增量修改。
+
+### 未覆盖项说明
+
+- 当前环境仅完成静态与编译级复检，未在项目虚拟环境做端到端跑数。
+- 建议你在现有环境执行一次 0-1 样本（enhanced/non-enhanced 各一轮）做最终运行态确认。
+
+## 增量更新（2026-02-27，运行态测试执行结果）
+
+### 已执行并通过（本机可复现）
+
+- 边界测试（离线）：
+  - `multimodal_top_k=0` 时：`image_tokens=0`。
+  - `multimodal_top_k=1` 时：图片计数严格封顶为 1。
+  - `history` 为空时：`history_tokens=0`。
+  - 仅传 `history_summary`：可正常进入历史消息。
+- 反例测试（离线）：
+  - 无效图片路径：触发 `image_token_estimate_per_image` fallback。
+  - 超长 `history_summary`（5 万字符）：token 估算稳定，无异常。
+  - enhanced 无图回退：最终 user content 为纯文本。
+  - enhanced 有图：最终 user content 为 `image_url(base64)` 在前、文本在后。
+
+### 端到端测试阻断（本机环境）
+
+- `evaluate.py` 运行链路需要本机完整依赖与服务：
+  - 初始阻断：`sentence_transformers` 缺失（已通过 stub 方式仅验证 argparse/help 可起）。
+  - 关键阻断：本机 `localhost:8001/8002/8000` 均未启动（连接被拒绝），无法完成真实 E2E 推理回合。
+  - 数据阻断：`evaluate_local/DocBench` 下未见完整 DocBench 数据目录，无法直接跑 0-1 文档生成。
+
+### 本次补充工具
+
+- 新增图片 token 对齐脚本（仅测 image token）：
+  - `rag-anything/examples/image_token_alignment_test.py`
+  - 用途：对比“本地估算”与“vLLM prompt_tokens 差分”。
