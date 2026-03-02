@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 from lightrag.types import GPTKeywordExtractionFormat
-from lightrag.utils import EmbeddingFunc
+from lightrag.utils import EmbeddingFunc, Tokenizer
 from openai import AsyncOpenAI
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
@@ -36,6 +36,8 @@ from raganything.constants import (
     DEFAULT_TIKTOKEN_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL_PATH,
     DEFAULT_RERANK_MODEL_PATH,
+    DEFAULT_TOKENIZER_MODEL_PATH,
+    DEFAULT_VISION_MODEL_PATH,
     DEFAULT_WORKING_DIR_ROOT,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_LOG_DIR,
@@ -49,6 +51,8 @@ from raganything.constants import (
     DEFAULT_QUERY_MAX_TOKENS,
     DEFAULT_INGEST_MAX_TOKENS,
     DEFAULT_VLM_ENABLE_JSON_SCHEMA,
+    DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD,
+    DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE,
 )
 from raganything.query_message_repack import repack_query_messages
 
@@ -66,6 +70,8 @@ class LocalRagSettings:
     tiktoken_cache_dir: str = DEFAULT_TIKTOKEN_CACHE_DIR
     embedding_model_path: str = DEFAULT_EMBEDDING_MODEL_PATH
     rerank_model_path: str = DEFAULT_RERANK_MODEL_PATH
+    tokenizer_model_path: str = DEFAULT_TOKENIZER_MODEL_PATH
+    vision_model_path: str = DEFAULT_VISION_MODEL_PATH
 
     working_dir_root: str = DEFAULT_WORKING_DIR_ROOT
     output_dir: str = DEFAULT_OUTPUT_DIR
@@ -87,17 +93,31 @@ class LocalRagSettings:
     ingest_max_tokens: int = DEFAULT_INGEST_MAX_TOKENS
 
     vlm_enable_json_schema: bool = DEFAULT_VLM_ENABLE_JSON_SCHEMA
+    image_token_estimate_method: str = DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD
+    image_token_model_name_or_path: str = ""
+    image_wrapper_tokens_per_image: int = DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
         vllm_base = os.getenv("VLLM_API_BASE", DEFAULT_VLLM_API_BASE)
         vllm_key = os.getenv("VLLM_API_KEY", DEFAULT_VLLM_API_KEY)
         llm_name = os.getenv("LLM_MODEL_NAME", DEFAULT_LLM_MODEL_NAME)
+        vision_model_path = os.getenv("VISION_MODEL_PATH", DEFAULT_VISION_MODEL_PATH)
+        tokenizer_model_path = os.getenv(
+            "RAGANYTHING_TOKENIZER_MODEL_PATH",
+            os.getenv("TOKENIZER_MODEL_PATH", vision_model_path),
+        )
+        image_token_model_name_or_path = os.getenv(
+            "RAGANYTHING_IMAGE_TOKEN_MODEL_PATH",
+            os.getenv("IMAGE_TOKEN_MODEL_NAME_OR_PATH", vision_model_path),
+        )
 
         return cls(
             tiktoken_cache_dir=os.getenv("TIKTOKEN_CACHE_DIR", DEFAULT_TIKTOKEN_CACHE_DIR),
             embedding_model_path=os.getenv("RAGANYTHING_EMBEDDING_MODEL_PATH", DEFAULT_EMBEDDING_MODEL_PATH),
             rerank_model_path=os.getenv("RAGANYTHING_RERANK_MODEL_PATH", DEFAULT_RERANK_MODEL_PATH),
+            tokenizer_model_path=tokenizer_model_path,
+            vision_model_path=vision_model_path,
             log_dir=os.getenv("RAGANYTHING_LOG_DIR", DEFAULT_LOG_DIR),
             vllm_api_base=vllm_base,
             vllm_api_key=vllm_key,
@@ -121,6 +141,17 @@ class LocalRagSettings:
                 "RAGANYTHING_VLM_ENABLE_JSON_SCHEMA", str(DEFAULT_VLM_ENABLE_JSON_SCHEMA)
             ).lower()
             in {"1", "true", "yes", "y", "on"},
+            image_token_estimate_method=os.getenv(
+                "RAGANYTHING_IMAGE_TOKEN_ESTIMATE_METHOD",
+                DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD,
+            ),
+            image_token_model_name_or_path=image_token_model_name_or_path,
+            image_wrapper_tokens_per_image=int(
+                os.getenv(
+                    "RAGANYTHING_IMAGE_WRAPPER_TOKENS_PER_IMAGE",
+                    str(DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE),
+                )
+            ),
         )
 
 
@@ -188,6 +219,46 @@ def load_models(settings: LocalRagSettings) -> tuple[SentenceTransformer, CrossE
     )
     _MODEL_CACHE[key] = (st_model, reranker_model)
     return st_model, reranker_model
+
+
+class _HFTokenizerAdapter:
+    def __init__(self, hf_tokenizer: Any):
+        self._hf_tokenizer = hf_tokenizer
+
+    def encode(self, content: str) -> list[int]:
+        return self._hf_tokenizer.encode(content, add_special_tokens=False)
+
+    def decode(self, tokens: list[int]) -> str:
+        return self._hf_tokenizer.decode(tokens, skip_special_tokens=False)
+
+
+def build_lightrag_tokenizer(
+    model_name_or_path: str, logger: logging.Logger
+) -> Tokenizer:
+    model_name_or_path = (model_name_or_path or "").strip()
+    if not model_name_or_path:
+        raise ValueError(
+            "Tokenizer model path is empty. Set RAGANYTHING_TOKENIZER_MODEL_PATH."
+        )
+
+    try:
+        from transformers import AutoTokenizer
+
+        hf_tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=True,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to load Qwen tokenizer from '{model_name_or_path}'. "
+            "Set RAGANYTHING_TOKENIZER_MODEL_PATH to your local Qwen3-VL model directory."
+        ) from exc
+
+    logger.info("LightRAG tokenizer initialized from: %s", model_name_or_path)
+    return Tokenizer(
+        model_name=model_name_or_path,
+        tokenizer=_HFTokenizerAdapter(hf_tokenizer),
+    )
 
 
 def build_embedding_func(
@@ -587,12 +658,49 @@ def _safe_doc_id(name: str) -> str:
     return hashlib.md5(name.encode("utf-8")).hexdigest()
 
 
+def _normalize_qwen_image_token_method(method: str | None) -> str:
+    normalized = (method or "").strip().lower()
+    if not normalized:
+        normalized = DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD
+    if normalized == "qwen_vl":
+        return normalized
+    raise ValueError(
+        "Only Qwen-VL image token estimation is supported in this project. "
+        "Set RAGANYTHING_IMAGE_TOKEN_ESTIMATE_METHOD=qwen_vl."
+    )
+
+
 class LocalRagService:
     def __init__(self, settings: Optional[LocalRagSettings] = None):
         # 初始化双客户端：text/vision 可同端口也可分离部署。
         self.settings = settings or LocalRagSettings.from_env()
-        os.environ["TIKTOKEN_CACHE_DIR"] = self.settings.tiktoken_cache_dir
         self.logger = configure_logging(self.settings)
+        self.settings.image_token_estimate_method = _normalize_qwen_image_token_method(
+            self.settings.image_token_estimate_method
+        )
+        if not self.settings.image_token_model_name_or_path:
+            self.settings.image_token_model_name_or_path = (
+                self.settings.vision_model_path
+            )
+        if not self.settings.tokenizer_model_path:
+            self.settings.tokenizer_model_path = (
+                self.settings.image_token_model_name_or_path
+                or self.settings.vision_model_path
+            )
+
+        os.environ["IMAGE_TOKEN_ESTIMATE_METHOD"] = (
+            self.settings.image_token_estimate_method
+        )
+        os.environ["IMAGE_TOKEN_MODEL_NAME_OR_PATH"] = (
+            self.settings.image_token_model_name_or_path
+        )
+        os.environ["IMAGE_WRAPPER_TOKENS_PER_IMAGE"] = str(
+            self.settings.image_wrapper_tokens_per_image
+        )
+        self.lightrag_tokenizer = build_lightrag_tokenizer(
+            self.settings.tokenizer_model_path,
+            self.logger,
+        )
         _maybe_enable_internvl2_prompts(self.settings, self.logger)
 
         text_base, text_key, text_model = _resolve_text_endpoint(self.settings)
@@ -607,6 +715,11 @@ class LocalRagService:
             self.settings.query_max_tokens,
             self.settings.ingest_max_tokens,
             self.settings.vlm_enable_json_schema,
+        )
+        self.logger.info(
+            "Image token estimate configured: method=qwen_vl, model_path=%s, wrapper_tokens=%s",
+            self.settings.image_token_model_name_or_path,
+            self.settings.image_wrapper_tokens_per_image,
         )
 
         self.text_client = AsyncOpenAI(api_key=text_key, base_url=text_base)
@@ -643,7 +756,10 @@ class LocalRagService:
             llm_model_func=self.llm_model_func,
             vision_model_func=self.vision_model_func,
             embedding_func=self.embedding_func,
-            lightrag_kwargs={"rerank_model_func": self.rerank_func},
+            lightrag_kwargs={
+                "rerank_model_func": self.rerank_func,
+                "tokenizer": self.lightrag_tokenizer,
+            },
         )
 
     async def get_rag(self, doc_id: str) -> RAGAnything:
@@ -682,6 +798,21 @@ class LocalRagService:
 
     async def query(self, doc_id: str, query: str, **kwargs) -> str:
         rag = await self.get_rag(doc_id)
+        kwargs.setdefault(
+            "image_token_estimate_method",
+            self.settings.image_token_estimate_method,
+        )
+        kwargs.setdefault(
+            "image_token_model_name_or_path",
+            self.settings.image_token_model_name_or_path,
+        )
+        kwargs.setdefault(
+            "image_wrapper_tokens_per_image",
+            self.settings.image_wrapper_tokens_per_image,
+        )
+        kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
+            str(kwargs.get("image_token_estimate_method", ""))
+        )
         return await rag.aquery(query, **kwargs)
 
 

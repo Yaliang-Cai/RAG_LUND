@@ -20,6 +20,51 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=".env", override=False)
 
 
+def _is_valid_xml_char(char: str) -> bool:
+    code_point = ord(char)
+    return (
+        code_point in (0x9, 0xA, 0xD)
+        or 0x20 <= code_point <= 0xD7FF
+        or 0xE000 <= code_point <= 0xFFFD
+        or 0x10000 <= code_point <= 0x10FFFF
+    )
+
+
+def _sanitize_xml_text(value: str) -> str:
+    return "".join(ch for ch in value if _is_valid_xml_char(ch))
+
+
+def _sanitize_graph_for_graphml(graph: nx.Graph) -> tuple[nx.Graph, int]:
+    """Return a graph copy with XML-illegal chars removed from string attributes."""
+    sanitized_graph = graph.copy()
+    changed_fields = 0
+
+    def _clean_attr_dict(attr_dict: dict) -> int:
+        local_changes = 0
+        for key, value in list(attr_dict.items()):
+            if not isinstance(value, str):
+                continue
+            cleaned = _sanitize_xml_text(value)
+            if cleaned != value:
+                attr_dict[key] = cleaned
+                local_changes += 1
+        return local_changes
+
+    changed_fields += _clean_attr_dict(sanitized_graph.graph)
+
+    for _, node_data in sanitized_graph.nodes(data=True):
+        changed_fields += _clean_attr_dict(node_data)
+
+    if sanitized_graph.is_multigraph():
+        for _, _, _, edge_data in sanitized_graph.edges(keys=True, data=True):
+            changed_fields += _clean_attr_dict(edge_data)
+    else:
+        for _, _, edge_data in sanitized_graph.edges(data=True):
+            changed_fields += _clean_attr_dict(edge_data)
+
+    return sanitized_graph, changed_fields
+
+
 @final
 @dataclass
 class NetworkXStorage(BaseGraphStorage):
@@ -34,7 +79,12 @@ class NetworkXStorage(BaseGraphStorage):
         logger.info(
             f"[{workspace}] Writing graph with {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
         )
-        nx.write_graphml(graph, file_name)
+        sanitized_graph, changed_fields = _sanitize_graph_for_graphml(graph)
+        if changed_fields:
+            logger.warning(
+                f"[{workspace}] Sanitized {changed_fields} GraphML string fields with invalid XML characters"
+            )
+        nx.write_graphml(sanitized_graph, file_name)
 
     def __post_init__(self):
         working_dir = self.global_config["working_dir"]

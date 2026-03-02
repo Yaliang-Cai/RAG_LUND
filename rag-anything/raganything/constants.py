@@ -83,16 +83,18 @@ DEFAULT_CHUNK_TOP_K = 10  # default and max allowed value for chunk_top_k
 # =============================================================================
 # Local deployment — model paths
 # =============================================================================
-DEFAULT_TIKTOKEN_CACHE_DIR = "/data/h50056787/workspaces/lightrag/tiktoken_cache"
+DEFAULT_TIKTOKEN_CACHE_DIR = "/data/y50056788/Yaliang/projects/lightrag/tiktoken_cache"
 DEFAULT_EMBEDDING_MODEL_PATH = "/data/h50056787/models/bge-m3"
 DEFAULT_RERANK_MODEL_PATH = "/data/h50056787/models/bge-reranker-v2-m3"
+DEFAULT_VISION_MODEL_PATH = "/data/y50056788/Yaliang/models/Qwen3-VL-30B-A3B-Instruct-FP8"
+DEFAULT_TOKENIZER_MODEL_PATH = DEFAULT_VISION_MODEL_PATH
 
 # =============================================================================
 # Local deployment — LLM / VLM service
 # =============================================================================
 DEFAULT_VLLM_API_BASE = "http://localhost:8001/v1"
 DEFAULT_VLLM_API_KEY = "EMPTY"
-DEFAULT_LLM_MODEL_NAME = "OpenGVLab/InternVL2-26B-AWQ"
+DEFAULT_LLM_MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 DEFAULT_DEVICE = "cuda:0"
 
 # =============================================================================
@@ -108,6 +110,8 @@ DEFAULT_INGEST_MAX_TOKENS = 8192
 # Local deployment — VLM parameters
 # =============================================================================
 DEFAULT_VLM_ENABLE_JSON_SCHEMA = True
+DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD = "qwen_vl"
+DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE = 2
 
 # =============================================================================
 # Logging

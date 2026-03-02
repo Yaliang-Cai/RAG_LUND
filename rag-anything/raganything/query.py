@@ -19,13 +19,16 @@ from raganything.constants import (
 )
 from raganything.query_message_repack import (
     build_answer_suffix,
-    normalize_optional_instruction_text,
     repack_query_messages,
 )
 from raganything.utils import (
     get_processor_for_type,
     encode_image_to_base64,
     validate_image_file,
+)
+
+ENHANCED_VLM_UPSTREAM_SYSTEM_PROMPT = (
+    "You are a helpful assistant that can analyze both text and image content."
 )
 
 
@@ -354,11 +357,13 @@ class QueryMixin:
         # Cap only how many image paths are converted to image inputs.
         # Retrieval context itself remains strict rerank order.
         kwargs.setdefault("multimodal_top_k", DEFAULT_MULTIMODAL_TOP_K)
-        conversation_history = kwargs.get("conversation_history") or []
-        history_summary = kwargs.get("history_summary")
-        image_cap: int = kwargs["multimodal_top_k"]
         query_param = QueryParam(mode=mode, only_need_prompt=True, **kwargs)
-        raw_prompt = await self.lightrag.aquery(query, param=query_param)
+        image_cap = query_param.multimodal_top_k
+        if image_cap is None:
+            image_cap = DEFAULT_MULTIMODAL_TOP_K
+        raw_prompt = await self.lightrag.aquery(
+            query, param=query_param, system_prompt=system_prompt
+        )
 
         self.logger.debug("Retrieved raw prompt from LightRAG")
 
@@ -385,8 +390,8 @@ class QueryMixin:
             enhanced_prompt,
             query,
             system_prompt,
-            conversation_history=conversation_history,
-            history_summary=history_summary,
+            conversation_history=query_param.conversation_history,
+            history_summary=query_param.history_summary,
         )
 
         # 4. Call VLM for question answering
@@ -654,7 +659,7 @@ class QueryMixin:
         self,
         enhanced_prompt: str,
         user_query: str,
-        system_prompt: str,
+        system_prompt: str | None,
         conversation_history: list[dict[str, Any]] | None = None,
         history_summary: str | None = None,
     ) -> List[Dict]:
@@ -671,25 +676,23 @@ class QueryMixin:
         """
         images_base64 = getattr(self, "_current_images_base64", [])
         has_images = bool(images_base64)
-        optional_system_prompt = normalize_optional_instruction_text(system_prompt)
-
-        base_system_prompt = "You are a helpful assistant that can analyze both text and image content to provide comprehensive answers."
-        upstream_system = (
-            f"{base_system_prompt}\n\n{optional_system_prompt}"
-            if optional_system_prompt
-            else base_system_prompt
-        )
 
         repacked = repack_query_messages(
             enhanced_prompt,
             user_query,
-            upstream_system=upstream_system,
+            upstream_system=ENHANCED_VLM_UPSTREAM_SYSTEM_PROMPT,
             has_images=has_images,
         )
         if repacked:
             final_system, final_user_text = repacked
         else:
-            final_system = upstream_system
+            base_system = str(system_prompt or "").strip()
+            if base_system:
+                final_system = (
+                    f"{ENHANCED_VLM_UPSTREAM_SYSTEM_PROMPT}\n\n{base_system}"
+                )
+            else:
+                final_system = ENHANCED_VLM_UPSTREAM_SYSTEM_PROMPT
             suffix = build_answer_suffix(has_images=has_images)
             final_user_text = (
                 f"Context:\n{enhanced_prompt}\n\n"
@@ -702,16 +705,14 @@ class QueryMixin:
             history_summary=history_summary,
         )
 
+        messages: list[dict[str, Any]] = []
+        if final_system:
+            messages.append({"role": "system", "content": final_system})
+        messages.extend(history_messages)
+
         if not has_images:
-            return (
-                [
-                {"role": "system", "content": final_system},
-                ]
-                + history_messages
-                + [
-                {"role": "user", "content": final_user_text},
-                ]
-            )
+            messages.append({"role": "user", "content": final_user_text})
+            return messages
 
         # Keep all images before text payload in enhanced mode.
         content_parts = [
@@ -723,21 +724,8 @@ class QueryMixin:
         ]
         content_parts.append({"type": "text", "text": final_user_text})
 
-        return (
-            [
-                {
-                    "role": "system",
-                    "content": final_system,
-                },
-            ]
-            + history_messages
-            + [
-                {
-                    "role": "user",
-                    "content": content_parts,
-                },
-            ]
-        )
+        messages.append({"role": "user", "content": content_parts})
+        return messages
 
     def _build_query_history_messages(
         self,
@@ -746,7 +734,7 @@ class QueryMixin:
     ) -> list[dict[str, str]]:
         history_messages: list[dict[str, str]] = []
 
-        normalized_summary = normalize_optional_instruction_text(history_summary)
+        normalized_summary = str(history_summary or "").strip()
         if normalized_summary:
             history_messages.append(
                 {
@@ -761,11 +749,11 @@ class QueryMixin:
             role = str(msg.get("role", "")).strip()
             if role not in {"system", "user", "assistant"}:
                 continue
-            content = msg.get("content")
+            content = msg.get("content", "")
             if isinstance(content, (dict, list)):
                 content = json.dumps(content, ensure_ascii=False)
             else:
-                content = str(content or "")
+                content = str(content)
             content = content.strip()
             if not content:
                 continue
@@ -783,24 +771,16 @@ class QueryMixin:
         Returns:
             str: VLM response result
         """
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("VLM messages must be a non-empty list.")
+        if not any(
+            isinstance(msg, dict) and msg.get("role") == "user" for msg in messages
+        ):
+            raise ValueError("VLM messages must include at least one user message.")
+
         try:
-            user_message = messages[1]
-            content = user_message["content"]
-            system_prompt = messages[0]["content"]
-
-            if isinstance(content, str):
-                # Pure text mode
-                result = await self.vision_model_func(
-                    content, system_prompt=system_prompt
-                )
-            else:
-                # Multimodal mode - pass complete messages directly to VLM
-                result = await self.vision_model_func(
-                    "",  # Empty prompt since we're using messages format
-                    messages=messages,
-                )
-
-            return result
+            # Always forward the complete chat history + current user payload.
+            return await self.vision_model_func("", messages=messages)
 
         except Exception as e:
             self.logger.error(f"VLM call failed: {e}")

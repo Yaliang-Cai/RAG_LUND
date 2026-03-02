@@ -1454,3 +1454,196 @@ def replace_image_path(match):
 
 - `python -m py_compile raganything/services/local_rag.py` 通过。
 - 代码检索确认已无调用层 `max_tokens` 覆盖入口。
+
+## 增量更新（2026-03-02，控制字符与 GraphML 安全写入）
+
+### 背景
+- 在 `docbench_46` 的 GraphML 中出现了 XML 非法控制字符（典型是 `\x08` / `\x0c`）。
+- 触发方式与公式类文本中的 LaTeX 命令有关（例如 `\\boldsymbol`、`\\frac` 在错误转义下可能落成控制字符）。
+- 结果是图文件可写但不可再读，LightRAG 初始化报 `not well-formed (invalid token)`。
+
+### 本次改动
+
+1) `raganything/modalprocessors.py`（入口修复）
+- 新增统一清洗函数：
+  - 将 `\x08 -> "\\b"`、`\x0c -> "\\f"`，尽量保留 LaTeX 语义；
+  - 再执行控制字符清理（复用 `sanitize_text_for_encoding`），避免非法字符入库。
+- 在四类解析路径统一接入清洗：
+  - image: `_parse_response`
+  - table: `_parse_table_response`
+  - equation: `_parse_equation_response`
+  - generic: `_parse_generic_response`
+- 解析失败 fallback 返回内容也走同一清洗，避免错误链路把脏字符写入图。
+
+2) `lightrag/kg/networkx_impl.py`（存储兜底）
+- 在 `write_nx_graph` 前新增 GraphML 安全过滤：
+  - 对 graph / node / edge 的所有字符串属性执行 XML 合法字符过滤；
+  - 移除 XML 1.0 非法字符后再写盘；
+  - 若发生清洗，打印 warning 统计变更字段数。
+- 目标：即使上游漏网，图文件也不再被写坏。
+
+### 兼容性与行为说明
+- 本次仅做“字符串安全化”与“写盘防护”，不改变召回/重排/问答主流程。
+- 不改官方 query 链路与提示词结构。
+- 对正常样本无行为变化；仅在含非法控制字符时触发修复。
+
+### 校验
+- 已通过语法检查：
+  - `python -m py_compile raganything/raganything/modalprocessors.py`
+  - `python -m py_compile lightrag/lightrag/kg/networkx_impl.py`
+
+## 增量更新（2026-03-02，补录：Qwen3-VL Token + Query Pipeline 同构）
+
+### 本次补录背景
+- 今天已完成一批关键改动，但未完整回填到本文件。
+- 本节补录“已执行且已验证”的代码与结论，避免后续排障信息断层。
+
+### 已执行改动（代码）
+
+1) `raganything/raganything/query.py`（enhanced/non-enhanced pipeline 同构）
+- 修复“固定索引假设”问题：
+  - 不再按 `messages[1]` 判定 user 消息；
+  - 改为校验后统一透传完整 `messages` 到 `vision_model_func("", messages=messages)`。
+- 与 non-enhanced 对齐消息组装骨架：
+  - 统一为 `[system?] + history_messages + [current_user]`。
+- enhanced 仅保留两处必要差异：
+  - 额外 prepend 固定上游 system：
+    - `You are a helpful assistant that can analyze both text and image content.`
+  - user 尾句使用 images 版本：
+    - `Please answer based on the context and images provided.`
+  - non-enhanced 尾句仍是：
+    - `Please answer based on the context provided.`
+- `aquery_vlm_enhanced(...)` 改为从同一个 `QueryParam` 读取：
+  - `multimodal_top_k`、`conversation_history`、`history_summary`，避免参数源分叉。
+
+2) `lightrag/lightrag/base.py`、`lightrag/lightrag/operate.py`、`raganything/services/local_rag.py`（Qwen3-VL token 路径收敛）
+- `image_token_estimate_method` 收敛为仅支持 `qwen_vl`。
+- 图像 token 估算统一走 Qwen 处理器：
+  - `AutoImageProcessor` + `image_grid_thw` + `merge_size`。
+- 坏路径图片不计 token（仅统计可读且可解析图片）。
+- 新增显式依赖保护：
+  - 缺少 `Pillow` 时直接报错，不再静默跳过导致预算失真。
+- `local_rag` 注入 Qwen tokenizer 到 LightRAG tokenizer 链路。
+
+3) `lightrag/lightrag/operate.py`（噪声实体规则边界修正）
+- 保留 `url`（词项）为噪声实体（应过滤）。
+- 保持 URL 地址白名单：
+  - 如 `https://...` 不作为噪声词误删（按路径/URL 白名单逻辑放行）。
+
+4) `rag-anything/start_server_qwen3_vl.sh`
+- 修复脚本乱码与注释吞行问题（`source` 行恢复为可执行）。
+- 统一为最小可执行启动脚本（含 `set -euo pipefail`）。
+
+### 验证结果（本轮）
+- 语法检查：
+  - 本轮改动的 Python 文件 `py_compile` 全通过。
+- 逻辑断言（内联）：
+  - enhanced/non-enhanced 同构与差异边界验证通过；
+  - history 场景不再受固定索引错位影响；
+  - `url` 词项过滤 + 真实 URL 放行验证通过；
+  - GraphML 安全清洗验证通过。
+
+## 增量更新（2026-03-02，补录：index 实体/路径过滤强化）
+
+### 背景
+- 今天对 `lightrag/lightrag/operate.py` 的索引清洗规则做了补强，但前面文档未单列记录。
+- 本节补录“实体过滤 + 路径判定 + 关系端点过滤”相关改动。
+
+### 代码补录（`operate.py`）
+
+1) 低质量实体规则补强
+- layout metadata 增补：
+  - `image path`
+- generic noise 增补：
+  - `content`、`analysis`、`method`、`results`、`source`、`total`、`team`、`list`、`url`
+- 新增规则标签：
+  - `image_path_label`：`Image Path...`
+  - `page_number_label`：`Page N`
+  - `coordinate_label`：`Coordinates [x, y, ...]`
+  - `coordinate_metadata`：带坐标数组的 metadata 文本
+  - `image_stem_no_ext`：`image_xxxx` 这类无扩展名伪实体
+
+2) 路径判定规则补强
+- 新增 `_is_relative_multisegment_path(...)`：
+  - 将“3 段及以上的相对路径样式”判定为路径（`relative_multisegment`）。
+- 保持 URL 白名单优先：
+  - 命中 URL scheme（如 `https://...`）返回 `url_scheme_whitelist`，不作为路径噪声处理。
+
+3) 生效位置
+- 实体过滤：
+  - `_classify_file_or_folder_path(...)` + `_classify_low_quality_entity(...)`
+- 关系端点过滤：
+  - source/target 同步复用上述规则，保持实体与关系口径一致。
+
+### 边界口径（本次确认）
+- “`url` 词项”是噪声实体，应过滤。
+- “真实 URL 地址”不是噪声词，不应误删（由 URL 白名单保护）。
+
+### 本轮校验
+- 语法：
+  - `python -m py_compile lightrag/lightrag/operate.py` 通过。
+- 逻辑断言（内联）：
+  - `url` -> `generic_noise`；
+  - `https://example.com/a/b` -> 非低质量实体（不误删）。
+
+## 增量更新（2026-03-02，补录遗漏：constants/evaluate/对齐脚本）
+
+### 1) `raganything/constants.py`
+- 默认模型与路径切换到 Qwen3-VL：
+  - `DEFAULT_LLM_MODEL_NAME = Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`
+  - `DEFAULT_VISION_MODEL_PATH`、`DEFAULT_TOKENIZER_MODEL_PATH`
+- 新增默认图像预算参数：
+  - `DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD = qwen_vl`
+  - `DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE = 2`
+
+### 2) `evaluate_local/DocBench/evaluate.py`
+- 评测链路切换到 Qwen3-VL：
+  - `RAG_MODEL_NAME`、`QWEN3_VL_MODEL_PATH`
+- 配置收敛函数：
+  - `_build_docbench_settings()`
+  - `_build_raw_prompt_query_kwargs()`
+  - `_build_experiment_config()`
+- `statistics.json` 新增 `experiment_config`，用于显式记录当次实验参数。
+
+### 3) `examples/image_token_alignment_test.py`
+- 对齐脚本从旧动态 patch 估算改为 Qwen 估算：
+  - `AutoImageProcessor` + `image_grid_thw` + `merge_size`
+- 新增 `--model-path`，并默认读取本地 Qwen3-VL 模型路径。
+
+### 本轮校验
+- `py_compile`：
+  - `raganything/constants.py`
+  - `evaluate_local/DocBench/evaluate.py`
+  - `examples/image_token_alignment_test.py`
+- 脚本逻辑校验：本地估算公式与 `operate.py` 中 Qwen 路径一致。
+
+## 待计划补充（2026-03-02，Index 健康检查：重复/孤儿/悬挂）
+
+### 背景
+- 今天讨论过 index 侧“数据健康”问题，但尚未形成最终实现。
+- 当前文档已有 `entity_key` 方向（去重）计划；本节补充“图结构健康检查”维度。
+
+### 待讨论问题（挂起）
+1. 重复节点（duplicates）
+- 同义实体分裂、大小写/标点变体造成多节点并存。
+- 需要明确“检测阶段”与“修复阶段”是否分离。
+
+2. 孤儿节点（orphans）
+- 节点存在但缺少有效边或缺少可追溯来源关联。
+- 需要明确“仅告警”还是“自动清理”策略。
+
+3. 悬挂关系（dangling edges）
+- 关系边存在但 source/target 在图中不存在。
+- 旧图/外部删改/异常迁移导致的历史脏数据兜底项，而不是当前 merge 主路径会常规产生的问题。
+
+### 初步计划（未执行）
+1. 先做体检报告，不自动修复
+- 输出 duplicates/orphans/dangling 的计数和样本 ID。
+- 将报告挂到 index 后处理日志与统计文件。
+
+2. 再做可回滚修复（第二阶段）
+- 去重合并、孤儿清理、悬挂边修复分别独立开关。
+- 所有修复操作保留 before/after 快照与回滚入口。
+
+### 当前状态
+- 本节仅为待计划/待讨论挂起，尚未提交对应代码改动。

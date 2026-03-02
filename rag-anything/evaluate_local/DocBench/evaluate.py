@@ -6,15 +6,15 @@ DocBench Evaluation Script for RAG-Anything Local (Manual Server Mode)
 
 使用流程：
 ---------
-1. 手动启动 InternVL2-26B-AWQ 服务（端口 8001）
+1. 手动启动 Qwen3-VL-30B-A3B-Instruct-FP8 服务（端口 8001）
    cd /data/y50056788/Yaliang/projects/lightrag
-   bash start_server_internvl2.sh
+   bash start_server_qwen3_vl.sh
 
 2. 生成系统答案（可后台运行）
    python evaluate.py --mode generate
    或：nohup python evaluate.py --mode generate > run_generate.log 2>&1 &
 
-3. 停止 InternVL2-26B-AWQ，启动 Qwen2.5-32B（端口 8002）
+3. 停止 Qwen3-VL 服务，启动 Qwen2.5-32B（端口 8002）
    # 在server终端按 Ctrl+C
    bash start_server_qwen2.5_32b_awq.sh
 
@@ -76,11 +76,12 @@ OUTPUT_MD_DIR = OUTPUT_DIR / "mineru_outputs"
 OUTPUT_MD_DIR.mkdir(parents=True, exist_ok=True)
 
 # API 配置
-RAG_API_BASE = "http://localhost:8001/v1"      # InternVL2-26B-AWQ（生成答案）
+RAG_API_BASE = "http://localhost:8001/v1"      # Qwen3-VL-30B-A3B-Instruct-FP8（生成答案）
 JUDGE_API_BASE = "http://localhost:8002/v1"    # Qwen2.5-32B（评估）
 RAG_API_KEY = "EMPTY"
+QWEN3_VL_MODEL_PATH = "/data/y50056788/Yaliang/models/Qwen3-VL-30B-A3B-Instruct-FP8"
 
-RAG_MODEL_NAME = "OpenGVLab/InternVL2-26B-AWQ"
+RAG_MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 JUDGE_MODEL_NAME = "Qwen/Qwen2.5-32B-Instruct"
 
 # Query 参数（DocBench 优化）
@@ -90,9 +91,9 @@ DOCBENCH_QUERY_PARAMS = {
     "chunk_top_k": 50,
     "vlm_enhanced": True,
     "multimodal_top_k": 5,
-    "max_total_tokens": 25000,
-    "max_entity_tokens": 4000,
-    "max_relation_tokens": 5000,
+    "image_token_estimate_method": "qwen_vl",
+    "image_token_model_name_or_path": QWEN3_VL_MODEL_PATH,
+    "image_wrapper_tokens_per_image": 2,
 }
 
 # ==========================================
@@ -274,6 +275,50 @@ def _bridge_lightrag_logs_to_run_file() -> None:
     logger.info(f"LightRAG log bridge ready (attached file handlers: {attached}).")
 
 
+def _build_docbench_settings() -> LocalRagSettings:
+    settings = LocalRagSettings.from_env()
+    settings.working_dir_root = str(WORKING_DIR_ROOT)
+    settings.output_dir = str(OUTPUT_MD_DIR)
+    settings.log_dir = str(SCRIPT_DIR / "logs")
+    settings.vllm_api_base = settings.vision_vllm_api_base = RAG_API_BASE
+    settings.vllm_api_key = settings.vision_vllm_api_key = RAG_API_KEY
+    settings.device = "cuda:0"
+    settings.llm_model_name = settings.vision_model_name = RAG_MODEL_NAME
+    settings.vision_model_path = QWEN3_VL_MODEL_PATH
+    settings.tokenizer_model_path = QWEN3_VL_MODEL_PATH
+    settings.image_token_estimate_method = "qwen_vl"
+    settings.image_token_model_name_or_path = QWEN3_VL_MODEL_PATH
+    settings.image_wrapper_tokens_per_image = 2
+    settings.temperature = 0.0
+    settings.query_max_tokens = 2048
+    settings.ingest_max_tokens = 8192
+    settings.vlm_enable_json_schema = True
+    return settings
+
+
+def _build_raw_prompt_query_kwargs() -> dict[str, Any]:
+    raw_prompt_kwargs: dict[str, Any] = {
+        "mode": DOCBENCH_QUERY_PARAMS["mode"],
+        "top_k": DOCBENCH_QUERY_PARAMS["top_k"],
+        "chunk_top_k": DOCBENCH_QUERY_PARAMS["chunk_top_k"],
+        "multimodal_top_k": DOCBENCH_QUERY_PARAMS.get("multimodal_top_k"),
+        "image_token_estimate_method": DOCBENCH_QUERY_PARAMS[
+            "image_token_estimate_method"
+        ],
+        "image_token_model_name_or_path": DOCBENCH_QUERY_PARAMS[
+            "image_token_model_name_or_path"
+        ],
+        "image_wrapper_tokens_per_image": DOCBENCH_QUERY_PARAMS[
+            "image_wrapper_tokens_per_image"
+        ],
+        "only_need_prompt": True,
+    }
+    for key in ("max_total_tokens", "max_entity_tokens", "max_relation_tokens"):
+        if key in DOCBENCH_QUERY_PARAMS:
+            raw_prompt_kwargs[key] = DOCBENCH_QUERY_PARAMS[key]
+    return raw_prompt_kwargs
+
+
 # ==========================================
 # Step 1: Generate Answers
 # ==========================================
@@ -288,7 +333,7 @@ async def generate_answers(
     """
     为 DocBench 生成系统答案
     
-    前提：InternVL2-26B-AWQ 服务已在 8001 端口运行
+    前提：Qwen3-VL-30B-A3B-Instruct-FP8 服务已在 8001 端口运行
     
     Args:
         start_id: 起始文档 ID
@@ -300,25 +345,7 @@ async def generate_answers(
     output_file = OUTPUT_DIR / "system_answers.jsonl"
     
     # 显式配置路径，保证评测时每个文档目录和日志目录可控
-    settings = LocalRagSettings.from_env()
-    settings.working_dir_root = str(WORKING_DIR_ROOT)
-    settings.output_dir = str(OUTPUT_MD_DIR)
-    settings.log_dir = str(SCRIPT_DIR / "logs")
-    settings.vllm_api_base = settings.vision_vllm_api_base = RAG_API_BASE
-    settings.vllm_api_key = settings.vision_vllm_api_key = RAG_API_KEY
-    
-    # 由于 GPU 1 不可访问，所有模型都在 GPU 0
-    # GPU 0 分配：
-    # - 其他进程: ~13 GiB
-    # - MinerU: ~2.4 GiB (0.05 * 47.35)
-    # - Embedding/Rerank: ~5 GiB
-    # - 总计: ~20 GiB (应该够用，虽然紧张)
-    settings.device = "cuda:0"
-    settings.llm_model_name = settings.vision_model_name = RAG_MODEL_NAME
-    settings.temperature = 0.0
-    settings.query_max_tokens = 2048
-    settings.ingest_max_tokens = 8192
-    settings.vlm_enable_json_schema = True
+    settings = _build_docbench_settings()
     
     # 只创建一次 service
     service = LocalRagService(settings)
@@ -408,14 +435,7 @@ async def generate_answers(
 
                                 rag = await service.get_rag(rag_doc_id)
                                 raw_prompt_param = QueryParam(
-                                    mode=DOCBENCH_QUERY_PARAMS["mode"],
-                                    top_k=DOCBENCH_QUERY_PARAMS["top_k"],
-                                    chunk_top_k=DOCBENCH_QUERY_PARAMS["chunk_top_k"],
-                                    multimodal_top_k=DOCBENCH_QUERY_PARAMS.get("multimodal_top_k"),
-                                    max_total_tokens=DOCBENCH_QUERY_PARAMS["max_total_tokens"],
-                                    max_entity_tokens=DOCBENCH_QUERY_PARAMS["max_entity_tokens"],
-                                    max_relation_tokens=DOCBENCH_QUERY_PARAMS["max_relation_tokens"],
-                                    only_need_prompt=True,
+                                    **_build_raw_prompt_query_kwargs()
                                 )
                                 raw_prompt_result = await rag.lightrag.aquery(
                                     question, param=raw_prompt_param
@@ -708,6 +728,44 @@ async def evaluate_answers(resume: bool = True):
 # Step 3: Calculate Statistics
 # ==========================================
 
+def _build_experiment_config() -> dict[str, Any]:
+    settings = _build_docbench_settings()
+
+    return {
+        "rag_generation": {
+            "api_base": settings.vision_vllm_api_base or settings.vllm_api_base,
+            "model_name": settings.vision_model_name or settings.llm_model_name,
+            "model_path": settings.vision_model_path,
+            "api_key_is_empty": (
+                (settings.vision_vllm_api_key or settings.vllm_api_key) == "EMPTY"
+            ),
+        },
+        "judge_evaluation": {
+            "api_base": JUDGE_API_BASE,
+            "model_name": JUDGE_MODEL_NAME,
+        },
+        "generation_settings": {
+            "device": settings.device,
+            "temperature": settings.temperature,
+            "query_max_tokens": settings.query_max_tokens,
+            "ingest_max_tokens": settings.ingest_max_tokens,
+            "vlm_enable_json_schema": settings.vlm_enable_json_schema,
+            "tokenizer_model_path": settings.tokenizer_model_path,
+            "image_token_estimate_method": settings.image_token_estimate_method,
+            "image_token_model_name_or_path": settings.image_token_model_name_or_path,
+            "image_wrapper_tokens_per_image": settings.image_wrapper_tokens_per_image,
+        },
+        "query_params": dict(DOCBENCH_QUERY_PARAMS),
+        "paths": {
+            "script_dir": str(SCRIPT_DIR),
+            "data_root": str(DATA_ROOT),
+            "output_dir": str(OUTPUT_DIR),
+            "working_dir_root": str(WORKING_DIR_ROOT),
+            "output_md_dir": str(OUTPUT_MD_DIR),
+        },
+    }
+
+
 def calculate_statistics():
     """计算评估统计数据"""
     result_file = OUTPUT_DIR / "eval_results.jsonl"
@@ -779,6 +837,7 @@ def calculate_statistics():
     
     # 保存统计到 JSON
     stats_output = {
+        'experiment_config': _build_experiment_config(),
         'overall': {'accuracy': overall_acc, 'correct': correct, 'total': total},
         'by_type': {
             qtype: {
@@ -885,7 +944,7 @@ Examples:
     
     # 执行对应的步骤
     if args.mode == 'generate':
-        logger.info("⚠️  Please ensure InternVL2-26B-AWQ is running on port 8001")
+        logger.info("⚠️  Please ensure Qwen3-VL-30B-A3B-Instruct-FP8 is running on port 8001")
         logger.info(f"   Check: curl http://localhost:8001/v1/models\n")
         await generate_answers(
             start_id=args.start_id,

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from lightrag.utils import (
     logger,
     compute_mdhash_id,
+    sanitize_text_for_encoding,
 )
 from lightrag.lightrag import LightRAG
 from dataclasses import asdict
@@ -28,6 +29,9 @@ from lightrag.operate import extract_entities, merge_nodes_and_edges
 
 # Import prompt templates
 from raganything.prompt import PROMPTS
+
+_BACKSPACE_CHAR = "\x08"
+_FORMFEED_CHAR = "\x0c"
 
 
 @dataclass
@@ -438,6 +442,42 @@ class BaseModalProcessor:
         except Exception as e:
             logger.error(f"Error getting context for item {item_info}: {e}")
             return ""
+
+    def _sanitize_modal_text(self, text: Any) -> str:
+        """Normalize control escapes and strip illegal control chars for storage safety."""
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            text = str(text)
+
+        # Keep LaTeX semantics by restoring escaped forms before sanitation.
+        normalized = text.replace(_BACKSPACE_CHAR, r"\b").replace(_FORMFEED_CHAR, r"\f")
+        try:
+            return sanitize_text_for_encoding(normalized)
+        except ValueError:
+            return "".join(
+                ch for ch in normalized if ch in "\t\n\r" or ord(ch) >= 0x20
+            )
+
+    def _sanitize_modal_response_payload(
+        self, response_data: Dict[str, Any]
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Sanitize parsed modal payload fields before downstream validation/storage."""
+        if not isinstance(response_data, dict):
+            return "", {}
+
+        description = self._sanitize_modal_text(response_data.get("detailed_description"))
+        raw_entity_info = response_data.get("entity_info")
+        entity_info = dict(raw_entity_info) if isinstance(raw_entity_info, dict) else {}
+        if entity_info:
+            entity_info["entity_name"] = self._sanitize_modal_text(
+                entity_info.get("entity_name")
+            )
+            entity_info["entity_type"] = self._sanitize_modal_text(
+                entity_info.get("entity_type")
+            )
+            entity_info["summary"] = self._sanitize_modal_text(entity_info.get("summary"))
+        return description, entity_info
 
     async def generate_description_only(
         self,
@@ -996,9 +1036,9 @@ class ImageModalProcessor(BaseModalProcessor):
         """Parse model response"""
         try:
             response_data = self._robust_json_parse(response)
-
-            description = response_data.get("detailed_description", "")
-            entity_data = response_data.get("entity_info", {})
+            description, entity_data = self._sanitize_modal_response_payload(
+                response_data
+            )
 
             if not description or not entity_data:
                 raise ValueError("Missing required fields in response")
@@ -1019,14 +1059,17 @@ class ImageModalProcessor(BaseModalProcessor):
         except (json.JSONDecodeError, AttributeError, ValueError) as e:
             logger.error(f"Error parsing image analysis response: {e}")
             logger.debug(f"Raw response: {response}")
+            safe_response = self._sanitize_modal_text(response)
             fallback_entity = {
                 "entity_name": entity_name
                 if entity_name
                 else f"image_{compute_mdhash_id(response)}",
                 "entity_type": "image",
-                "summary": response[:100] + "..." if len(response) > 100 else response,
+                "summary": safe_response[:100] + "..."
+                if len(safe_response) > 100
+                else safe_response,
             }
-            return response, fallback_entity
+            return safe_response, fallback_entity
 
 
 class TableModalProcessor(BaseModalProcessor):
@@ -1190,9 +1233,9 @@ class TableModalProcessor(BaseModalProcessor):
         """Parse table analysis response"""
         try:
             response_data = self._robust_json_parse(response)
-
-            description = response_data.get("detailed_description", "")
-            entity_data = response_data.get("entity_info", {})
+            description, entity_data = self._sanitize_modal_response_payload(
+                response_data
+            )
 
             if not description or not entity_data:
                 raise ValueError("Missing required fields in response")
@@ -1213,14 +1256,17 @@ class TableModalProcessor(BaseModalProcessor):
         except (json.JSONDecodeError, AttributeError, ValueError) as e:
             logger.error(f"Error parsing table analysis response: {e}")
             logger.debug(f"Raw response: {response}")
+            safe_response = self._sanitize_modal_text(response)
             fallback_entity = {
                 "entity_name": entity_name
                 if entity_name
                 else f"table_{compute_mdhash_id(response)}",
                 "entity_type": "table",
-                "summary": response[:100] + "..." if len(response) > 100 else response,
+                "summary": safe_response[:100] + "..."
+                if len(safe_response) > 100
+                else safe_response,
             }
-            return response, fallback_entity
+            return safe_response, fallback_entity
 
 
 class EquationModalProcessor(BaseModalProcessor):
@@ -1374,9 +1420,9 @@ class EquationModalProcessor(BaseModalProcessor):
         """Parse equation analysis response with robust JSON handling"""
         try:
             response_data = self._robust_json_parse(response)
-
-            description = response_data.get("detailed_description", "")
-            entity_data = response_data.get("entity_info", {})
+            description, entity_data = self._sanitize_modal_response_payload(
+                response_data
+            )
 
             if not description or not entity_data:
                 raise ValueError("Missing required fields in response")
@@ -1397,14 +1443,17 @@ class EquationModalProcessor(BaseModalProcessor):
         except (json.JSONDecodeError, AttributeError, ValueError) as e:
             logger.error(f"Error parsing equation analysis response: {e}")
             logger.debug(f"Raw response: {response}")
+            safe_response = self._sanitize_modal_text(response)
             fallback_entity = {
                 "entity_name": entity_name
                 if entity_name
                 else f"equation_{compute_mdhash_id(response)}",
                 "entity_type": "equation",
-                "summary": response[:100] + "..." if len(response) > 100 else response,
+                "summary": safe_response[:100] + "..."
+                if len(safe_response) > 100
+                else safe_response,
             }
-            return response, fallback_entity
+            return safe_response, fallback_entity
 
 
 class GenericModalProcessor(BaseModalProcessor):
@@ -1536,9 +1585,9 @@ class GenericModalProcessor(BaseModalProcessor):
         """Parse generic analysis response"""
         try:
             response_data = self._robust_json_parse(response)
-
-            description = response_data.get("detailed_description", "")
-            entity_data = response_data.get("entity_info", {})
+            description, entity_data = self._sanitize_modal_response_payload(
+                response_data
+            )
 
             if not description or not entity_data:
                 raise ValueError("Missing required fields in response")
@@ -1559,11 +1608,14 @@ class GenericModalProcessor(BaseModalProcessor):
         except (json.JSONDecodeError, AttributeError, ValueError) as e:
             logger.error(f"Error parsing {content_type} analysis response: {e}")
             logger.debug(f"Raw response: {response}")
+            safe_response = self._sanitize_modal_text(response)
             fallback_entity = {
                 "entity_name": entity_name
                 if entity_name
                 else f"{content_type}_{compute_mdhash_id(response)}",
                 "entity_type": content_type,
-                "summary": response[:100] + "..." if len(response) > 100 else response,
+                "summary": safe_response[:100] + "..."
+                if len(safe_response) > 100
+                else safe_response,
             }
-            return response, fallback_entity
+            return safe_response, fallback_entity

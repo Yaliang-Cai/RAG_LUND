@@ -3,6 +3,7 @@ from functools import partial
 from pathlib import Path
 import unicodedata
 import hashlib
+import os
 
 import asyncio
 import json
@@ -66,7 +67,6 @@ from lightrag.constants import (
     DEFAULT_FILE_PATH_MORE_PLACEHOLDER,
     DEFAULT_MAX_FILE_PATHS,
     DEFAULT_ENTITY_NAME_MAX_LENGTH,
-    DEFAULT_IMAGE_TOKEN_ESTIMATE_PER_IMAGE,
 )
 from lightrag.kg.shared_storage import get_storage_keyed_lock
 import time
@@ -76,6 +76,11 @@ try:
     from PIL import Image as PILImage
 except Exception:  # pragma: no cover - optional dependency
     PILImage = None
+
+try:
+    from transformers import AutoImageProcessor
+except Exception:  # pragma: no cover - optional dependency
+    AutoImageProcessor = None
 
 # use the .env that is inside the current folder
 # allows to use different .env file for each lightrag instance
@@ -131,6 +136,7 @@ _LAYOUT_METADATA_ENTITIES = {
     "reference type",
     "token type",
     "token types",
+    "image path",
 }
 
 # Generic low-information residues.
@@ -163,9 +169,24 @@ _GENERIC_NOISE_ENTITIES = {
     "tt",
     "xt",
     "etc",
+    "content",
+    "analysis",
+    "method",
+    "results",
+    "source",
+    "total",
+    "team",
+    "list",
+    "url",
 }
 
 _TABLE_FIGURE_LABEL_RE = _re.compile(r"^(?:table|figure|fig)\s*\d+$", _re.IGNORECASE)
+_IMAGE_STEM_NO_EXT_RE = _re.compile(r"^image(?:_|-)[a-z0-9]{4,}$", _re.IGNORECASE)
+_PAGE_NUMBER_ENTITY_RE = _re.compile(r"^page\s+\d+$", _re.IGNORECASE)
+_COORDINATE_ENTITY_RE = _re.compile(r"^coordinates?\s*\[[^\]]+\]$", _re.IGNORECASE)
+_COORDINATE_BRACKET_RE = _re.compile(
+    r"\[\s*-?\d+(?:\.\d+)?\s*(?:,\s*-?\d+(?:\.\d+)?\s*){1,}\]"
+)
 
 _PATH_SEGMENT_SPLIT_RE = _re.compile(r"[\\/]+")
 _PATH_SEGMENT_TOKEN_RE = _re.compile(r"[_\-\s]+")
@@ -186,6 +207,26 @@ def _looks_like_math_expression(text: str) -> bool:
     if _LATEX_DELIM_RE.search(text):
         return True
     return False
+
+
+def _is_relative_multisegment_path(text: str) -> bool:
+    """Return True for relative path-like text with 3+ slash-separated segments."""
+    if "/" not in text and "\\" not in text:
+        return False
+
+    segments = [seg.strip() for seg in _PATH_SEGMENT_SPLIT_RE.split(text) if seg.strip()]
+    if len(segments) < 3:
+        return False
+
+    for seg in segments:
+        if seg in {".", "..", "~"}:
+            continue
+        if seg.endswith(":"):
+            return False
+        if not _re.fullmatch(r"[\w.\- ]+", seg):
+            return False
+
+    return True
 
 
 def _classify_file_or_folder_path(name: str) -> tuple[bool, str]:
@@ -216,6 +257,8 @@ def _classify_file_or_folder_path(name: str) -> tuple[bool, str]:
         return True, "posix_abs"
     if cleaned.startswith(("./", "../", "~/", ".\\", "..\\", "~\\")):
         return True, "relative_prefix"
+    if _is_relative_multisegment_path(cleaned):
+        return True, "relative_multisegment"
     if _BARE_FILENAME_RE.match(cleaned):
         return True, "bare_filename"
 
@@ -350,6 +393,8 @@ def _classify_low_quality_entity(
     cleaned = name.strip()
     key = _entity_lexical_key(cleaned)
 
+    if cleaned.casefold().startswith("image path"):
+        return True, "image_path_label"
     if key:
         if path_fragment_keys and key in path_fragment_keys:
             return True, "path_fragment_from_source"
@@ -357,8 +402,18 @@ def _classify_low_quality_entity(
         return True, "layout_metadata"
     if key in _GENERIC_NOISE_ENTITIES:
         return True, "generic_noise"
+    if _PAGE_NUMBER_ENTITY_RE.match(cleaned):
+        return True, "page_number_label"
+    if _COORDINATE_ENTITY_RE.match(cleaned):
+        return True, "coordinate_label"
+    if ("bounding box" in key or "coordinate" in key) and _COORDINATE_BRACKET_RE.search(
+        cleaned
+    ):
+        return True, "coordinate_metadata"
     if _TABLE_FIGURE_LABEL_RE.match(cleaned):
         return True, "table_figure_label"
+    if _IMAGE_STEM_NO_EXT_RE.match(cleaned):
+        return True, "image_stem_no_ext"
     if "published by" in key:
         return True, "publisher_phrase_noise"
     if len(key) <= 2 and key.isalpha():
@@ -423,6 +478,9 @@ def _history_messages_signature(history_messages: list[dict[str, str]]) -> str:
     return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
 
+_QWEN_IMAGE_PROCESSOR_CACHE: dict[str, Any] = {}
+
+
 def _collect_image_paths_for_budget(chunks: list[dict], image_cap: int) -> list[str]:
     if image_cap <= 0 or not chunks:
         return []
@@ -441,34 +499,62 @@ def _collect_image_paths_for_budget(chunks: list[dict], image_cap: int) -> list[
     return image_paths
 
 
-def _estimate_dynamic_patch_count(
-    width: int,
-    height: int,
-    min_dynamic_patch: int,
-    max_dynamic_patch: int,
-    use_thumbnail: bool,
+def _resolve_image_token_estimate_method(query_param: QueryParam) -> str:
+    method = str(
+        getattr(query_param, "image_token_estimate_method", "qwen_vl") or "qwen_vl"
+    ).strip().lower()
+    if method == "qwen_vl":
+        return method
+    raise ValueError(
+        "Unsupported image_token_estimate_method: "
+        f"{method}. Set image_token_estimate_method=qwen_vl."
+    )
+
+
+def _get_qwen_image_processor(model_name_or_path: str):
+    if not model_name_or_path:
+        raise ValueError(
+            "Qwen-VL image token estimation requires image_token_model_name_or_path."
+        )
+    if AutoImageProcessor is None:
+        raise RuntimeError(
+            "transformers is required for Qwen-VL image token estimation."
+        )
+
+    if model_name_or_path not in _QWEN_IMAGE_PROCESSOR_CACHE:
+        _QWEN_IMAGE_PROCESSOR_CACHE[model_name_or_path] = (
+            AutoImageProcessor.from_pretrained(
+                model_name_or_path,
+                trust_remote_code=True,
+            )
+        )
+    return _QWEN_IMAGE_PROCESSOR_CACHE[model_name_or_path]
+
+
+def _estimate_qwen_image_tokens(
+    image_path: Path,
+    image_processor: Any,
+    wrapper_tokens: int,
 ) -> int:
-    if width <= 0 or height <= 0:
-        return 1
+    if PILImage is None:
+        raise RuntimeError("Pillow is required for Qwen-VL image token estimation.")
 
-    image_ratio = width / height
-    candidate_ratios: list[tuple[int, int]] = []
-    for n in range(min_dynamic_patch, max_dynamic_patch + 1):
-        for i in range(1, n + 1):
-            if n % i != 0:
-                continue
-            j = n // i
-            candidate_ratios.append((i, j))
+    with PILImage.open(image_path) as image:
+        image_rgb = image.convert("RGB")
+        processed = image_processor(images=image_rgb, return_tensors="np")
 
-    if not candidate_ratios:
-        return 1
+    image_grid_thw = processed.get("image_grid_thw")
+    if image_grid_thw is None or len(image_grid_thw) <= 0:
+        raise RuntimeError("Qwen image processor did not return image_grid_thw.")
 
-    candidate_ratios = sorted(set(candidate_ratios), key=lambda x: x[0] * x[1])
-    best = min(candidate_ratios, key=lambda x: abs(image_ratio - (x[0] / x[1])))
-    blocks = best[0] * best[1]
-    if use_thumbnail and blocks != 1:
-        blocks += 1
-    return blocks
+    grid_thw = image_grid_thw[0]
+    merge_size = max(1, int(getattr(image_processor, "merge_size", 2)))
+    visual_tokens = int(grid_thw[0] * grid_thw[1] * grid_thw[2]) // (merge_size**2)
+    if visual_tokens <= 0:
+        raise RuntimeError(
+            f"Invalid Qwen visual token estimate for image: {image_path.as_posix()}"
+        )
+    return visual_tokens + wrapper_tokens
 
 
 def _estimate_image_tokens_for_budget(
@@ -483,69 +569,52 @@ def _estimate_image_tokens_for_budget(
     if image_count <= 0:
         return 0, 0, 0
 
-    image_size = max(1, int(getattr(query_param, "image_size_for_token_estimate", 448)))
-    patch_size = max(1, int(getattr(query_param, "patch_size_for_token_estimate", 14)))
-    downsample_ratio = float(
-        max(0.0, getattr(query_param, "downsample_ratio_for_token_estimate", 0.5))
-    )
-    min_dynamic_patch = max(
-        1, int(getattr(query_param, "min_dynamic_patch_for_token_estimate", 1))
-    )
-    max_dynamic_patch = max(
-        min_dynamic_patch,
-        int(getattr(query_param, "max_dynamic_patch_for_token_estimate", 12)),
-    )
-    use_thumbnail = bool(getattr(query_param, "use_thumbnail_for_token_estimate", True))
+    if PILImage is None:
+        raise RuntimeError("Pillow is required for Qwen-VL image token estimation.")
+
     wrapper_tokens = max(
         0, int(getattr(query_param, "image_wrapper_tokens_per_image", 2))
     )
-    fallback_per_image_tokens = int(
-        max(
-            0,
-            getattr(
-                query_param,
-                "image_token_estimate_per_image",
-                DEFAULT_IMAGE_TOKEN_ESTIMATE_PER_IMAGE,
-            ),
-        )
-    )
 
-    per_patch_tokens = int(((image_size // patch_size) ** 2) * (downsample_ratio**2))
-    if per_patch_tokens <= 0:
-        per_patch_tokens = max(1, fallback_per_image_tokens)
+    _resolve_image_token_estimate_method(query_param)
+    model_name_or_path = str(
+        getattr(query_param, "image_token_model_name_or_path", "")
+        or os.getenv("IMAGE_TOKEN_MODEL_NAME_OR_PATH", "")
+        or os.getenv("VISION_MODEL_NAME", "")
+    ).strip()
+    image_processor = _get_qwen_image_processor(model_name_or_path)
 
     total_tokens = 0
-    fallback_count = 0
+    valid_image_count = 0
+    skipped_image_count = 0
     for image_path in image_paths:
         path_obj = Path(image_path)
-        if PILImage is not None and path_obj.exists():
+        if path_obj.exists():
             try:
-                with PILImage.open(path_obj) as image:
-                    width, height = image.size
-                patches = _estimate_dynamic_patch_count(
-                    width=width,
-                    height=height,
-                    min_dynamic_patch=min_dynamic_patch,
-                    max_dynamic_patch=max_dynamic_patch,
-                    use_thumbnail=use_thumbnail,
+                total_tokens += _estimate_qwen_image_tokens(
+                    image_path=path_obj,
+                    image_processor=image_processor,
+                    wrapper_tokens=wrapper_tokens,
                 )
-                total_tokens += patches * per_patch_tokens + wrapper_tokens
+                valid_image_count += 1
                 continue
             except Exception:
                 pass
-        fallback_count += 1
-        total_tokens += fallback_per_image_tokens
 
-    if fallback_count > 0:
+        skipped_image_count += 1
+
+    if skipped_image_count > 0:
         logger.debug(
-            "Image token reserve fallback used for %s/%s images (path unreadable); fallback_per_image=%s",
-            fallback_count,
+            "Skipped %s/%s images during Qwen token estimation (path unreadable or image parse failed).",
+            skipped_image_count,
             image_count,
-            fallback_per_image_tokens,
         )
 
-    per_image_tokens = total_tokens // max(1, image_count)
-    return total_tokens, image_count, per_image_tokens
+    if valid_image_count <= 0:
+        return 0, 0, 0
+
+    per_image_tokens = total_tokens // valid_image_count
+    return total_tokens, valid_image_count, per_image_tokens
 
 
 def _is_file_or_folder_path(name: str) -> bool:

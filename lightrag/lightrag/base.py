@@ -187,24 +187,15 @@ class QueryParam:
     )
     """Fallback input-token reserve per image when image metadata cannot be read."""
 
-    image_size_for_token_estimate: int = int(
-        os.getenv("IMAGE_SIZE_FOR_TOKEN_ESTIMATE", "448")
+    image_token_estimate_method: str = os.getenv(
+        "IMAGE_TOKEN_ESTIMATE_METHOD", "qwen_vl"
     )
-    patch_size_for_token_estimate: int = int(
-        os.getenv("PATCH_SIZE_FOR_TOKEN_ESTIMATE", "14")
+    """Image token estimate strategy. Supported: qwen_vl."""
+
+    image_token_model_name_or_path: str = os.getenv(
+        "IMAGE_TOKEN_MODEL_NAME_OR_PATH", ""
     )
-    downsample_ratio_for_token_estimate: float = float(
-        os.getenv("DOWNSAMPLE_RATIO_FOR_TOKEN_ESTIMATE", "0.5")
-    )
-    min_dynamic_patch_for_token_estimate: int = int(
-        os.getenv("MIN_DYNAMIC_PATCH_FOR_TOKEN_ESTIMATE", "1")
-    )
-    max_dynamic_patch_for_token_estimate: int = int(
-        os.getenv("MAX_DYNAMIC_PATCH_FOR_TOKEN_ESTIMATE", "12")
-    )
-    use_thumbnail_for_token_estimate: bool = (
-        os.getenv("USE_THUMBNAIL_FOR_TOKEN_ESTIMATE", "true").lower() == "true"
-    )
+    """HF repo id or local model path used by qwen_vl estimator."""
     image_wrapper_tokens_per_image: int = int(
         os.getenv("IMAGE_WRAPPER_TOKENS_PER_IMAGE", "2")
     )
