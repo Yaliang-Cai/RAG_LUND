@@ -7,34 +7,32 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <script src="https://unpkg.com/marked@4.3.0/marked.min.js" onerror="loadFallbackMarked()"></script>
-  <script>
-    function loadFallbackMarked() {
-      console.warn("CDN load failed, using plain text mode");
-      window.marked = { parse: function(t) { return '<pre style="white-space:pre-wrap;">' + t + '</pre>'; } };
-    }
-    window.addEventListener('DOMContentLoaded', () => { if (typeof marked === 'undefined') loadFallbackMarked(); });
-  </script>
+  <!-- KaTeX -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+  <!-- highlight.js -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <!-- marked.js -->
+  <script src="https://unpkg.com/marked@4.3.0/marked.min.js"></script>
+  <!-- PDF.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- graphology + sigma -->
+  <script src="https://unpkg.com/graphology@0.25.4/dist/graphology.umd.min.js"></script>
+  <script src="https://unpkg.com/sigma@2.4.0/build/sigma.min.js"></script>
   <style>
     /* ══════════════════════════════════════════════
        DESIGN SYSTEM — Editorial Research Journal
-       Warm document reader + Dark chat interface
-       Amber accent palette
     ══════════════════════════════════════════════ */
-
     :root {
-      /* Amber accent system */
       --accent: #d4940a;
       --accent-soft: rgba(212, 148, 10, 0.12);
       --accent-medium: rgba(212, 148, 10, 0.25);
       --accent-glow: rgba(212, 148, 10, 0.06);
-
-      /* Typography */
       --font-display: 'DM Serif Display', Georgia, serif;
       --font-body: 'IBM Plex Sans', -apple-system, sans-serif;
       --font-mono: 'IBM Plex Mono', 'Cascadia Code', monospace;
-
-      /* Shared */
       --radius-sm: 6px;
       --radius-md: 10px;
       --radius-lg: 14px;
@@ -42,12 +40,10 @@
       --divider-width: 5px;
     }
 
-    /* ── Dark Theme (default) ── */
     [data-theme="dark"] {
       --bg-app: #111113;
       --bg-header: #19191c;
       --bg-source: #1c1b18;
-      --bg-source-list: #1a1917;
       --bg-reader: #22211d;
       --bg-chat: #141416;
       --bg-input: #1e1e21;
@@ -56,6 +52,8 @@
       --bg-hover: rgba(255,255,255,0.04);
       --bg-active: var(--accent-soft);
       --bg-code: #1a1a1d;
+      --bg-graph: #131315;
+      --bg-trace: #18181b;
       --border: rgba(255,255,255,0.07);
       --border-strong: rgba(255,255,255,0.12);
       --text-primary: #e8e4df;
@@ -74,14 +72,15 @@
       --placeholder: #5a5550;
       --table-stripe: rgba(255,255,255,0.02);
       --img-shadow: 0 4px 20px rgba(0,0,0,0.4);
+      --success: #22c55e;
+      --error: #ef4444;
+      --warning: #f59e0b;
     }
 
-    /* ── Light Theme ── */
     [data-theme="light"] {
       --bg-app: #f5f2ed;
       --bg-header: #fffdf8;
       --bg-source: #faf8f3;
-      --bg-source-list: #f7f5f0;
       --bg-reader: #fffef9;
       --bg-chat: #f0ede7;
       --bg-input: #ffffff;
@@ -90,6 +89,8 @@
       --bg-hover: rgba(0,0,0,0.03);
       --bg-active: var(--accent-soft);
       --bg-code: #f7f5f0;
+      --bg-graph: #f8f6f1;
+      --bg-trace: #f5f3ee;
       --border: rgba(0,0,0,0.08);
       --border-strong: rgba(0,0,0,0.14);
       --text-primary: #2c2824;
@@ -108,13 +109,13 @@
       --placeholder: #b0a898;
       --table-stripe: rgba(0,0,0,0.02);
       --img-shadow: 0 4px 20px rgba(0,0,0,0.08);
+      --success: #16a34a;
+      --error: #dc2626;
+      --warning: #d97706;
     }
 
-    /* ══════════════════════════════════════════════
-       RESET & BASE
-    ══════════════════════════════════════════════ */
+    /* ── Reset ── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
     body {
       font-family: var(--font-body);
       background: var(--bg-app);
@@ -124,384 +125,153 @@
       flex-direction: column;
       overflow: hidden;
       -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
     }
-
-    /* Scrollbar */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: var(--scrollbar-track); }
     ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--accent-medium); }
 
-    /* ══════════════════════════════════════════════
-       HEADER
-    ══════════════════════════════════════════════ */
+    /* ── Header ── */
     header {
       height: 52px;
       background: var(--bg-header);
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
-      padding: 0 20px;
+      padding: 0 16px;
       justify-content: space-between;
       flex-shrink: 0;
       z-index: 100;
     }
-
-    .header-left {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      user-select: none;
-    }
-
+    .header-left, .header-right { display: flex; align-items: center; gap: 8px; }
+    .brand { display: flex; align-items: center; gap: 10px; user-select: none; }
     .brand-icon {
-      width: 28px;
-      height: 28px;
-      background: var(--accent);
-      border-radius: var(--radius-sm);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 14px;
-      color: #fff;
-      font-weight: 600;
-      font-family: var(--font-mono);
-      letter-spacing: -0.5px;
+      width: 28px; height: 28px; background: var(--accent); border-radius: var(--radius-sm);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; color: #fff; font-weight: 600; font-family: var(--font-mono);
     }
-
-    .brand-text {
-      font-family: var(--font-display);
-      font-size: 17px;
-      color: var(--text-primary);
-      letter-spacing: 0.2px;
-    }
-
-    .header-sep {
-      width: 1px;
-      height: 24px;
-      background: var(--border-strong);
-    }
-
-    .header-controls {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
+    .brand-text { font-family: var(--font-display); font-size: 17px; color: var(--text-primary); }
+    .header-sep { width: 1px; height: 24px; background: var(--border-strong); margin: 0 4px; }
     .ctrl-input {
-      font-family: var(--font-mono);
-      font-size: 12px;
-      padding: 6px 10px;
-      border: 1px solid var(--input-border);
-      border-radius: var(--radius-sm);
-      background: var(--bg-input);
-      color: var(--text-primary);
-      outline: none;
-      transition: border-color var(--transition);
-      width: 140px;
+      font-family: var(--font-mono); font-size: 12px; padding: 6px 10px;
+      border: 1px solid var(--input-border); border-radius: var(--radius-sm);
+      background: var(--bg-input); color: var(--text-primary); outline: none;
+      transition: border-color var(--transition); width: 130px;
     }
     .ctrl-input:focus { border-color: var(--input-focus); }
     .ctrl-input::placeholder { color: var(--placeholder); }
-
     .ctrl-select {
-      font-family: var(--font-body);
-      font-size: 12px;
-      padding: 6px 28px 6px 10px;
-      border: 1px solid var(--input-border);
-      border-radius: var(--radius-sm);
-      background: var(--bg-input);
-      color: var(--text-primary);
-      outline: none;
-      cursor: pointer;
+      font-family: var(--font-body); font-size: 12px; padding: 6px 26px 6px 10px;
+      border: 1px solid var(--input-border); border-radius: var(--radius-sm);
+      background: var(--bg-input); color: var(--text-primary); outline: none; cursor: pointer;
       appearance: none;
       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%239b9590'/%3E%3C/svg%3E");
-      background-repeat: no-repeat;
-      background-position: right 8px center;
-      min-width: 160px;
-      transition: border-color var(--transition);
+      background-repeat: no-repeat; background-position: right 8px center;
+      min-width: 150px; transition: border-color var(--transition);
     }
     .ctrl-select:focus { border-color: var(--input-focus); }
-
-    .header-right {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
     .icon-btn {
-      width: 32px;
-      height: 32px;
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      background: transparent;
-      color: var(--text-secondary);
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all var(--transition);
-      font-size: 15px;
+      width: 32px; height: 32px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+      background: transparent; color: var(--text-secondary); cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: all var(--transition); font-size: 15px; flex-shrink: 0;
     }
-    .icon-btn:hover {
-      background: var(--bg-hover);
-      color: var(--accent);
-      border-color: var(--accent-medium);
+    .icon-btn:hover { background: var(--bg-hover); color: var(--accent); border-color: var(--accent-medium); }
+    .icon-btn.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-medium); }
+    .icon-btn svg { width: 16px; height: 16px; }
+    .icon-btn-label {
+      font-size: 11px; margin-left: 4px; font-weight: 500;
+      display: none;
+    }
+    @media (min-width: 1100px) {
+      .icon-btn-label { display: inline; }
+      .icon-btn.has-label { width: auto; padding: 0 10px; gap: 4px; }
     }
 
-    .theme-btn svg { width: 16px; height: 16px; fill: currentColor; }
+    /* ── Main Layout ── */
+    .main-container { display: flex; flex: 1; overflow: hidden; position: relative; }
 
-    /* ══════════════════════════════════════════════
-       MAIN LAYOUT
-    ══════════════════════════════════════════════ */
-    .main-container {
-      display: flex;
-      flex: 1;
-      overflow: hidden;
-      position: relative;
+    /* ── PDF Panel (Left) ── */
+    .pdf-panel {
+      width: 48%; min-width: 280px; display: flex; flex-direction: column;
+      flex-shrink: 0; overflow: hidden; background: var(--bg-source);
     }
+    .pdf-toolbar {
+      height: 42px; padding: 0 12px; display: flex; align-items: center; gap: 8px;
+      border-bottom: 1px solid var(--border); background: var(--bg-header); flex-shrink: 0;
+    }
+    .pdf-toolbar .ctrl-select { min-width: 120px; font-size: 11px; padding: 4px 24px 4px 8px; }
+    .pdf-page-controls { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+    .pdf-page-controls .icon-btn { width: 26px; height: 26px; }
+    .pdf-page-controls .icon-btn svg { width: 12px; height: 12px; }
+    .pdf-page-info { font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); min-width: 60px; text-align: center; }
+    .pdf-zoom-controls { display: flex; align-items: center; gap: 4px; }
+    .pdf-zoom-controls .icon-btn { width: 26px; height: 26px; }
+    .pdf-zoom-controls .icon-btn svg { width: 12px; height: 12px; }
 
-    /* ── Source Panel (Left) ── */
-    .source-panel {
-      width: 48%;
-      min-width: 300px;
-      background: var(--bg-source);
-      display: flex;
-      flex-direction: column;
-      flex-shrink: 0;
-      overflow: hidden;
-      transition: opacity 0.3s ease;
+    .pdf-viewer {
+      flex: 1; overflow-y: auto; overflow-x: auto;
+      background: var(--bg-reader); position: relative;
     }
+    .pdf-pages { display: flex; flex-direction: column; align-items: center; padding: 16px; gap: 12px; }
+    .pdf-page-wrapper {
+      background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+      position: relative; display: flex; align-items: center; justify-content: center;
+    }
+    .pdf-page-wrapper canvas { display: block; }
+    .pdf-page-num {
+      position: absolute; bottom: 4px; right: 8px;
+      font-size: 10px; color: #999; font-family: var(--font-mono);
+    }
+    .pdf-empty {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%; color: var(--text-tertiary); gap: 12px;
+    }
+    .pdf-empty-icon {
+      width: 56px; height: 56px; border-radius: 14px; background: var(--accent-soft);
+      display: flex; align-items: center; justify-content: center; color: var(--accent); opacity: 0.6;
+    }
+    .pdf-empty-title { font-family: var(--font-display); font-size: 16px; }
+    .pdf-empty-sub { font-size: 12px; opacity: 0.6; }
 
-    .source-list-header {
-      padding: 12px 18px;
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 1.2px;
-      color: var(--text-tertiary);
-      border-bottom: 1px solid var(--border);
-      background: var(--bg-source-list);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-shrink: 0;
+    /* Markdown fallback in pdf panel */
+    .md-viewer {
+      flex: 1; overflow-y: auto; padding: 32px 36px 60px;
+      background: var(--bg-reader); color: var(--text-reader);
+      font-size: 15px; line-height: 1.8; font-weight: 300; display: none;
     }
+    .md-viewer h1, .md-viewer h2, .md-viewer h3 {
+      font-family: var(--font-display); color: var(--text-reader-h); font-weight: 400;
+      margin-top: 2em; margin-bottom: 0.6em;
+    }
+    .md-viewer h1 { font-size: 1.8em; border-bottom: 2px solid var(--border-strong); padding-bottom: 12px; margin-top: 0; }
+    .md-viewer h2 { font-size: 1.4em; }
+    .md-viewer p { margin-bottom: 1em; }
+    .md-viewer img { max-width: 100%; border-radius: var(--radius-md); margin: 16px 0; cursor: pointer; }
+    .md-viewer pre {
+      background: var(--bg-code); padding: 14px 18px; border-radius: var(--radius-md);
+      overflow-x: auto; border: 1px solid var(--border); font-family: var(--font-mono);
+      font-size: 13px; line-height: 1.6; margin: 16px 0;
+    }
+    .md-viewer code { font-family: var(--font-mono); font-size: 0.88em; background: var(--bg-code); padding: 2px 6px; border-radius: 4px; }
+    .md-viewer pre code { background: transparent; padding: 0; }
+    .md-viewer table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 0.9em; }
+    .md-viewer th { text-align: left; font-weight: 600; border-bottom: 2px solid var(--border-strong); padding: 8px 14px; }
+    .md-viewer td { border-bottom: 1px solid var(--border); padding: 8px 14px; }
+    .md-viewer tr:nth-child(even) td { background: var(--table-stripe); }
+    .md-viewer blockquote { border-left: 3px solid var(--accent); padding: 8px 16px; margin: 16px 0; color: var(--text-secondary); background: var(--accent-glow); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+    .md-viewer ul, .md-viewer ol { padding-left: 24px; margin-bottom: 1em; }
+    .md-viewer li { margin-bottom: 4px; }
+    .md-viewer a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-medium); }
 
-    .source-list-hint {
-      font-size: 10px;
-      font-weight: 400;
-      text-transform: none;
-      letter-spacing: 0;
-      color: var(--text-tertiary);
-      opacity: 0.7;
-    }
-
-    .source-list-container {
-      max-height: 28vh;
-      overflow-y: auto;
-      border-bottom: 1px solid var(--border);
-      padding: 6px;
-      flex-shrink: 0;
-    }
-
-    .source-item {
-      display: flex;
-      align-items: center;
-      padding: 8px 12px;
-      cursor: pointer;
-      border-radius: var(--radius-sm);
-      font-size: 13px;
-      font-weight: 400;
-      color: var(--text-secondary);
-      transition: all var(--transition);
-      gap: 10px;
-    }
-    .source-item:hover {
-      background: var(--bg-hover);
-      color: var(--text-primary);
-    }
-    .source-item.active {
-      background: var(--bg-active);
-      color: var(--accent);
-      font-weight: 500;
-    }
-
-    .source-icon {
-      width: 20px;
-      height: 20px;
-      border-radius: 4px;
-      background: var(--accent-soft);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-      font-size: 10px;
-      color: var(--accent);
-    }
-
-    .source-name {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    /* ── Document Reader ── */
-    .markdown-content {
-      flex: 1;
-      overflow-y: auto;
-      padding: 36px 40px 60px;
-      background: var(--bg-reader);
-      color: var(--text-reader);
-      font-size: 15px;
-      line-height: 1.8;
-      font-weight: 300;
-    }
-
-    .markdown-content h1,
-    .markdown-content h2,
-    .markdown-content h3 {
-      font-family: var(--font-display);
-      color: var(--text-reader-h);
-      font-weight: 400;
-      margin-top: 2em;
-      margin-bottom: 0.6em;
-    }
-    .markdown-content h1 {
-      font-size: 1.8em;
-      border-bottom: 2px solid var(--border-strong);
-      padding-bottom: 12px;
-      margin-top: 0;
-    }
-    .markdown-content h2 { font-size: 1.4em; }
-    .markdown-content h3 { font-size: 1.15em; }
-
-    .markdown-content p { margin-bottom: 1em; }
-
-    .markdown-content a {
-      color: var(--accent);
-      text-decoration: none;
-      border-bottom: 1px solid var(--accent-medium);
-      transition: border-color var(--transition);
-    }
-    .markdown-content a:hover { border-color: var(--accent); }
-
-    .markdown-content img {
-      max-width: 100%;
-      border-radius: var(--radius-md);
-      margin: 16px 0;
-      box-shadow: var(--img-shadow);
-    }
-
-    .markdown-content pre {
-      background: var(--bg-code);
-      padding: 16px 20px;
-      border-radius: var(--radius-md);
-      overflow-x: auto;
-      border: 1px solid var(--border);
-      font-family: var(--font-mono);
-      font-size: 13px;
-      line-height: 1.6;
-      margin: 16px 0;
-    }
-
-    .markdown-content code {
-      font-family: var(--font-mono);
-      font-size: 0.88em;
-      background: var(--bg-code);
-      padding: 2px 6px;
-      border-radius: 4px;
-    }
-    .markdown-content pre code {
-      background: transparent;
-      padding: 0;
-    }
-
-    .markdown-content table {
-      border-collapse: collapse;
-      width: 100%;
-      margin: 16px 0;
-      font-size: 0.9em;
-    }
-    .markdown-content th {
-      text-align: left;
-      font-weight: 600;
-      border-bottom: 2px solid var(--border-strong);
-      padding: 8px 14px;
-      color: var(--text-reader-h);
-    }
-    .markdown-content td {
-      border-bottom: 1px solid var(--border);
-      padding: 8px 14px;
-    }
-    .markdown-content tr:nth-child(even) td { background: var(--table-stripe); }
-
-    .markdown-content blockquote {
-      border-left: 3px solid var(--accent);
-      padding: 8px 16px;
-      margin: 16px 0;
-      color: var(--text-secondary);
-      background: var(--accent-glow);
-      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-    }
-
-    .markdown-content ul, .markdown-content ol {
-      padding-left: 24px;
-      margin-bottom: 1em;
-    }
-    .markdown-content li { margin-bottom: 4px; }
-
-    .reader-empty {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 100%;
-      color: var(--text-tertiary);
-      gap: 12px;
-    }
-    .reader-empty-icon {
-      width: 48px;
-      height: 48px;
-      border-radius: 12px;
-      background: var(--accent-soft);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 20px;
-      color: var(--accent);
-      opacity: 0.6;
-    }
-    .reader-empty-title { font-family: var(--font-display); font-size: 16px; }
-    .reader-empty-sub { font-size: 12px; opacity: 0.6; }
-
-    /* ── Resizable Divider ── */
+    /* ── Divider ── */
     .divider {
-      width: var(--divider-width);
-      cursor: col-resize;
-      background: var(--border);
-      position: relative;
-      flex-shrink: 0;
-      z-index: 10;
-      transition: background var(--transition);
+      width: var(--divider-width); cursor: col-resize; background: var(--border);
+      position: relative; flex-shrink: 0; z-index: 10; transition: background var(--transition);
     }
     .divider::after {
-      content: '';
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      width: 3px;
-      height: 40px;
-      border-radius: 2px;
-      background: var(--text-tertiary);
-      opacity: 0.3;
+      content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      width: 3px; height: 40px; border-radius: 2px; background: var(--text-tertiary); opacity: 0.3;
       transition: opacity var(--transition), height var(--transition);
     }
     .divider:hover { background: var(--accent-medium); }
@@ -510,291 +280,241 @@
 
     /* ── Chat Panel (Right) ── */
     .chat-panel {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      background: var(--bg-chat);
-      min-width: 360px;
-      overflow: hidden;
+      flex: 1; display: flex; flex-direction: column;
+      background: var(--bg-chat); min-width: 340px; overflow: hidden;
     }
-
     .chat-header {
-      padding: 12px 20px;
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      flex-shrink: 0;
+      padding: 10px 20px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
     }
     .chat-header-title {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 1.2px;
-      color: var(--text-tertiary);
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 1.2px; color: var(--text-tertiary);
     }
-    .chat-status {
-      font-size: 10px;
-      color: var(--text-tertiary);
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .status-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--accent);
-    }
+    .chat-status { font-size: 10px; color: var(--text-tertiary); display: flex; align-items: center; gap: 6px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
+    /* ── Reasoning Trace ── */
+    .reasoning-trace {
+      background: var(--bg-trace); border-bottom: 1px solid var(--border);
+      overflow: hidden; flex-shrink: 0; max-height: 200px; overflow-y: auto;
+    }
+    .trace-header {
+      padding: 8px 16px; display: flex; align-items: center; justify-content: space-between;
+      cursor: pointer; font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 1px; color: var(--text-tertiary);
+    }
+    .trace-header:hover { color: var(--accent); }
+    .trace-steps { padding: 0 16px 10px; }
+    .trace-step {
+      display: flex; align-items: center; gap: 8px; padding: 4px 0;
+      font-size: 12px; color: var(--text-secondary);
+    }
+    .trace-step-icon { width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .trace-step.pending .trace-step-icon { color: var(--text-tertiary); }
+    .trace-step.active .trace-step-icon { color: var(--accent); }
+    .trace-step.active .trace-step-icon svg { animation: spin 1s linear infinite; }
+    .trace-step.done .trace-step-icon { color: var(--success); }
+    .trace-step.error .trace-step-icon { color: var(--error); }
+    .trace-keywords {
+      padding: 6px 0; font-size: 11px; color: var(--text-tertiary);
+    }
+    .trace-keyword {
+      display: inline-block; background: var(--accent-soft); color: var(--accent);
+      padding: 2px 8px; border-radius: 10px; font-size: 10px; margin: 2px 4px 2px 0;
+      font-family: var(--font-mono);
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Chat Messages ── */
     .chat-messages {
-      flex: 1;
-      overflow-y: auto;
-      padding: 24px 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
+      flex: 1; overflow-y: auto; padding: 20px;
+      display: flex; flex-direction: column; gap: 14px;
     }
-
     .chat-welcome {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 100%;
-      gap: 10px;
-      color: var(--text-tertiary);
-      text-align: center;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%; gap: 10px; color: var(--text-tertiary); text-align: center;
     }
-    .chat-welcome-icon {
-      font-size: 28px;
-      opacity: 0.4;
-      margin-bottom: 4px;
-    }
-    .chat-welcome-title {
-      font-family: var(--font-display);
-      font-size: 18px;
-      color: var(--text-secondary);
-    }
+    .chat-welcome-icon { font-size: 28px; opacity: 0.4; margin-bottom: 4px; }
+    .chat-welcome-title { font-family: var(--font-display); font-size: 18px; color: var(--text-secondary); }
     .chat-welcome-sub { font-size: 12px; opacity: 0.6; max-width: 260px; line-height: 1.6; }
 
-    /* Messages */
     .message {
-      max-width: 82%;
-      padding: 14px 18px;
-      border-radius: var(--radius-lg);
-      line-height: 1.7;
-      font-size: 14px;
-      word-wrap: break-word;
+      max-width: 88%; padding: 14px 18px; border-radius: var(--radius-lg);
+      line-height: 1.7; font-size: 14px; word-wrap: break-word;
       animation: msgIn 0.3s cubic-bezier(.4,0,.2,1);
     }
-
-    @keyframes msgIn {
-      from { opacity: 0; transform: translateY(8px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
+    @keyframes msgIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
     .message.user {
-      align-self: flex-end;
-      background: var(--bg-user-msg);
-      border: 1px solid var(--accent-medium);
-      border-bottom-right-radius: 4px;
-      color: var(--text-primary);
+      align-self: flex-end; background: var(--bg-user-msg);
+      border: 1px solid var(--accent-medium); border-bottom-right-radius: 4px;
     }
-
     .message.bot {
-      align-self: flex-start;
-      background: var(--bg-bot-msg);
-      border: 1px solid var(--border);
-      border-bottom-left-radius: 4px;
-      color: var(--text-primary);
+      align-self: flex-start; background: var(--bg-bot-msg);
+      border: 1px solid var(--border); border-bottom-left-radius: 4px;
     }
-
     .message.bot p { margin-bottom: 8px; }
     .message.bot p:last-child { margin-bottom: 0; }
     .message.bot ul, .message.bot ol { padding-left: 20px; margin-bottom: 8px; }
     .message.bot li { margin-bottom: 2px; }
     .message.bot pre {
-      background: var(--bg-code);
-      padding: 12px 14px;
-      border-radius: var(--radius-sm);
-      overflow-x: auto;
-      font-family: var(--font-mono);
-      font-size: 12px;
-      margin: 8px 0;
+      background: var(--bg-code); padding: 12px 14px; border-radius: var(--radius-sm);
+      overflow-x: auto; font-family: var(--font-mono); font-size: 12px; margin: 8px 0;
       border: 1px solid var(--border);
     }
-    .message.bot code {
-      font-family: var(--font-mono);
-      font-size: 0.88em;
-      background: var(--bg-code);
-      padding: 1px 5px;
-      border-radius: 3px;
-    }
+    .message.bot code { font-family: var(--font-mono); font-size: 0.88em; background: var(--bg-code); padding: 1px 5px; border-radius: 3px; }
     .message.bot pre code { background: transparent; padding: 0; }
-    .message.bot table {
-      border-collapse: collapse;
-      width: 100%;
-      font-size: 0.9em;
-      margin: 8px 0;
-    }
-    .message.bot th, .message.bot td {
-      border: 1px solid var(--border);
-      padding: 6px 10px;
-      text-align: left;
-    }
+    .message.bot table { border-collapse: collapse; width: 100%; font-size: 0.9em; margin: 8px 0; overflow-x: auto; display: block; }
+    .message.bot th, .message.bot td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+    .message.bot th { background: var(--bg-code); font-weight: 600; }
+    .message.bot img { max-width: 100%; border-radius: var(--radius-sm); margin: 8px 0; cursor: pointer; }
+    .message.bot blockquote { border-left: 3px solid var(--accent); padding: 6px 12px; margin: 8px 0; color: var(--text-secondary); background: var(--accent-glow); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+    .message.bot .katex-display { margin: 12px 0; overflow-x: auto; }
 
-    .message.thinking {
-      background: transparent;
-      border: none;
-      padding: 8px 0;
-    }
-
-    .thinking-dots {
-      display: flex;
-      gap: 5px;
-      align-items: center;
-      padding: 4px 0;
-    }
+    .message.thinking { background: transparent; border: none; padding: 8px 0; }
+    .thinking-dots { display: flex; gap: 5px; align-items: center; padding: 4px 0; }
     .thinking-dots span {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--thinking-dot);
-      opacity: 0.3;
-      animation: dotPulse 1.4s ease-in-out infinite;
+      width: 7px; height: 7px; border-radius: 50%; background: var(--thinking-dot);
+      opacity: 0.3; animation: dotPulse 1.4s ease-in-out infinite;
     }
     .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
     .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
-
-    @keyframes dotPulse {
-      0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); }
-      40% { opacity: 1; transform: scale(1); }
-    }
+    @keyframes dotPulse { 0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1); } }
 
     /* Citation */
     .citation-link {
-      color: var(--accent);
-      cursor: pointer;
-      font-weight: 600;
-      background: var(--citation-bg);
-      padding: 1px 6px;
-      border-radius: 4px;
-      font-size: 0.85em;
-      font-family: var(--font-mono);
-      transition: all var(--transition);
-      border: 1px solid transparent;
+      color: var(--accent); cursor: pointer; font-weight: 600;
+      background: var(--citation-bg); padding: 1px 6px; border-radius: 4px;
+      font-size: 0.85em; font-family: var(--font-mono);
+      transition: all var(--transition); border: 1px solid transparent;
     }
-    .citation-link:hover {
-      border-color: var(--accent-medium);
-      background: var(--accent-medium);
-    }
+    .citation-link:hover { border-color: var(--accent-medium); background: var(--accent-medium); }
 
-    /* Input Area */
-    .input-area {
-      padding: 16px 20px 20px;
-      background: var(--bg-chat);
-      flex-shrink: 0;
+    /* Citation hover card */
+    .citation-card {
+      position: fixed; z-index: 1000; background: var(--bg-bot-msg);
+      border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+      padding: 12px 16px; max-width: 400px; max-height: 200px; overflow-y: auto;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.3); font-size: 12px; line-height: 1.6;
+      color: var(--text-secondary); pointer-events: none;
     }
+    .citation-card-title { font-weight: 600; color: var(--accent); margin-bottom: 4px; font-size: 11px; }
 
+    /* ── Input Area ── */
+    .input-area { padding: 14px 20px 18px; background: var(--bg-chat); flex-shrink: 0; }
     .input-wrapper {
-      display: flex;
-      align-items: flex-end;
-      gap: 10px;
-      background: var(--bg-input);
-      border: 1px solid var(--input-border);
-      border-radius: var(--radius-lg);
-      padding: 10px 12px 10px 16px;
+      display: flex; align-items: flex-end; gap: 10px;
+      background: var(--bg-input); border: 1px solid var(--input-border);
+      border-radius: var(--radius-lg); padding: 10px 12px 10px 16px;
       transition: border-color var(--transition), box-shadow var(--transition);
     }
-    .input-wrapper:focus-within {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px var(--accent-soft);
-    }
-
+    .input-wrapper:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
     .input-wrapper textarea {
-      flex: 1;
-      border: none;
-      background: transparent;
-      color: var(--text-primary);
-      font-family: var(--font-body);
-      font-size: 14px;
-      line-height: 1.5;
-      resize: none;
-      outline: none;
-      min-height: 22px;
-      max-height: 120px;
+      flex: 1; border: none; background: transparent; color: var(--text-primary);
+      font-family: var(--font-body); font-size: 14px; line-height: 1.5;
+      resize: none; outline: none; min-height: 22px; max-height: 120px;
     }
     .input-wrapper textarea::placeholder { color: var(--placeholder); }
-
     .send-btn {
-      width: 36px;
-      height: 36px;
-      border-radius: var(--radius-sm);
-      border: none;
-      background: var(--accent);
-      color: #fff;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all var(--transition);
-      flex-shrink: 0;
+      width: 36px; height: 36px; border-radius: var(--radius-sm); border: none;
+      background: var(--accent); color: #fff; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: all var(--transition); flex-shrink: 0;
     }
     .send-btn:hover { filter: brightness(1.1); transform: scale(1.04); }
     .send-btn:active { transform: scale(0.96); }
     .send-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
     .send-btn svg { width: 18px; height: 18px; fill: currentColor; }
+    .input-hint { text-align: center; font-size: 10px; color: var(--text-tertiary); margin-top: 8px; opacity: 0.5; }
 
-    .input-hint {
-      text-align: center;
-      font-size: 10px;
-      color: var(--text-tertiary);
-      margin-top: 8px;
-      opacity: 0.5;
+    /* ── Graph Panel (Bottom) ── */
+    .graph-panel {
+      background: var(--bg-graph); border-top: 1px solid var(--border);
+      flex-shrink: 0; overflow: hidden;
+      transition: height 0.3s ease;
+    }
+    .graph-panel.open { height: 320px; }
+    .graph-panel.closed { height: 0; }
+    .graph-toolbar {
+      height: 38px; padding: 0 16px; display: flex; align-items: center; gap: 10px;
+      border-bottom: 1px solid var(--border); background: var(--bg-header);
+    }
+    .graph-toolbar-title {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 1px; color: var(--text-tertiary);
+    }
+    .graph-toolbar .ctrl-input { width: 200px; font-size: 11px; padding: 4px 8px; }
+    .graph-toolbar .icon-btn { width: 26px; height: 26px; margin-left: auto; }
+    .graph-body { display: flex; height: calc(100% - 38px); }
+    .graph-canvas { flex: 1; position: relative; }
+    .graph-canvas-inner { width: 100%; height: 100%; }
+    .graph-details-panel {
+      width: 260px; border-left: 1px solid var(--border); padding: 12px;
+      overflow-y: auto; font-size: 12px; display: none;
+    }
+    .graph-details-panel.open { display: block; }
+    .graph-detail-title { font-weight: 600; font-size: 14px; color: var(--accent); margin-bottom: 8px; }
+    .graph-detail-type { font-size: 11px; color: var(--text-tertiary); margin-bottom: 6px; }
+    .graph-detail-desc { color: var(--text-secondary); line-height: 1.6; }
+    .graph-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-tertiary); font-size: 13px; }
+
+    /* ── Modal / Lightbox ── */
+    .modal-overlay {
+      position: fixed; inset: 0; z-index: 2000; background: rgba(0,0,0,0.85);
+      display: flex; align-items: center; justify-content: center; cursor: pointer;
+    }
+    .modal-overlay img { max-width: 90vw; max-height: 90vh; border-radius: var(--radius-md); cursor: default; }
+    .modal-close {
+      position: fixed; top: 16px; right: 16px; z-index: 2001;
+      width: 36px; height: 36px; border-radius: 50%; border: none;
+      background: rgba(255,255,255,0.15); color: #fff; cursor: pointer;
+      font-size: 20px; display: flex; align-items: center; justify-content: center;
     }
 
-    /* ══════════════════════════════════════════════
-       FLASH HIGHLIGHT
-    ══════════════════════════════════════════════ */
-    @keyframes flashHighlight {
-      0% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 20px var(--flash-color); }
-      100% { box-shadow: none; }
+    /* ── Toast ── */
+    .toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 3000; display: flex; flex-direction: column; gap: 8px; }
+    .toast {
+      padding: 10px 16px; border-radius: var(--radius-sm); font-size: 13px;
+      color: #fff; animation: toastIn 0.3s ease;
+      display: flex; align-items: center; gap: 8px;
     }
+    .toast.success { background: var(--success); }
+    .toast.error { background: var(--error); }
+    .toast.info { background: #3b82f6; }
+    @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* ── Upload Progress ── */
+    .upload-overlay {
+      position: fixed; inset: 0; z-index: 1500; background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .upload-dialog {
+      background: var(--bg-bot-msg); border: 1px solid var(--border-strong);
+      border-radius: var(--radius-lg); padding: 32px; text-align: center;
+      min-width: 300px;
+    }
+    .upload-spinner {
+      width: 40px; height: 40px; border: 3px solid var(--border);
+      border-top-color: var(--accent); border-radius: 50%;
+      animation: spin 0.8s linear infinite; margin: 0 auto 16px;
+    }
+    .upload-text { font-size: 14px; color: var(--text-secondary); }
+
+    /* ── Animations ── */
+    @keyframes fadeInUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    header { animation: fadeInUp 0.4s ease both; }
+    .pdf-panel { animation: fadeInUp 0.4s ease 0.1s both; }
+    .chat-panel { animation: fadeInUp 0.4s ease 0.2s both; }
+    @keyframes flashHighlight { 0% { box-shadow: inset 0 0 0 2px var(--accent), 0 0 20px var(--flash-color); } 100% { box-shadow: none; } }
     .flash-active { animation: flashHighlight 1.5s ease-out; }
 
-    /* ══════════════════════════════════════════════
-       LOADING STATE
-    ══════════════════════════════════════════════ */
-    .file-list-empty {
-      padding: 20px;
-      text-align: center;
-      font-size: 13px;
-      color: var(--text-tertiary);
-    }
-
-    /* ══════════════════════════════════════════════
-       PAGE LOAD ANIMATION
-    ══════════════════════════════════════════════ */
-    @keyframes fadeInUp {
-      from { opacity: 0; transform: translateY(12px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    header { animation: fadeInUp 0.4s ease both; }
-    .source-panel { animation: fadeInUp 0.4s ease 0.1s both; }
-    .chat-panel { animation: fadeInUp 0.4s ease 0.2s both; }
-
-    /* ══════════════════════════════════════════════
-       RESPONSIVE
-    ══════════════════════════════════════════════ */
+    /* ── Responsive ── */
     @media (max-width: 768px) {
       .main-container { flex-direction: column; }
-      .source-panel { width: 100% !important; max-height: 45vh; min-width: 0; }
+      .pdf-panel { width: 100% !important; max-height: 45vh; min-width: 0; }
       .divider { width: 100%; height: 4px; cursor: row-resize; }
       .divider::after { width: 40px; height: 3px; }
       .chat-panel { min-width: 0; }
-      .markdown-content { padding: 20px; }
     }
   </style>
 </head>
@@ -808,19 +528,30 @@
         <div class="brand-text">RAG Notebook</div>
       </div>
       <div class="header-sep"></div>
-      <div class="header-controls">
-        <input type="password" id="apiKey" placeholder="API Key" class="ctrl-input" autocomplete="off">
-        <button class="icon-btn" onclick="refreshWorkspaces()" title="Refresh workspaces">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6"/><path d="M2.5 22v-6h6"/><path d="M3.5 12a9 9 0 0 1 15-6.7L21.5 8"/><path d="M20.5 12a9 9 0 0 1-15 6.7L2.5 16"/></svg>
-        </button>
-        <select id="workspaceSelect" class="ctrl-select" onchange="loadWorkspace()">
-          <option value="">Enter API key to start</option>
-        </select>
-      </div>
+      <input type="password" id="apiKey" placeholder="API Key" class="ctrl-input" autocomplete="off">
+      <button class="icon-btn" onclick="FileManager.refreshWorkspaces()" title="Refresh">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6"/><path d="M2.5 22v-6h6"/><path d="M3.5 12a9 9 0 0 1 15-6.7L21.5 8"/><path d="M20.5 12a9 9 0 0 1-15 6.7L2.5 16"/></svg>
+      </button>
+      <select id="workspaceSelect" class="ctrl-select" onchange="FileManager.loadWorkspace(this.value)">
+        <option value="">Enter API key to start</option>
+      </select>
+      <button class="icon-btn has-label" onclick="FileManager.upload()" title="Upload file">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span class="icon-btn-label">Upload</span>
+      </button>
     </div>
     <div class="header-right">
-      <button class="icon-btn theme-btn" onclick="toggleTheme()" title="Toggle theme">
-        <svg viewBox="0 0 24 24"><path d="M12 3c-4.97 0-9 4.03-9 9s4.03 9 9 9 9-4.03 9-9c0-.46-.04-.92-.1-1.36-.98 1.37-2.58 2.26-4.4 2.26-2.98 0-5.4-2.42-5.4-5.4 0-1.81.89-3.42 2.26-4.4-.44-.06-.9-.1-1.36-.1z"/></svg>
+      <select id="modeSelect" class="ctrl-select" style="min-width:100px" title="Query mode">
+        <option value="hybrid">Hybrid</option>
+        <option value="local">Local</option>
+        <option value="global">Global</option>
+        <option value="naive">Naive</option>
+      </select>
+      <button class="icon-btn" id="graphToggleBtn" onclick="GraphViewer.toggle()" title="Knowledge Graph">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="5" cy="6" r="3"/><circle cx="19" cy="6" r="3"/><circle cx="12" cy="19" r="3"/><line x1="7.5" y1="7.5" x2="10" y2="17"/><line x1="16.5" y1="7.5" x2="14" y2="17"/><line x1="8" y1="6" x2="16" y2="6"/></svg>
+      </button>
+      <button class="icon-btn" onclick="UI.toggleTheme()" title="Toggle theme">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3c-4.97 0-9 4.03-9 9s4.03 9 9 9 9-4.03 9-9c0-.46-.04-.92-.1-1.36-.98 1.37-2.58 2.26-4.4 2.26-2.98 0-5.4-2.42-5.4-5.4 0-1.81.89-3.42 2.26-4.4-.44-.06-.9-.1-1.36-.1z"/></svg>
       </button>
     </div>
   </header>
@@ -828,40 +559,64 @@
   <!-- ═══ MAIN CONTAINER ═══ -->
   <div class="main-container">
 
-    <!-- Source Panel -->
-    <div class="source-panel" id="sourcePanel">
-      <div class="source-list-header">
-        <span>Sources</span>
-        <span class="source-list-hint">Select to preview</span>
+    <!-- PDF / Document Panel (Left) -->
+    <div class="pdf-panel" id="pdfPanel">
+      <div class="pdf-toolbar">
+        <select id="fileSelect" class="ctrl-select" onchange="FileManager.selectFile(this.value)">
+          <option value="">No files</option>
+        </select>
+        <div class="pdf-page-controls">
+          <button class="icon-btn" onclick="PDFViewer.prevPage()" title="Previous page">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <span class="pdf-page-info" id="pdfPageInfo">—</span>
+          <button class="icon-btn" onclick="PDFViewer.nextPage()" title="Next page">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+        <div class="pdf-zoom-controls">
+          <button class="icon-btn" onclick="PDFViewer.zoomOut()" title="Zoom out">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+          <button class="icon-btn" onclick="PDFViewer.zoomIn()" title="Zoom in">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+        </div>
       </div>
-      <div class="source-list-container" id="fileList">
-        <div class="file-list-empty">Select a workspace above</div>
-      </div>
-      <div class="markdown-content" id="markdownContainer">
-        <div class="reader-empty">
-          <div class="reader-empty-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+      <div class="pdf-viewer" id="pdfViewer">
+        <div class="pdf-pages" id="pdfPages"></div>
+        <div class="md-viewer" id="mdViewer"></div>
+        <div class="pdf-empty" id="pdfEmpty">
+          <div class="pdf-empty-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
           </div>
-          <div class="reader-empty-title">Document Preview</div>
-          <div class="reader-empty-sub">Select a source file to view its content</div>
+          <div class="pdf-empty-title">Document Preview</div>
+          <div class="pdf-empty-sub">Select a workspace to view documents</div>
         </div>
       </div>
     </div>
 
-    <!-- Resizable Divider -->
+    <!-- Divider -->
     <div class="divider" id="divider"></div>
 
-    <!-- Chat Panel -->
+    <!-- Chat Panel (Right) -->
     <div class="chat-panel">
       <div class="chat-header">
         <span class="chat-header-title">Assistant</span>
-        <span class="chat-status">
-          <span class="status-dot"></span>
-          Ready
-        </span>
+        <span class="chat-status"><span class="status-dot"></span> Ready</span>
+      </div>
+      <div class="reasoning-trace" id="reasoningTrace" style="display:none">
+        <div class="trace-header" onclick="ReasoningTrace.toggleCollapse()">
+          <span>Reasoning Trace</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="trace-body" id="traceBody">
+          <div class="trace-steps" id="traceSteps"></div>
+          <div class="trace-keywords" id="traceKeywords" style="display:none"></div>
+        </div>
       </div>
       <div class="chat-messages" id="chatMessages">
-        <div class="chat-welcome">
+        <div class="chat-welcome" id="chatWelcome">
           <div class="chat-welcome-icon">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           </div>
@@ -872,7 +627,7 @@
       <div class="input-area">
         <div class="input-wrapper">
           <textarea id="questionInput" placeholder="Ask about the selected workspace..." rows="1"></textarea>
-          <button class="send-btn" onclick="sendMessage()" id="sendBtn" title="Send message">
+          <button class="send-btn" onclick="Chat.send()" id="sendBtn" title="Send message">
             <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
           </button>
         </div>
@@ -881,33 +636,1005 @@
     </div>
   </div>
 
+  <!-- ═══ GRAPH PANEL (Bottom, collapsible) ═══ -->
+  <div class="graph-panel closed" id="graphPanel">
+    <div class="graph-toolbar">
+      <span class="graph-toolbar-title">Knowledge Graph</span>
+      <input type="text" class="ctrl-input" id="graphSearchInput" placeholder="Search entities..." onkeydown="if(event.key==='Enter')GraphViewer.searchEntities()">
+      <button class="icon-btn" onclick="GraphViewer.searchEntities()" title="Search">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </button>
+      <button class="icon-btn" onclick="GraphViewer.toggle()" title="Close" style="margin-left:auto">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="graph-body">
+      <div class="graph-canvas">
+        <div class="graph-canvas-inner" id="graphContainer"></div>
+        <div class="graph-empty" id="graphEmpty">Query to see related entities</div>
+      </div>
+      <div class="graph-details-panel" id="graphDetailsPanel">
+        <div class="graph-detail-title" id="graphDetailTitle"></div>
+        <div class="graph-detail-type" id="graphDetailType"></div>
+        <div class="graph-detail-desc" id="graphDetailDesc"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Overlay -->
+  <div class="modal-overlay" id="modalOverlay" style="display:none" onclick="UI.closeModal()">
+    <button class="modal-close" onclick="UI.closeModal()">&times;</button>
+    <div id="modalContent"></div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- Citation Hover Card -->
+  <div class="citation-card" id="citationCard" style="display:none">
+    <div class="citation-card-title" id="citationCardTitle"></div>
+    <div id="citationCardContent"></div>
+  </div>
+
+  <!-- Hidden file input -->
+  <input type="file" id="fileInput" style="display:none"
+    accept=".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.bmp,.tiff,.gif,.webp,.md,.txt">
+
   <!-- ═══ SCRIPTS ═══ -->
   <script>
-    /* ── State ── */
-    let currentDocId = "";
-    let currentFilename = "";
-    let messageSeq = 0;
-    let welcomeCleared = false;
+  /* ============================================================
+     MODULE 1: AppState & AppConfig
+  ============================================================ */
+  const AppState = {
+    apiKey: '',
+    currentDocId: '',
+    currentFile: null,       // {name, type:'pdf'|'md', url?}
+    workspaces: [],
+    lastQueryResponse: null, // full structured query response
+    welcomeCleared: false,
+    graphOpen: false,
+    msgSeq: 0,
+  };
 
-    /* ── Theme ── */
-    function toggleTheme() {
+  const AppConfig = {
+    pdfWorkerSrc: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
+    entityColors: {
+      'PERSON': '#ff6b6b', 'ORGANIZATION': '#4ecdc4', 'LOCATION': '#45b7d1',
+      'CONCEPT': '#f7b731', 'TECHNOLOGY': '#a55eea', 'EVENT': '#26de81',
+      'DOCUMENT': '#fd9644', 'default': '#95a5a6',
+    },
+  };
+
+  // Init PDF.js worker
+  if (typeof pdfjsLib !== 'undefined') {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = AppConfig.pdfWorkerSrc;
+  }
+
+  /* ============================================================
+     MODULE 2: API Client
+  ============================================================ */
+  const API = {
+    _headers() {
+      const h = { 'x-api-key': AppState.apiKey };
+      return h;
+    },
+    _jsonHeaders() {
+      return { ...this._headers(), 'Content-Type': 'application/json' };
+    },
+    async getWorkspaces() {
+      const r = await fetch('/workspaces', { headers: this._headers() });
+      if (!r.ok) throw new Error(r.status === 401 ? 'Invalid API key' : `Error ${r.status}`);
+      return r.json();
+    },
+    async getUploads(docId) {
+      const r = await fetch(`/uploads/${docId}`, { headers: this._headers() });
+      return r.ok ? r.json() : { files: [] };
+    },
+    async getFiles(docId) {
+      const r = await fetch(`/files/${docId}`, { headers: this._headers() });
+      return r.ok ? r.json() : { files: [] };
+    },
+    async getContent(docId, filename) {
+      const r = await fetch(`/content/${docId}?filename=${encodeURIComponent(filename)}`, { headers: this._headers() });
+      if (!r.ok) throw new Error(`Error ${r.status}`);
+      return r.json();
+    },
+    async query(docId, query, opts = {}) {
+      const body = {
+        doc_id: docId, query,
+        mode: opts.mode || 'hybrid',
+        top_k: opts.top_k || 10,
+        chunk_top_k: opts.chunk_top_k || 5,
+        vlm_enhanced: opts.vlm_enhanced !== false,
+        return_graph: opts.return_graph || false,
+        graph_max_depth: opts.graph_max_depth || 2,
+        graph_max_nodes: opts.graph_max_nodes || 50,
+      };
+      const r = await fetch('/query', {
+        method: 'POST', headers: this._jsonHeaders(), body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(`Query failed (${r.status})`);
+      return r.json();
+    },
+    async getGraphLabels(docId) {
+      const r = await fetch(`/graph/${docId}/labels`, { headers: this._headers() });
+      return r.ok ? r.json() : { labels: [] };
+    },
+    async getSubgraph(docId, label, maxDepth = 2, maxNodes = 50) {
+      const r = await fetch(`/graph/${docId}/subgraph?label=${encodeURIComponent(label)}&max_depth=${maxDepth}&max_nodes=${maxNodes}`, { headers: this._headers() });
+      return r.ok ? r.json() : { nodes: [], edges: [] };
+    },
+    async getGraphStats(docId) {
+      const r = await fetch(`/graph/${docId}/stats`, { headers: this._headers() });
+      return r.ok ? r.json() : {};
+    },
+    async searchEntities(docId, q, limit = 20) {
+      const r = await fetch(`/graph/${docId}/search?q=${encodeURIComponent(q)}&limit=${limit}`, { headers: this._headers() });
+      return r.ok ? r.json() : { results: [] };
+    },
+    async ingest(file, docId) {
+      const fd = new FormData();
+      fd.append('file', file);
+      if (docId) fd.append('doc_id', docId);
+      const r = await fetch('/ingest', { method: 'POST', headers: this._headers(), body: fd });
+      if (!r.ok) throw new Error(`Ingest failed (${r.status})`);
+      return r.json();
+    },
+    async deleteWorkspace(docId) {
+      const r = await fetch(`/workspace/${docId}`, { method: 'DELETE', headers: this._headers() });
+      if (!r.ok) throw new Error(`Delete failed (${r.status})`);
+      return r.json();
+    },
+    uploadUrl(docId, filename) {
+      return `/uploads/${docId}/${encodeURIComponent(filename)}`;
+    },
+  };
+
+  /* ============================================================
+     MODULE 3: PDF Viewer
+  ============================================================ */
+  const PDFViewer = {
+    pdfDoc: null,
+    currentPage: 1,
+    totalPages: 0,
+    scale: 1.3,
+    renderedPages: new Set(),
+    observer: null,
+
+    init() {
+      const container = document.getElementById('pdfPages');
+      if (!container) return;
+      this.observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            const num = parseInt(entry.target.dataset.page);
+            if (!this.renderedPages.has(num)) this._renderPage(num, entry.target);
+          }
+        });
+      }, { root: document.getElementById('pdfViewer'), rootMargin: '300px' });
+    },
+
+    async loadDocument(url) {
+      if (typeof pdfjsLib === 'undefined') {
+        UI.showToast('PDF.js not loaded', 'error');
+        return;
+      }
+      this.destroy();
+      try {
+        // Add API key header for authenticated PDF fetching
+        this.pdfDoc = await pdfjsLib.getDocument({
+          url: url,
+          httpHeaders: { 'x-api-key': AppState.apiKey },
+        }).promise;
+        this.totalPages = this.pdfDoc.numPages;
+        this.currentPage = 1;
+        this._buildPages();
+        this._updatePageInfo();
+        document.getElementById('pdfEmpty').style.display = 'none';
+        document.getElementById('pdfPages').style.display = 'flex';
+        document.getElementById('mdViewer').style.display = 'none';
+      } catch (e) {
+        console.error('PDF load error:', e);
+        UI.showToast('Failed to load PDF: ' + e.message, 'error');
+      }
+    },
+
+    _buildPages() {
+      const container = document.getElementById('pdfPages');
+      container.innerHTML = '';
+      for (let i = 1; i <= this.totalPages; i++) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'pdf-page-wrapper';
+        wrapper.dataset.page = i;
+        const canvas = document.createElement('canvas');
+        wrapper.appendChild(canvas);
+        const num = document.createElement('div');
+        num.className = 'pdf-page-num';
+        num.textContent = i;
+        wrapper.appendChild(num);
+        container.appendChild(wrapper);
+        this.observer.observe(wrapper);
+      }
+    },
+
+    async _renderPage(num, wrapper) {
+      if (this.renderedPages.has(num) || !this.pdfDoc) return;
+      this.renderedPages.add(num);
+      try {
+        const page = await this.pdfDoc.getPage(num);
+        const viewport = page.getViewport({ scale: this.scale });
+        const canvas = wrapper.querySelector('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+      } catch (e) {
+        console.error(`Render page ${num} error:`, e);
+      }
+    },
+
+    scrollToPage(num) {
+      if (num < 1 || num > this.totalPages) return;
+      this.currentPage = num;
+      const wrapper = document.querySelector(`#pdfPages [data-page="${num}"]`);
+      if (wrapper) wrapper.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      this._updatePageInfo();
+    },
+
+    nextPage() { if (this.currentPage < this.totalPages) this.scrollToPage(this.currentPage + 1); },
+    prevPage() { if (this.currentPage > 1) this.scrollToPage(this.currentPage - 1); },
+
+    zoomIn() { this.scale = Math.min(3, this.scale + 0.2); this._rerender(); },
+    zoomOut() { this.scale = Math.max(0.5, this.scale - 0.2); this._rerender(); },
+
+    _rerender() {
+      this.renderedPages.clear();
+      this._buildPages();
+    },
+
+    _updatePageInfo() {
+      document.getElementById('pdfPageInfo').textContent =
+        this.totalPages > 0 ? `${this.currentPage} / ${this.totalPages}` : '—';
+    },
+
+    destroy() {
+      if (this.pdfDoc) { this.pdfDoc.destroy(); this.pdfDoc = null; }
+      this.renderedPages.clear();
+      this.totalPages = 0;
+      this.currentPage = 1;
+      document.getElementById('pdfPages').innerHTML = '';
+    },
+  };
+
+  /* ============================================================
+     MODULE 4: Renderer (Markdown + KaTeX + hljs + citations)
+  ============================================================ */
+  const Renderer = {
+    render(text) {
+      if (!text) return '';
+      let html = (typeof marked !== 'undefined') ? marked.parse(text) : this._escapeHtml(text);
+      html = this._processCitations(html);
+      return html;
+    },
+
+    postProcess(container) {
+      // KaTeX
+      if (typeof renderMathInElement === 'function') {
+        try {
+          renderMathInElement(container, {
+            delimiters: [
+              { left: '$$', right: '$$', display: true },
+              { left: '$', right: '$', display: false },
+              { left: '\\(', right: '\\)', display: false },
+              { left: '\\[', right: '\\]', display: true },
+            ],
+            ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+            throwOnError: false,
+          });
+        } catch (e) { /* KaTeX not loaded, skip */ }
+      }
+      // highlight.js
+      if (typeof hljs !== 'undefined') {
+        container.querySelectorAll('pre code').forEach(block => {
+          try { hljs.highlightElement(block); } catch (e) {}
+        });
+      }
+      // Image click to zoom
+      container.querySelectorAll('img').forEach(img => {
+        img.style.cursor = 'pointer';
+        img.onclick = (e) => {
+          e.stopPropagation();
+          UI.showModal(`<img src="${img.src}" alt="${img.alt || ''}">`);
+        };
+      });
+    },
+
+    _processCitations(html) {
+      // Replace [N] with clickable citation links, but skip markdown links [text](url)
+      return html.replace(/\[(\d+)\](?!\()/g, (match, num) => {
+        return `<span class="citation-link" data-ref="${num}" onclick="Citations.onClick('${num}')" onmouseenter="Citations.onHover('${num}', event)" onmouseleave="Citations.onLeave()">${match}</span>`;
+      });
+    },
+
+    _escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    },
+  };
+
+  /* ============================================================
+     MODULE 5: Reasoning Trace
+  ============================================================ */
+  const ReasoningTrace = {
+    steps: [],
+    collapsed: false,
+
+    show() {
+      document.getElementById('reasoningTrace').style.display = 'block';
+      this.collapsed = false;
+      document.getElementById('traceBody').style.display = 'block';
+    },
+
+    hide() {
+      document.getElementById('reasoningTrace').style.display = 'none';
+    },
+
+    clear() {
+      this.steps = [];
+      document.getElementById('traceSteps').innerHTML = '';
+      document.getElementById('traceKeywords').style.display = 'none';
+      document.getElementById('traceKeywords').innerHTML = '';
+    },
+
+    start() {
+      this.clear();
+      this.show();
+      this.addStep('Extracting keywords...', 'active');
+      this.addStep('Searching knowledge graph...', 'pending');
+      this.addStep('Reranking chunks...', 'pending');
+      this.addStep('Generating answer...', 'pending');
+    },
+
+    addStep(text, status = 'pending') {
+      const idx = this.steps.length;
+      this.steps.push({ text, status });
+      const el = document.createElement('div');
+      el.className = `trace-step ${status}`;
+      el.id = `traceStep${idx}`;
+      el.innerHTML = `<span class="trace-step-icon">${this._icon(status)}</span><span>${text}</span>`;
+      document.getElementById('traceSteps').appendChild(el);
+      return idx;
+    },
+
+    updateStep(idx, status) {
+      if (idx >= this.steps.length) return;
+      this.steps[idx].status = status;
+      const el = document.getElementById(`traceStep${idx}`);
+      if (el) {
+        el.className = `trace-step ${status}`;
+        el.querySelector('.trace-step-icon').innerHTML = this._icon(status);
+      }
+    },
+
+    advanceTo(stepIdx) {
+      for (let i = 0; i < stepIdx; i++) this.updateStep(i, 'done');
+      if (stepIdx < this.steps.length) this.updateStep(stepIdx, 'active');
+    },
+
+    allDone() {
+      this.steps.forEach((_, i) => this.updateStep(i, 'done'));
+    },
+
+    showKeywords(keywords) {
+      const kw = document.getElementById('traceKeywords');
+      if (!keywords) return;
+      const all = [...(keywords.high_level || []), ...(keywords.low_level || [])];
+      if (all.length === 0) return;
+      kw.style.display = 'block';
+      kw.innerHTML = '<strong style="font-size:10px;color:var(--text-tertiary)">Keywords:</strong> ' +
+        all.map(k => `<span class="trace-keyword">${k}</span>`).join('');
+    },
+
+    toggleCollapse() {
+      this.collapsed = !this.collapsed;
+      document.getElementById('traceBody').style.display = this.collapsed ? 'none' : 'block';
+    },
+
+    _icon(status) {
+      const svgAttrs = 'width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"';
+      switch (status) {
+        case 'active': return `<svg ${svgAttrs} stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>`;
+        case 'done': return `<svg ${svgAttrs} stroke-linecap="round"><path d="M20 6L9 17l-5-5"/></svg>`;
+        case 'error': return `<svg ${svgAttrs} stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
+        default: return `<svg ${svgAttrs}><circle cx="12" cy="12" r="4" fill="currentColor" opacity="0.3"/></svg>`;
+      }
+    },
+  };
+
+  /* ============================================================
+     MODULE 6: Citations
+  ============================================================ */
+  const Citations = {
+    chunks: {},     // refId -> chunk data
+    references: {}, // refId -> reference data
+
+    register(data) {
+      this.clear();
+      if (!data) return;
+      const chunks = data.chunks || [];
+      const refs = data.references || [];
+      // Index by reference_id or position
+      chunks.forEach((c, i) => {
+        const id = c.reference_id || String(i + 1);
+        this.chunks[id] = c;
+      });
+      refs.forEach((r, i) => {
+        const id = r.reference_id || String(i + 1);
+        this.references[id] = r;
+      });
+    },
+
+    onClick(refId) {
+      const chunk = this.chunks[refId];
+      const ref = this.references[refId];
+      if (!chunk && !ref) return;
+
+      // Try to determine page number from file_path
+      const filePath = (chunk && chunk.file_path) || (ref && ref.file_path) || '';
+      const pageMatch = filePath.match(/page[_\-]?(\d+)/i);
+      if (pageMatch && PDFViewer.pdfDoc) {
+        PDFViewer.scrollToPage(parseInt(pageMatch[1]));
+      }
+
+      // Flash the PDF panel
+      const panel = document.getElementById('pdfPanel');
+      panel.classList.remove('flash-active');
+      void panel.offsetWidth;
+      panel.classList.add('flash-active');
+    },
+
+    onHover(refId, event) {
+      const chunk = this.chunks[refId];
+      if (!chunk) return;
+      const card = document.getElementById('citationCard');
+      const title = document.getElementById('citationCardTitle');
+      const content = document.getElementById('citationCardContent');
+      title.textContent = `Reference [${refId}]`;
+      const text = chunk.content || '';
+      content.textContent = text.length > 300 ? text.substring(0, 300) + '...' : text;
+      card.style.display = 'block';
+      // Position near cursor
+      const x = Math.min(event.clientX + 10, window.innerWidth - 420);
+      const y = Math.min(event.clientY + 10, window.innerHeight - 220);
+      card.style.left = x + 'px';
+      card.style.top = y + 'px';
+    },
+
+    onLeave() {
+      document.getElementById('citationCard').style.display = 'none';
+    },
+
+    clear() {
+      this.chunks = {};
+      this.references = {};
+    },
+  };
+
+  /* ============================================================
+     MODULE 7: Chat Engine
+  ============================================================ */
+  const Chat = {
+    async send() {
+      const input = document.getElementById('questionInput');
+      const text = input.value.trim();
+      if (!text || !AppState.currentDocId) return;
+      if (!AppState.apiKey) {
+        this._clearWelcome();
+        this._addBot('Please enter an API key in the header.');
+        return;
+      }
+
+      this._clearWelcome();
+      this._addUser(text);
+      input.value = '';
+      input.style.height = 'auto';
+
+      const thinkingId = this._addThinking();
+      document.getElementById('sendBtn').disabled = true;
+
+      // Start reasoning trace
+      ReasoningTrace.start();
+      const mode = document.getElementById('modeSelect').value;
+
+      try {
+        // Simulate trace progress
+        setTimeout(() => ReasoningTrace.advanceTo(1), 400);
+        setTimeout(() => ReasoningTrace.advanceTo(2), 1200);
+        setTimeout(() => ReasoningTrace.advanceTo(3), 2000);
+
+        const data = await API.query(AppState.currentDocId, text, {
+          mode,
+          return_graph: AppState.graphOpen,
+        });
+
+        AppState.lastQueryResponse = data;
+
+        // Complete trace
+        ReasoningTrace.allDone();
+        if (data.metadata && data.metadata.keywords) {
+          ReasoningTrace.showKeywords(data.metadata.keywords);
+        }
+
+        // Register citations
+        Citations.register(data.data || {});
+
+        // Render answer
+        this._removeMsg(thinkingId);
+        const html = Renderer.render(data.answer || 'No answer returned.');
+        const msgEl = this._addBot(html, true);
+        Renderer.postProcess(msgEl);
+
+        // Update graph if data available
+        if (data.graph && data.graph.nodes && data.graph.nodes.length > 0) {
+          GraphViewer.loadData(data.graph.nodes, data.graph.edges || []);
+        }
+
+      } catch (e) {
+        ReasoningTrace.updateStep(3, 'error');
+        this._removeMsg(thinkingId);
+        this._addBot('Error: ' + e.message);
+      }
+
+      document.getElementById('sendBtn').disabled = false;
+    },
+
+    _clearWelcome() {
+      if (AppState.welcomeCleared) return;
+      const w = document.getElementById('chatWelcome');
+      if (w) w.remove();
+      AppState.welcomeCleared = true;
+    },
+
+    _addUser(text) {
+      const div = this._createMsg('user');
+      div.textContent = text;
+      this._append(div);
+      return div.id;
+    },
+
+    _addBot(content, isHtml = false) {
+      const div = this._createMsg('bot');
+      if (isHtml) div.innerHTML = content;
+      else div.textContent = content;
+      this._append(div);
+      return div;
+    },
+
+    _addThinking() {
+      const div = this._createMsg('bot thinking');
+      div.innerHTML = '<div class="thinking-dots"><span></span><span></span><span></span></div>';
+      this._append(div);
+      return div.id;
+    },
+
+    _createMsg(cls) {
+      AppState.msgSeq++;
+      const div = document.createElement('div');
+      div.className = `message ${cls}`;
+      div.id = `msg-${AppState.msgSeq}`;
+      return div;
+    },
+
+    _append(el) {
+      document.getElementById('chatMessages').appendChild(el);
+      el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    },
+
+    _removeMsg(id) {
+      const el = document.getElementById(id);
+      if (el) el.remove();
+    },
+  };
+
+  /* ============================================================
+     MODULE 8: Graph Viewer (Sigma.js + graphology)
+  ============================================================ */
+  const GraphViewer = {
+    sigmaInstance: null,
+    graph: null,
+
+    toggle() {
+      AppState.graphOpen = !AppState.graphOpen;
+      const panel = document.getElementById('graphPanel');
+      const btn = document.getElementById('graphToggleBtn');
+      if (AppState.graphOpen) {
+        panel.classList.remove('closed');
+        panel.classList.add('open');
+        btn.classList.add('active');
+        // If we have data from last query, load it
+        if (AppState.lastQueryResponse && AppState.lastQueryResponse.graph) {
+          const g = AppState.lastQueryResponse.graph;
+          this.loadData(g.nodes || [], g.edges || []);
+        }
+      } else {
+        panel.classList.remove('open');
+        panel.classList.add('closed');
+        btn.classList.remove('active');
+      }
+    },
+
+    loadData(nodes, edges) {
+      if (typeof graphology === 'undefined' || typeof Sigma === 'undefined') {
+        console.warn('Sigma.js or graphology not loaded');
+        return;
+      }
+      this.destroy();
+
+      document.getElementById('graphEmpty').style.display = nodes.length === 0 ? 'flex' : 'none';
+      if (nodes.length === 0) return;
+
+      const Graph = graphology;
+      this.graph = new Graph();
+
+      // Add nodes with circular layout
+      const n = nodes.length;
+      nodes.forEach((node, i) => {
+        const angle = (2 * Math.PI * i) / n;
+        const r = Math.min(n * 8, 200);
+        const color = AppConfig.entityColors[node.type] || AppConfig.entityColors['default'];
+        this.graph.addNode(node.id, {
+          x: r * Math.cos(angle),
+          y: r * Math.sin(angle),
+          size: Math.max(6, Math.min(20, 8 + (node.degree || 0))),
+          color: color,
+          label: node.label || node.id,
+          _type: node.type || '',
+          _description: node.description || '',
+        });
+      });
+
+      // Add edges
+      edges.forEach((edge, i) => {
+        if (this.graph.hasNode(edge.source) && this.graph.hasNode(edge.target)) {
+          try {
+            this.graph.addEdge(edge.source, edge.target, {
+              size: 1.5,
+              color: 'rgba(150,150,150,0.4)',
+              label: edge.label || '',
+            });
+          } catch (e) { /* duplicate edge, skip */ }
+        }
+      });
+
+      // Apply simple force layout
+      this._forceLayout(80);
+
+      // Render with sigma
+      const container = document.getElementById('graphContainer');
+      try {
+        this.sigmaInstance = new Sigma(this.graph, container, {
+          renderEdgeLabels: false,
+          defaultNodeColor: '#95a5a6',
+          defaultEdgeColor: 'rgba(150,150,150,0.3)',
+          labelColor: { color: getComputedStyle(document.documentElement).getPropertyValue('--text-primary').trim() || '#e8e4df' },
+          labelFont: 'IBM Plex Sans',
+          labelSize: 12,
+          minCameraRatio: 0.1,
+          maxCameraRatio: 10,
+        });
+
+        // Node click handler
+        this.sigmaInstance.on('clickNode', ({ node }) => {
+          const attrs = this.graph.getNodeAttributes(node);
+          this._showDetails(node, attrs);
+        });
+
+        // Node hover
+        this.sigmaInstance.on('enterNode', ({ node }) => {
+          document.getElementById('graphContainer').style.cursor = 'pointer';
+        });
+        this.sigmaInstance.on('leaveNode', () => {
+          document.getElementById('graphContainer').style.cursor = 'default';
+        });
+      } catch (e) {
+        console.error('Sigma render error:', e);
+      }
+    },
+
+    _forceLayout(iterations) {
+      if (!this.graph || this.graph.order === 0) return;
+      const nodes = this.graph.nodes();
+      const n = nodes.length;
+      const k = Math.sqrt(10000 / n);
+
+      for (let iter = 0; iter < iterations; iter++) {
+        const disp = {};
+        nodes.forEach(v => { disp[v] = { x: 0, y: 0 }; });
+
+        // Repulsion
+        for (let i = 0; i < n; i++) {
+          for (let j = i + 1; j < n; j++) {
+            const u = nodes[i], v = nodes[j];
+            const ux = this.graph.getNodeAttribute(u, 'x');
+            const uy = this.graph.getNodeAttribute(u, 'y');
+            const vx = this.graph.getNodeAttribute(v, 'x');
+            const vy = this.graph.getNodeAttribute(v, 'y');
+            let dx = ux - vx, dy = uy - vy;
+            const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 0.01);
+            const force = k * k / dist;
+            const fx = (dx / dist) * force;
+            const fy = (dy / dist) * force;
+            disp[u].x += fx; disp[u].y += fy;
+            disp[v].x -= fx; disp[v].y -= fy;
+          }
+        }
+
+        // Attraction
+        this.graph.forEachEdge((edge, attrs, source, target) => {
+          const sx = this.graph.getNodeAttribute(source, 'x');
+          const sy = this.graph.getNodeAttribute(source, 'y');
+          const tx = this.graph.getNodeAttribute(target, 'x');
+          const ty = this.graph.getNodeAttribute(target, 'y');
+          let dx = tx - sx, dy = ty - sy;
+          const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 0.01);
+          const force = dist * dist / k;
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
+          disp[source].x += fx; disp[source].y += fy;
+          disp[target].x -= fx; disp[target].y -= fy;
+        });
+
+        // Apply
+        const temp = 10 * (1 - iter / iterations);
+        nodes.forEach(v => {
+          const d = disp[v];
+          const len = Math.max(Math.sqrt(d.x * d.x + d.y * d.y), 0.01);
+          const capped = Math.min(len, temp);
+          this.graph.setNodeAttribute(v, 'x', this.graph.getNodeAttribute(v, 'x') + (d.x / len) * capped);
+          this.graph.setNodeAttribute(v, 'y', this.graph.getNodeAttribute(v, 'y') + (d.y / len) * capped);
+        });
+      }
+    },
+
+    _showDetails(nodeId, attrs) {
+      const panel = document.getElementById('graphDetailsPanel');
+      document.getElementById('graphDetailTitle').textContent = nodeId;
+      document.getElementById('graphDetailType').textContent = attrs._type || 'Unknown type';
+      document.getElementById('graphDetailDesc').textContent = attrs._description || 'No description available.';
+      panel.classList.add('open');
+    },
+
+    async searchEntities() {
+      const q = document.getElementById('graphSearchInput').value.trim();
+      if (!q || !AppState.currentDocId) return;
+      try {
+        const data = await API.getSubgraph(AppState.currentDocId, q);
+        if (data.nodes && data.nodes.length > 0) {
+          this.loadData(data.nodes, data.edges || []);
+        } else {
+          UI.showToast('No entities found for: ' + q, 'info');
+        }
+      } catch (e) {
+        UI.showToast('Search failed: ' + e.message, 'error');
+      }
+    },
+
+    destroy() {
+      if (this.sigmaInstance) {
+        this.sigmaInstance.kill();
+        this.sigmaInstance = null;
+      }
+      this.graph = null;
+      document.getElementById('graphDetailsPanel').classList.remove('open');
+    },
+  };
+
+  /* ============================================================
+     MODULE 9: File Manager
+  ============================================================ */
+  const FileManager = {
+    async refreshWorkspaces() {
+      AppState.apiKey = document.getElementById('apiKey').value.trim();
+      if (!AppState.apiKey) {
+        localStorage.removeItem('rag-api-key');
+        this._setPlaceholder('Enter API key to start');
+        this._resetView();
+        return;
+      }
+      localStorage.setItem('rag-api-key', AppState.apiKey);
+      this._resetView();
+      this._setPlaceholder('Loading...', true);
+      try {
+        const data = await API.getWorkspaces();
+        AppState.workspaces = data.workspaces || [];
+        const sel = document.getElementById('workspaceSelect');
+        if (AppState.workspaces.length === 0) {
+          this._setPlaceholder('No workspaces found');
+          return;
+        }
+        sel.innerHTML = '<option value="">Select workspace</option>';
+        AppState.workspaces.forEach(ws => {
+          const o = document.createElement('option');
+          o.value = ws.doc_id;
+          o.textContent = ws.doc_id + (ws.uploaded_files && ws.uploaded_files.length > 0 ? ` (${ws.uploaded_files.length} files)` : '');
+          sel.appendChild(o);
+        });
+        sel.disabled = false;
+      } catch (e) {
+        this._setPlaceholder(e.message || 'Connection failed');
+      }
+    },
+
+    async loadWorkspace(docId) {
+      if (!docId || !AppState.apiKey) {
+        this._resetView();
+        return;
+      }
+      AppState.currentDocId = docId;
+
+      // Fetch uploads and parsed files
+      const [uploads, files] = await Promise.all([
+        API.getUploads(docId),
+        API.getFiles(docId),
+      ]);
+
+      const sel = document.getElementById('fileSelect');
+      sel.innerHTML = '';
+
+      // Add uploaded files (PDFs etc.)
+      const uploadedFiles = (uploads.files || []);
+      if (uploadedFiles.length > 0) {
+        const grp = document.createElement('optgroup');
+        grp.label = 'Uploaded Files';
+        uploadedFiles.forEach(f => {
+          const o = document.createElement('option');
+          o.value = 'upload:' + f.name;
+          o.textContent = f.name;
+          grp.appendChild(o);
+        });
+        sel.appendChild(grp);
+      }
+
+      // Add parsed .md files
+      const parsedFiles = (files.files || []);
+      if (parsedFiles.length > 0) {
+        const grp = document.createElement('optgroup');
+        grp.label = 'Parsed Documents';
+        parsedFiles.forEach(f => {
+          const o = document.createElement('option');
+          o.value = 'md:' + f;
+          o.textContent = f;
+          grp.appendChild(o);
+        });
+        sel.appendChild(grp);
+      }
+
+      if (uploadedFiles.length === 0 && parsedFiles.length === 0) {
+        sel.innerHTML = '<option value="">No files</option>';
+        return;
+      }
+
+      // Auto-load first file
+      if (sel.options.length > 0) {
+        sel.selectedIndex = 0;
+        this.selectFile(sel.options[0].value);
+      }
+    },
+
+    async selectFile(value) {
+      if (!value) return;
+      const [type, ...nameParts] = value.split(':');
+      const name = nameParts.join(':');
+
+      if (type === 'upload' && name.toLowerCase().endsWith('.pdf')) {
+        // Load PDF
+        const url = API.uploadUrl(AppState.currentDocId, name);
+        AppState.currentFile = { name, type: 'pdf', url };
+        document.getElementById('pdfEmpty').style.display = 'none';
+        document.getElementById('mdViewer').style.display = 'none';
+        document.getElementById('pdfPages').style.display = 'flex';
+        await PDFViewer.loadDocument(url);
+      } else if (type === 'md') {
+        // Load markdown
+        PDFViewer.destroy();
+        document.getElementById('pdfPages').style.display = 'none';
+        document.getElementById('pdfEmpty').style.display = 'none';
+        document.getElementById('mdViewer').style.display = 'block';
+        AppState.currentFile = { name, type: 'md' };
+        try {
+          const data = await API.getContent(AppState.currentDocId, name);
+          const viewer = document.getElementById('mdViewer');
+          viewer.innerHTML = (typeof marked !== 'undefined') ? marked.parse(data.content) : data.content;
+          Renderer.postProcess(viewer);
+          viewer.scrollTop = 0;
+        } catch (e) {
+          document.getElementById('mdViewer').innerHTML = '<p style="color:var(--text-tertiary)">Failed to load</p>';
+        }
+      } else {
+        // Non-PDF uploaded file: show placeholder
+        PDFViewer.destroy();
+        document.getElementById('pdfPages').style.display = 'none';
+        document.getElementById('mdViewer').style.display = 'none';
+        document.getElementById('pdfEmpty').style.display = 'flex';
+        document.querySelector('.pdf-empty-title').textContent = name;
+        document.querySelector('.pdf-empty-sub').textContent = 'Preview not available for this file type';
+      }
+    },
+
+    async upload() {
+      const input = document.getElementById('fileInput');
+      input.onchange = async () => {
+        const file = input.files[0];
+        if (!file) return;
+        if (!AppState.apiKey) { UI.showToast('Enter API key first', 'error'); return; }
+
+        // Show upload overlay
+        const overlay = document.createElement('div');
+        overlay.className = 'upload-overlay';
+        overlay.id = 'uploadOverlay';
+        overlay.innerHTML = `<div class="upload-dialog"><div class="upload-spinner"></div><div class="upload-text">Processing ${file.name}...</div></div>`;
+        document.body.appendChild(overlay);
+
+        try {
+          const docId = AppState.currentDocId || undefined;
+          const result = await API.ingest(file, docId);
+          UI.showToast(`Uploaded: ${result.filename} → workspace: ${result.doc_id}`, 'success');
+          // Refresh
+          await this.refreshWorkspaces();
+          // Select the workspace
+          document.getElementById('workspaceSelect').value = result.doc_id;
+          await this.loadWorkspace(result.doc_id);
+        } catch (e) {
+          UI.showToast('Upload failed: ' + e.message, 'error');
+        } finally {
+          document.getElementById('uploadOverlay')?.remove();
+          input.value = '';
+        }
+      };
+      input.click();
+    },
+
+    _setPlaceholder(text, disabled = true) {
+      const s = document.getElementById('workspaceSelect');
+      s.innerHTML = `<option value="">${text}</option>`;
+      s.disabled = disabled;
+    },
+
+    _resetView() {
+      AppState.currentDocId = '';
+      AppState.currentFile = null;
+      PDFViewer.destroy();
+      document.getElementById('fileSelect').innerHTML = '<option value="">No files</option>';
+      document.getElementById('pdfPages').style.display = 'none';
+      document.getElementById('mdViewer').style.display = 'none';
+      document.getElementById('pdfEmpty').style.display = 'flex';
+      document.querySelector('.pdf-empty-title').textContent = 'Document Preview';
+      document.querySelector('.pdf-empty-sub').textContent = 'Select a workspace to view documents';
+      document.getElementById('pdfPageInfo').textContent = '—';
+    },
+  };
+
+  /* ============================================================
+     MODULE 10: UI Controls
+  ============================================================ */
+  const UI = {
+    initTheme() {
+      const saved = localStorage.getItem('rag-theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    },
+
+    toggleTheme() {
       const html = document.documentElement;
       const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
       html.setAttribute('data-theme', next);
       localStorage.setItem('rag-theme', next);
-    }
-    (function initTheme() {
-      const saved = localStorage.getItem('rag-theme');
-      if (saved) document.documentElement.setAttribute('data-theme', saved);
-    })();
+    },
 
-    /* ── Resizable Divider ── */
-    (function initDivider() {
+    initDivider() {
       const divider = document.getElementById('divider');
-      const sourcePanel = document.getElementById('sourcePanel');
+      const panel = document.getElementById('pdfPanel');
       const container = document.querySelector('.main-container');
       let isDragging = false;
-
       divider.addEventListener('mousedown', (e) => {
         isDragging = true;
         divider.classList.add('dragging');
@@ -915,15 +1642,12 @@
         document.body.style.userSelect = 'none';
         e.preventDefault();
       });
-
       document.addEventListener('mousemove', (e) => {
         if (!isDragging) return;
         const rect = container.getBoundingClientRect();
         const pct = ((e.clientX - rect.left) / rect.width) * 100;
-        const clamped = Math.max(20, Math.min(75, pct));
-        sourcePanel.style.width = clamped + '%';
+        panel.style.width = Math.max(20, Math.min(75, pct)) + '%';
       });
-
       document.addEventListener('mouseup', () => {
         if (!isDragging) return;
         isDragging = false;
@@ -931,10 +1655,9 @@
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
       });
-    })();
+    },
 
-    /* ── Auto-resize textarea ── */
-    (function initTextarea() {
+    initTextarea() {
       const textarea = document.getElementById('questionInput');
       textarea.addEventListener('input', () => {
         textarea.style.height = 'auto';
@@ -943,222 +1666,62 @@
       textarea.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
-          sendMessage();
+          Chat.send();
         }
       });
-    })();
+    },
 
-    /* ── Helpers ── */
-    function setWorkspacePlaceholder(text, disabled = true) {
-      const s = document.getElementById("workspaceSelect");
-      s.innerHTML = `<option value="">${text}</option>`;
-      s.disabled = disabled;
+    showModal(html) {
+      const overlay = document.getElementById('modalOverlay');
+      document.getElementById('modalContent').innerHTML = html;
+      overlay.style.display = 'flex';
+    },
+
+    closeModal() {
+      document.getElementById('modalOverlay').style.display = 'none';
+      document.getElementById('modalContent').innerHTML = '';
+    },
+
+    showToast(msg, type = 'info') {
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+      toast.textContent = msg;
+      document.getElementById('toastContainer').appendChild(toast);
+      setTimeout(() => toast.remove(), 4000);
+    },
+  };
+
+  /* ============================================================
+     MODULE 11: App Init
+  ============================================================ */
+  (function main() {
+    UI.initTheme();
+    UI.initDivider();
+    UI.initTextarea();
+    PDFViewer.init();
+
+    // Escape closes modal
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') UI.closeModal();
+    });
+
+    // Restore API key
+    const savedKey = localStorage.getItem('rag-api-key');
+    if (savedKey) {
+      document.getElementById('apiKey').value = savedKey;
+      FileManager.refreshWorkspaces();
     }
 
-    function resetWorkspaceView(msg = "Select a workspace above") {
-      currentDocId = "";
-      currentFilename = "";
-      document.getElementById("fileList").innerHTML = `<div class="file-list-empty">${msg}</div>`;
-      document.getElementById("markdownContainer").innerHTML = `
-        <div class="reader-empty">
-          <div class="reader-empty-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-          </div>
-          <div class="reader-empty-title">Document Preview</div>
-          <div class="reader-empty-sub">Select a source file to view its content</div>
-        </div>`;
+    // API key input: refresh on Enter
+    document.getElementById('apiKey').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') FileManager.refreshWorkspaces();
+    });
+
+    // marked.js fallback
+    if (typeof marked === 'undefined') {
+      window.marked = { parse: (t) => '<pre style="white-space:pre-wrap;">' + t + '</pre>' };
     }
-
-    /* ── API Calls ── */
-    async function refreshWorkspaces() {
-      const apiKey = document.getElementById("apiKey").value.trim();
-      if (!apiKey) {
-        localStorage.removeItem('rag-api-key');
-        setWorkspacePlaceholder("Enter API key to start");
-        resetWorkspaceView();
-        return;
-      }
-      localStorage.setItem('rag-api-key', apiKey);
-      resetWorkspaceView();
-      setWorkspacePlaceholder("Loading...", true);
-      try {
-        const resp = await fetch("/workspaces", { headers: { "x-api-key": apiKey } });
-        if (!resp.ok) {
-          setWorkspacePlaceholder(resp.status === 401 ? "Invalid API key" : `Error (${resp.status})`);
-          return;
-        }
-        const data = await resp.json();
-        const s = document.getElementById("workspaceSelect");
-        if (!data.workspaces || data.workspaces.length === 0) {
-          setWorkspacePlaceholder("No workspaces found");
-          return;
-        }
-        s.innerHTML = '<option value="">Select workspace</option>';
-        data.workspaces.forEach(ws => {
-          const o = document.createElement("option");
-          o.value = ws.doc_id;
-          o.textContent = ws.doc_id;
-          s.appendChild(o);
-        });
-        s.disabled = false;
-      } catch (e) {
-        setWorkspacePlaceholder("Connection failed");
-        console.error(e);
-      }
-    }
-
-    async function loadWorkspace() {
-      const apiKey = document.getElementById("apiKey").value.trim();
-      const docId = document.getElementById("workspaceSelect").value;
-      if (!apiKey) { setWorkspacePlaceholder("Enter API key"); resetWorkspaceView(); return; }
-      if (!docId) { resetWorkspaceView(); return; }
-      currentDocId = docId;
-      document.getElementById("fileList").innerHTML = '<div class="file-list-empty">Loading files...</div>';
-      try {
-        const resp = await fetch(`/files/${docId}`, { headers: { "x-api-key": apiKey } });
-        if (!resp.ok) {
-          document.getElementById("fileList").innerHTML = '<div class="file-list-empty">Failed to load</div>';
-          return;
-        }
-        const data = await resp.json();
-        const el = document.getElementById("fileList");
-        el.innerHTML = "";
-        if (!data.files || data.files.length === 0) {
-          el.innerHTML = '<div class="file-list-empty">No files in workspace</div>';
-          return;
-        }
-        data.files.forEach((file, i) => {
-          const div = document.createElement("div");
-          div.className = "source-item";
-          div.innerHTML = `<span class="source-icon"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span><span class="source-name">${file}</span>`;
-          div.onclick = () => loadFileContent(file, div);
-          el.appendChild(div);
-          if (i === 0) loadFileContent(file, div);
-        });
-      } catch (e) {
-        document.getElementById("fileList").innerHTML = '<div class="file-list-empty">Failed to load</div>';
-      }
-    }
-
-    async function loadFileContent(filename, element) {
-      document.querySelectorAll(".source-item").forEach(el => el.classList.remove("active"));
-      if (element) element.classList.add("active");
-      currentFilename = filename;
-      const container = document.getElementById("markdownContainer");
-      try {
-        const apiKey = document.getElementById("apiKey").value.trim();
-        if (!apiKey || !currentDocId) return;
-        const resp = await fetch(`/content/${currentDocId}?filename=${encodeURIComponent(filename)}`, {
-          headers: { "x-api-key": apiKey }
-        });
-        if (!resp.ok) { container.innerHTML = '<div class="file-list-empty">Failed to load preview</div>'; return; }
-        const data = await resp.json();
-        container.innerHTML = marked.parse(data.content);
-        container.scrollTop = 0;
-      } catch (e) { container.innerHTML = '<div class="file-list-empty">Failed to load preview</div>'; }
-    }
-
-    /* ── Chat ── */
-    function clearWelcome() {
-      if (welcomeCleared) return;
-      const w = document.querySelector('.chat-welcome');
-      if (w) w.remove();
-      welcomeCleared = true;
-    }
-
-    async function sendMessage() {
-      const input = document.getElementById("questionInput");
-      const text = input.value.trim();
-      if (!text || !currentDocId) return;
-      const apiKey = document.getElementById("apiKey").value.trim();
-      if (!apiKey) {
-        clearWelcome();
-        addMessage("bot", "Please enter an API key in the header.");
-        return;
-      }
-
-      clearWelcome();
-      addMessage("user", text);
-      input.value = "";
-      input.style.height = 'auto';
-
-      const loadingId = addThinking();
-      const sendBtn = document.getElementById("sendBtn");
-      sendBtn.disabled = true;
-
-      try {
-        const resp = await fetch("/query", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-api-key": apiKey },
-          body: JSON.stringify({ doc_id: currentDocId, query: text })
-        });
-        removeMessage(loadingId);
-        sendBtn.disabled = false;
-        if (!resp.ok) { addMessage("bot", `Request failed (${resp.status})`); return; }
-        const data = await resp.json();
-        let answer = marked.parse(data.answer);
-        answer = answer.replace(/\[([a-zA-Z0-9_\-\.\s:]+)\]/g, (match, content) => {
-          let cleanId = content.replace(/^Source:\s*/i, '').trim();
-          return `<span class="citation-link" onclick="scrollToReference('${cleanId}')">${match}</span>`;
-        });
-        addMessage("bot", answer, true);
-      } catch (e) {
-        removeMessage(loadingId);
-        sendBtn.disabled = false;
-        addMessage("bot", "Connection error: " + e.message);
-      }
-    }
-
-    function addMessage(role, content, isHtml = false) {
-      messageSeq++;
-      const div = document.createElement("div");
-      div.className = `message ${role}`;
-      div.id = `msg-${messageSeq}-${Date.now()}`;
-      if (isHtml) div.innerHTML = content; else div.textContent = content;
-      document.getElementById("chatMessages").appendChild(div);
-      div.scrollIntoView({ behavior: 'smooth', block: 'end' });
-      return div.id;
-    }
-
-    function addThinking() {
-      messageSeq++;
-      const div = document.createElement("div");
-      div.className = "message bot thinking";
-      div.id = `msg-${messageSeq}-${Date.now()}`;
-      div.innerHTML = '<div class="thinking-dots"><span></span><span></span><span></span></div>';
-      document.getElementById("chatMessages").appendChild(div);
-      div.scrollIntoView({ behavior: 'smooth', block: 'end' });
-      return div.id;
-    }
-
-    function removeMessage(id) { document.getElementById(id)?.remove(); }
-
-    window.scrollToReference = function(refId) {
-      const panel = document.getElementById('sourcePanel');
-      const items = document.querySelectorAll(".source-item");
-      for (let item of items) {
-        const name = item.querySelector('.source-name');
-        const text = name ? name.textContent : item.textContent;
-        if (text.includes(refId) || refId.includes(text.trim())) {
-          item.click();
-          break;
-        }
-      }
-      panel.classList.remove('flash-active');
-      void panel.offsetWidth;
-      panel.classList.add('flash-active');
-    };
-
-    /* ── Init ── */
-    (function restoreApiKey() {
-      const saved = localStorage.getItem('rag-api-key');
-      if (saved) {
-        document.getElementById("apiKey").value = saved;
-        refreshWorkspaces();
-      } else {
-        setWorkspacePlaceholder("Enter API key to start");
-      }
-    })();
+  })();
   </script>
 </body>
 </html>

@@ -2218,3 +2218,58 @@ LightRAG 的 `query_routes.py` 提供 NDJSON 格式：
 | Prompt 模板 | `lightrag/lightrag/prompt.py` | 224–357 | `rag_response` / `kg_query_context` / `naive_rag_response` |
 | LLM 调用（自定义）| `raganything/services/local_rag.py` | `build_llm_model_func` | keyword / text / VLM 三条路径 |
 | 默认常量 | `raganything/constants.py` | — | 所有默认值统一出口 |
+
+---
+
+## 增量更新（2026-03-03，WebUI v2 三面板重设计 + 后端 API 扩展）
+
+### 改动范围
+
+仅修改两个文件：`server/app.py`、`server/templates/index.html`。不涉及 `raganything/` 或 `lightrag/` 核心代码。
+
+### 后端新增端点（`server/app.py`）
+
+**三层存储**：`uploads/{doc_id}/`（原件）+ `output/{doc_id}/`（解析产物）+ `rag_workspace/{doc_id}/`（KG + 向量）
+
+| 端点 | 说明 |
+|------|------|
+| `GET /graph/{doc_id}/labels` | 调用 `rag.lightrag.get_graph_labels()` |
+| `GET /graph/{doc_id}/subgraph?label=&max_depth=2&max_nodes=50` | 调用 `get_knowledge_graph()`，序列化 `KnowledgeGraphNode/Edge` |
+| `GET /graph/{doc_id}/stats` | 通过 networkx 读取 graphml，返回实体/关系数量 |
+| `GET /graph/{doc_id}/search?q=&limit=20` | 调用 `search_labels()` 模糊搜索 |
+| `DELETE /workspace/{doc_id}` | 删除三层目录 + 清除 `_rag_instances` 缓存 |
+| `GET /workspace/{doc_id}/stats` | 文件数、实体/关系数、磁盘占用 |
+| `GET /workspaces` | 增强版：合并三层目录 doc_id，含 `uploaded_files` 列表 |
+| `GET /uploads/{doc_id}/{filename}` | 静态服务上传的 PDF 原件 |
+
+**`/query` 增强**：两阶段查询（`aquery_data()` 结构化检索 + `service.query()` LLM 生成），返回 `entities`、`relationships`、`chunks`、`references`、`metadata`、`graph`（可选）。
+
+### 前端重写（`server/templates/index.html`，~700 行）
+
+**布局**：三面板——左侧 PDF 阅读器（48%）+ 右侧聊天区 + 底部知识图谱面板（可折叠）
+
+**CDN 依赖**：
+- marked 4.3.0（Markdown）
+- KaTeX 0.16.9（LaTeX 公式）
+- highlight.js 11.9.0（代码高亮）
+- PDF.js 3.11.174（PDF 渲染，IntersectionObserver 懒加载）
+- graphology 0.25.4 + sigma 2.4.0（知识图谱可视化，自定义 Fruchterman-Reingold 力导向布局）
+
+**11 个 JS 模块**：AppState、API、PDFViewer、Renderer、ReasoningTrace、Citations、Chat、GraphViewer、FileManager、UI、Init
+
+**核心交互**：
+- PDF 页面懒渲染 + 缩放 + 引用点击跳转对应页
+- 推理过程 4 步动画（关键词提取 → KG 搜索 → 重排序 → 生成）
+- 图谱节点点击显示详情面板 + 实体搜索
+- 渲染管线：marked → KaTeX auto-render → hljs → 引用链接替换 → 图片点击放大
+
+**设计延续**：琥珀色点缀、DM Serif Display + IBM Plex Sans/Mono 字体、深色/浅色主题 CSS 变量切换
+
+### 启动方式
+
+```bash
+export RAGANYTHING_API_KEY=your_key
+cd rag-anything
+uvicorn server.app:app --host 0.0.0.0 --port 9621
+# 浏览器打开 http://localhost:9621
+```

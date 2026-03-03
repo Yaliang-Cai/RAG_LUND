@@ -1017,33 +1017,40 @@ python examples/text_format_test.py --check-reportlab --file dummy
 > **注意**：API密钥仅在完整RAG处理和LLM集成时需要。解析测试文件（`office_document_test.py`、`image_format_test.py` 和 `text_format_test.py`）仅测试MinerU功能，无需API密钥。
 # FastAPI Local UI
 
+三面板 WebUI：文档阅读、聊天问答、知识图谱探索。
 
+**功能**：PDF 阅读器（PDF.js）、知识图谱可视化（Sigma.js）、LaTeX 公式渲染（KaTeX）、代码高亮、推理过程动画、引用跳转、深色/浅色主题。
 
-Set API key:
-
-
-
-```bash
-
-set RAGANYTHING_API_KEY=your_key
-
-```
-
-
-
-Run server:
-
-
+### 快速启动
 
 ```bash
+# 1. 设置 API Key
+export RAGANYTHING_API_KEY=your_key   # Linux/Mac
+set RAGANYTHING_API_KEY=your_key      # Windows
 
-uvicorn server.app:app --host 0.0.0.0 --port 8000
+# 2. 启动服务
+cd rag-anything
+uvicorn server.app:app --host 0.0.0.0 --port 9621
 
+# 3. 打开浏览器
+# http://localhost:9621
 ```
 
+### API 端点
 
-
-Open: `http://localhost:8000`
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/workspaces` | 列出所有工作空间 |
+| `POST` | `/ingest` | 上传并处理文档 |
+| `POST` | `/query` | 查询（返回实体、关系、chunk、引用等结构化数据） |
+| `GET` | `/files/{doc_id}` | 列出解析后的文件 |
+| `GET` | `/uploads/{doc_id}/{filename}` | 获取上传的 PDF 原件 |
+| `GET` | `/graph/{doc_id}/labels` | 获取图谱实体标签 |
+| `GET` | `/graph/{doc_id}/subgraph` | 按标签获取子图 |
+| `GET` | `/graph/{doc_id}/stats` | 图谱统计信息 |
+| `GET` | `/graph/{doc_id}/search` | 搜索图谱实体 |
+| `GET` | `/workspace/{doc_id}/stats` | 工作空间统计 |
+| `DELETE` | `/workspace/{doc_id}` | 删除工作空间（三层全删） |
 
 
 

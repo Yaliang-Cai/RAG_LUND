@@ -986,38 +986,6 @@ This method is particularly useful when:
 - You want to process programmatically generated content
 - You need to insert content from multiple sources into a single knowledge base
 - You have cached parsing results that you want to reuse
-# FastAPI Local UI
-
-
-
-Set API key:
-
-
-
-```bash
-
-set RAGANYTHING_API_KEY=your_key
-
-```
-
-
-
-Run server:
-
-
-
-```bash
-
-uvicorn server.app:app --host 0.0.0.0 --port 8000
-
-```
-
-
-
-Open: `http://localhost:8000`
-
-
-
 ### RAG 应用程序
 
 `raganything_local_v2.py`, `app.py`, `local_rag.py`   三者是紧密协同工作的关系。它们构成了一个完整的 RAG 应用程序，从用户交互到核心逻辑处理，再到测试验证。
@@ -1206,19 +1174,40 @@ python scripts/download_mmlongbench.py --docs_manifest ./data/mmlongbench/docs_m
 
 ## FastAPI Local UI
 
-Set API key:
+A three-panel WebUI for document viewing, chat, and knowledge graph exploration.
+
+**Features**: PDF viewer (PDF.js), knowledge graph visualization (Sigma.js), LaTeX rendering (KaTeX), code highlighting, reasoning trace animation, citation navigation, dark/light themes.
+
+### Quick Start
 
 ```bash
-set RAGANYTHING_API_KEY=your_key
+# 1. Set API key
+export RAGANYTHING_API_KEY=your_key   # Linux/Mac
+set RAGANYTHING_API_KEY=your_key      # Windows
+
+# 2. Start server
+cd rag-anything
+uvicorn server.app:app --host 0.0.0.0 --port 9621
+
+# 3. Open browser
+# http://localhost:9621
 ```
 
-Run server:
+### API Endpoints
 
-```bash
-uvicorn server.app:app --host 0.0.0.0 --port 8000
-```
-
-Open: `http://localhost:8000`
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/workspaces` | List all workspaces |
+| `POST` | `/ingest` | Upload & process document |
+| `POST` | `/query` | Query with structured response (entities, relations, chunks, references) |
+| `GET` | `/files/{doc_id}` | List parsed files |
+| `GET` | `/uploads/{doc_id}/{filename}` | Serve uploaded PDF |
+| `GET` | `/graph/{doc_id}/labels` | Get graph entity labels |
+| `GET` | `/graph/{doc_id}/subgraph` | Get subgraph by label |
+| `GET` | `/graph/{doc_id}/stats` | Graph statistics |
+| `GET` | `/graph/{doc_id}/search` | Search graph entities |
+| `GET` | `/workspace/{doc_id}/stats` | Workspace statistics |
+| `DELETE` | `/workspace/{doc_id}` | Delete workspace (all 3 layers) |
 
 ---
 
