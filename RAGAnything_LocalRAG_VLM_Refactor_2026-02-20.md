@@ -1696,7 +1696,7 @@ def replace_image_path(match):
   - 通过正则匹配 `[VLM_IMAGE_n]`；
   - 按文本片段与对应图片在同一 `content` 序列中交错拼接；
   - 无效 marker 保留为文本（防止静默丢内容）；
-  - 若文本中无 marker，采用“文本在前、图片在后”稳定回退，不再回到旧的“全图前置”。
+  - 若文本中无 marker，直接报错（fail-fast），不再做兜底回退。
 - `_build_vlm_messages_with_images()` 在 `has_images=True` 时改为调用该函数构造 `content_parts`。
 
 ### 相较未改动前的功能变化
@@ -1710,5 +1710,5 @@ def replace_image_path(match):
 - 逻辑断言（内联）：
   - marker 顺序交错正确；
   - 越界 marker 保留为文本；
-  - 无 marker 时回退为“文本在前、图片在后”；
+  - 无 marker 时触发显式异常（不静默兜底）；
   - `_build_vlm_messages_with_images()` 下 system/history/user 结构保持稳定。

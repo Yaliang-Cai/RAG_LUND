@@ -726,11 +726,18 @@ class QueryMixin:
         self, final_user_text: str, images_base64: list[str]
     ) -> list[dict[str, Any]]:
         marker_pattern = re.compile(r"\[VLM_IMAGE_(\d+)\]")
+        marker_matches = list(marker_pattern.finditer(final_user_text))
+        if not marker_matches:
+            raise ValueError(
+                "Enhanced multimodal invariant violated: images are present, "
+                "but no [VLM_IMAGE_n] marker exists in final user text."
+            )
+
         content_parts: list[dict[str, Any]] = []
         image_parts_added = 0
         cursor = 0
 
-        for match in marker_pattern.finditer(final_user_text):
+        for match in marker_matches:
             text_chunk = final_user_text[cursor : match.start()]
             if text_chunk:
                 content_parts.append({"type": "text", "text": text_chunk})
@@ -759,15 +766,10 @@ class QueryMixin:
         if image_parts_added > 0:
             return content_parts
 
-        # Marker-missing fallback: keep text first, then append images.
-        for image_base64 in images_base64:
-            content_parts.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
-                }
-            )
-        return content_parts
+        raise ValueError(
+            "Enhanced multimodal invariant violated: marker-image mapping failed; "
+            "no valid image was inserted."
+        )
 
     def _build_query_history_messages(
         self,
