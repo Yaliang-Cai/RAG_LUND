@@ -103,10 +103,7 @@ class LocalRagSettings:
         vllm_key = os.getenv("VLLM_API_KEY", DEFAULT_VLLM_API_KEY)
         llm_name = os.getenv("LLM_MODEL_NAME", DEFAULT_LLM_MODEL_NAME)
         vision_model_path = os.getenv("VISION_MODEL_PATH", DEFAULT_VISION_MODEL_PATH)
-        tokenizer_model_path = os.getenv(
-            "RAGANYTHING_TOKENIZER_MODEL_PATH",
-            os.getenv("TOKENIZER_MODEL_PATH", vision_model_path),
-        )
+        tokenizer_model_path = os.getenv("TOKENIZER_MODEL_PATH", vision_model_path)
         image_token_model_name_or_path = os.getenv(
             "RAGANYTHING_IMAGE_TOKEN_MODEL_PATH",
             os.getenv("IMAGE_TOKEN_MODEL_NAME_OR_PATH", vision_model_path),
@@ -238,7 +235,7 @@ def build_lightrag_tokenizer(
     model_name_or_path = (model_name_or_path or "").strip()
     if not model_name_or_path:
         raise ValueError(
-            "Tokenizer model path is empty. Set RAGANYTHING_TOKENIZER_MODEL_PATH."
+            "Tokenizer model path is empty. Set TOKENIZER_MODEL_PATH."
         )
 
     try:
@@ -251,7 +248,7 @@ def build_lightrag_tokenizer(
     except Exception as exc:
         raise RuntimeError(
             f"Failed to load Qwen tokenizer from '{model_name_or_path}'. "
-            "Set RAGANYTHING_TOKENIZER_MODEL_PATH to your local Qwen3-VL model directory."
+            "Set TOKENIZER_MODEL_PATH to your local Qwen3-VL model directory."
         ) from exc
 
     logger.info("LightRAG tokenizer initialized from: %s", model_name_or_path)

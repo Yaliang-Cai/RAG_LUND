@@ -1647,3 +1647,34 @@ def replace_image_path(match):
 
 ### 当前状态
 - 本节仅为待计划/待讨论挂起，尚未提交对应代码改动。
+
+## 增量更新（2026-03-03，tokenizer 环境变量收敛）
+
+### 背景
+- 当前项目已切换到 Qwen3-VL 本地 tokenizer。
+- 实际使用中仅需 `TOKENIZER_MODEL_PATH`（无则回退 `VISION_MODEL_PATH`），`RAGANYTHING_TOKENIZER_MODEL_PATH` 属于额外兼容层，增加配置认知成本。
+
+### 改动前
+- `LocalRagSettings.from_env()` 中 tokenizer 路径读取链为：
+  - `RAGANYTHING_TOKENIZER_MODEL_PATH` -> `TOKENIZER_MODEL_PATH` -> `VISION_MODEL_PATH`
+- tokenizer 加载异常提示文案也指向 `RAGANYTHING_TOKENIZER_MODEL_PATH`。
+
+### 改动后
+- `LocalRagSettings.from_env()` 收敛为：
+  - `TOKENIZER_MODEL_PATH` -> `VISION_MODEL_PATH`
+- 异常提示统一改为 `TOKENIZER_MODEL_PATH`：
+  - `Tokenizer model path is empty. Set TOKENIZER_MODEL_PATH.`
+  - `Set TOKENIZER_MODEL_PATH to your local Qwen3-VL model directory.`
+
+### 相较未改动前的功能变化
+- 功能语义不变：仍然优先使用显式 tokenizer 路径，其次回退视觉模型路径。
+- 配置更简洁：减少 1 层项目私有变量，降低误配置与排障复杂度。
+- 文案一致性提升：环境变量名称与实际生效路径一致。
+
+### 本轮校验
+- 语法校验：
+  - `python -m py_compile raganything/services/local_rag.py` 通过。
+- 逻辑断言（静态）：
+  - `local_rag.py` 中已无 `RAGANYTHING_TOKENIZER_MODEL_PATH` 引用；
+  - 已存在 `os.getenv("TOKENIZER_MODEL_PATH", vision_model_path)`；
+  - 两处异常提示已统一为 `TOKENIZER_MODEL_PATH`。
