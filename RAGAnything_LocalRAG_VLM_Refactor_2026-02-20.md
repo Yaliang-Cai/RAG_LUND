@@ -1648,6 +1648,96 @@ def replace_image_path(match):
 ### 当前状态
 - 本节仅为待计划/待讨论挂起，尚未提交对应代码改动。
 
+## 待计划补充（2026-03-03，vLLM 批处理参数与 MAX_ASYNC 联调）
+
+### 参数定义（先统一口径）
+- `--max-num-batched-tokens`：
+  - vLLM scheduler 单轮可处理的总 token 上限（跨请求合计，包含 prefill/decode）。
+  - 调大后通常提升吞吐，但会增加显存压力与尾延迟抖动风险。
+- `--max-num-seqs`：
+  - vLLM 同时调度的序列（请求）上限。
+  - 调大后可提高并发处理能力，但会带来 KV cache/调度竞争压力。
+- `MAX_ASYNC`（LightRAG API 侧）：
+  - 应用层并发请求上限（发往 LLM/VLM 的并发数）。
+  - 它不是 GPU 并行度本身，最终仍受 vLLM 的 `--max-num-seqs` 与 token 预算约束。
+
+### 三者关系（关键）
+- 有效并发近似受 `min(MAX_ASYNC, --max-num-seqs)` 约束。
+- 若 `--max-num-batched-tokens` 过小，即使 `--max-num-seqs` 很大，也会因 token 预算不足导致排队。
+- 若 `MAX_ASYNC` 远大于 `--max-num-seqs`，会把排队前移到 vLLM 服务侧，表现为请求堆积和 p95/p99 变差。
+
+### 待计划联调步骤（未执行）
+1. 配置入口
+- 服务侧（`start_server_qwen3_vl.sh`）新增：
+  - `--max-num-batched-tokens 16384`
+  - `--max-num-seqs 8`
+- 应用侧（`lightrag/api/config.py`）先将 `MAX_ASYNC` 从 4 提到 6，观察后再评估到 8。
+
+2. 观察指标
+- 吞吐：requests/s、tokens/s。
+- 延迟：p50/p95/p99、超时率、400/500 比例。
+- 资源：GPU 显存占用、OOM、KV cache 紧张告警。
+
+3. 调参顺序
+- 先固定 `--max-num-batched-tokens=16384`，只调 `MAX_ASYNC`（4 -> 6 -> 8）。
+- 若吞吐无提升且延迟上升，回退 `MAX_ASYNC`。
+- 若并发受限明显，再评估 `--max-num-seqs` 与 `--max-num-batched-tokens` 联动上调。
+
+### 当前状态
+- 本节为待计划补充，尚未提交参数改动与压测结果。
+
+## 待计划补充（2026-03-03，Stage 3.5 主实体去噪与同名防污染）
+
+### 背景
+- 当前 Stage 3.5 会将多模态主实体直接写入 graph / entities_vdb / full_entities。
+- 该路径不经过 `operate.py` 抽取阶段的低质量实体过滤。
+- 主实体主键以 `entity_name` 为全局键，跨文档同名时存在合并污染风险。
+
+### 问题 A：`page_number` 类主实体优化
+- 典型高风险：`Page Number 1 (page_number)` 这类布局元信息，跨文档重复概率高、检索价值低。
+
+### 待计划方案（未执行）
+1. Stage 3.5 直写前增加轻量过滤（仅针对主实体）
+- 新增主实体过滤函数（建议复用/对齐 `operate.py` 的 `page_number_label`、`layout_metadata` 口径）。
+- 默认过滤：`page_number`、纯布局元信息（header/footer token、坐标类标签）。
+- 保留：image/table/equation 的语义主实体。
+
+2. 可观测性
+- 记录主实体过滤计数与样本（按 `doc_id` 汇总）：
+  - `stage35_filtered_count`
+  - `stage35_filtered_examples`
+
+### 问题 B：`full_entities` 覆盖导致维护链路风险
+- 按 doc 删除/重建时，`full_entities` 不完整会导致受影响实体识别不全。主实体只在vdb_entities里，kv_store_full_entities里没有。同样kv_store_full_relations里也米有，注意排查其他kv_store里有没有影响。kv_store_text_chunks里有，因为是生成多模态chunk的肯定存在多模态主实体。
+- 可能留下陈旧实体/关系引用，后续维护链路排障成本上升。
+- 存储一致性变差：graph / entities_vdb / full_entities 三者可能出现不一致。
+
+### 问题 C：同名实体跨文档污染
+- 风险：同名实体在图中被当作同一全局实体，`source_id/file_path` 混杂。
+
+### 问题 D：`context_window=1` 造成主实体语义跨页漂移
+- 当前多模态描述生成默认 `context_mode=page`、`context_window=1`。
+- 这意味着主实体命名/摘要会使用“前一页 + 当前页 + 后一页”的文本上下文，而不是严格当前页。
+- 对 `page_number/footer/footnote` 等布局型对象，易引入跨页噪声，增加命名不稳定与同名冲突概率。
+
+### 待计划方案（未执行）
+1. 增加对照开关（仅影响多模态描述阶段）
+- 方案 A：保持现状（`context_window=1`）。
+- 方案 B：严格当前页（`context_window=0`）。
+- 评估维度：主实体稳定性、同名率、检索准确率、人工可解释性。
+
+2. 分类型上下文策略（可选）
+- 对布局型对象（`page_number/footer/footnote`）默认使用 `context_window=0`。
+- 对语义型对象（image/table/equation）保留 `context_window=1`。
+
+3. 观测指标
+- `stage35_entity_name_collision_rate`
+- `stage35_page_scoped_name_consistency`
+- 采样记录“主实体名 + page_idx + doc_id + context_window”用于复盘。
+
+### 当前状态
+- 本节为待计划补充，尚未提交对应代码改动。
+
 ## 增量更新（2026-03-03，tokenizer 环境变量收敛）
 
 ### 背景

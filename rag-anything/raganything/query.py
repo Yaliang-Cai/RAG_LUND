@@ -665,7 +665,7 @@ class QueryMixin:
     ) -> List[Dict]:
         """
         Build VLM messages using the same text repack rule as non-enhanced query.
-        For enhanced mode, images are kept at the front of user content.
+        For enhanced mode, images are interleaved at [VLM_IMAGE_n] marker positions.
 
         Args:
             enhanced_prompt: Enhanced prompt with image markers

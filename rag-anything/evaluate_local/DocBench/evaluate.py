@@ -4,32 +4,32 @@
 DocBench Evaluation Script for RAG-Anything Local (Manual Server Mode)
 ======================================================================
 
-使用流程：
+Quick workflow:
 ---------
-1. 手动启动 Qwen3-VL-30B-A3B-Instruct-FP8 服务（端口 8001）
+1. Start Qwen3-VL-30B-A3B-Instruct-FP8 service (port 8001)
    cd /data/y50056788/Yaliang/projects/lightrag
    bash start_server_qwen3_vl.sh
 
-2. 生成系统答案（可后台运行）
+2. Generate system answers (can run in background)
    python evaluate.py --mode generate
-   或：nohup python evaluate.py --mode generate > run_generate.log 2>&1 &
+   or: nohup python evaluate.py --mode generate > run_generate.log 2>&1 &
 
-3. 停止 Qwen3-VL 服务，启动 Qwen2.5-32B（端口 8002）
-   # 在server终端按 Ctrl+C
+3. Stop Qwen3-VL service, then start Qwen2.5-32B (port 8002)
+   # press Ctrl+C in the server terminal
    bash start_server_qwen2.5_32b_awq.sh
 
-4. 评估答案
+4. Evaluate answers
    python evaluate.py --mode evaluate
 
-5. 查看统计
+5. Show stats
    python evaluate.py --mode stats
 """
 
 import os
 
-# ===== 限制 MinerU 内部 vLLM 的 GPU 内存占用 =====
+# ===== Limit MinerU internal vLLM GPU memory usage =====
 # 0.10 = 4.74GB, 0.15 = 7.1GB, 0.20 = 9.47GB
-# 推荐 0.15：给 MinerU 7.1GB，GPU 0 总占用 ~12GB
+# Recommended 0.15: MinerU ~= 7.1GB, GPU0 total ~= 12GB
 os.environ['MINERU_VLLM_GPU_MEMORY_UTILIZATION'] = '0.15'
 # =================================================
 
@@ -48,16 +48,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
 
 # ==========================================
-# 配置区（绝对路径，方便在任意目录运行）
+# Configuration (absolute paths for running from any directory)
 # ==========================================
 
-# 脚本所在目录
+# Script directory
 SCRIPT_DIR = Path("/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/DocBench")
 
-# DocBench 数据集目录
+# DocBench dataset directory
 DATA_ROOT = Path("/data/y50056788/Yaliang/datasets_for_eval/data_for_DocBench")
 
-# 输出根目录（所有结果保存在这里）
+# Output root directory (all results are saved here)
 OUTPUT_DIR = SCRIPT_DIR / "docbench_results"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PROMPT_DUMP_DIR = OUTPUT_DIR / "prompt_dumps"
@@ -65,26 +65,26 @@ PROMPT_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 FINAL_MESSAGES_DUMP_DIR = OUTPUT_DIR / "final_vlm_messages"
 FINAL_MESSAGES_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# RAG 工作目录（每个文档一个独立图谱）
-# 输出：docbench_results/rag_workspaces/docbench_0/, docbench_1/, ...
+# RAG working directory (one isolated graph per document)
+# Example output: docbench_results/rag_workspaces/docbench_0/, docbench_1/, ...
 WORKING_DIR_ROOT = OUTPUT_DIR / "rag_workspaces"
 WORKING_DIR_ROOT.mkdir(parents=True, exist_ok=True)
 
-# MinerU 输出目录（每个文档独立）
-# 输出：docbench_results/mineru_outputs/docbench_0/{pdf_name}/hybrid_auto/, ...
+# MinerU output directory (isolated per document)
+# Example output: docbench_results/mineru_outputs/docbench_0/{pdf_name}/hybrid_auto/, ...
 OUTPUT_MD_DIR = OUTPUT_DIR / "mineru_outputs"
 OUTPUT_MD_DIR.mkdir(parents=True, exist_ok=True)
 
-# API 配置
-RAG_API_BASE = "http://localhost:8001/v1"      # Qwen3-VL-30B-A3B-Instruct-FP8（生成答案）
-JUDGE_API_BASE = "http://localhost:8002/v1"    # Qwen2.5-32B（评估）
+# API settings
+RAG_API_BASE = "http://localhost:8001/v1"      # Qwen3-VL-30B-A3B-Instruct-FP8 (answer generation)
+JUDGE_API_BASE = "http://localhost:8002/v1"    # Qwen2.5-32B (evaluation)
 RAG_API_KEY = "EMPTY"
 QWEN3_VL_MODEL_PATH = "/data/y50056788/Yaliang/models/Qwen3-VL-30B-A3B-Instruct-FP8"
 
 RAG_MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 JUDGE_MODEL_NAME = "Qwen/Qwen2.5-32B-Instruct"
 
-# Query 参数（DocBench 优化）
+# Query parameters (DocBench tuned)
 DOCBENCH_QUERY_PARAMS = {
     "mode": "hybrid",
     "top_k": 30,
@@ -97,7 +97,7 @@ DOCBENCH_QUERY_PARAMS = {
 }
 
 # ==========================================
-# 日志配置
+# Logging
 # ==========================================
 
 logging.basicConfig(
@@ -105,12 +105,12 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     level=logging.INFO,
     handlers=[
-        logging.StreamHandler(sys.stdout),  # 确保输出到终端
+        logging.StreamHandler(sys.stdout),  # Ensure logs are visible in terminal
     ]
 )
 logger = logging.getLogger(__name__)
 
-# 同时配置其他模块的 logger，确保能看到所有日志
+# Configure related module loggers as well
 logging.getLogger("raganything").setLevel(logging.INFO)
 logging.getLogger("raganything.processor").setLevel(logging.INFO)
 logging.getLogger("raganything.parser").setLevel(logging.INFO)

@@ -25,7 +25,6 @@ from .constants import (
     DEFAULT_MAX_RELATION_TOKENS,
     DEFAULT_MAX_TOTAL_TOKENS,
     DEFAULT_HISTORY_TURNS,
-    DEFAULT_IMAGE_TOKEN_ESTIMATE_PER_IMAGE,
     DEFAULT_OLLAMA_MODEL_NAME,
     DEFAULT_OLLAMA_MODEL_TAG,
     DEFAULT_OLLAMA_MODEL_SIZE,
@@ -178,14 +177,6 @@ class QueryParam:
     Chunks that are not sent as images still remain as text context.
     Default None means no image cap override.
     """
-
-    image_token_estimate_per_image: int = int(
-        os.getenv(
-            "IMAGE_TOKEN_ESTIMATE_PER_IMAGE",
-            str(DEFAULT_IMAGE_TOKEN_ESTIMATE_PER_IMAGE),
-        )
-    )
-    """Fallback input-token reserve per image when image metadata cannot be read."""
 
     image_token_estimate_method: str = os.getenv(
         "IMAGE_TOKEN_ESTIMATE_METHOD", "qwen_vl"
