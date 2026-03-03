@@ -714,18 +714,60 @@ class QueryMixin:
             messages.append({"role": "user", "content": final_user_text})
             return messages
 
-        # Keep all images before text payload in enhanced mode.
-        content_parts = [
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
-            }
-            for image_base64 in images_base64
-        ]
-        content_parts.append({"type": "text", "text": final_user_text})
+        # Interleave image blocks at marker positions to align text-image locality.
+        content_parts = self._build_interleaved_vlm_content_parts(
+            final_user_text, images_base64
+        )
 
         messages.append({"role": "user", "content": content_parts})
         return messages
+
+    def _build_interleaved_vlm_content_parts(
+        self, final_user_text: str, images_base64: list[str]
+    ) -> list[dict[str, Any]]:
+        marker_pattern = re.compile(r"\[VLM_IMAGE_(\d+)\]")
+        content_parts: list[dict[str, Any]] = []
+        image_parts_added = 0
+        cursor = 0
+
+        for match in marker_pattern.finditer(final_user_text):
+            text_chunk = final_user_text[cursor : match.start()]
+            if text_chunk:
+                content_parts.append({"type": "text", "text": text_chunk})
+
+            image_idx = int(match.group(1)) - 1
+            if 0 <= image_idx < len(images_base64):
+                content_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{images_base64[image_idx]}"
+                        },
+                    }
+                )
+                image_parts_added += 1
+            else:
+                # Keep unknown markers as text to avoid silent content loss.
+                content_parts.append({"type": "text", "text": match.group(0)})
+
+            cursor = match.end()
+
+        tail_text = final_user_text[cursor:]
+        if tail_text:
+            content_parts.append({"type": "text", "text": tail_text})
+
+        if image_parts_added > 0:
+            return content_parts
+
+        # Marker-missing fallback: keep text first, then append images.
+        for image_base64 in images_base64:
+            content_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+                }
+            )
+        return content_parts
 
     def _build_query_history_messages(
         self,

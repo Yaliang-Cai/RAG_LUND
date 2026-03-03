@@ -1678,3 +1678,37 @@ def replace_image_path(match):
   - `local_rag.py` 中已无 `RAGANYTHING_TOKENIZER_MODEL_PATH` 引用；
   - 已存在 `os.getenv("TOKENIZER_MODEL_PATH", vision_model_path)`；
   - 两处异常提示已统一为 `TOKENIZER_MODEL_PATH`。
+
+## 增量更新（2026-03-03，enhanced 图文交错对齐官方实现）
+
+### 背景
+- 当前 enhanced 查询消息中，图片采用“全图前置 + 文本在后”打包。
+- 官方 RAGAnything `query.py` 的多模态构造是按 `[VLM_IMAGE_n]` 标记位置进行图文交错，更利于多图问答时的局部对齐。
+
+### 改动前
+- `_build_vlm_messages_with_images()` 在 `has_images=True` 时直接：
+  - 先追加全部 `image_url`；
+  - 再追加单段文本 `final_user_text`。
+- 行为是 block 排列，不是 marker 驱动交错。
+
+### 改动后
+- `raganything/query.py` 新增 `_build_interleaved_vlm_content_parts(final_user_text, images_base64)`：
+  - 通过正则匹配 `[VLM_IMAGE_n]`；
+  - 按文本片段与对应图片在同一 `content` 序列中交错拼接；
+  - 无效 marker 保留为文本（防止静默丢内容）；
+  - 若文本中无 marker，采用“文本在前、图片在后”稳定回退，不再回到旧的“全图前置”。
+- `_build_vlm_messages_with_images()` 在 `has_images=True` 时改为调用该函数构造 `content_parts`。
+
+### 相较未改动前的功能变化
+- enhanced 图文绑定粒度从“全局前置”升级为“局部交错”，与官方 marker 语义一致。
+- non-enhanced 流程不变。
+- history/system/user 组装顺序不变，仅 user 的 multimodal content 内部顺序变化。
+
+### 本轮校验
+- 语法校验：
+  - `python -m py_compile raganything/query.py` 通过。
+- 逻辑断言（内联）：
+  - marker 顺序交错正确；
+  - 越界 marker 保留为文本；
+  - 无 marker 时回退为“文本在前、图片在后”；
+  - `_build_vlm_messages_with_images()` 下 system/history/user 结构保持稳定。
