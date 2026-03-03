@@ -541,7 +541,7 @@ def _estimate_qwen_image_tokens(
 
     with PILImage.open(image_path) as image:
         image_rgb = image.convert("RGB")
-        processed = image_processor(images=image_rgb, return_tensors="np")
+        processed = image_processor(images=image_rgb, return_tensors="pt")
 
     image_grid_thw = processed.get("image_grid_thw")
     if image_grid_thw is None or len(image_grid_thw) <= 0:

@@ -145,7 +145,7 @@ def estimate_image_tokens_qwen_local(
 ) -> tuple[int, int, int, tuple[int, int, int]]:
     with Image.open(image_path) as image:
         image_rgb = image.convert("RGB")
-        processed = image_processor(images=image_rgb, return_tensors="np")
+        processed = image_processor(images=image_rgb, return_tensors="pt")
 
     image_grid_thw = processed.get("image_grid_thw")
     if image_grid_thw is None or len(image_grid_thw) <= 0:
