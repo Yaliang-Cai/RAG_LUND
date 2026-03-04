@@ -24,6 +24,7 @@ from .constants import (
     DEFAULT_MAX_ENTITY_TOKENS,
     DEFAULT_MAX_RELATION_TOKENS,
     DEFAULT_MAX_TOTAL_TOKENS,
+    DEFAULT_ENABLE_IMAGE_TOKEN_BUDGET,
     DEFAULT_HISTORY_TURNS,
     DEFAULT_OLLAMA_MODEL_NAME,
     DEFAULT_OLLAMA_MODEL_TAG,
@@ -190,6 +191,17 @@ class QueryParam:
     image_wrapper_tokens_per_image: int = int(
         os.getenv("IMAGE_WRAPPER_TOKENS_PER_IMAGE", "2")
     )
+
+    enable_image_token_budget: bool = (
+        os.getenv(
+            "ENABLE_IMAGE_TOKEN_BUDGET", str(DEFAULT_ENABLE_IMAGE_TOKEN_BUDGET)
+        ).lower()
+        == "true"
+    )
+    """Enable order-preserving chunk+image joint token budgeting.
+    - True: rerank-first + prefix packing with per-chunk image token accounting.
+    - False: fallback to official-style available_chunk_tokens token truncation.
+    """
 
 
 @dataclass

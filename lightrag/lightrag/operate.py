@@ -8,7 +8,7 @@ import os
 import asyncio
 import json
 import json_repair
-from typing import Any, AsyncIterator, overload, Literal
+from typing import Any, AsyncIterator, overload, Literal, Callable
 from collections import Counter, defaultdict
 
 from lightrag.exceptions import (
@@ -481,24 +481,6 @@ def _history_messages_signature(history_messages: list[dict[str, str]]) -> str:
 _QWEN_IMAGE_PROCESSOR_CACHE: dict[str, Any] = {}
 
 
-def _collect_image_paths_for_budget(chunks: list[dict], image_cap: int) -> list[str]:
-    if image_cap <= 0 or not chunks:
-        return []
-    seen_paths: set[str] = set()
-    image_paths: list[str] = []
-    for chunk in chunks:
-        content = str(chunk.get("content", "") or "")
-        for match in _QUERY_IMAGE_PATH_RE.finditer(content):
-            image_path = match.group(1).strip().strip("\"'`")
-            if not image_path or image_path in seen_paths:
-                continue
-            seen_paths.add(image_path)
-            image_paths.append(image_path)
-            if len(image_paths) >= image_cap:
-                return image_paths
-    return image_paths
-
-
 def _resolve_image_token_estimate_method(query_param: QueryParam) -> str:
     method = str(
         getattr(query_param, "image_token_estimate_method", "qwen_vl") or "qwen_vl"
@@ -557,64 +539,87 @@ def _estimate_qwen_image_tokens(
     return visual_tokens + wrapper_tokens
 
 
-def _estimate_image_tokens_for_budget(
-    chunks: list[dict], query_param: QueryParam
-) -> tuple[int, int, int]:
-    multimodal_top_k = getattr(query_param, "multimodal_top_k", None)
-    if multimodal_top_k is None or multimodal_top_k <= 0:
-        return 0, 0, 0
+def _coerce_bool(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
-    image_paths = _collect_image_paths_for_budget(chunks, multimodal_top_k)
-    image_count = len(image_paths)
-    if image_count <= 0:
-        return 0, 0, 0
 
-    if PILImage is None:
-        raise RuntimeError("Pillow is required for Qwen-VL image token estimation.")
+def _chunk_token_cost(tokenizer: Tokenizer, chunk: dict) -> int:
+    # Keep token accounting aligned with process_chunks_unified Step 4,
+    # where truncation happens before synthetic "id" is added in Step 5.
+    if "id" in chunk:
+        chunk = {k: v for k, v in chunk.items() if k != "id"}
+    return len(
+        tokenizer.encode(
+            "\n".join(json.dumps(item, ensure_ascii=False) for item in [chunk])
+        )
+    )
 
+
+def _extract_image_paths_from_chunk(chunk: dict) -> list[str]:
+    content = str(chunk.get("content", "") or "")
+    image_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for match in _QUERY_IMAGE_PATH_RE.finditer(content):
+        image_path = match.group(1).strip().strip("\"'`")
+        if not image_path or image_path in seen_paths:
+            continue
+        seen_paths.add(image_path)
+        image_paths.append(image_path)
+    return image_paths
+
+
+def _build_lazy_qwen_image_token_estimator(
+    query_param: QueryParam,
+) -> Callable[[str], int | None]:
     wrapper_tokens = max(
         0, int(getattr(query_param, "image_wrapper_tokens_per_image", 2))
     )
+    token_cache: dict[str, int | None] = {}
+    image_processor: Any = None
+    processor_initialized = False
 
-    _resolve_image_token_estimate_method(query_param)
-    model_name_or_path = str(
-        getattr(query_param, "image_token_model_name_or_path", "")
-        or os.getenv("IMAGE_TOKEN_MODEL_NAME_OR_PATH", "")
-        or os.getenv("VISION_MODEL_NAME", "")
-    ).strip()
-    image_processor = _get_qwen_image_processor(model_name_or_path)
+    def _ensure_processor():
+        nonlocal image_processor, processor_initialized
+        if processor_initialized:
+            return
+        processor_initialized = True
+        if PILImage is None:
+            raise RuntimeError("Pillow is required for Qwen-VL image token estimation.")
+        _resolve_image_token_estimate_method(query_param)
+        model_name_or_path = str(
+            getattr(query_param, "image_token_model_name_or_path", "")
+            or os.getenv("IMAGE_TOKEN_MODEL_NAME_OR_PATH", "")
+            or os.getenv("VISION_MODEL_NAME", "")
+        ).strip()
+        image_processor = _get_qwen_image_processor(model_name_or_path)
 
-    total_tokens = 0
-    valid_image_count = 0
-    skipped_image_count = 0
-    for image_path in image_paths:
+    def _estimate(image_path: str) -> int | None:
+        if image_path in token_cache:
+            return token_cache[image_path]
+
         path_obj = Path(image_path)
-        if path_obj.exists():
-            try:
-                total_tokens += _estimate_qwen_image_tokens(
-                    image_path=path_obj,
-                    image_processor=image_processor,
-                    wrapper_tokens=wrapper_tokens,
-                )
-                valid_image_count += 1
-                continue
-            except Exception:
-                pass
+        if not path_obj.exists():
+            token_cache[image_path] = None
+            return None
 
-        skipped_image_count += 1
+        _ensure_processor()
+        try:
+            token_value = _estimate_qwen_image_tokens(
+                image_path=path_obj,
+                image_processor=image_processor,
+                wrapper_tokens=wrapper_tokens,
+            )
+            token_cache[image_path] = token_value
+            return token_value
+        except Exception:
+            token_cache[image_path] = None
+            return None
 
-    if skipped_image_count > 0:
-        logger.debug(
-            "Skipped %s/%s images during Qwen token estimation (path unreadable or image parse failed).",
-            skipped_image_count,
-            image_count,
-        )
-
-    if valid_image_count <= 0:
-        return 0, 0, 0
-
-    per_image_tokens = total_tokens // valid_image_count
-    return total_tokens, valid_image_count, per_image_tokens
+    return _estimate
 
 
 def _is_file_or_folder_path(name: str) -> bool:
@@ -4561,28 +4566,102 @@ async def _build_context_str(
     )
     sys_prompt_tokens = len(tokenizer.encode(pre_sys_prompt))
 
-    # Calculate available tokens for text chunks
+    # Calculate fixed overhead before chunk packing
     query_tokens = len(tokenizer.encode(query))
     history_messages = _build_effective_history_messages(query_param)
     history_tokens = _estimate_history_tokens(tokenizer, history_messages)
-    image_tokens, image_count, per_image_tokens = _estimate_image_tokens_for_budget(
-        merged_chunks, query_param
+    enable_image_budget = _coerce_bool(
+        getattr(query_param, "enable_image_token_budget", True), default=True
     )
+    budget_history_tokens = history_tokens
     buffer_tokens = 200  # reserved for reference list and safety buffer
-    available_chunk_tokens = max_total_tokens - (
+    fixed_overhead_tokens = (
         sys_prompt_tokens
         + kg_context_tokens
         + query_tokens
-        + history_tokens
-        + image_tokens
+        + budget_history_tokens
         + buffer_tokens
     )
+    available_chunk_tokens = max_total_tokens - fixed_overhead_tokens
     if available_chunk_tokens < 0:
         logger.warning(
             "Chunk token budget below zero (%s); clamped to 0",
             available_chunk_tokens,
         )
         available_chunk_tokens = 0
+
+    if not enable_image_budget:
+        # Official-style fallback path
+        truncated_chunks = await process_chunks_unified(
+            query=query,
+            unique_chunks=merged_chunks,
+            query_param=query_param,
+            global_config=global_config,
+            source_type=query_param.mode,
+            chunk_token_limit=available_chunk_tokens,
+        )
+        image_tokens = 0
+        image_count = 0
+    else:
+        ordered_candidates = await process_chunks_unified(
+            query=query,
+            unique_chunks=merged_chunks,
+            query_param=query_param,
+            global_config=global_config,
+            source_type=query_param.mode,
+            chunk_token_limit=2**31 - 1,
+        )
+
+        image_cap = int(getattr(query_param, "multimodal_top_k", 0) or 0)
+        estimate_image_tokens = (
+            _build_lazy_qwen_image_token_estimator(query_param)
+            if image_cap > 0
+            else None
+        )
+
+        truncated_chunks = []
+        selected_image_paths: set[str] = set()
+        skipped_image_count = 0
+        total_tokens_used = fixed_overhead_tokens
+        image_tokens = 0
+
+        for chunk in ordered_candidates:
+            chunk_text_tokens = _chunk_token_cost(tokenizer, chunk)
+            chunk_image_tokens = 0
+            new_paths_for_chunk: list[str] = []
+
+            if estimate_image_tokens is not None and len(selected_image_paths) < image_cap:
+                for image_path in _extract_image_paths_from_chunk(chunk):
+                    if image_path in selected_image_paths or image_path in new_paths_for_chunk:
+                        continue
+                    if len(selected_image_paths) + len(new_paths_for_chunk) >= image_cap:
+                        break
+
+                    token_value = estimate_image_tokens(image_path)
+                    if token_value is None:
+                        skipped_image_count += 1
+                        continue
+                    chunk_image_tokens += token_value
+                    new_paths_for_chunk.append(image_path)
+
+            chunk_total_tokens = chunk_text_tokens + chunk_image_tokens
+            if total_tokens_used + chunk_total_tokens > max_total_tokens:
+                break
+
+            truncated_chunks.append(chunk)
+            total_tokens_used += chunk_total_tokens
+            image_tokens += chunk_image_tokens
+            if new_paths_for_chunk:
+                selected_image_paths.update(new_paths_for_chunk)
+
+        image_count = len(selected_image_paths)
+        if skipped_image_count > 0:
+            logger.debug(
+                "Skipped %s images during per-chunk Qwen token estimation (path unreadable or image parse failed).",
+                skipped_image_count,
+            )
+
+    per_image_tokens = image_tokens // image_count if image_count > 0 else 0
 
     logger.debug(
         "Token allocation - Total: %s, SysPrompt: %s, Query: %s, KG: %s, "
@@ -4591,22 +4670,12 @@ async def _build_context_str(
         sys_prompt_tokens,
         query_tokens,
         kg_context_tokens,
-        history_tokens,
+        budget_history_tokens,
         image_tokens,
         image_count,
         per_image_tokens,
         buffer_tokens,
         available_chunk_tokens,
-    )
-
-    # Apply token truncation to chunks using the dynamic limit
-    truncated_chunks = await process_chunks_unified(
-        query=query,
-        unique_chunks=merged_chunks,
-        query_param=query_param,
-        global_config=global_config,
-        source_type=query_param.mode,
-        chunk_token_limit=available_chunk_tokens,  # Pass dynamic limit
     )
 
     # Generate reference list from truncated chunks using the new common function
@@ -5485,22 +5554,23 @@ async def naive_query(
         content_data="",  # Empty for overhead calculation
     )
 
-    # Calculate available tokens for chunks
+    # Calculate fixed overhead before chunk packing
     sys_prompt_tokens = len(tokenizer.encode(pre_sys_prompt))
     query_tokens = len(tokenizer.encode(query))
     history_messages = _build_effective_history_messages(query_param)
     history_tokens = _estimate_history_tokens(tokenizer, history_messages)
-    image_tokens, image_count, per_image_tokens = _estimate_image_tokens_for_budget(
-        chunks, query_param
+    enable_image_budget = _coerce_bool(
+        getattr(query_param, "enable_image_token_budget", True), default=True
     )
+    budget_history_tokens = history_tokens
     buffer_tokens = 200  # reserved for reference list and safety buffer
-    available_chunk_tokens = max_total_tokens - (
+    fixed_overhead_tokens = (
         sys_prompt_tokens
         + query_tokens
-        + history_tokens
-        + image_tokens
+        + budget_history_tokens
         + buffer_tokens
     )
+    available_chunk_tokens = max_total_tokens - fixed_overhead_tokens
     if available_chunk_tokens < 0:
         logger.warning(
             "Naive chunk token budget below zero (%s); clamped to 0",
@@ -5508,28 +5578,91 @@ async def naive_query(
         )
         available_chunk_tokens = 0
 
+    if not enable_image_budget:
+        # Official-style fallback path
+        processed_chunks = await process_chunks_unified(
+            query=query,
+            unique_chunks=chunks,
+            query_param=query_param,
+            global_config=global_config,
+            source_type="vector",
+            chunk_token_limit=available_chunk_tokens,
+        )
+        image_tokens = 0
+        image_count = 0
+    else:
+        ordered_candidates = await process_chunks_unified(
+            query=query,
+            unique_chunks=chunks,
+            query_param=query_param,
+            global_config=global_config,
+            source_type="vector",
+            chunk_token_limit=2**31 - 1,
+        )
+
+        image_cap = int(getattr(query_param, "multimodal_top_k", 0) or 0)
+        estimate_image_tokens = (
+            _build_lazy_qwen_image_token_estimator(query_param)
+            if image_cap > 0
+            else None
+        )
+
+        processed_chunks = []
+        selected_image_paths: set[str] = set()
+        skipped_image_count = 0
+        total_tokens_used = fixed_overhead_tokens
+        image_tokens = 0
+
+        for chunk in ordered_candidates:
+            chunk_text_tokens = _chunk_token_cost(tokenizer, chunk)
+            chunk_image_tokens = 0
+            new_paths_for_chunk: list[str] = []
+
+            if estimate_image_tokens is not None and len(selected_image_paths) < image_cap:
+                for image_path in _extract_image_paths_from_chunk(chunk):
+                    if image_path in selected_image_paths or image_path in new_paths_for_chunk:
+                        continue
+                    if len(selected_image_paths) + len(new_paths_for_chunk) >= image_cap:
+                        break
+
+                    token_value = estimate_image_tokens(image_path)
+                    if token_value is None:
+                        skipped_image_count += 1
+                        continue
+                    chunk_image_tokens += token_value
+                    new_paths_for_chunk.append(image_path)
+
+            chunk_total_tokens = chunk_text_tokens + chunk_image_tokens
+            if total_tokens_used + chunk_total_tokens > max_total_tokens:
+                break
+
+            processed_chunks.append(chunk)
+            total_tokens_used += chunk_total_tokens
+            image_tokens += chunk_image_tokens
+            if new_paths_for_chunk:
+                selected_image_paths.update(new_paths_for_chunk)
+
+        image_count = len(selected_image_paths)
+        if skipped_image_count > 0:
+            logger.debug(
+                "Skipped %s images during per-chunk Qwen token estimation (path unreadable or image parse failed).",
+                skipped_image_count,
+            )
+
+    per_image_tokens = image_tokens // image_count if image_count > 0 else 0
+
     logger.debug(
         "Naive query token allocation - Total: %s, SysPrompt: %s, Query: %s, "
         "History: %s, Image: %s (%s * %s), Buffer: %s, Available for chunks: %s",
         max_total_tokens,
         sys_prompt_tokens,
         query_tokens,
-        history_tokens,
+        budget_history_tokens,
         image_tokens,
         image_count,
         per_image_tokens,
         buffer_tokens,
         available_chunk_tokens,
-    )
-
-    # Process chunks using unified processing with dynamic token limit
-    processed_chunks = await process_chunks_unified(
-        query=query,
-        unique_chunks=chunks,
-        query_param=query_param,
-        global_config=global_config,
-        source_type="vector",
-        chunk_token_limit=available_chunk_tokens,  # Pass dynamic limit
     )
 
     # Generate reference list from processed chunks using the new common function

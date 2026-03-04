@@ -6,15 +6,15 @@ DocBench Evaluation Script for RAG-Anything Local (Manual Server Mode)
 
 Quick workflow:
 ---------
-1. Start Qwen3-VL-30B-A3B-Instruct-FP8 service (port 8001)
+1. Start Qwen3.5-35B-A3B-FP8 service (port 8001)
    cd /data/y50056788/Yaliang/projects/lightrag
-   bash start_server_qwen3_vl.sh
+   bash start_server_qwen3.5.sh
 
 2. Generate system answers (can run in background)
    python evaluate.py --mode generate
    or: nohup python evaluate.py --mode generate > run_generate.log 2>&1 &
 
-3. Stop Qwen3-VL service, then start Qwen2.5-32B (port 8002)
+3. Stop Qwen3.5 service, then start Qwen2.5-32B (port 8002)
    # press Ctrl+C in the server terminal
    bash start_server_qwen2.5_32b_awq.sh
 
@@ -76,12 +76,12 @@ OUTPUT_MD_DIR = OUTPUT_DIR / "mineru_outputs"
 OUTPUT_MD_DIR.mkdir(parents=True, exist_ok=True)
 
 # API settings
-RAG_API_BASE = "http://localhost:8001/v1"      # Qwen3-VL-30B-A3B-Instruct-FP8 (answer generation)
+RAG_API_BASE = "http://localhost:8001/v1"      # Qwen3.5-35B-A3B-FP8 (answer generation)
 JUDGE_API_BASE = "http://localhost:8002/v1"    # Qwen2.5-32B (evaluation)
 RAG_API_KEY = "EMPTY"
-QWEN3_VL_MODEL_PATH = "/data/y50056788/Yaliang/models/Qwen3-VL-30B-A3B-Instruct-FP8"
+RAG_VISION_MODEL_PATH = "/data/y50056788/Yaliang/models/Qwen3.5-35B-A3B-FP8"
 
-RAG_MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+RAG_MODEL_NAME = "Qwen/Qwen3.5-35B-A3B-FP8"
 JUDGE_MODEL_NAME = "Qwen/Qwen2.5-32B-Instruct"
 
 # Query parameters (DocBench tuned)
@@ -92,7 +92,7 @@ DOCBENCH_QUERY_PARAMS = {
     "vlm_enhanced": True,
     "multimodal_top_k": 5,
     "image_token_estimate_method": "qwen_vl",
-    "image_token_model_name_or_path": QWEN3_VL_MODEL_PATH,
+    "image_token_model_name_or_path": RAG_VISION_MODEL_PATH,
     "image_wrapper_tokens_per_image": 2,
 }
 
@@ -284,10 +284,10 @@ def _build_docbench_settings() -> LocalRagSettings:
     settings.vllm_api_key = settings.vision_vllm_api_key = RAG_API_KEY
     settings.device = "cuda:0"
     settings.llm_model_name = settings.vision_model_name = RAG_MODEL_NAME
-    settings.vision_model_path = QWEN3_VL_MODEL_PATH
-    settings.tokenizer_model_path = QWEN3_VL_MODEL_PATH
+    settings.vision_model_path = RAG_VISION_MODEL_PATH
+    settings.tokenizer_model_path = RAG_VISION_MODEL_PATH
     settings.image_token_estimate_method = "qwen_vl"
-    settings.image_token_model_name_or_path = QWEN3_VL_MODEL_PATH
+    settings.image_token_model_name_or_path = RAG_VISION_MODEL_PATH
     settings.image_wrapper_tokens_per_image = 2
     settings.temperature = 0.0
     settings.query_max_tokens = 2048
@@ -333,7 +333,7 @@ async def generate_answers(
     """
     为 DocBench 生成系统答案
     
-    前提：Qwen3-VL-30B-A3B-Instruct-FP8 服务已在 8001 端口运行
+    前提：Qwen3.5-35B-A3B-FP8 服务已在 8001 端口运行
     
     Args:
         start_id: 起始文档 ID
@@ -944,7 +944,7 @@ Examples:
     
     # 执行对应的步骤
     if args.mode == 'generate':
-        logger.info("⚠️  Please ensure Qwen3-VL-30B-A3B-Instruct-FP8 is running on port 8001")
+        logger.info("⚠️  Please ensure Qwen3.5-35B-A3B-FP8 is running on port 8001")
         logger.info(f"   Check: curl http://localhost:8001/v1/models\n")
         await generate_answers(
             start_id=args.start_id,

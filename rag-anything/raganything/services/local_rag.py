@@ -248,7 +248,7 @@ def build_lightrag_tokenizer(
     except Exception as exc:
         raise RuntimeError(
             f"Failed to load Qwen tokenizer from '{model_name_or_path}'. "
-            "Set TOKENIZER_MODEL_PATH to your local Qwen3-VL model directory."
+            "Set TOKENIZER_MODEL_PATH to your local Qwen model directory."
         ) from exc
 
     logger.info("LightRAG tokenizer initialized from: %s", model_name_or_path)
