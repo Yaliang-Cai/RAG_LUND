@@ -12,7 +12,8 @@
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
   <!-- highlight.js -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+  <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" disabled>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <!-- marked.js -->
   <script src="https://unpkg.com/marked@4.3.0/marked.min.js"></script>
@@ -840,6 +841,7 @@
     },
 
     _buildPages() {
+      if (this.observer) this.observer.disconnect();
       const container = document.getElementById('pdfPages');
       container.innerHTML = '';
       for (let i = 1; i <= this.totalPages; i++) {
@@ -897,6 +899,7 @@
     },
 
     destroy() {
+      if (this.observer) this.observer.disconnect();
       if (this.pdfDoc) { this.pdfDoc.destroy(); this.pdfDoc = null; }
       this.renderedPages.clear();
       this.totalPages = 0;
@@ -943,7 +946,10 @@
         img.style.cursor = 'pointer';
         img.onclick = (e) => {
           e.stopPropagation();
-          UI.showModal(`<img src="${img.src}" alt="${img.alt || ''}">`);
+          const safeImg = document.createElement('img');
+          safeImg.src = img.src;
+          safeImg.alt = img.alt || '';
+          UI.showModalElement(safeImg);
         };
       });
     },
@@ -1147,23 +1153,26 @@
       const mode = document.getElementById('modeSelect').value;
 
       try {
-        // Simulate trace progress
-        setTimeout(() => ReasoningTrace.advanceTo(1), 400);
-        setTimeout(() => ReasoningTrace.advanceTo(2), 1200);
-        setTimeout(() => ReasoningTrace.advanceTo(3), 2000);
+        // Step 0→1: mark "extracting keywords" as active (already done in start())
+        // Use a single slow pulse that auto-advances only if API is slow
+        const traceTimer = setTimeout(() => ReasoningTrace.advanceTo(1), 3000);
 
         const data = await API.query(AppState.currentDocId, text, {
           mode,
           return_graph: AppState.graphOpen,
         });
+        clearTimeout(traceTimer);
 
         AppState.lastQueryResponse = data;
 
-        // Complete trace
-        ReasoningTrace.allDone();
+        // Advance trace based on actual response content
+        ReasoningTrace.advanceTo(1); // keywords extracted
         if (data.metadata && data.metadata.keywords) {
           ReasoningTrace.showKeywords(data.metadata.keywords);
         }
+        ReasoningTrace.advanceTo(2); // KG searched
+        ReasoningTrace.advanceTo(3); // reranking done
+        ReasoningTrace.allDone();    // generation complete
 
         // Register citations
         Citations.register(data.data || {});
@@ -1408,7 +1417,11 @@
       const q = document.getElementById('graphSearchInput').value.trim();
       if (!q || !AppState.currentDocId) return;
       try {
-        const data = await API.getSubgraph(AppState.currentDocId, q);
+        // First search for matching labels, then get subgraph with best match
+        const searchResult = await API.searchEntities(AppState.currentDocId, q);
+        const labels = searchResult.results || [];
+        const label = labels.length > 0 ? labels[0] : q;
+        const data = await API.getSubgraph(AppState.currentDocId, label);
         if (data.nodes && data.nodes.length > 0) {
           this.loadData(data.nodes, data.edges || []);
         } else {
@@ -1514,10 +1527,11 @@
         return;
       }
 
-      // Auto-load first file
-      if (sel.options.length > 0) {
-        sel.selectedIndex = 0;
-        this.selectFile(sel.options[0].value);
+      // Auto-load first file (skip optgroup, find first real option)
+      const firstOption = sel.querySelector('option');
+      if (firstOption) {
+        firstOption.selected = true;
+        this.selectFile(firstOption.value);
       }
     },
 
@@ -1620,7 +1634,10 @@
   const UI = {
     initTheme() {
       const saved = localStorage.getItem('rag-theme');
-      if (saved) document.documentElement.setAttribute('data-theme', saved);
+      if (saved) {
+        document.documentElement.setAttribute('data-theme', saved);
+        this._syncHljsTheme(saved);
+      }
     },
 
     toggleTheme() {
@@ -1628,6 +1645,16 @@
       const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
       html.setAttribute('data-theme', next);
       localStorage.setItem('rag-theme', next);
+      this._syncHljsTheme(next);
+    },
+
+    _syncHljsTheme(theme) {
+      const dark = document.getElementById('hljs-dark');
+      const light = document.getElementById('hljs-light');
+      if (dark && light) {
+        dark.disabled = (theme === 'light');
+        light.disabled = (theme === 'dark');
+      }
     },
 
     initDivider() {
@@ -1674,6 +1701,14 @@
     showModal(html) {
       const overlay = document.getElementById('modalOverlay');
       document.getElementById('modalContent').innerHTML = html;
+      overlay.style.display = 'flex';
+    },
+
+    showModalElement(el) {
+      const overlay = document.getElementById('modalOverlay');
+      const content = document.getElementById('modalContent');
+      content.innerHTML = '';
+      content.appendChild(el);
       overlay.style.display = 'flex';
     },
 

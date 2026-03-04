@@ -326,7 +326,17 @@ async def _get_query_subgraph(rag, retrieval, payload):
         ll_kws = keywords.get("low_level", [])
         if not ll_kws:
             return None
-        label = ll_kws[0] if isinstance(ll_kws[0], str) else str(ll_kws[0])
+        raw_label = ll_kws[0] if isinstance(ll_kws[0], str) else str(ll_kws[0])
+        # Use search_labels to find the closest matching entity in the graph
+        label = raw_label
+        try:
+            matches = await rag.lightrag.chunk_entity_relation_graph.search_labels(
+                raw_label, limit=1
+            )
+            if matches:
+                label = matches[0]
+        except Exception:
+            pass  # fallback to raw keyword
         kg = await rag.lightrag.get_knowledge_graph(
             node_label=label,
             max_depth=payload.graph_max_depth,
