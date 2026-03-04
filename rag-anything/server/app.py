@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Set
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -94,6 +94,16 @@ def verify_api_key(x_api_key: Optional[str] = Header(default=None)):
     if not expected: return
     if x_api_key != expected:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+def verify_api_key_or_query(
+    x_api_key: Optional[str] = Header(default=None),
+    key: Optional[str] = Query(default=None),
+):
+    """Like verify_api_key but also accepts ?key= query param (for <iframe> PDF src URLs)."""
+    expected = os.getenv(API_KEY_ENV, "").strip()
+    if not expected: return
+    if x_api_key == expected or key == expected: return
+    raise HTTPException(status_code=401, detail="Invalid API key")
 
 # --- 数据模型 ---
 class QueryRequest(BaseModel):
@@ -240,7 +250,7 @@ def list_uploads(
 def serve_upload(
     doc_id: str,
     filename: str,
-    _auth: None = Depends(verify_api_key),
+    _auth: None = Depends(verify_api_key_or_query),
 ):
     _validate_doc_id(doc_id)
     if ".." in filename or "/" in filename or "\\" in filename:

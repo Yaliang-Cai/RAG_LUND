@@ -640,6 +640,7 @@
       </div>
       <div class="pdf-viewer" id="pdfViewer">
         <div class="pdf-pages" id="pdfPages"></div>
+        <iframe id="pdfIframe" style="display:none;width:100%;height:100%;border:none;flex:1;background:#fff;"></iframe>
         <div class="md-viewer" id="mdViewer"></div>
         <div class="pdf-empty" id="pdfEmpty">
           <div class="pdf-empty-icon">
@@ -934,6 +935,14 @@
     },
 
     scrollToPage(num) {
+      // If showing in native iframe, use fragment navigation
+      const frame = document.getElementById('pdfIframe');
+      if (frame && frame.style.display !== 'none' && frame.src) {
+        const base = frame.src.split('#')[0];
+        frame.src = base + '#page=' + num;
+        return;
+      }
+      // PDF.js path
       if (num < 1 || num > this.totalPages) return;
       this.currentPage = num;
       const wrapper = document.querySelector(`#pdfPages [data-page="${num}"]`);
@@ -1168,7 +1177,8 @@
       // Try to determine page number from file_path
       const filePath = (chunk && chunk.file_path) || (ref && ref.file_path) || '';
       const pageMatch = filePath.match(/page[_\-]?(\d+)/i);
-      if (pageMatch && PDFViewer.pdfDoc) {
+      const iframeVisible = document.getElementById('pdfIframe')?.style.display !== 'none';
+      if (pageMatch && (PDFViewer.pdfDoc || iframeVisible)) {
         PDFViewer.scrollToPage(parseInt(pageMatch[1]));
       }
 
@@ -1643,16 +1653,27 @@
       const name = nameParts.join(':');
 
       if (type === 'upload' && name.toLowerCase().endsWith('.pdf')) {
-        // Load PDF
-        const url = API.uploadUrl(AppState.currentDocId, name);
+        // Load PDF via native browser renderer (iframe) — no CDN dependency
+        const keyParam = AppState.apiKey ? `?key=${encodeURIComponent(AppState.apiKey)}` : '';
+        const url = `/uploads/${AppState.currentDocId}/${encodeURIComponent(name)}${keyParam}`;
         AppState.currentFile = { name, type: 'pdf', url };
+        PDFViewer.destroy();
         document.getElementById('pdfEmpty').style.display = 'none';
         document.getElementById('mdViewer').style.display = 'none';
-        document.getElementById('pdfPages').style.display = 'flex';
-        await PDFViewer.loadDocument(url);
+        document.getElementById('pdfPages').style.display = 'none';
+        const frame = document.getElementById('pdfIframe');
+        frame.src = url;
+        frame.style.display = 'block';
+        // Hide PDF.js page controls — browser has its own
+        document.querySelector('.pdf-page-controls').style.display = 'none';
+        document.querySelector('.pdf-zoom-controls').style.display = 'none';
       } else if (type === 'md') {
         // Load markdown
         PDFViewer.destroy();
+        const frame = document.getElementById('pdfIframe');
+        frame.src = ''; frame.style.display = 'none';
+        document.querySelector('.pdf-page-controls').style.display = '';
+        document.querySelector('.pdf-zoom-controls').style.display = '';
         document.getElementById('pdfPages').style.display = 'none';
         document.getElementById('pdfEmpty').style.display = 'none';
         document.getElementById('mdViewer').style.display = 'block';
@@ -1669,6 +1690,10 @@
       } else {
         // Non-PDF uploaded file: show placeholder
         PDFViewer.destroy();
+        const frame = document.getElementById('pdfIframe');
+        frame.src = ''; frame.style.display = 'none';
+        document.querySelector('.pdf-page-controls').style.display = '';
+        document.querySelector('.pdf-zoom-controls').style.display = '';
         document.getElementById('pdfPages').style.display = 'none';
         document.getElementById('mdViewer').style.display = 'none';
         document.getElementById('pdfEmpty').style.display = 'flex';
@@ -1808,6 +1833,10 @@
       AppState.currentDocId = '';
       AppState.currentFile = null;
       PDFViewer.destroy();
+      const frame = document.getElementById('pdfIframe');
+      if (frame) { frame.src = ''; frame.style.display = 'none'; }
+      document.querySelector('.pdf-page-controls').style.display = '';
+      document.querySelector('.pdf-zoom-controls').style.display = '';
       document.getElementById('fileSelect').innerHTML = '<option value="">No files</option>';
       document.getElementById('pdfPages').style.display = 'none';
       document.getElementById('mdViewer').style.display = 'none';
