@@ -19,6 +19,9 @@ You are a Knowledge Graph Specialist responsible for extracting entities and rel
         *   `entity_type`: Categorize the entity using one of the following types: `{entity_types}`. If none of the provided entity types apply, do not add new entity type and classify it as `Other`.
         *   `entity_description`: Provide a concise yet comprehensive description of the entity's attributes and activities, based *solely* on the information present in the input text.
     *   **Entity Exclusion Rules:** Do **NOT** extract file-system artifacts as entities, including paths, path fragments, directory names, and filenames/extensions (e.g., `/a/b`, `C:\\x\\y`, `docbench_results`, `image_01.jpg`, `config.yaml`). Do **NOT** extract pure layout/metadata labels (e.g., `Page Number`, `Bounding Box`, `Reference Type`) unless they are explicitly the core subject in context.
+    *   **Document Locator Rules:** Do **NOT** extract bare locator labels as entities, including labels such as `Table/Figure/Eq/Section/Chapter/Appendix/Page/Ref/Footnote` followed only by an index/number (e.g., `Table 7`, `Figure 2`, `Section 3`, `Appendix A`, `Ref [12]`).
+    *   **Locator With Semantic Title:** If a locator has meaningful semantic title text (e.g., `Table 7: Ablation Results`), it can be extracted. Keep the full locator title and normalize naming using explicit type suffix where applicable (e.g., `Table 7: Ablation Results (table)`).
+    *   **Ambiguous Generic Terms:** Do **NOT** extract ambiguous generic references without clear disambiguation in context (e.g., `paper`, `title`, `other`, `they`, `ours`, `all`, `labels`).
     *   **Output Format - Entities:** Output a total of 4 fields for each entity, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `entity`.
         *   Format: `entity{tuple_delimiter}entity_name{tuple_delimiter}entity_type{tuple_delimiter}entity_description`
 
@@ -51,6 +54,7 @@ You are a Knowledge Graph Specialist responsible for extracting entities and rel
 6.  **Context & Objectivity:**
     *   Ensure all entity names and descriptions are written in the **third person**.
     *   Explicitly name the subject or object; **avoid using pronouns** such as `this article`, `this paper`, `our company`, `I`, `you`, and `he/she`.
+    *   Prioritize entities that can form clear relationships; avoid outputting isolated placeholder-like entities when they carry no standalone semantic value.
 
 7.  **Language & Proper Nouns:**
     *   The entire output (entity names, keywords, and descriptions) must be written in `{language}`.

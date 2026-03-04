@@ -181,6 +181,29 @@
 - 校验：语法与关键分支断言通过（顺序交错、越界 marker、无 marker 异常）。
 ---
 
+## 增量更新（2026-03-04，默认预算回退 + JSON 严格输出 + 抽取前后协同降噪）
+
+- Query token 预算默认行为已回退为官方 `available_chunk_tokens` 路径：
+  - `DEFAULT_ENABLE_IMAGE_TOKEN_BUDGET=False`；
+  - `operate.py` 两条链路（KG/naive）缺省值对齐为 `False`，避免漏参时误走图片联合预算分支；
+  - history token 仍计入固定开销预算。
+
+- VLM `json_schema` 功能保留（含 fallback），未回退：
+  - ingest 结构化输出仍由 `local_rag.py` 的 schema 分支控制；
+  - `strict=False` 保持兼容优先。
+
+- 官方 `raganything/prompt.py` 已并入严格 JSON 输出句（不新建 Qwen 专用 prompt 分叉）：
+  - 覆盖 8 个模态分析 prompt（with/without context 全覆盖）；
+  - 采用公共前后缀拼接，避免重复维护；
+  - 关键句使用 `{{` / `}}` 转义，保证后续 `.format(...)` 不误解析占位符。
+
+- KG 抽取“前置约束 + 后置过滤”协同增强：
+  - system prompt 增加广义定位标签规则、泛词无指代过滤、关系软约束；
+  - 后置 filter 扩展到广义 locator 裸标签，且保留“带语义标题”的高价值实体；
+  - 示例：`Table 7: Ablation Results (table)` 会保留；`Table 7` / `Figure 2` / `Section 3` / `Ref [12]` 会过滤。
+
+---
+
 ## 架构备忘：Query 完整链路（2026-02-26）
 
 > 纯参考性记录，无代码改动。覆盖从 HTTP 请求入口到最终 LLM 消息返回的每一层。

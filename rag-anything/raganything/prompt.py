@@ -11,6 +11,15 @@ from typing import Any
 
 PROMPTS: dict[str, Any] = {}
 
+STRICT_JSON_PREFIX = (
+    "CRITICAL INSTRUCTION: Your response MUST be a valid JSON object only. "
+    "Start with {{ and end with }}. No text before or after."
+)
+STRICT_JSON_SUFFIX = (
+    "FINAL REMINDER: Output ONLY the JSON object. "
+    "Do not add explanations, commentary, or markdown code blocks."
+)
+
 # System prompts for different analysis types
 PROMPTS["IMAGE_ANALYSIS_SYSTEM"] = (
     "You are an expert image analyst. Provide detailed, accurate descriptions."
@@ -270,6 +279,25 @@ Context from surrounding content:
 Content: {content}
 
 Focus on extracting meaningful information that would be useful for knowledge retrieval and understanding the content's role in the broader context."""
+
+# Apply strict JSON guards to all modal analysis prompts (with/without context).
+_STRICT_JSON_PROMPT_KEYS = (
+    "vision_prompt",
+    "vision_prompt_with_context",
+    "table_prompt",
+    "table_prompt_with_context",
+    "equation_prompt",
+    "equation_prompt_with_context",
+    "generic_prompt",
+    "generic_prompt_with_context",
+)
+for _prompt_key in _STRICT_JSON_PROMPT_KEYS:
+    _prompt_text = str(PROMPTS.get(_prompt_key, "")).strip()
+    if not _prompt_text:
+        continue
+    PROMPTS[_prompt_key] = (
+        f"{STRICT_JSON_PREFIX}\n\n{_prompt_text}\n\n{STRICT_JSON_SUFFIX}"
+    )
 
 # Modal chunk templates
 PROMPTS["image_chunk"] = """

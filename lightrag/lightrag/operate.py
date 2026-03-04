@@ -60,6 +60,7 @@ from lightrag.constants import (
     DEFAULT_MAX_TOTAL_TOKENS,
     DEFAULT_RELATED_CHUNK_NUMBER,
     DEFAULT_KG_CHUNK_PICK_METHOD,
+    DEFAULT_ENABLE_IMAGE_TOKEN_BUDGET,
     DEFAULT_ENTITY_TYPES,
     DEFAULT_SUMMARY_LANGUAGE,
     SOURCE_IDS_LIMIT_METHOD_KEEP,
@@ -180,7 +181,49 @@ _GENERIC_NOISE_ENTITIES = {
     "url",
 }
 
-_TABLE_FIGURE_LABEL_RE = _re.compile(r"^(?:table|figure|fig)\s*\d+$", _re.IGNORECASE)
+_AMBIGUOUS_REFERENCE_ENTITIES = {
+    "paper",
+    "title",
+    "other",
+    "others",
+    "they",
+    "them",
+    "their",
+    "ours",
+    "all",
+    "labels",
+    "this paper",
+    "our paper",
+    "our work",
+    "this study",
+}
+
+_LOCATOR_WITH_TITLE_RE = _re.compile(
+    r"^(?:table|figure|fig|eq|equation|formula|section|sec|chapter|ch|appendix|app|page|p|ref|reference|footnote|fn)\.?\s*"
+    r"(?:[A-Za-z]?\d+(?:\.\d+)*|[A-Za-z])\s*[:\-]\s*.+$",
+    _re.IGNORECASE,
+)
+_LOCATOR_BARE_LABEL_RE = _re.compile(
+    r"^(?:table|figure|fig|eq|equation|formula|section|sec|chapter|ch|appendix|app|page|p|ref|reference|footnote|fn)\.?\s*"
+    r"(?:[A-Za-z]?\d+(?:\.\d+)*|[A-Za-z])$",
+    _re.IGNORECASE,
+)
+_LOCATOR_REF_BRACKET_RE = _re.compile(
+    r"^(?:ref|reference)\s*\[\s*\d+\s*\]$", _re.IGNORECASE
+)
+_TABLE_WITH_TITLE_RE = _re.compile(
+    r"^table\.?\s*(?:[A-Za-z]?\d+(?:\.\d+)*|[A-Za-z])\s*[:\-]\s*.+$",
+    _re.IGNORECASE,
+)
+_FIGURE_WITH_TITLE_RE = _re.compile(
+    r"^(?:figure|fig)\.?\s*(?:[A-Za-z]?\d+(?:\.\d+)*|[A-Za-z])\s*[:\-]\s*.+$",
+    _re.IGNORECASE,
+)
+_EQUATION_WITH_TITLE_RE = _re.compile(
+    r"^(?:eq|equation|formula)\.?\s*(?:[A-Za-z]?\d+(?:\.\d+)*|[A-Za-z])\s*[:\-]\s*.+$",
+    _re.IGNORECASE,
+)
+_MODAL_ENTITY_SUFFIX_RE = _re.compile(r"\s*\((?:table|image|equation)\)$", _re.IGNORECASE)
 _IMAGE_STEM_NO_EXT_RE = _re.compile(r"^image(?:_|-)[a-z0-9]{4,}$", _re.IGNORECASE)
 _PAGE_NUMBER_ENTITY_RE = _re.compile(r"^page\s+\d+$", _re.IGNORECASE)
 _COORDINATE_ENTITY_RE = _re.compile(r"^coordinates?\s*\[[^\]]+\]$", _re.IGNORECASE)
@@ -372,16 +415,41 @@ def _normalize_entity_surface(name: str) -> str:
     if normalized.islower():
         words = normalized.split(" ")
         if len(words) == 1 and _looks_like_acronym(words[0]):
-            return words[0].upper()
-        titled_words = []
-        for w in words:
-            if _looks_like_acronym(w):
-                titled_words.append(w.upper())
-            else:
-                titled_words.append(w.capitalize())
-        return " ".join(titled_words)
+            normalized = words[0].upper()
+        else:
+            titled_words = []
+            for w in words:
+                if _looks_like_acronym(w):
+                    titled_words.append(w.upper())
+                else:
+                    titled_words.append(w.capitalize())
+            normalized = " ".join(titled_words)
+
+    if _MODAL_ENTITY_SUFFIX_RE.search(normalized):
+        return normalized
+    if _TABLE_WITH_TITLE_RE.match(normalized):
+        return f"{normalized} (table)"
+    if _FIGURE_WITH_TITLE_RE.match(normalized):
+        return f"{normalized} (image)"
+    if _EQUATION_WITH_TITLE_RE.match(normalized):
+        return f"{normalized} (equation)"
 
     return normalized
+
+
+def _strip_modal_suffix(name: str) -> str:
+    return _MODAL_ENTITY_SUFFIX_RE.sub("", name or "").strip()
+
+
+def _has_semantic_locator_title(name: str) -> bool:
+    return bool(_LOCATOR_WITH_TITLE_RE.match(_strip_modal_suffix(name)))
+
+
+def _is_bare_locator_label(name: str) -> bool:
+    cleaned = _strip_modal_suffix(name)
+    if _LOCATOR_REF_BRACKET_RE.match(cleaned):
+        return True
+    return bool(_LOCATOR_BARE_LABEL_RE.match(cleaned))
 
 
 def _classify_low_quality_entity(
@@ -391,8 +459,14 @@ def _classify_low_quality_entity(
     if not name:
         return True, "empty"
     cleaned = name.strip()
-    key = _entity_lexical_key(cleaned)
+    key = _entity_lexical_key(_strip_modal_suffix(cleaned))
 
+    if _has_semantic_locator_title(cleaned):
+        # Keep high-value locator entities with semantic titles, e.g.
+        # "Table 7: Ablation Results (table)".
+        return False, "locator_with_semantic_title"
+    if _is_bare_locator_label(cleaned):
+        return True, "bare_locator_label"
     if cleaned.casefold().startswith("image path"):
         return True, "image_path_label"
     if key:
@@ -400,6 +474,8 @@ def _classify_low_quality_entity(
             return True, "path_fragment_from_source"
     if key in _LAYOUT_METADATA_ENTITIES:
         return True, "layout_metadata"
+    if key in _AMBIGUOUS_REFERENCE_ENTITIES:
+        return True, "ambiguous_reference"
     if key in _GENERIC_NOISE_ENTITIES:
         return True, "generic_noise"
     if _PAGE_NUMBER_ENTITY_RE.match(cleaned):
@@ -410,8 +486,6 @@ def _classify_low_quality_entity(
         cleaned
     ):
         return True, "coordinate_metadata"
-    if _TABLE_FIGURE_LABEL_RE.match(cleaned):
-        return True, "table_figure_label"
     if _IMAGE_STEM_NO_EXT_RE.match(cleaned):
         return True, "image_stem_no_ext"
     if "published by" in key:
@@ -4571,7 +4645,12 @@ async def _build_context_str(
     history_messages = _build_effective_history_messages(query_param)
     history_tokens = _estimate_history_tokens(tokenizer, history_messages)
     enable_image_budget = _coerce_bool(
-        getattr(query_param, "enable_image_token_budget", True), default=True
+        getattr(
+            query_param,
+            "enable_image_token_budget",
+            DEFAULT_ENABLE_IMAGE_TOKEN_BUDGET,
+        ),
+        default=DEFAULT_ENABLE_IMAGE_TOKEN_BUDGET,
     )
     budget_history_tokens = history_tokens
     buffer_tokens = 200  # reserved for reference list and safety buffer
@@ -5560,7 +5639,12 @@ async def naive_query(
     history_messages = _build_effective_history_messages(query_param)
     history_tokens = _estimate_history_tokens(tokenizer, history_messages)
     enable_image_budget = _coerce_bool(
-        getattr(query_param, "enable_image_token_budget", True), default=True
+        getattr(
+            query_param,
+            "enable_image_token_budget",
+            DEFAULT_ENABLE_IMAGE_TOKEN_BUDGET,
+        ),
+        default=DEFAULT_ENABLE_IMAGE_TOKEN_BUDGET,
     )
     budget_history_tokens = history_tokens
     buffer_tokens = 200  # reserved for reference list and safety buffer
