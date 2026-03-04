@@ -19,9 +19,7 @@
   <script src="https://unpkg.com/marked@4.3.0/marked.min.js"></script>
   <!-- PDF.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-  <!-- graphology + sigma -->
-  <script src="https://unpkg.com/graphology@0.25.4/dist/graphology.umd.min.js"></script>
-  <script src="https://unpkg.com/sigma@2.4.0/build/sigma.min.js"></script>
+  <!-- graphology + sigma removed: graph rendered via pyvis iframe -->
   <style>
     /* ══════════════════════════════════════════════
        DESIGN SYSTEM — Editorial Research Journal
@@ -434,7 +432,7 @@
       flex-shrink: 0; overflow: hidden;
       transition: height 0.3s ease;
     }
-    .graph-panel.open { height: 320px; }
+    .graph-panel.open { height: 420px; }
     .graph-panel.closed { height: 0; }
     .graph-toolbar {
       height: 38px; padding: 0 16px; display: flex; align-items: center; gap: 10px;
@@ -446,17 +444,19 @@
     }
     .graph-toolbar .ctrl-input { width: 200px; font-size: 11px; padding: 4px 8px; }
     .graph-toolbar .icon-btn { width: 26px; height: 26px; margin-left: auto; }
-    .graph-body { display: flex; height: calc(100% - 38px); }
-    .graph-canvas { flex: 1; position: relative; }
-    .graph-canvas-inner { width: 100%; height: 100%; }
-    .graph-details-panel {
-      width: 260px; border-left: 1px solid var(--border); padding: 12px;
-      overflow-y: auto; font-size: 12px; display: none;
+    .graph-body { display: flex; height: calc(100% - 38px); position: relative; }
+    .graph-iframe { flex: 1; border: none; background: var(--bg-graph); display: none; }
+    .graph-loading {
+      position: absolute; inset: 0; display: none;
+      align-items: center; justify-content: center; flex-direction: column;
+      gap: 10px; background: var(--bg-graph); color: var(--text-tertiary); font-size: 12px;
     }
-    .graph-details-panel.open { display: block; }
-    .graph-detail-title { font-weight: 600; font-size: 14px; color: var(--accent); margin-bottom: 8px; }
-    .graph-detail-type { font-size: 11px; color: var(--text-tertiary); margin-bottom: 6px; }
-    .graph-detail-desc { color: var(--text-secondary); line-height: 1.6; }
+    .graph-loading.active { display: flex; }
+    .graph-loading-spinner {
+      width: 28px; height: 28px; border: 2px solid var(--border);
+      border-top-color: var(--accent); border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
     .graph-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-tertiary); font-size: 13px; }
 
     /* ── Modal / Lightbox ── */
@@ -705,15 +705,12 @@
       </button>
     </div>
     <div class="graph-body">
-      <div class="graph-canvas">
-        <div class="graph-canvas-inner" id="graphContainer"></div>
-        <div class="graph-empty" id="graphEmpty">Query to see related entities</div>
+      <iframe id="graphIframe" class="graph-iframe"></iframe>
+      <div class="graph-loading" id="graphLoading">
+        <div class="graph-loading-spinner"></div>
+        <span>Rendering knowledge graph…</span>
       </div>
-      <div class="graph-details-panel" id="graphDetailsPanel">
-        <div class="graph-detail-title" id="graphDetailTitle"></div>
-        <div class="graph-detail-type" id="graphDetailType"></div>
-        <div class="graph-detail-desc" id="graphDetailDesc"></div>
-      </div>
+      <div class="graph-empty" id="graphEmpty">Open a workspace to view its knowledge graph</div>
     </div>
   </div>
 
@@ -1336,11 +1333,10 @@
   };
 
   /* ============================================================
-     MODULE 8: Graph Viewer (Sigma.js + graphology)
+     MODULE 8: Graph Viewer (pyvis iframe — no CDN dependency)
   ============================================================ */
   const GraphViewer = {
-    sigmaInstance: null,
-    graph: null,
+    _currentUrl: null,
 
     toggle() {
       AppState.graphOpen = !AppState.graphOpen;
@@ -1350,13 +1346,8 @@
         panel.classList.remove('closed');
         panel.classList.add('open');
         btn.classList.add('active');
-        // If we have data from last query, load it
-        if (AppState.lastQueryResponse && AppState.lastQueryResponse.graph) {
-          const g = AppState.lastQueryResponse.graph;
-          this.loadData(g.nodes || [], g.edges || []);
-        } else if (AppState.currentDocId && !this.graph) {
-          // 自动加载图谱概览
-          this._loadOverview();
+        if (AppState.currentDocId && !this._currentUrl) {
+          this._load(AppState.currentDocId);
         }
       } else {
         panel.classList.remove('open');
@@ -1365,186 +1356,48 @@
       }
     },
 
-    async _loadOverview() {
-      if (!AppState.currentDocId) return;
-      try {
-        const data = await API.getGraphOverview(AppState.currentDocId, 30);
-        if (data.nodes && data.nodes.length > 0) {
-          this.loadData(data.nodes, data.edges || []);
-        }
-      } catch (e) {
-        console.warn('Graph overview load failed:', e);
-      }
+    _load(docId, q) {
+      const keyParam = AppState.apiKey ? `&key=${encodeURIComponent(AppState.apiKey)}` : '';
+      const qParam = q ? `&q=${encodeURIComponent(q)}` : '';
+      const url = `/graph/${docId}/html?max_nodes=60${keyParam}${qParam}`;
+      this._currentUrl = url;
+
+      const frame = document.getElementById('graphIframe');
+      const loading = document.getElementById('graphLoading');
+      const empty = document.getElementById('graphEmpty');
+
+      frame.style.display = 'none';
+      empty.style.display = 'none';
+      loading.classList.add('active');
+
+      frame.onload = () => {
+        loading.classList.remove('active');
+        frame.style.display = 'block';
+      };
+      frame.onerror = () => {
+        loading.classList.remove('active');
+        empty.style.display = 'flex';
+        empty.textContent = 'Failed to load graph';
+      };
+      frame.src = url;
     },
 
-    loadData(nodes, edges) {
-      if (typeof graphology === 'undefined' || typeof Sigma === 'undefined') {
-        console.warn('Sigma.js or graphology not loaded');
-        return;
-      }
-      this.destroy();
-
-      document.getElementById('graphEmpty').style.display = nodes.length === 0 ? 'flex' : 'none';
-      if (nodes.length === 0) return;
-
-      const Graph = graphology;
-      this.graph = new Graph();
-
-      // Add nodes with circular layout
-      const n = nodes.length;
-      nodes.forEach((node, i) => {
-        const angle = (2 * Math.PI * i) / n;
-        const r = Math.min(n * 8, 200);
-        const color = AppConfig.entityColors[node.type] || AppConfig.entityColors['default'];
-        this.graph.addNode(node.id, {
-          x: r * Math.cos(angle),
-          y: r * Math.sin(angle),
-          size: Math.max(6, Math.min(20, 8 + (node.degree || 0))),
-          color: color,
-          label: node.label || node.id,
-          _type: node.type || '',
-          _description: node.description || '',
-        });
-      });
-
-      // Add edges
-      edges.forEach((edge, i) => {
-        if (this.graph.hasNode(edge.source) && this.graph.hasNode(edge.target)) {
-          try {
-            this.graph.addEdge(edge.source, edge.target, {
-              size: 1.5,
-              color: 'rgba(150,150,150,0.4)',
-              label: edge.label || '',
-            });
-          } catch (e) { /* duplicate edge, skip */ }
-        }
-      });
-
-      // Apply simple force layout
-      this._forceLayout(80);
-
-      // Render with sigma
-      const container = document.getElementById('graphContainer');
-      try {
-        this.sigmaInstance = new Sigma(this.graph, container, {
-          renderEdgeLabels: false,
-          defaultNodeColor: '#95a5a6',
-          defaultEdgeColor: 'rgba(150,150,150,0.3)',
-          labelColor: { color: getComputedStyle(document.documentElement).getPropertyValue('--text-primary').trim() || '#e8e4df' },
-          labelFont: 'IBM Plex Sans',
-          labelSize: 12,
-          minCameraRatio: 0.1,
-          maxCameraRatio: 10,
-        });
-
-        // Node click handler
-        this.sigmaInstance.on('clickNode', ({ node }) => {
-          const attrs = this.graph.getNodeAttributes(node);
-          this._showDetails(node, attrs);
-        });
-
-        // Node hover
-        this.sigmaInstance.on('enterNode', ({ node }) => {
-          document.getElementById('graphContainer').style.cursor = 'pointer';
-        });
-        this.sigmaInstance.on('leaveNode', () => {
-          document.getElementById('graphContainer').style.cursor = 'default';
-        });
-      } catch (e) {
-        console.error('Sigma render error:', e);
-      }
-    },
-
-    _forceLayout(iterations) {
-      if (!this.graph || this.graph.order === 0) return;
-      const nodes = this.graph.nodes();
-      const n = nodes.length;
-      const k = Math.sqrt(10000 / n);
-
-      for (let iter = 0; iter < iterations; iter++) {
-        const disp = {};
-        nodes.forEach(v => { disp[v] = { x: 0, y: 0 }; });
-
-        // Repulsion
-        for (let i = 0; i < n; i++) {
-          for (let j = i + 1; j < n; j++) {
-            const u = nodes[i], v = nodes[j];
-            const ux = this.graph.getNodeAttribute(u, 'x');
-            const uy = this.graph.getNodeAttribute(u, 'y');
-            const vx = this.graph.getNodeAttribute(v, 'x');
-            const vy = this.graph.getNodeAttribute(v, 'y');
-            let dx = ux - vx, dy = uy - vy;
-            const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 0.01);
-            const force = k * k / dist;
-            const fx = (dx / dist) * force;
-            const fy = (dy / dist) * force;
-            disp[u].x += fx; disp[u].y += fy;
-            disp[v].x -= fx; disp[v].y -= fy;
-          }
-        }
-
-        // Attraction
-        this.graph.forEachEdge((edge, attrs, source, target) => {
-          const sx = this.graph.getNodeAttribute(source, 'x');
-          const sy = this.graph.getNodeAttribute(source, 'y');
-          const tx = this.graph.getNodeAttribute(target, 'x');
-          const ty = this.graph.getNodeAttribute(target, 'y');
-          let dx = tx - sx, dy = ty - sy;
-          const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 0.01);
-          const force = dist * dist / k;
-          const fx = (dx / dist) * force;
-          const fy = (dy / dist) * force;
-          disp[source].x += fx; disp[source].y += fy;
-          disp[target].x -= fx; disp[target].y -= fy;
-        });
-
-        // Apply
-        const temp = 10 * (1 - iter / iterations);
-        nodes.forEach(v => {
-          const d = disp[v];
-          const len = Math.max(Math.sqrt(d.x * d.x + d.y * d.y), 0.01);
-          const capped = Math.min(len, temp);
-          this.graph.setNodeAttribute(v, 'x', this.graph.getNodeAttribute(v, 'x') + (d.x / len) * capped);
-          this.graph.setNodeAttribute(v, 'y', this.graph.getNodeAttribute(v, 'y') + (d.y / len) * capped);
-        });
-      }
-    },
-
-    _showDetails(nodeId, attrs) {
-      const panel = document.getElementById('graphDetailsPanel');
-      document.getElementById('graphDetailTitle').textContent = nodeId;
-      document.getElementById('graphDetailType').textContent = attrs._type || 'Unknown type';
-      document.getElementById('graphDetailDesc').textContent = attrs._description || 'No description available.';
-      panel.classList.add('open');
-    },
-
-    async searchEntities() {
+    searchEntities() {
       const q = document.getElementById('graphSearchInput').value.trim();
-      if (!q || !AppState.currentDocId) return;
-      try {
-        // First search for matching labels, then get subgraph with best match
-        const searchResult = await API.searchEntities(AppState.currentDocId, q);
-        const labels = searchResult.results || [];
-        const label = labels.length > 0 ? labels[0] : q;
-        const data = await API.getSubgraph(AppState.currentDocId, label);
-        if (data.nodes && data.nodes.length > 0) {
-          this.loadData(data.nodes, data.edges || []);
-        } else {
-          UI.showToast('No entities found for: ' + q, 'info');
-        }
-      } catch (e) {
-        UI.showToast('Search failed: ' + e.message, 'error');
-      }
+      if (!AppState.currentDocId) return;
+      this._load(AppState.currentDocId, q || undefined);
     },
 
-    destroy() {
-      if (this.sigmaInstance) {
-        this.sigmaInstance.kill();
-        this.sigmaInstance = null;
-      }
-      this.graph = null;
-      document.getElementById('graphDetailsPanel').classList.remove('open');
+    reset() {
+      this._currentUrl = null;
+      const frame = document.getElementById('graphIframe');
+      frame.src = ''; frame.style.display = 'none';
+      document.getElementById('graphLoading').classList.remove('active');
+      document.getElementById('graphEmpty').style.display = 'flex';
+      document.getElementById('graphEmpty').textContent = 'Open a workspace to view its knowledge graph';
     },
+
+    destroy() { this.reset(); },
   };
 
   /* ============================================================
@@ -1596,6 +1449,7 @@
         return;
       }
       AppState.currentDocId = docId;
+      GraphViewer.reset();  // clear previous workspace's graph
 
       // Fetch uploads and parsed files
       const [uploads, files] = await Promise.all([

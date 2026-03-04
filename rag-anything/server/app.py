@@ -563,6 +563,137 @@ async def get_graph_overview(
     return {"nodes": nodes, "edges": edges}
 
 
+_ENTITY_COLORS = {
+    "PERSON": "#ff6b6b",
+    "ORGANIZATION": "#4ecdc4",
+    "LOCATION": "#45b7d1",
+    "CONCEPT": "#f7b731",
+    "TECHNOLOGY": "#a55eea",
+    "EVENT": "#26de81",
+    "DOCUMENT": "#fd9644",
+}
+_DEFAULT_NODE_COLOR = "#95a5a6"
+
+
+@app.get("/graph/{doc_id}/html")
+def get_graph_html(
+    doc_id: str,
+    q: Optional[str] = None,
+    max_nodes: int = 60,
+    _auth: None = Depends(verify_api_key_or_query),
+    service: LocalRagService = Depends(get_service),
+):
+    """
+    Generate a self-contained pyvis HTML visualisation of the knowledge graph.
+    Uses cdn_resources='in_line' so no external CDN is needed at render time.
+    Accepts optional ?q= to filter to matching nodes + their 1-hop neighbours.
+    Accepts ?key= for iframe-based authentication (via verify_api_key_or_query).
+    """
+    import os
+    import tempfile
+
+    _validate_doc_id(doc_id)
+    G = _read_graphml_safe(_graphml_path(service, doc_id))
+
+    _NO_GRAPH_HTML = (
+        "<html><body style='margin:0;display:flex;align-items:center;"
+        "justify-content:center;height:100vh;"
+        "background:#131315;color:#6b6560;font-family:sans-serif;font-size:13px'>"
+        "<div style='text-align:center'>"
+        "<div style='font-size:32px;margin-bottom:12px'>🕸️</div>"
+        "<div>No graph data found for this workspace.</div>"
+        "<div style='font-size:11px;margin-top:6px;opacity:.6'>"
+        "Upload and ingest a document first.</div></div></body></html>"
+    )
+
+    if G is None or G.number_of_nodes() == 0:
+        from fastapi.responses import HTMLResponse as _HR
+        return _HR(content=_NO_GRAPH_HTML)
+
+    # Select nodes
+    if q and q.strip():
+        q_lower = q.strip().lower()
+        seeds = [n for n in G.nodes() if q_lower in n.lower()][:10]
+        neighborhood = set(seeds)
+        for seed in seeds:
+            neighborhood.update(G.neighbors(seed))
+        display_nodes = list(neighborhood)[:max_nodes]
+    else:
+        display_nodes = sorted(G.nodes(), key=lambda n: G.degree(n), reverse=True)[:max_nodes]
+
+    sub = G.subgraph(display_nodes)
+
+    try:
+        from pyvis.network import Network
+    except ImportError:
+        from fastapi.responses import HTMLResponse as _HR
+        return _HR(content="<html><body style='color:red;padding:20px'>pyvis not installed. Run: pip install pyvis</body></html>")
+
+    net = Network(
+        height="100%",
+        width="100%",
+        bgcolor="#131315",
+        font_color="#c8c4be",
+        directed=sub.is_directed(),
+    )
+    try:
+        net_kwargs = {"cdn_resources": "in_line"}
+        net2 = Network(height="100%", width="100%", bgcolor="#131315", font_color="#c8c4be",
+                       directed=sub.is_directed(), **net_kwargs)
+        net = net2
+    except TypeError:
+        pass  # older pyvis without cdn_resources param
+
+    net.from_nx(sub)
+
+    for node in net.nodes:
+        nid = node["id"]
+        attrs = sub.nodes.get(nid, {})
+        etype = attrs.get("entity_type", "")
+        node["color"] = _ENTITY_COLORS.get(etype.upper(), _DEFAULT_NODE_COLOR)
+        node["title"] = f"<b>{nid}</b><br>{etype}<br><br>{attrs.get('description', '')}"
+        node["size"] = max(10, min(30, 10 + G.degree(nid) * 2))
+        node["label"] = nid
+
+    for edge in net.edges:
+        desc = edge.get("description") or edge.get("label") or ""
+        edge["title"] = desc
+        edge["color"] = "rgba(200,196,190,0.25)"
+
+    # Physics settings for better layout
+    net.set_options("""{
+      "physics": {
+        "enabled": true,
+        "solver": "forceAtlas2Based",
+        "forceAtlas2Based": {"gravitationalConstant": -60, "centralGravity": 0.01,
+                             "springLength": 120, "springConstant": 0.08},
+        "stabilization": {"iterations": 150}
+      },
+      "edges": {"smooth": {"type": "continuous"}, "width": 1.5},
+      "interaction": {"hover": true, "tooltipDelay": 100}
+    }""")
+
+    # Generate HTML
+    try:
+        html_content = net.generate_html()
+    except AttributeError:
+        # Fallback for older pyvis
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w", encoding="utf-8") as f:
+            tmp_path = f.name
+        try:
+            net.show(tmp_path, notebook=False)
+            with open(tmp_path, encoding="utf-8") as f:
+                html_content = f.read()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    from fastapi.responses import HTMLResponse as _HR
+    return _HR(content=html_content)
+
+
 # =========================================================================
 # 工作空间管理
 # =========================================================================
