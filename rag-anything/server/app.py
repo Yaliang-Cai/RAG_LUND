@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import shutil
 import tempfile
@@ -16,6 +17,8 @@ from raganything.constants import (
     DEFAULT_CHUNK_TOP_K,
     DEFAULT_SUPPORTED_FILE_EXTENSIONS,
 )
+
+logger = logging.getLogger(__name__)
 
 # --- 配置与初始化 ---
 APP_ROOT = Path(__file__).resolve().parent
@@ -183,13 +186,10 @@ async def ingest(
     upload_path = upload_dir / original_filename
     upload_path.write_bytes(content)
 
-    # 写入临时文件供 parser 使用
-    tmp_fd, tmp_name = tempfile.mkstemp(suffix=file_ext)
-    tmp_path = Path(tmp_name)
-    try:
-        os.write(tmp_fd, content)
-    finally:
-        os.close(tmp_fd)
+    # 写入临时文件供 parser 使用（保留原始文件名以便 MinerU 正确命名输出）
+    tmp_dir = Path(tempfile.mkdtemp())
+    tmp_path = tmp_dir / original_filename
+    tmp_path.write_bytes(content)
 
     workspace_output = str(Path(service.settings.output_dir) / final_doc_id)
     try:
@@ -197,7 +197,7 @@ async def ingest(
             str(tmp_path), doc_id=final_doc_id, output_dir=workspace_output
         )
     finally:
-        tmp_path.unlink(missing_ok=True)
+        shutil.rmtree(str(tmp_dir), ignore_errors=True)
 
     return {"doc_id": final_id, "filename": original_filename}
 
@@ -367,6 +367,25 @@ async def _get_query_subgraph(rag, retrieval, payload):
 # 知识图谱 API
 # =========================================================================
 
+def _graphml_path(service: LocalRagService, doc_id: str) -> Path:
+    return (
+        Path(service.settings.working_dir_root).resolve()
+        / doc_id
+        / "graph_chunk_entity_relation.graphml"
+    )
+
+
+def _read_graphml_safe(path: Path):
+    """Read a GraphML file with NetworkX; returns None on failure."""
+    if not path.exists():
+        return None
+    try:
+        import networkx as nx
+        return nx.read_graphml(str(path))
+    except Exception:
+        return None
+
+
 @app.get("/graph/{doc_id}/labels")
 async def get_graph_labels(
     doc_id: str,
@@ -374,13 +393,21 @@ async def get_graph_labels(
     service: LocalRagService = Depends(get_service),
 ):
     _validate_doc_id(doc_id)
-    rag = await service.get_rag(doc_id)
-    await rag._ensure_lightrag_initialized()
+    # 优先尝试 LightRAG API
     try:
+        rag = await service.get_rag(doc_id)
+        await rag._ensure_lightrag_initialized()
         labels = await rag.lightrag.get_graph_labels()
-        return {"labels": labels if isinstance(labels, list) else []}
+        if isinstance(labels, list) and labels:
+            return {"labels": labels}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get labels: {e}")
+        logger.warning("get_graph_labels LightRAG fallback: %s", e)
+
+    # 兜底：NetworkX 直接读 GraphML
+    G = _read_graphml_safe(_graphml_path(service, doc_id))
+    if G is not None and G.number_of_nodes() > 0:
+        return {"labels": sorted(G.nodes())[:500]}
+    return {"labels": []}
 
 
 @app.get("/graph/{doc_id}/subgraph")
@@ -429,23 +456,15 @@ async def get_graph_stats(
     service: LocalRagService = Depends(get_service),
 ):
     _validate_doc_id(doc_id)
-    graphml_path = (
-        Path(service.settings.working_dir_root).resolve()
-        / doc_id
-        / "graph_chunk_entity_relation.graphml"
-    )
-    if not graphml_path.exists():
-        return {"entity_count": 0, "relation_count": 0, "graphml_size": 0}
-    try:
-        import networkx as nx
-        G = nx.read_graphml(str(graphml_path))
+    gpath = _graphml_path(service, doc_id)
+    G = _read_graphml_safe(gpath)
+    if G is not None:
         return {
             "entity_count": G.number_of_nodes(),
             "relation_count": G.number_of_edges(),
-            "graphml_size": graphml_path.stat().st_size,
+            "graphml_size": gpath.stat().st_size,
         }
-    except Exception:
-        return {"entity_count": 0, "relation_count": 0, "graphml_size": graphml_path.stat().st_size}
+    return {"entity_count": 0, "relation_count": 0, "graphml_size": gpath.stat().st_size if gpath.exists() else 0}
 
 
 @app.get("/graph/{doc_id}/search")
@@ -459,15 +478,66 @@ async def search_graph_entities(
     _validate_doc_id(doc_id)
     if not q.strip():
         return {"results": []}
-    rag = await service.get_rag(doc_id)
-    await rag._ensure_lightrag_initialized()
+    safe_limit = min(limit, 100)
+    q_stripped = q.strip()
+
+    # 优先尝试 LightRAG API
     try:
+        rag = await service.get_rag(doc_id)
+        await rag._ensure_lightrag_initialized()
         results = await rag.lightrag.chunk_entity_relation_graph.search_labels(
-            q.strip(), limit=min(limit, 100)
+            q_stripped, limit=safe_limit
         )
-        return {"results": results if isinstance(results, list) else []}
+        if isinstance(results, list) and results:
+            return {"results": results}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+        logger.warning("search_graph_entities LightRAG fallback: %s", e)
+
+    # 兜底：NetworkX 子串匹配
+    G = _read_graphml_safe(_graphml_path(service, doc_id))
+    if G is not None:
+        q_lower = q_stripped.lower()
+        matched = [n for n in G.nodes() if q_lower in n.lower()][:safe_limit]
+        return {"results": matched}
+    return {"results": []}
+
+
+@app.get("/graph/{doc_id}/overview")
+async def get_graph_overview(
+    doc_id: str,
+    max_nodes: int = 30,
+    _auth: None = Depends(verify_api_key),
+    service: LocalRagService = Depends(get_service),
+):
+    """返回知识图谱概览子图（最高度数节点及其邻域），不依赖 LightRAG async API。"""
+    _validate_doc_id(doc_id)
+    G = _read_graphml_safe(_graphml_path(service, doc_id))
+    if G is None or G.number_of_nodes() == 0:
+        return {"nodes": [], "edges": []}
+
+    # 选取度数最高的 max_nodes 个节点
+    top_nodes = sorted(G.nodes(), key=lambda n: G.degree(n), reverse=True)[:max_nodes]
+    sub = G.subgraph(top_nodes)
+
+    nodes = [
+        {
+            "id": n,
+            "label": n,
+            "type": G.nodes[n].get("entity_type", ""),
+            "description": G.nodes[n].get("description", ""),
+        }
+        for n in sub.nodes()
+    ]
+    edges = [
+        {
+            "source": u,
+            "target": v,
+            "label": d.get("description", ""),
+            "weight": float(d.get("weight", 1.0)),
+        }
+        for u, v, d in sub.edges(data=True)
+    ]
+    return {"nodes": nodes, "edges": edges}
 
 
 # =========================================================================
@@ -583,4 +653,11 @@ async def list_workspaces(
             "uploaded_files": uploaded_files,
         })
 
-    return {"workspaces": workspaces}
+    return {
+        "workspaces": workspaces,
+        "roots": {
+            "uploads": str(UPLOADS_DIR),
+            "output": str(output_root),
+            "workspace": str(working_root),
+        },
+    }

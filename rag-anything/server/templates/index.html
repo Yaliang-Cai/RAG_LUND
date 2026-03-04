@@ -492,14 +492,22 @@
     .upload-dialog {
       background: var(--bg-bot-msg); border: 1px solid var(--border-strong);
       border-radius: var(--radius-lg); padding: 32px; text-align: center;
-      min-width: 300px;
+      min-width: 360px;
     }
     .upload-spinner {
       width: 40px; height: 40px; border: 3px solid var(--border);
       border-top-color: var(--accent); border-radius: 50%;
       animation: spin 0.8s linear infinite; margin: 0 auto 16px;
     }
-    .upload-text { font-size: 14px; color: var(--text-secondary); }
+    .upload-text { font-size: 14px; color: var(--text-secondary); margin-bottom: 20px; }
+    .upload-stages { text-align: left; font-size: 12px; line-height: 2; }
+    .upload-stage { color: var(--text-tertiary); transition: color 0.3s; }
+    .upload-stage.active { color: var(--accent); font-weight: 500; }
+    .upload-stage.done { color: var(--success); }
+    .upload-stage::before { content: '○ '; }
+    .upload-stage.active::before { content: '◉ '; }
+    .upload-stage.done::before { content: '✓ '; }
+    .upload-elapsed { margin-top: 12px; font-size: 11px; color: var(--text-tertiary); }
 
     /* ── Animations ── */
     @keyframes fadeInUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
@@ -786,6 +794,10 @@
       if (!r.ok) throw new Error(`Delete failed (${r.status})`);
       return r.json();
     },
+    async getGraphOverview(docId, maxNodes = 30) {
+      const r = await fetch(`/graph/${docId}/overview?max_nodes=${maxNodes}`, { headers: this._headers() });
+      return r.ok ? r.json() : { nodes: [], edges: [] };
+    },
     uploadUrl(docId, filename) {
       return `/uploads/${docId}/${encodeURIComponent(filename)}`;
     },
@@ -914,7 +926,28 @@
   const Renderer = {
     render(text) {
       if (!text) return '';
+      // --- 保护 LaTeX 公式不被 marked 破坏 ---
+      const mathSlots = [];
+      const _slot = (m) => { mathSlots.push(m); return `\x00MATH${mathSlots.length - 1}\x00`; };
+      // display math $$...$$
+      text = text.replace(/\$\$([\s\S]*?)\$\$/g, _slot);
+      // \[...\]
+      text = text.replace(/\\\[([\s\S]*?)\\\]/g, _slot);
+      // inline math $...$  (not empty, not preceded/followed by digit for currency)
+      text = text.replace(/(?<!\$)\$(?!\$)([^\$\n]+?)\$/g, _slot);
+      // \(...\)
+      text = text.replace(/\\\(([\s\S]*?)\\\)/g, _slot);
+
       let html = (typeof marked !== 'undefined') ? marked.parse(text) : this._escapeHtml(text);
+
+      // --- 还原 LaTeX 公式 ---
+      mathSlots.forEach((raw, i) => {
+        // marked 可能对占位符做了 HTML encode，兼容两种形式
+        const placeholder = `\x00MATH${i}\x00`;
+        const encodedPlaceholder = `\x00MATH${i}\x00`;
+        html = html.split(placeholder).join(raw);
+      });
+
       html = this._processCitations(html);
       return html;
     },
@@ -1264,11 +1297,26 @@
         if (AppState.lastQueryResponse && AppState.lastQueryResponse.graph) {
           const g = AppState.lastQueryResponse.graph;
           this.loadData(g.nodes || [], g.edges || []);
+        } else if (AppState.currentDocId && !this.graph) {
+          // 自动加载图谱概览
+          this._loadOverview();
         }
       } else {
         panel.classList.remove('open');
         panel.classList.add('closed');
         btn.classList.remove('active');
+      }
+    },
+
+    async _loadOverview() {
+      if (!AppState.currentDocId) return;
+      try {
+        const data = await API.getGraphOverview(AppState.currentDocId, 30);
+        if (data.nodes && data.nodes.length > 0) {
+          this.loadData(data.nodes, data.edges || []);
+        }
+      } catch (e) {
+        console.warn('Graph overview load failed:', e);
       }
     },
 
@@ -1463,6 +1511,13 @@
         const sel = document.getElementById('workspaceSelect');
         if (AppState.workspaces.length === 0) {
           this._setPlaceholder('No workspaces found');
+          if (data.roots) {
+            console.info('Workspace scan paths:', data.roots);
+            UI.showToast(
+              `No workspaces found. Scanned:\n• ${data.roots.workspace}\n• ${data.roots.output}\n• ${data.roots.uploads}`,
+              'info', 8000
+            );
+          }
           return;
         }
         sel.innerHTML = '<option value="">Select workspace</option>';
@@ -1582,23 +1637,62 @@
         if (!file) return;
         if (!AppState.apiKey) { UI.showToast('Enter API key first', 'error'); return; }
 
-        // Show upload overlay
+        const stages = [
+          'Uploading file...',
+          'Parsing document layout (OCR, tables, formulas)...',
+          'Generating multimodal descriptions (VLM)...',
+          'Extracting entities & building knowledge graph...',
+          'Finalizing workspace...',
+        ];
+        let currentStage = 0;
+        const startTime = Date.now();
+
+        // Build progress overlay
         const overlay = document.createElement('div');
         overlay.className = 'upload-overlay';
         overlay.id = 'uploadOverlay';
-        overlay.innerHTML = `<div class="upload-dialog"><div class="upload-spinner"></div><div class="upload-text">Processing ${file.name}...</div></div>`;
+        overlay.innerHTML = `<div class="upload-dialog">
+          <div class="upload-spinner"></div>
+          <div class="upload-text">Processing <strong>${file.name}</strong></div>
+          <div class="upload-stages" id="uploadStages">
+            ${stages.map((s, i) => `<div class="upload-stage${i === 0 ? ' active' : ''}" id="uStage${i}">${s}</div>`).join('')}
+          </div>
+          <div class="upload-elapsed" id="uploadElapsed">Elapsed: 0s</div>
+        </div>`;
         document.body.appendChild(overlay);
+
+        // Auto-advance stages on timer + elapsed counter
+        const advanceInterval = setInterval(() => {
+          if (currentStage < stages.length - 1) {
+            const prev = document.getElementById(`uStage${currentStage}`);
+            if (prev) { prev.classList.remove('active'); prev.classList.add('done'); }
+            currentStage++;
+            const next = document.getElementById(`uStage${currentStage}`);
+            if (next) next.classList.add('active');
+          }
+        }, 12000);
+        const elapsedInterval = setInterval(() => {
+          const el = document.getElementById('uploadElapsed');
+          if (el) el.textContent = `Elapsed: ${Math.round((Date.now() - startTime) / 1000)}s`;
+        }, 1000);
 
         try {
           const docId = AppState.currentDocId || undefined;
           const result = await API.ingest(file, docId);
+          clearInterval(advanceInterval);
+          clearInterval(elapsedInterval);
+          // Mark all done
+          stages.forEach((_, i) => {
+            const el = document.getElementById(`uStage${i}`);
+            if (el) { el.classList.remove('active'); el.classList.add('done'); }
+          });
           UI.showToast(`Uploaded: ${result.filename} → workspace: ${result.doc_id}`, 'success');
-          // Refresh
           await this.refreshWorkspaces();
-          // Select the workspace
           document.getElementById('workspaceSelect').value = result.doc_id;
           await this.loadWorkspace(result.doc_id);
         } catch (e) {
+          clearInterval(advanceInterval);
+          clearInterval(elapsedInterval);
           UI.showToast('Upload failed: ' + e.message, 'error');
         } finally {
           document.getElementById('uploadOverlay')?.remove();
@@ -1717,12 +1811,13 @@
       document.getElementById('modalContent').innerHTML = '';
     },
 
-    showToast(msg, type = 'info') {
+    showToast(msg, type = 'info', duration = 4000) {
       const toast = document.createElement('div');
       toast.className = `toast ${type}`;
+      toast.style.whiteSpace = 'pre-line';
       toast.textContent = msg;
       document.getElementById('toastContainer').appendChild(toast);
-      setTimeout(() => toast.remove(), 4000);
+      setTimeout(() => toast.remove(), duration);
     },
   };
 
