@@ -202,6 +202,20 @@
   - 后置 filter 扩展到广义 locator 裸标签，且保留“带语义标题”的高价值实体；
   - 示例：`Table 7: Ablation Results (table)` 会保留；`Table 7` / `Figure 2` / `Section 3` / `Ref [12]` 会过滤。
 
+## 增量更新（2026-03-04，review 收口修复：chunking 边界 + graph 安全）
+
+- `chunking.py` 边界修复：
+  - `chunking_sentence`：补齐“首句超长”分支，超长句会递归拆分，不再产出超预算 chunk。
+  - `chunking_semantic`：合并 section 时计入 `\"\\n\\n\"` 分隔符 token，避免轻微超预算。
+
+- `server/app.py` 收口修复：
+  - `/graph/{doc_id}/search`：`limit` 增加下界钳位，`safe_limit = max(1, min(limit, DEFAULT_GRAPH_SEARCH_MAX_SAFE))`，避免负值/零值带来的异常行为。
+  - `/graph/{doc_id}/html`：节点/边 tooltip 增加 `html.escape`，避免 description 注入导致的渲染风险。
+
+- 复核结果（按固定执行流程）：
+  - 语法：`py_compile` 通过（触达文件）。
+  - 逻辑/边界：内联断言通过（超长句、semantic 分隔符、graph search 负值输入）。
+
 ---
 
 ## 架构备忘：Query 完整链路（2026-02-26）

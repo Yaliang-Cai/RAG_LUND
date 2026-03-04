@@ -151,6 +151,24 @@ def chunking_sentence(
 
     for sent in sentences:
         sent_toks = len(tokenizer.encode(sent))
+        if sent_toks > chunk_token_size:
+            # Flush current buffer first, then split oversized sentence.
+            if buf:
+                chunks.append(_flush(buf))
+                buf = []
+                buf_tokens = 0
+
+            for sub in chunking_recursive(
+                tokenizer,
+                sent,
+                chunk_overlap_token_size=chunk_overlap_token_size,
+                chunk_token_size=chunk_token_size,
+            ):
+                sub["chunk_order_index"] = chunk_idx
+                chunks.append(sub)
+                chunk_idx += 1
+            continue
+
         if buf_tokens + sent_toks > chunk_token_size and buf:
             chunks.append(_flush(buf))
             # Build overlap from the tail of the flushed buffer
@@ -284,6 +302,7 @@ def chunking_semantic(
     idx = 0
     buf = ""
     buf_tokens = 0
+    sep_tokens = len(tokenizer.encode("\n\n"))
 
     def _flush() -> None:
         nonlocal buf, buf_tokens, idx
@@ -310,11 +329,14 @@ def chunking_semantic(
                 sub["chunk_order_index"] = idx
                 chunks.append(sub)
                 idx += 1
-        elif buf_tokens + sec_tokens <= chunk_token_size:
-            # Merge small section into current buffer
-            buf = (buf + "\n\n" + section).strip() if buf else section
-            buf_tokens += sec_tokens
         else:
+            add_tokens = sec_tokens if not buf else sep_tokens + sec_tokens
+            if buf_tokens + add_tokens <= chunk_token_size:
+                # Merge small section into current buffer.
+                buf = (buf + "\n\n" + section).strip() if buf else section
+                buf_tokens += add_tokens
+                continue
+
             # Buffer is full — flush, then start fresh with this section
             _flush()
             buf = section

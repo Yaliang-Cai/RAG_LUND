@@ -1,4 +1,5 @@
 import hashlib
+import html
 import logging
 import os
 import shutil
@@ -511,7 +512,7 @@ async def search_graph_entities(
     _validate_doc_id(doc_id)
     if not q.strip():
         return {"results": []}
-    safe_limit = min(limit, DEFAULT_GRAPH_SEARCH_MAX_SAFE)
+    safe_limit = max(1, min(limit, DEFAULT_GRAPH_SEARCH_MAX_SAFE))
     q_stripped = q.strip()
 
     # 优先尝试 LightRAG API
@@ -660,14 +661,17 @@ def get_graph_html(
         nid = node["id"]
         attrs = sub.nodes.get(nid, {})
         etype = attrs.get("entity_type", "")
+        safe_nid = html.escape(str(nid))
+        safe_etype = html.escape(str(etype))
+        safe_desc = html.escape(str(attrs.get("description", "")))
         node["color"] = _ENTITY_COLORS.get(etype.upper(), _DEFAULT_NODE_COLOR)
-        node["title"] = f"<b>{nid}</b><br>{etype}<br><br>{attrs.get('description', '')}"
+        node["title"] = f"<b>{safe_nid}</b><br>{safe_etype}<br><br>{safe_desc}"
         node["size"] = max(10, min(30, 10 + G.degree(nid) * 2))
-        node["label"] = nid
+        node["label"] = str(nid)
 
     for edge in net.edges:
         desc = edge.get("description") or edge.get("label") or ""
-        edge["title"] = desc
+        edge["title"] = html.escape(str(desc))
         edge["color"] = "rgba(200,196,190,0.25)"
 
     # Physics settings for better layout
