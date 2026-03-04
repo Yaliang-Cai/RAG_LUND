@@ -98,6 +98,13 @@ DEFAULT_LLM_MODEL_NAME = "Qwen/Qwen3.5-35B-A3B-FP8"
 DEFAULT_DEVICE = "cuda:0"
 
 # =============================================================================
+# Chunking strategy
+# =============================================================================
+DEFAULT_CHUNKING_STRATEGY = "token"   # "token" | "recursive" | "sentence" | "paragraph"
+DEFAULT_CHUNK_TOKEN_SIZE = 1200       # max tokens per chunk
+DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE = 100  # overlap tokens between consecutive chunks
+
+# =============================================================================
 # Local deployment - generation parameters
 # =============================================================================
 DEFAULT_EMBEDDING_DIM = 1024

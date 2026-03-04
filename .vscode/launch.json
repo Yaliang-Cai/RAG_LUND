@@ -122,8 +122,8 @@
             "console": "integratedTerminal",
             "python": "/home/h50056787/miniconda3/envs/lightRAG/bin/python",
             "args": [
-                "-p", "./data/RAG_anything.pdf", 
-                "-i", "Debug_Test_Space"
+                "-p", "./rag-anything/data/PaddleOCR-VL-1.5.pdf", 
+                "-i", "PaddleOCR"
             ],
             "env": {
                 "PATH": "/home/h50056787/miniconda3/envs/lightRAG/bin:${env:PATH}",

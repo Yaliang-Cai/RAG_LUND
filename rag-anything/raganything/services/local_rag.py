@@ -30,6 +30,7 @@ from openai import AsyncOpenAI
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from raganything import RAGAnything, RAGAnythingConfig
+from raganything.chunking import get_chunking_func
 from raganything.constants import (
     DEFAULT_LOG_MAX_BYTES,
     DEFAULT_LOG_BACKUP_COUNT,
@@ -53,6 +54,9 @@ from raganything.constants import (
     DEFAULT_VLM_ENABLE_JSON_SCHEMA,
     DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD,
     DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE,
+    DEFAULT_CHUNKING_STRATEGY,
+    DEFAULT_CHUNK_TOKEN_SIZE,
+    DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE,
 )
 from raganything.query_message_repack import repack_query_messages
 
@@ -96,6 +100,10 @@ class LocalRagSettings:
     image_token_estimate_method: str = DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD
     image_token_model_name_or_path: str = ""
     image_wrapper_tokens_per_image: int = DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE
+
+    chunking_strategy: str = DEFAULT_CHUNKING_STRATEGY
+    chunk_token_size: int = DEFAULT_CHUNK_TOKEN_SIZE
+    chunk_overlap_token_size: int = DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -149,6 +157,9 @@ class LocalRagSettings:
                     str(DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE),
                 )
             ),
+            chunking_strategy=os.getenv("CHUNKING_STRATEGY", DEFAULT_CHUNKING_STRATEGY),
+            chunk_token_size=int(os.getenv("CHUNK_SIZE", str(DEFAULT_CHUNK_TOKEN_SIZE))),
+            chunk_overlap_token_size=int(os.getenv("CHUNK_OVERLAP_SIZE", str(DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE))),
         )
 
 
@@ -756,6 +767,9 @@ class LocalRagService:
             lightrag_kwargs={
                 "rerank_model_func": self.rerank_func,
                 "tokenizer": self.lightrag_tokenizer,
+                "chunk_token_size": self.settings.chunk_token_size,
+                "chunk_overlap_token_size": self.settings.chunk_overlap_token_size,
+                "chunking_func": get_chunking_func(self.settings.chunking_strategy),
             },
         )
 
@@ -773,6 +787,7 @@ class LocalRagService:
         file_path: str,
         output_dir: Optional[str] = None,
         doc_id: Optional[str] = None,
+        chunking_strategy: Optional[str] = None,
     ) -> str:
         file_path_obj = Path(file_path)
         if not file_path_obj.exists():
@@ -782,14 +797,24 @@ class LocalRagService:
         rag = await self.get_rag(doc_id)
         output_dir = output_dir or self.settings.output_dir
 
-        if file_path_obj.is_file():
-            await rag.process_document_complete(
-                file_path=str(file_path_obj),
-                output_dir=output_dir,
-                parse_method="auto",
-            )
-        else:
-            await rag.process_folder_complete(str(file_path_obj), recursive=False)
+        # Per-upload chunking strategy override
+        old_chunking_func = None
+        if chunking_strategy and chunking_strategy != self.settings.chunking_strategy:
+            old_chunking_func = rag.lightrag.chunking_func
+            rag.lightrag.chunking_func = get_chunking_func(chunking_strategy)
+
+        try:
+            if file_path_obj.is_file():
+                await rag.process_document_complete(
+                    file_path=str(file_path_obj),
+                    output_dir=output_dir,
+                    parse_method="auto",
+                )
+            else:
+                await rag.process_folder_complete(str(file_path_obj), recursive=False)
+        finally:
+            if old_chunking_func is not None:
+                rag.lightrag.chunking_func = old_chunking_func
 
         return doc_id
 

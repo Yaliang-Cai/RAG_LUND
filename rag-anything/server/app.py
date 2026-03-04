@@ -12,11 +12,14 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
+from raganything.chunking import CHUNKING_STRATEGIES
 from raganything.constants import (
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
     DEFAULT_SUPPORTED_FILE_EXTENSIONS,
 )
+
+VALID_CHUNKING_STRATEGIES: Set[str] = set(CHUNKING_STRATEGIES.keys())
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +163,7 @@ async def get_document_content(
 async def ingest(
     file: UploadFile = File(...),
     doc_id: Optional[str] = Form(default=None),
+    chunking_strategy: Optional[str] = Form(default=None),
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
 ):
@@ -168,6 +172,12 @@ async def ingest(
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file type: '{file_ext}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
+        )
+
+    if chunking_strategy and chunking_strategy not in VALID_CHUNKING_STRATEGIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid chunking_strategy '{chunking_strategy}'. Valid: {', '.join(sorted(VALID_CHUNKING_STRATEGIES))}",
         )
 
     file_stem = Path(file.filename).stem
@@ -194,7 +204,10 @@ async def ingest(
     workspace_output = str(Path(service.settings.output_dir) / final_doc_id)
     try:
         final_id = await service.ingest(
-            str(tmp_path), doc_id=final_doc_id, output_dir=workspace_output
+            str(tmp_path),
+            doc_id=final_doc_id,
+            output_dir=workspace_output,
+            chunking_strategy=chunking_strategy or None,
         )
     finally:
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
