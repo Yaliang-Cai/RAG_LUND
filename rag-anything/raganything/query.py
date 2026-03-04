@@ -16,6 +16,7 @@ from raganything.constants import (
     DEFAULT_MULTIMODAL_TOP_K,
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
+    SUPPORTED_IMAGE_EXTENSIONS,
 )
 from raganything.query_message_repack import (
     build_answer_suffix,
@@ -589,10 +590,9 @@ class QueryMixin:
         self._current_images_base64 = []
 
         # Enhanced regex pattern for matching image paths
-        # Matches only the path ending with image file extensions
-        image_path_pattern = (
-            r"Image Path:\s*([^\r\n]*?\.(?:jpg|jpeg|png|gif|bmp|webp|tiff|tif))"
-        )
+        # Build extension alternation from SUPPORTED_IMAGE_EXTENSIONS in constants.py
+        _ext_alts = "|".join(e.lstrip(".") for e in SUPPORTED_IMAGE_EXTENSIONS)
+        image_path_pattern = rf"Image Path:\s*([^\r\n]*?\.(?:{_ext_alts}))"
 
         # First, let's see what matches we find
         matches = re.findall(image_path_pattern, prompt)

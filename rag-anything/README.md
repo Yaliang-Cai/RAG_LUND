@@ -1217,18 +1217,33 @@ uvicorn server.app:app --host 0.0.0.0 --port 9621
 
 ### Environment Variables
 
-Create a `.env` file (refer to `.env.example`):
+All defaults are defined in `raganything/constants.py`. Override them with environment variables:
 
 ```bash
-OPENAI_API_KEY=your_openai_api_key
-OPENAI_BASE_URL=your_base_url  # Optional
-OUTPUT_DIR=./output             # Default output directory for parsed documents
-PARSER=mineru                   # Parser selection: mineru or docling
-PARSE_METHOD=auto              # Parse method: auto, ocr, or txt
-```
+# LLM / VLM service (vLLM)
+VLLM_API_BASE=http://localhost:8001/v1
+VLLM_API_KEY=EMPTY
+LLM_MODEL_NAME=Qwen/Qwen2-VL-7B-Instruct
 
-**Note:** For backward compatibility, legacy environment variable names are still supported:
-- `MINERU_PARSE_METHOD` is deprecated, please use `PARSE_METHOD`
+# Local model paths
+RAGANYTHING_EMBEDDING_MODEL_PATH=./models/bge-m3
+RAGANYTHING_RERANK_MODEL_PATH=./models/bge-reranker-v2-m3
+
+# Storage directories
+RAGANYTHING_WORKDIR_ROOT=./rag_workspace
+RAGANYTHING_OUTPUT_DIR=./output
+
+# Web API key (optional)
+RAGANYTHING_API_KEY=your_key
+
+# Chunking (token | recursive | sentence | paragraph)
+CHUNKING_STRATEGY=token
+CHUNK_SIZE=1200
+CHUNK_OVERLAP_SIZE=100
+
+# Offline tiktoken cache
+TIKTOKEN_CACHE_DIR=./tiktoken_cache
+```
 
 > **Note**: API keys are only required for full RAG processing with LLM integration. The parsing test files (`office_document_test.py` and `image_format_test.py`) only test parser functionality and do not require API keys.
 

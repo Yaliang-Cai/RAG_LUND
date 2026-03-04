@@ -706,4 +706,44 @@ uvicorn server.app:app --host 0.0.0.0 --port 9621
 
 ### 校验
 - 仅做默认值与文案收敛，未引入新分支逻辑。
-- 目标是“默认即当前生产模型”，减少环境变量漏配时的错模型风险。
+- 目标是”默认即当前生产模型”，减少环境变量漏配时的错模型风险。
+
+---
+
+## 待计划补充（2026-03-04，WebUI 离线静态资源托管）
+
+### 背景
+- WebUI（`server/templates/index.html`）目前依赖 8 个外部 CDN 资源，断网环境下全部加载失败。
+- 后端（vLLM 推理、RAG、Embedding、Rerank）均为本地部署，不受网络影响。
+- 仅前端 UI 显示质量下降，核心功能（上传、入库、查询）不受影响。
+
+### 当前外部依赖清单
+
+| 资源 | CDN | 断网影响 |
+|------|-----|---------|
+| Google Fonts（DM Serif Display / IBM Plex Sans / Mono）| fonts.googleapis.com | 退回系统字体，视觉影响小 |
+| KaTeX 0.16.9（CSS + JS + auto-render）| cdn.bootcdn.net | **公式显示原始 LaTeX 文本** |
+| highlight.js 11.9.0（CSS × 2 + JS）| cdnjs.cloudflare.com | 代码无高亮，功能不影响 |
+| marked.js 4.3.0 | cdn.bootcdn.net | **Markdown 答案显示原始文本** |
+| PDF.js 3.11.174 | cdnjs.cloudflare.com | PDF 预览已改为 iframe，实际不影响 |
+
+### 待实现方案（未执行）
+
+1. **FastAPI 挂载静态目录**
+   - `app.mount(“/static”, StaticFiles(directory=”server/static”), name=”static”)`
+   - 在 `server/static/` 下存放各库文件
+
+2. **一次性下载脚本**（`server/download_static.py`）
+   - 联网时执行一次，把上述 CDN 资源下载到 `server/static/`
+   - PDF.js worker 需单独下载
+
+3. **HTML 改用本地路径**
+   - 将 `index.html` 中所有 CDN URL 替换为 `/static/...`
+   - 字体部分用系统字体 fallback 替代 Google Fonts（无需下载字体文件）
+
+### 优先级
+- 当前环境（校内服务器）有网络，暂不阻塞。
+- 若迁移至完全离线环境（如 HPC 隔离区），再执行本节。
+
+### 当前状态
+- 本节为待计划，尚未提交任何代码改动。

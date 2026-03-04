@@ -7,16 +7,16 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <!-- KaTeX -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+  <!-- KaTeX (bootcdn - reliable in CN) -->
+  <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.css">
+  <script defer src="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script defer src="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
   <!-- highlight.js -->
   <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" disabled>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-  <!-- marked.js -->
-  <script src="https://unpkg.com/marked@4.3.0/marked.min.js"></script>
+  <!-- marked.js (bootcdn - reliable in CN) -->
+  <script src="https://cdn.bootcdn.net/ajax/libs/marked/4.3.0/marked.min.js"></script>
   <!-- PDF.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <!-- graphology + sigma removed: graph rendered via pyvis iframe -->
@@ -352,6 +352,10 @@
       align-self: flex-start; background: var(--bg-bot-msg);
       border: 1px solid var(--border); border-bottom-left-radius: 4px;
     }
+    .message.bot h1 { font-size: 1.35em; font-weight: 700; margin: 14px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .message.bot h2 { font-size: 1.15em; font-weight: 700; margin: 12px 0 6px; }
+    .message.bot h3 { font-size: 1.05em; font-weight: 600; margin: 10px 0 4px; }
+    .message.bot h4, .message.bot h5, .message.bot h6 { font-size: 1em; font-weight: 600; margin: 8px 0 4px; }
     .message.bot p { margin-bottom: 8px; }
     .message.bot p:last-child { margin-bottom: 0; }
     .message.bot ul, .message.bot ol { padding-left: 20px; margin-bottom: 8px; }
@@ -980,8 +984,9 @@
     render(text) {
       if (!text) return '';
       // --- 保护 LaTeX 公式不被 marked 破坏 ---
+      // 用不含特殊字符的占位符，避免 marked 对 \x00 做转义
       const mathSlots = [];
-      const _slot = (m) => { mathSlots.push(m); return `\x00MATH${mathSlots.length - 1}\x00`; };
+      const _slot = (m) => { const idx = mathSlots.length; mathSlots.push(m); return `MATHSLOT${idx}END`; };
       // display math $$...$$
       text = text.replace(/\$\$([\s\S]*?)\$\$/g, _slot);
       // \[...\]
@@ -995,10 +1000,7 @@
 
       // --- 还原 LaTeX 公式 ---
       mathSlots.forEach((raw, i) => {
-        // marked 可能对占位符做了 HTML encode，兼容两种形式
-        const placeholder = `\x00MATH${i}\x00`;
-        const encodedPlaceholder = `\x00MATH${i}\x00`;
-        html = html.split(placeholder).join(raw);
+        html = html.split(`MATHSLOT${i}END`).join(raw);
       });
 
       html = this._processCitations(html);
@@ -1561,6 +1563,7 @@
       recursive: 'Tries §→¶→sentence→word boundaries before falling back to tokens. Better semantic coherence.',
       sentence:  'Accumulates complete sentences up to the token budget. Ideal for Q&A and conversational text.',
       paragraph: 'Splits on blank lines; oversized paragraphs fall back to token sliding window.',
+      semantic:  'Structure-aware: detects section headers (Markdown #, underlined, ALL-CAPS), merges small sections, splits large ones recursively. Best for academic papers and structured documents.',
     },
 
     upload() {
@@ -1580,6 +1583,7 @@
               <option value="recursive">Recursive — NLP boundary hierarchy</option>
               <option value="sentence">Sentence — group complete sentences</option>
               <option value="paragraph">Paragraph — split on blank lines</option>
+              <option value="semantic">Semantic — structure-aware section splitting</option>
             </select>
           </div>
           <div class="upload-settings-hint" id="chunkStrategyHint">${this._chunkStrategyHints.token}</div>

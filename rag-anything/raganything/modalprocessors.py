@@ -29,6 +29,14 @@ from lightrag.operate import extract_entities, merge_nodes_and_edges
 
 # Import prompt templates
 from raganything.prompt import PROMPTS
+from raganything.constants import (
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_CONTEXT_MODE,
+    DEFAULT_MAX_CONTEXT_TOKENS,
+    DEFAULT_INCLUDE_HEADERS,
+    DEFAULT_INCLUDE_CAPTIONS,
+    DEFAULT_CONTEXT_FILTER_CONTENT_TYPES,
+)
 
 _BACKSPACE_CHAR = "\x08"
 _FORMFEED_CHAR = "\x0c"
@@ -38,16 +46,18 @@ _FORMFEED_CHAR = "\x0c"
 class ContextConfig:
     """Configuration for context extraction"""
 
-    context_window: int = 1  # Window size for context extraction
-    context_mode: str = "page"  # "page", "chunk", "token"
-    max_context_tokens: int = 2000  # Maximum context tokens
-    include_headers: bool = True  # Whether to include headers/titles
-    include_captions: bool = True  # Whether to include image/table captions
-    filter_content_types: List[str] = None  # Content types to include
+    context_window: int = DEFAULT_CONTEXT_WINDOW
+    context_mode: str = DEFAULT_CONTEXT_MODE
+    max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS
+    include_headers: bool = DEFAULT_INCLUDE_HEADERS
+    include_captions: bool = DEFAULT_INCLUDE_CAPTIONS
+    filter_content_types: List[str] = None  # defaults to DEFAULT_CONTEXT_FILTER_CONTENT_TYPES
 
     def __post_init__(self):
         if self.filter_content_types is None:
-            self.filter_content_types = ["text"]
+            self.filter_content_types = [
+                t.strip() for t in DEFAULT_CONTEXT_FILTER_CONTENT_TYPES.split(",")
+            ]
 
 
 class ContextExtractor:

@@ -17,6 +17,16 @@ from raganything.constants import (
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
     DEFAULT_SUPPORTED_FILE_EXTENSIONS,
+    DEFAULT_QUERY_MODE,
+    DEFAULT_ENABLE_RERANK,
+    DEFAULT_VLM_ENHANCED,
+    DEFAULT_GRAPH_MAX_DEPTH,
+    DEFAULT_GRAPH_MAX_NODES,
+    DEFAULT_GRAPH_OVERVIEW_MAX_NODES,
+    DEFAULT_GRAPH_HTML_MAX_NODES,
+    DEFAULT_GRAPH_SEARCH_SEED_LIMIT,
+    DEFAULT_GRAPH_SEARCH_MAX_RESULTS,
+    DEFAULT_GRAPH_SEARCH_MAX_SAFE,
 )
 
 VALID_CHUNKING_STRATEGIES: Set[str] = set(CHUNKING_STRATEGIES.keys())
@@ -109,14 +119,14 @@ def verify_api_key_or_query(
 class QueryRequest(BaseModel):
     doc_id: str
     query: str
-    mode: str = "hybrid"
+    mode: str = DEFAULT_QUERY_MODE
     top_k: int = DEFAULT_TOP_K
     chunk_top_k: int = DEFAULT_CHUNK_TOP_K
-    enable_rerank: bool = True
-    vlm_enhanced: bool = True
+    enable_rerank: bool = DEFAULT_ENABLE_RERANK
+    vlm_enhanced: bool = DEFAULT_VLM_ENHANCED
     return_graph: bool = False
-    graph_max_depth: int = 2
-    graph_max_nodes: int = 50
+    graph_max_depth: int = DEFAULT_GRAPH_MAX_DEPTH
+    graph_max_nodes: int = DEFAULT_GRAPH_MAX_NODES
 
 # =========================================================================
 # 路由
@@ -494,14 +504,14 @@ async def get_graph_stats(
 async def search_graph_entities(
     doc_id: str,
     q: str,
-    limit: int = 20,
+    limit: int = DEFAULT_GRAPH_SEARCH_MAX_RESULTS,
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
 ):
     _validate_doc_id(doc_id)
     if not q.strip():
         return {"results": []}
-    safe_limit = min(limit, 100)
+    safe_limit = min(limit, DEFAULT_GRAPH_SEARCH_MAX_SAFE)
     q_stripped = q.strip()
 
     # 优先尝试 LightRAG API
@@ -528,7 +538,7 @@ async def search_graph_entities(
 @app.get("/graph/{doc_id}/overview")
 async def get_graph_overview(
     doc_id: str,
-    max_nodes: int = 30,
+    max_nodes: int = DEFAULT_GRAPH_OVERVIEW_MAX_NODES,
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
 ):
@@ -579,7 +589,7 @@ _DEFAULT_NODE_COLOR = "#95a5a6"
 def get_graph_html(
     doc_id: str,
     q: Optional[str] = None,
-    max_nodes: int = 60,
+    max_nodes: int = DEFAULT_GRAPH_HTML_MAX_NODES,
     _auth: None = Depends(verify_api_key_or_query),
     service: LocalRagService = Depends(get_service),
 ):
@@ -613,7 +623,7 @@ def get_graph_html(
     # Select nodes
     if q and q.strip():
         q_lower = q.strip().lower()
-        seeds = [n for n in G.nodes() if q_lower in n.lower()][:10]
+        seeds = [n for n in G.nodes() if q_lower in n.lower()][:DEFAULT_GRAPH_SEARCH_SEED_LIMIT]
         neighborhood = set(seeds)
         for seed in seeds:
             neighborhood.update(G.neighbors(seed))

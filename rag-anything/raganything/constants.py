@@ -79,6 +79,20 @@ SUPPORTED_IMAGE_EXTENSIONS = [
 # =============================================================================
 DEFAULT_TOP_K = 20        # default and max allowed value for top_k
 DEFAULT_CHUNK_TOP_K = 10  # default and max allowed value for chunk_top_k
+DEFAULT_QUERY_MODE = "hybrid"   # "naive" | "local" | "global" | "hybrid"
+DEFAULT_ENABLE_RERANK = True
+DEFAULT_VLM_ENHANCED = True
+
+# =============================================================================
+# Knowledge graph visualization defaults
+# =============================================================================
+DEFAULT_GRAPH_MAX_DEPTH = 2
+DEFAULT_GRAPH_MAX_NODES = 50
+DEFAULT_GRAPH_OVERVIEW_MAX_NODES = 30   # for overview endpoint (no query filter)
+DEFAULT_GRAPH_HTML_MAX_NODES = 60       # for pyvis HTML rendering
+DEFAULT_GRAPH_SEARCH_SEED_LIMIT = 10    # max seed nodes when filtering by query
+DEFAULT_GRAPH_SEARCH_MAX_RESULTS = 20   # default limit for entity search endpoint
+DEFAULT_GRAPH_SEARCH_MAX_SAFE = 100     # hard cap for entity search results
 
 # =============================================================================
 # Local deployment - model paths
@@ -100,7 +114,7 @@ DEFAULT_DEVICE = "cuda:0"
 # =============================================================================
 # Chunking strategy
 # =============================================================================
-DEFAULT_CHUNKING_STRATEGY = "token"   # "token" | "recursive" | "sentence" | "paragraph"
+DEFAULT_CHUNKING_STRATEGY = "token"   # "token" | "recursive" | "sentence" | "paragraph" | "semantic"
 DEFAULT_CHUNK_TOKEN_SIZE = 1200       # max tokens per chunk
 DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE = 100  # overlap tokens between consecutive chunks
 

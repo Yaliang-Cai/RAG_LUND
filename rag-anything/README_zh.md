@@ -1151,18 +1151,33 @@ uvicorn server.app:app --host 0.0.0.0 --port 9621
 
 ### 环境变量
 
-创建 `.env` 文件（参考 `.env.example`）：
+所有默认值定义在 `raganything/constants.py`，可通过环境变量覆盖：
 
 ```bash
-OPENAI_API_KEY=your_openai_api_key
-OPENAI_BASE_URL=your_base_url  # 可选
-OUTPUT_DIR=./output             # 解析文档的默认输出目录
-PARSER=mineru                   # 解析器选择：mineru 或 docling
-PARSE_METHOD=auto              # 解析方法：auto, ocr 或 txt
-```
+# LLM / VLM 服务 (vLLM)
+VLLM_API_BASE=http://localhost:8001/v1
+VLLM_API_KEY=EMPTY
+LLM_MODEL_NAME=Qwen/Qwen2-VL-7B-Instruct
 
-**注意：** 为了向后兼容，旧的环境变量名称仍然有效：
-- `MINERU_PARSE_METHOD` 已弃用，请使用 `PARSE_METHOD`
+# 本地模型路径
+RAGANYTHING_EMBEDDING_MODEL_PATH=./models/bge-m3
+RAGANYTHING_RERANK_MODEL_PATH=./models/bge-reranker-v2-m3
+
+# 存储目录
+RAGANYTHING_WORKDIR_ROOT=./rag_workspace
+RAGANYTHING_OUTPUT_DIR=./output
+
+# Web API 密钥（可选）
+RAGANYTHING_API_KEY=your_key
+
+# Chunking 策略 (token | recursive | sentence | paragraph)
+CHUNKING_STRATEGY=token
+CHUNK_SIZE=1200
+CHUNK_OVERLAP_SIZE=100
+
+# 离线 tiktoken 缓存
+TIKTOKEN_CACHE_DIR=./tiktoken_cache
+```
 
 ### 解析器配置
 

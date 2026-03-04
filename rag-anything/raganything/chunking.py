@@ -218,6 +218,113 @@ def chunking_paragraph(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 5. Semantic  (structure-aware: section headers → merge small / split large)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Ordered from strongest to weakest structural signal
+_SECTION_HEADER_PATTERNS = [
+    re.compile(r"^#{1,6}\s+.+", re.MULTILINE),            # Markdown: # Title / ## Sub
+    re.compile(r"^.+\n[=\-]{3,}\s*$", re.MULTILINE),      # Underlined: Title\n===
+    re.compile(r"^[A-Z][A-Z\d\s\-:,]{4,}$", re.MULTILINE), # ALL-CAPS section titles
+]
+
+
+def _section_boundaries(content: str) -> list[int]:
+    """Return sorted char-positions where a new section header starts."""
+    positions: set[int] = {0}
+    for pattern in _SECTION_HEADER_PATTERNS:
+        for m in pattern.finditer(content):
+            positions.add(m.start())
+    return sorted(positions)
+
+
+def chunking_semantic(
+    tokenizer: Tokenizer,
+    content: str,
+    split_by_character: str | None = None,
+    split_by_character_only: bool = False,
+    chunk_overlap_token_size: int = 100,
+    chunk_token_size: int = 1200,
+) -> list[dict[str, Any]]:
+    """
+    Structure-aware semantic chunking (Databricks-style).
+
+    Steps
+    -----
+    1. Detect section boundaries: Markdown headers (# / ##), underlined headers,
+       and ALL-CAPS title lines — same structural markers used in the Databricks
+       RecursiveCharacterTextSplitter approach.
+    2. Merge consecutive small sections that together fit within `chunk_token_size`
+       to avoid tiny isolated chunks.
+    3. Split sections that exceed `chunk_token_size` via the recursive strategy
+       (which respects paragraph → sentence → word hierarchy with overlap).
+
+    Result: chunks that honour document structure, keeping section content
+    together rather than cutting blindly at a token boundary.
+    """
+    boundaries = _section_boundaries(content)
+
+    # Build raw section blocks
+    sections: list[str] = []
+    for i, start in enumerate(boundaries):
+        end = boundaries[i + 1] if i + 1 < len(boundaries) else len(content)
+        block = content[start:end].strip()
+        if block:
+            sections.append(block)
+
+    # Fall back to paragraph splitting when no structure was detected
+    if len(sections) <= 1:
+        return chunking_paragraph(
+            tokenizer, content,
+            chunk_overlap_token_size=chunk_overlap_token_size,
+            chunk_token_size=chunk_token_size,
+        )
+
+    chunks: list[dict[str, Any]] = []
+    idx = 0
+    buf = ""
+    buf_tokens = 0
+
+    def _flush() -> None:
+        nonlocal buf, buf_tokens, idx
+        if buf.strip():
+            chunks.append({
+                "tokens": len(tokenizer.encode(buf.strip())),
+                "content": buf.strip(),
+                "chunk_order_index": idx,
+            })
+            idx += 1
+        buf, buf_tokens = "", 0
+
+    for section in sections:
+        sec_tokens = len(tokenizer.encode(section))
+
+        if sec_tokens > chunk_token_size:
+            # Flush accumulated buffer first, then split the oversized section
+            _flush()
+            for sub in chunking_recursive(
+                tokenizer, section,
+                chunk_overlap_token_size=chunk_overlap_token_size,
+                chunk_token_size=chunk_token_size,
+            ):
+                sub["chunk_order_index"] = idx
+                chunks.append(sub)
+                idx += 1
+        elif buf_tokens + sec_tokens <= chunk_token_size:
+            # Merge small section into current buffer
+            buf = (buf + "\n\n" + section).strip() if buf else section
+            buf_tokens += sec_tokens
+        else:
+            # Buffer is full — flush, then start fresh with this section
+            _flush()
+            buf = section
+            buf_tokens = sec_tokens
+
+    _flush()
+    return chunks
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Registry & factory
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -226,6 +333,7 @@ CHUNKING_STRATEGIES: dict[str, Any] = {
     "recursive": chunking_recursive,
     "sentence": chunking_sentence,
     "paragraph": chunking_paragraph,
+    "semantic": chunking_semantic,
 }
 
 
