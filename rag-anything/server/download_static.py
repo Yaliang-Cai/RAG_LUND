@@ -17,6 +17,8 @@ import re
 import sys
 import urllib.request
 from pathlib import Path
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -26,20 +28,20 @@ STATIC_DIR = Path(__file__).parent / "static"
 ASSETS = [
     # marked.js
     (
-        "https://cdn.bootcdn.net/ajax/libs/marked/4.3.0/marked.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js",
         "marked.min.js",
     ),
     # KaTeX
     (
-        "https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.css",
+        "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css",
         "katex/katex.min.css",
     ),
     (
-        "https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js",
         "katex/katex.min.js",
     ),
     (
-        "https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js",
         "katex/auto-render.min.js",
     ),
     # highlight.js
@@ -57,7 +59,7 @@ ASSETS = [
     ),
 ]
 
-KATEX_FONT_BASE = "https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/fonts/"
+KATEX_FONT_BASE = "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/fonts/"
 
 
 def _download(url: str, dest: Path, force: bool = False) -> bool:

@@ -520,6 +520,16 @@
       border-radius: var(--radius); color: var(--text-primary);
       font-size: 13px; padding: 8px 10px; cursor: pointer;
     }
+    .upload-settings-workspace-val {
+      font-family: var(--font-mono); font-size: 12px; display: inline-block;
+      color: var(--accent); background: var(--accent-soft);
+      padding: 3px 9px; border-radius: 4px;
+      border: 1px solid var(--accent-medium); max-width: 100%; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .upload-settings-workspace-new {
+      font-size: 12px; color: var(--text-tertiary); font-style: italic;
+    }
     .upload-settings-hint {
       font-size: 11px; color: var(--text-tertiary); margin-bottom: 20px;
       min-height: 30px; line-height: 1.5;
@@ -1565,6 +1575,13 @@
       }
     },
 
+    // Mirror server-side _compute_doc_id(): strip non-alphanum/-/_ from filename stem
+    _computeDocId(filename) {
+      const stem = filename.replace(/\.[^.]+$/, '');
+      const cleaned = stem.replace(/[^a-zA-Z0-9\-_]/g, '');
+      return cleaned || '(auto)';
+    },
+
     _chunkStrategyHints: {
       token:     'Sliding window with 100-token overlap. Fast and predictable. Best for most use cases.',
       recursive: 'Tries §→¶→sentence→word boundaries before falling back to tokens. Better semantic coherence.',
@@ -1580,9 +1597,16 @@
       const settingsEl = document.createElement('div');
       settingsEl.className = 'upload-settings-overlay';
       settingsEl.id = 'uploadSettingsOverlay';
+      const wsDisplay = AppState.currentDocId
+        ? `<span class="upload-settings-workspace-val">${AppState.currentDocId}</span>`
+        : `<span class="upload-settings-workspace-new">New workspace — name derived from filename</span>`;
       settingsEl.innerHTML = `
         <div class="upload-settings-dialog">
           <div class="upload-settings-title">Upload Document</div>
+          <div class="upload-settings-row">
+            <label class="upload-settings-label">Target Workspace</label>
+            ${wsDisplay}
+          </div>
           <div class="upload-settings-row">
             <label class="upload-settings-label" for="chunkStrategySelect">Chunking Strategy</label>
             <select class="upload-settings-select" id="chunkStrategySelect">
@@ -1632,6 +1656,7 @@
         const startTime = Date.now();
 
         // Build progress overlay
+        const expectedDocId = AppState.currentDocId || this._computeDocId(file.name);
         const overlay = document.createElement('div');
         overlay.className = 'upload-overlay';
         overlay.id = 'uploadOverlay';
@@ -1639,7 +1664,8 @@
           <div class="upload-spinner"></div>
           <div class="upload-text">Processing <strong>${file.name}</strong>
             <span style="font-size:11px;color:var(--text-tertiary);display:block;margin-top:4px;">
-              Strategy: ${chunkingStrategy}</span></div>
+              Workspace: <span style="font-family:var(--font-mono);color:var(--accent)">${expectedDocId}</span>
+              &nbsp;·&nbsp;Strategy: ${chunkingStrategy}</span></div>
           <div class="upload-stages" id="uploadStages">
             ${stages.map((s, i) => `<div class="upload-stage${i === 0 ? ' active' : ''}" id="uStage${i}">${s}</div>`).join('')}
           </div>
