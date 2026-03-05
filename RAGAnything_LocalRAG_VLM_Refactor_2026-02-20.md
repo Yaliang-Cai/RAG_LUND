@@ -724,40 +724,43 @@ uvicorn server.app:app --host 0.0.0.0 --port 9621
 
 ---
 
-## 待计划补充（2026-03-04，WebUI 离线静态资源托管）
+## 已完成（2026-03-05，WebUI 离线静态资源托管）
 
 ### 背景
-- WebUI（`server/templates/index.html`）目前依赖 8 个外部 CDN 资源，断网环境下全部加载失败。
+- WebUI 之前依赖 8 个外部 CDN 资源，断网环境下全部加载失败。
 - 后端（vLLM 推理、RAG、Embedding、Rerank）均为本地部署，不受网络影响。
-- 仅前端 UI 显示质量下降，核心功能（上传、入库、查询）不受影响。
 
-### 当前外部依赖清单
+### 实现方案
 
-| 资源 | CDN | 断网影响 |
-|------|-----|---------|
-| Google Fonts（DM Serif Display / IBM Plex Sans / Mono）| fonts.googleapis.com | 退回系统字体，视觉影响小 |
-| KaTeX 0.16.9（CSS + JS + auto-render）| cdn.bootcdn.net | **公式显示原始 LaTeX 文本** |
-| highlight.js 11.9.0（CSS × 2 + JS）| cdnjs.cloudflare.com | 代码无高亮，功能不影响 |
-| marked.js 4.3.0 | cdn.bootcdn.net | **Markdown 答案显示原始文本** |
-| PDF.js 3.11.174 | cdnjs.cloudflare.com | PDF 预览已改为 iframe，实际不影响 |
+#### 1. `server/download_static.py`（新增）
+联网时执行一次，将所有前端资源下载到 `server/static/`：
+- `marked.min.js`
+- `katex/katex.min.css` + `katex.min.js` + `auto-render.min.js`
+- `katex/fonts/*.woff2`（从 CSS 动态解析 URL，自动下载全部字体文件）
+- `hljs/highlight.min.js` + `github-dark.min.css` + `github.min.css`
+- 支持 `--force` 参数强制重新下载
 
-### 待实现方案（未执行）
+#### 2. `server/app.py`
+- 挂载 `StaticFiles`：`app.mount(“/static”, StaticFiles(...))`
+- 启动时检测三个 sentinel 文件是否存在，决定 `_USE_LOCAL_STATIC` 标志
+- 将 `use_local_static` 传入 Jinja2 模板
 
-1. **FastAPI 挂载静态目录**
-   - `app.mount(“/static”, StaticFiles(directory=”server/static”), name=”static”)`
-   - 在 `server/static/` 下存放各库文件
+#### 3. `server/templates/index.html`
+- 用 `{% if use_local_static %}` 条件块切换本地路径 vs CDN
+- 离线时：`/static/katex/...`、`/static/hljs/...`、`/static/marked.min.js`
+- 在线时：保持原 bootcdn + cdnjs CDN 链接（对中国网络友好）
+- 同时移除了已无用的 PDF.js（PDF 预览已改为 iframe，无需此库）
+- Google Fonts 仅在在线模式加载；离线时 CSS 变量中的 fallback 字体栈生效
 
-2. **一次性下载脚本**（`server/download_static.py`）
-   - 联网时执行一次，把上述 CDN 资源下载到 `server/static/`
-   - PDF.js worker 需单独下载
+#### 4. `server/static/.gitignore`（新增）
+- 忽略下载的资源文件，仅保留 `.gitkeep` 和 `.gitignore` 本身进入版本库
 
-3. **HTML 改用本地路径**
-   - 将 `index.html` 中所有 CDN URL 替换为 `/static/...`
-   - 字体部分用系统字体 fallback 替代 Google Fonts（无需下载字体文件）
+### 使用方式
+```bash
+# 联网时执行一次（约下载 ~2MB）
+python server/download_static.py
 
-### 优先级
-- 当前环境（校内服务器）有网络，暂不阻塞。
-- 若迁移至完全离线环境（如 HPC 隔离区），再执行本节。
-
-### 当前状态
-- 本节为待计划，尚未提交任何代码改动。
+# 正常启动，自动切换到离线模式
+uvicorn server.app:app --host 0.0.0.0 --port 9621
+# 日志输出：Offline mode: serving JS/CSS from server/static/
+```

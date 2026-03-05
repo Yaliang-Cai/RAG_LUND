@@ -9,6 +9,7 @@ from typing import Optional, Set
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -38,6 +39,14 @@ logger = logging.getLogger(__name__)
 APP_ROOT = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(APP_ROOT / "templates"))
 
+# 检测本地静态资源是否已下载（运行 server/download_static.py 后生效）
+_STATIC_DIR = APP_ROOT / "static"
+_USE_LOCAL_STATIC: bool = all([
+    (_STATIC_DIR / "marked.min.js").exists(),
+    (_STATIC_DIR / "katex" / "katex.min.js").exists(),
+    (_STATIC_DIR / "hljs" / "highlight.min.js").exists(),
+])
+
 API_KEY_ENV = "RAGANYTHING_API_KEY"
 MAX_TOP_K = int(os.getenv("RAGANYTHING_MAX_TOP_K", str(DEFAULT_TOP_K)))
 MAX_CHUNK_TOP_K = int(os.getenv("RAGANYTHING_MAX_CHUNK_TOP_K", str(DEFAULT_CHUNK_TOP_K)))
@@ -51,7 +60,13 @@ SUPPORTED_EXTENSIONS: Set[str] = {
 UPLOADS_DIR = Path(os.getenv("RAGANYTHING_UPLOADS_DIR", "./uploads")).resolve()
 
 app = FastAPI(title="RAGAnything Local Service")
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 _service: Optional[LocalRagService] = None
+
+if _USE_LOCAL_STATIC:
+    logger.info("Offline mode: serving JS/CSS from server/static/")
+else:
+    logger.info("Online mode: loading JS/CSS from CDN")
 
 
 def _compute_doc_id(name: str) -> str:
@@ -135,7 +150,10 @@ class QueryRequest(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return TEMPLATES.TemplateResponse("index.html", {"request": request})
+    return TEMPLATES.TemplateResponse(
+        "index.html",
+        {"request": request, "use_local_static": _USE_LOCAL_STATIC},
+    )
 
 # --- 文件列表 (解析产物) ---
 @app.get("/files/{doc_id}")

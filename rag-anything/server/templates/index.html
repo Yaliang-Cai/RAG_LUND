@@ -4,21 +4,28 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RAG Notebook</title>
+  {% if use_local_static %}
+  <!-- ── Offline mode: assets served locally (run server/download_static.py) ── -->
+  <link rel="stylesheet" href="/static/katex/katex.min.css">
+  <script defer src="/static/katex/katex.min.js"></script>
+  <script defer src="/static/katex/auto-render.min.js"></script>
+  <link id="hljs-dark" rel="stylesheet" href="/static/hljs/github-dark.min.css">
+  <link id="hljs-light" rel="stylesheet" href="/static/hljs/github.min.css" disabled>
+  <script src="/static/hljs/highlight.min.js"></script>
+  <script src="/static/marked.min.js"></script>
+  {% else %}
+  <!-- ── Online mode: assets loaded from CDN ── -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <!-- KaTeX (bootcdn - reliable in CN) -->
   <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.css">
   <script defer src="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
   <script defer src="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
-  <!-- highlight.js -->
   <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" disabled>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-  <!-- marked.js (bootcdn - reliable in CN) -->
   <script src="https://cdn.bootcdn.net/ajax/libs/marked/4.3.0/marked.min.js"></script>
-  <!-- PDF.js -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  {% endif %}
   <!-- graphology + sigma removed: graph rendered via pyvis iframe -->
   <style>
     /* ══════════════════════════════════════════════

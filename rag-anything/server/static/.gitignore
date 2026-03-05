@@ -1,0 +1,5 @@
+# Ignore downloaded static assets — run server/download_static.py to generate them.
+# The .gitkeep in this directory keeps the folder tracked in git.
+*
+!.gitignore
+!.gitkeep
