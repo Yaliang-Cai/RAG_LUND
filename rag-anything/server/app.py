@@ -80,24 +80,44 @@ def _validate_doc_id(doc_id: str):
 
 
 # --- [核心逻辑 1] 在指定 workspace 的 hybrid_auto 中查找文件 ---
+def _safe_filename(filename: str) -> str:
+    """Return the basename only; raise 400 if the result is empty or not .md."""
+    name = Path(filename).name
+    if not name or not name.lower().endswith(".md"):
+        raise HTTPException(status_code=400, detail="Invalid filename: must be a .md file")
+    return name
+
+
 def _find_md_in_hybrid_auto(doc_id: str, filename: str, output_dir: str) -> Path:
     _validate_doc_id(doc_id)
     workspace_dir = Path(output_dir).resolve() / doc_id
     if not workspace_dir.exists():
         raise HTTPException(status_code=404, detail=f"Workspace '{doc_id}' not found")
 
+    safe_name = _safe_filename(filename)
+
     for hybrid_dir in workspace_dir.rglob("hybrid_auto"):
         if not hybrid_dir.is_dir():
             continue
-        target = hybrid_dir / filename
-        if target.exists() and target.suffix.lower() == ".md":
+        target = (hybrid_dir / safe_name).resolve()
+        # resolve() + relative_to(): confirm path stays within workspace
+        try:
+            target.relative_to(workspace_dir)
+        except ValueError:
+            continue
+        if target.exists():
             return target
 
     all_md = sorted(workspace_dir.rglob("hybrid_auto/*.md"))
-    candidates = [
-        p for p in all_md
-        if filename.lower() in p.name.lower() and p.suffix.lower() == ".md"
-    ]
+    candidates = []
+    for p in all_md:
+        if safe_name.lower() not in p.name.lower():
+            continue
+        try:
+            p.resolve().relative_to(workspace_dir)
+            candidates.append(p)
+        except ValueError:
+            continue
     if candidates:
         return candidates[0]
 
@@ -229,10 +249,17 @@ async def ingest(
         raise HTTPException(status_code=500, detail=f"File read failed: {str(e)}")
 
     # 保存原始文件到 uploads/{doc_id}/
+    # basename-only + resolve+relative_to 三重校验，防路径穿越写
     upload_dir = UPLOADS_DIR / final_doc_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    original_filename = file.filename
+    original_filename = Path(file.filename).name  # strip any directory components
+    if not original_filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
     upload_path = upload_dir / original_filename
+    try:
+        upload_path.resolve().relative_to(upload_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename")
     upload_path.write_bytes(content)
 
     # 写入临时文件供 parser 使用（保留原始文件名以便 MinerU 正确命名输出）

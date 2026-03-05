@@ -734,6 +734,9 @@ class LocalRagService:
         self.vision_client = AsyncOpenAI(api_key=vision_key, base_url=vision_base)
         self._rag_instances: Dict[str, RAGAnything] = {}
         self._init_lock = asyncio.Lock()
+        # Per-doc-id locks: serialise ingest for the same workspace so that the
+        # temporary chunking_func swap never races with a concurrent ingest.
+        self._ingest_locks: Dict[str, asyncio.Lock] = {}
 
         st_model, reranker_model = load_models(self.settings)
         self.embedding_func = build_embedding_func(self.settings, st_model)
@@ -797,24 +800,27 @@ class LocalRagService:
         rag = await self.get_rag(doc_id)
         output_dir = output_dir or self.settings.output_dir
 
-        # Per-upload chunking strategy override
-        old_chunking_func = None
-        if chunking_strategy and chunking_strategy != self.settings.chunking_strategy:
-            old_chunking_func = rag.lightrag.chunking_func
-            rag.lightrag.chunking_func = get_chunking_func(chunking_strategy)
-
-        try:
-            if file_path_obj.is_file():
-                await rag.process_document_complete(
-                    file_path=str(file_path_obj),
-                    output_dir=output_dir,
-                    parse_method="auto",
-                )
-            else:
-                await rag.process_folder_complete(str(file_path_obj), recursive=False)
-        finally:
-            if old_chunking_func is not None:
-                rag.lightrag.chunking_func = old_chunking_func
+        # Per-doc-id lock: serialise ingest for the same workspace so the
+        # temporary chunking_func swap never races with a concurrent ingest.
+        if doc_id not in self._ingest_locks:
+            self._ingest_locks[doc_id] = asyncio.Lock()
+        async with self._ingest_locks[doc_id]:
+            old_chunking_func = None
+            if chunking_strategy and chunking_strategy != self.settings.chunking_strategy:
+                old_chunking_func = rag.lightrag.chunking_func
+                rag.lightrag.chunking_func = get_chunking_func(chunking_strategy)
+            try:
+                if file_path_obj.is_file():
+                    await rag.process_document_complete(
+                        file_path=str(file_path_obj),
+                        output_dir=output_dir,
+                        parse_method="auto",
+                    )
+                else:
+                    await rag.process_folder_complete(str(file_path_obj), recursive=False)
+            finally:
+                if old_chunking_func is not None:
+                    rag.lightrag.chunking_func = old_chunking_func
 
         return doc_id
 
