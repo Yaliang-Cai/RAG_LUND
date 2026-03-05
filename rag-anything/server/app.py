@@ -635,6 +635,7 @@ _DEFAULT_NODE_COLOR = "#95a5a6"
 def get_graph_html(
     doc_id: str,
     q: Optional[str] = None,
+    theme: str = "dark",
     max_nodes: int = DEFAULT_GRAPH_HTML_MAX_NODES,
     _auth: None = Depends(verify_api_key_or_query),
     service: LocalRagService = Depends(get_service),
@@ -644,6 +645,7 @@ def get_graph_html(
     Uses cdn_resources='in_line' so no external CDN is needed at render time.
     Accepts optional ?q= to filter to matching nodes + their 1-hop neighbours.
     Accepts ?key= for iframe-based authentication (via verify_api_key_or_query).
+    Accepts ?theme=dark|light to match the parent page's colour scheme.
     """
     import os
     import tempfile
@@ -651,10 +653,24 @@ def get_graph_html(
     _validate_doc_id(doc_id)
     G = _read_graphml_safe(_graphml_path(service, doc_id))
 
+    # Theme-aware colours
+    if theme == "light":
+        _bgcolor    = "#f8f6f1"
+        _font_color = "#3a352e"
+        _edge_color = "rgba(80,70,60,0.22)"
+        _empty_bg   = "#f8f6f1"
+        _empty_fg   = "#a09890"
+    else:
+        _bgcolor    = "#131315"
+        _font_color = "#c8c4be"
+        _edge_color = "rgba(200,196,190,0.25)"
+        _empty_bg   = "#131315"
+        _empty_fg   = "#6b6560"
+
     _NO_GRAPH_HTML = (
-        "<html><body style='margin:0;display:flex;align-items:center;"
-        "justify-content:center;height:100vh;"
-        "background:#131315;color:#6b6560;font-family:sans-serif;font-size:13px'>"
+        f"<html><body style='margin:0;display:flex;align-items:center;"
+        f"justify-content:center;height:100vh;"
+        f"background:{_empty_bg};color:{_empty_fg};font-family:sans-serif;font-size:13px'>"
         "<div style='text-align:center'>"
         "<div style='font-size:32px;margin-bottom:12px'>🕸️</div>"
         "<div>No graph data found for this workspace.</div>"
@@ -688,13 +704,13 @@ def get_graph_html(
     net = Network(
         height="100%",
         width="100%",
-        bgcolor="#131315",
-        font_color="#c8c4be",
+        bgcolor=_bgcolor,
+        font_color=_font_color,
         directed=sub.is_directed(),
     )
     try:
         net_kwargs = {"cdn_resources": "in_line"}
-        net2 = Network(height="100%", width="100%", bgcolor="#131315", font_color="#c8c4be",
+        net2 = Network(height="100%", width="100%", bgcolor=_bgcolor, font_color=_font_color,
                        directed=sub.is_directed(), **net_kwargs)
         net = net2
     except TypeError:
@@ -717,7 +733,7 @@ def get_graph_html(
     for edge in net.edges:
         desc = edge.get("description") or edge.get("label") or ""
         edge["title"] = html.escape(str(desc))
-        edge["color"] = "rgba(200,196,190,0.25)"
+        edge["color"] = _edge_color
 
     # Physics settings for better layout
     net.set_options("""{
