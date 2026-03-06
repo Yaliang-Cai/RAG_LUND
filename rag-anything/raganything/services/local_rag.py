@@ -862,61 +862,23 @@ class LocalRagService:
         chunk_top_k: int = 5,
         enable_rerank: bool = True,
     ):
-        """Async generator that streams LLM answer tokens.
+        """Async generator — currently delegates to the unified aquery() so that
+        LightRAG's proven prompt templates (with ### References) are used.
 
-        Builds a RAG prompt from aquery_data context, then calls the LLM
-        with stream=True so tokens are yielded as they arrive.
+        TODO: replace with true token-streaming once LightRAG exposes a streaming
+        interface, so the SSE infrastructure already in place can be leveraged.
         """
-        rag = await self.get_rag(doc_id)
-        await rag._ensure_lightrag_initialized()
-
-        from lightrag import QueryParam
-        param = QueryParam(
-            mode=mode, top_k=top_k, chunk_top_k=chunk_top_k,
-            enable_rerank=enable_rerank,
-        )
-        retrieval: dict = {}
         try:
-            retrieval = await rag.lightrag.aquery_data(query, param=param)
-        except Exception:
-            pass
-
-        chunks = retrieval.get("data", {}).get("chunks", [])
-        ctx_parts = []
-        for i, c in enumerate(chunks):
-            content = (c.get("content") or "").strip()
-            if content:
-                ctx_parts.append(f"[{i + 1}] {content}")
-        context = "\n\n".join(ctx_parts) if ctx_parts else "No relevant context found."
-
-        system = (
-            "You are a helpful research assistant. Answer the question based on the "
-            "provided context. Use inline citation numbers [N] to reference specific "
-            "passages. Be concise but thorough."
-        )
-        user_msg = (
-            f"Context:\n{context}\n\n---\nQuestion: {query}\n\n"
-            "Please answer based on the context above, using [N] citations."
-        )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_msg},
-        ]
-        try:
-            stream = await self.text_client.chat.completions.create(
-                model=self.text_model_name,
-                messages=messages,
-                temperature=self.settings.temperature,
-                max_tokens=self.settings.query_max_tokens,
-                stream=True,
+            answer = await self.query(
+                doc_id, query,
+                mode=mode, top_k=top_k,
+                chunk_top_k=chunk_top_k,
+                enable_rerank=enable_rerank,
             )
-            async for chunk in stream:
-                delta = chunk.choices[0].delta
-                if delta and delta.content:
-                    yield delta.content
+            yield answer or "No answer returned."
         except Exception as exc:
             self.logger.error("stream_query error: %s", exc)
-            yield f"\n\n[Streaming error: {exc}]"
+            yield f"\n\n[Query error: {exc}]"
 
 
 if __name__ == "__main__":
