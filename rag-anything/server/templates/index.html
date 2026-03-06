@@ -547,11 +547,15 @@
       font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
       text-transform: uppercase; color: var(--text-secondary);
     }
-    .upload-settings-select {
+    .upload-settings-select,
+    .upload-settings-input {
       background: var(--bg-input); border: 1px solid var(--border-strong);
       border-radius: var(--radius); color: var(--text-primary);
-      font-size: 13px; padding: 8px 10px; cursor: pointer;
+      font-size: 13px; padding: 8px 10px; outline: none;
     }
+    .upload-settings-select { cursor: pointer; }
+    .upload-settings-input { font-family: var(--font-mono); }
+    .upload-settings-input:focus { border-color: var(--accent); }
     .upload-settings-workspace-val {
       font-family: var(--font-mono); font-size: 12px; display: inline-block;
       color: var(--accent); background: var(--accent-soft);
@@ -797,7 +801,7 @@
   </div>
 
   <!-- Hidden file input -->
-  <input type="file" id="fileInput" style="display:none"
+  <input type="file" id="fileInput" style="display:none" multiple
     accept=".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.bmp,.tiff,.gif,.webp,.md,.txt">
 
   <!-- ═══ SCRIPTS ═══ -->
@@ -1788,19 +1792,31 @@
     upload() {
       if (!AppState.apiKey) { UI.showToast('Enter API key first', 'error'); return; }
 
-      // Show pre-upload settings dialog
+      // Build workspace options: "New workspace" first, then existing ones
+      const existingOpts = AppState.workspaces.map(ws => {
+        const label = ws.doc_id + (ws.uploaded_files && ws.uploaded_files.length > 0
+          ? ` (${ws.uploaded_files.length} files)` : '');
+        const sel = ws.doc_id === AppState.currentDocId ? ' selected' : '';
+        return `<option value="${ws.doc_id}"${sel}>${label}</option>`;
+      }).join('');
+
       const settingsEl = document.createElement('div');
       settingsEl.className = 'upload-settings-overlay';
       settingsEl.id = 'uploadSettingsOverlay';
-      const wsDisplay = AppState.currentDocId
-        ? `<span class="upload-settings-workspace-val">${AppState.currentDocId}</span>`
-        : `<span class="upload-settings-workspace-new">New workspace — name derived from filename</span>`;
       settingsEl.innerHTML = `
         <div class="upload-settings-dialog">
           <div class="upload-settings-title">Upload Document</div>
           <div class="upload-settings-row">
-            <label class="upload-settings-label">Target Workspace</label>
-            ${wsDisplay}
+            <label class="upload-settings-label" for="wsTargetSelect">Target Workspace</label>
+            <select class="upload-settings-select" id="wsTargetSelect">
+              <option value="__new__">＋ New workspace (name from filename)</option>
+              ${existingOpts}
+            </select>
+          </div>
+          <div class="upload-settings-row" id="customWsRow" style="display:none">
+            <label class="upload-settings-label" for="customWsInput">Custom Workspace Name</label>
+            <input class="upload-settings-input" id="customWsInput" type="text"
+              placeholder="e.g. my_project  (leave blank to use filename)" autocomplete="off">
           </div>
           <div class="upload-settings-row">
             <label class="upload-settings-label" for="chunkStrategySelect">Chunking Strategy</label>
@@ -1815,11 +1831,21 @@
           <div class="upload-settings-hint" id="chunkStrategyHint">${this._chunkStrategyHints.token}</div>
           <div class="upload-settings-btns">
             <button class="btn-cancel" id="uploadSettingsCancel">Cancel</button>
-            <button class="btn-confirm" id="uploadSettingsConfirm">Choose File →</button>
+            <button class="btn-confirm" id="uploadSettingsConfirm">Choose Files →</button>
           </div>
         </div>`;
       document.body.appendChild(settingsEl);
 
+      // If a workspace is currently selected, pre-select it; otherwise stay on "new"
+      const wsTargetSelect = document.getElementById('wsTargetSelect');
+      if (AppState.currentDocId && AppState.workspaces.some(ws => ws.doc_id === AppState.currentDocId)) {
+        wsTargetSelect.value = AppState.currentDocId;
+      }
+
+      wsTargetSelect.addEventListener('change', () => {
+        document.getElementById('customWsRow').style.display =
+          wsTargetSelect.value === '__new__' ? '' : 'none';
+      });
       document.getElementById('chunkStrategySelect').addEventListener('change', (e) => {
         document.getElementById('chunkStrategyHint').textContent =
           this._chunkStrategyHints[e.target.value] || '';
@@ -1829,16 +1855,24 @@
       });
       document.getElementById('uploadSettingsConfirm').addEventListener('click', () => {
         const strategy = document.getElementById('chunkStrategySelect').value;
+        const wsVal = wsTargetSelect.value;
+        let targetDocId;
+        if (wsVal === '__new__') {
+          const custom = document.getElementById('customWsInput').value.trim();
+          targetDocId = custom || undefined; // undefined → derive from filename
+        } else {
+          targetDocId = wsVal;
+        }
         settingsEl.remove();
-        this._startUpload(strategy);
+        this._startUpload(strategy, targetDocId);
       });
     },
 
-    _startUpload(chunkingStrategy) {
+    _startUpload(chunkingStrategy, targetDocId) {
       const input = document.getElementById('fileInput');
       input.onchange = async () => {
-        const file = input.files[0];
-        if (!file) return;
+        const files = Array.from(input.files);
+        if (!files.length) return;
 
         const stages = [
           'Uploading file...',
@@ -1847,63 +1881,76 @@
           'Extracting entities & building knowledge graph...',
           'Finalizing workspace...',
         ];
-        let currentStage = 0;
-        const startTime = Date.now();
 
-        // Build progress overlay
-        const expectedDocId = AppState.currentDocId || this._computeDocId(file.name);
-        const overlay = document.createElement('div');
-        overlay.className = 'upload-overlay';
-        overlay.id = 'uploadOverlay';
-        overlay.innerHTML = `<div class="upload-dialog">
-          <div class="upload-spinner"></div>
-          <div class="upload-text">Processing <strong>${file.name}</strong>
-            <span style="font-size:11px;color:var(--text-tertiary);display:block;margin-top:4px;">
-              Workspace: <span style="font-family:var(--font-mono);color:var(--accent)">${expectedDocId}</span>
-              &nbsp;·&nbsp;Strategy: ${chunkingStrategy}</span></div>
-          <div class="upload-stages" id="uploadStages">
-            ${stages.map((s, i) => `<div class="upload-stage${i === 0 ? ' active' : ''}" id="uStage${i}">${s}</div>`).join('')}
-          </div>
-          <div class="upload-elapsed" id="uploadElapsed">Elapsed: 0s</div>
-        </div>`;
-        document.body.appendChild(overlay);
+        // lockedDocId: fixed after the first file succeeds so all files go to the same workspace
+        let lockedDocId = targetDocId;
+        let lastResult = null;
 
-        // Auto-advance stages on timer + elapsed counter
-        const advanceInterval = setInterval(() => {
-          if (currentStage < stages.length - 1) {
-            const prev = document.getElementById(`uStage${currentStage}`);
-            if (prev) { prev.classList.remove('active'); prev.classList.add('done'); }
-            currentStage++;
-            const next = document.getElementById(`uStage${currentStage}`);
-            if (next) next.classList.add('active');
+        for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
+          const file = files[fileIdx];
+          const fileLabel = files.length > 1 ? `[${fileIdx + 1}/${files.length}] ` : '';
+          const expectedDocId = lockedDocId || this._computeDocId(file.name);
+
+          let currentStage = 0;
+          const startTime = Date.now();
+
+          const overlay = document.createElement('div');
+          overlay.className = 'upload-overlay';
+          overlay.id = 'uploadOverlay';
+          overlay.innerHTML = `<div class="upload-dialog">
+            <div class="upload-spinner"></div>
+            <div class="upload-text">Processing <strong>${fileLabel}${file.name}</strong>
+              <span style="font-size:11px;color:var(--text-tertiary);display:block;margin-top:4px;">
+                Workspace: <span style="font-family:var(--font-mono);color:var(--accent)">${expectedDocId}</span>
+                &nbsp;·&nbsp;Strategy: ${chunkingStrategy}</span></div>
+            <div class="upload-stages" id="uploadStages">
+              ${stages.map((s, i) => `<div class="upload-stage${i === 0 ? ' active' : ''}" id="uStage${i}">${s}</div>`).join('')}
+            </div>
+            <div class="upload-elapsed" id="uploadElapsed">Elapsed: 0s</div>
+          </div>`;
+          document.body.appendChild(overlay);
+
+          const advanceInterval = setInterval(() => {
+            if (currentStage < stages.length - 1) {
+              const prev = document.getElementById(`uStage${currentStage}`);
+              if (prev) { prev.classList.remove('active'); prev.classList.add('done'); }
+              currentStage++;
+              const next = document.getElementById(`uStage${currentStage}`);
+              if (next) next.classList.add('active');
+            }
+          }, 12000);
+          const elapsedInterval = setInterval(() => {
+            const el = document.getElementById('uploadElapsed');
+            if (el) el.textContent = `Elapsed: ${Math.round((Date.now() - startTime) / 1000)}s`;
+          }, 1000);
+
+          try {
+            const result = await API.ingest(file, lockedDocId, chunkingStrategy);
+            clearInterval(advanceInterval);
+            clearInterval(elapsedInterval);
+            stages.forEach((_, i) => {
+              const el = document.getElementById(`uStage${i}`);
+              if (el) { el.classList.remove('active'); el.classList.add('done'); }
+            });
+            // Lock workspace for subsequent files in this batch
+            lockedDocId = result.doc_id;
+            lastResult = result;
+            UI.showToast(`Uploaded: ${result.filename} → workspace: ${result.doc_id}`, 'success');
+          } catch (e) {
+            clearInterval(advanceInterval);
+            clearInterval(elapsedInterval);
+            UI.showToast(`Upload failed [${file.name}]: ` + e.message, 'error');
+          } finally {
+            document.getElementById('uploadOverlay')?.remove();
           }
-        }, 12000);
-        const elapsedInterval = setInterval(() => {
-          const el = document.getElementById('uploadElapsed');
-          if (el) el.textContent = `Elapsed: ${Math.round((Date.now() - startTime) / 1000)}s`;
-        }, 1000);
+        }
 
-        try {
-          const docId = AppState.currentDocId || undefined;
-          const result = await API.ingest(file, docId, chunkingStrategy);
-          clearInterval(advanceInterval);
-          clearInterval(elapsedInterval);
-          // Mark all done
-          stages.forEach((_, i) => {
-            const el = document.getElementById(`uStage${i}`);
-            if (el) { el.classList.remove('active'); el.classList.add('done'); }
-          });
-          UI.showToast(`Uploaded: ${result.filename} → workspace: ${result.doc_id}`, 'success');
+        input.value = '';
+        // After all files, refresh and switch to the workspace
+        if (lastResult) {
           await this.refreshWorkspaces();
-          document.getElementById('workspaceSelect').value = result.doc_id;
-          await this.loadWorkspace(result.doc_id);
-        } catch (e) {
-          clearInterval(advanceInterval);
-          clearInterval(elapsedInterval);
-          UI.showToast('Upload failed: ' + e.message, 'error');
-        } finally {
-          document.getElementById('uploadOverlay')?.remove();
-          input.value = '';
+          document.getElementById('workspaceSelect').value = lastResult.doc_id;
+          await this.loadWorkspace(lastResult.doc_id);
         }
       };
       input.click();
