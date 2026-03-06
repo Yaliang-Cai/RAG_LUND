@@ -1483,13 +1483,22 @@
       const fsIcon = document.getElementById('graphFsIcon');
 
       panel.classList.remove('sidebar', 'fullscreen');
+      // Always clear inline dimensions first — inline styles survive class changes
+      // and would prevent the panel from collapsing to width:0 on close.
+      panel.style.width = '';
+      panel.style.minWidth = '';
       this._state = state;
 
       if (state === 'sidebar') {
         panel.classList.add('sidebar');
+        // Restore last dragged width (previously saved by the resize divider).
+        const savedW = parseInt(localStorage.getItem('rag-graph-width'));
+        if (savedW > 0) {
+          panel.style.width    = savedW + 'px';
+          panel.style.minWidth = savedW + 'px';
+        }
         div2.classList.remove('hidden');
         btn.classList.add('active');
-        // switch icon to collapse/shrink
         if (fsIcon) fsIcon.innerHTML = '<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>';
         UI._initDivider2();
       } else if (state === 'fullscreen') {
@@ -2083,13 +2092,8 @@
       document.getElementById('leftPanelBtn').classList.add('active');
     }
 
-    // Restore graph panel width
-    const savedGW = parseInt(localStorage.getItem('rag-graph-width'));
-    if (savedGW > 0) {
-      const gp = document.getElementById('graphPanel');
-      gp.style.width    = savedGW + 'px';
-      gp.style.minWidth = savedGW + 'px';
-    }
+    // Graph panel width is restored lazily inside _setState('sidebar')
+    // when the panel is actually opened, so no inline style is set here.
 
     // Close graph search dropdown when clicking outside
     document.addEventListener('mousedown', (e) => {
