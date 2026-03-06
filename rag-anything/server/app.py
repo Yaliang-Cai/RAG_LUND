@@ -966,9 +966,9 @@ async def list_workspaces(
     output_root = Path(service.settings.output_dir).resolve()
     workspaces = []
 
-    # 收集所有可能的 doc_id
+    # 只从有效数据目录收集 doc_id（不含 uploads），避免已删除的工作空间仍出现
     doc_ids = set()
-    for root_dir in [working_root, output_root, UPLOADS_DIR]:
+    for root_dir in [working_root, output_root]:
         if root_dir.exists():
             for d in root_dir.iterdir():
                 if d.is_dir():

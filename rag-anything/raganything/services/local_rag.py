@@ -808,8 +808,14 @@ class LocalRagService:
         async with self._ingest_locks[doc_id]:
             old_chunking_func = None
             if chunking_strategy and chunking_strategy != self.settings.chunking_strategy:
-                old_chunking_func = rag.lightrag.chunking_func
-                rag.lightrag.chunking_func = get_chunking_func(chunking_strategy)
+                new_func = get_chunking_func(chunking_strategy)
+                # lightrag is created lazily inside process_document_complete, so we
+                # must swap in lightrag_kwargs (read during LightRAG.__init__).
+                # If lightrag is already initialized, also patch the live instance.
+                old_chunking_func = rag.lightrag_kwargs.get("chunking_func")
+                rag.lightrag_kwargs["chunking_func"] = new_func
+                if rag.lightrag is not None:
+                    rag.lightrag.chunking_func = new_func
             try:
                 if file_path_obj.is_file():
                     await rag.process_document_complete(
@@ -821,7 +827,10 @@ class LocalRagService:
                     await rag.process_folder_complete(str(file_path_obj), recursive=False)
             finally:
                 if old_chunking_func is not None:
-                    rag.lightrag.chunking_func = old_chunking_func
+                    # Restore both the kwargs and the live instance (if now initialized)
+                    rag.lightrag_kwargs["chunking_func"] = old_chunking_func
+                    if rag.lightrag is not None:
+                        rag.lightrag.chunking_func = old_chunking_func
 
         return doc_id
 

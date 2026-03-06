@@ -205,6 +205,8 @@ def chunking_paragraph(
 ) -> list[dict[str, Any]]:
     """
     Paragraph-based chunking: split on blank lines (\\n\\n).
+    Small consecutive paragraphs are merged up to chunk_token_size so that
+    the output never contains hundreds of tiny single-paragraph chunks.
     Paragraphs that exceed chunk_token_size are further split with the
     token-based sliding window.
     """
@@ -213,25 +215,46 @@ def chunking_paragraph(
     paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
     results: list[dict[str, Any]] = []
     idx = 0
-    for para in paragraphs:
-        toks = tokenizer.encode(para)
-        if len(toks) <= chunk_token_size:
+    buf = ""
+    buf_tokens = 0
+    sep_tokens = len(tokenizer.encode("\n\n"))
+
+    def _flush_buf() -> None:
+        nonlocal buf, buf_tokens, idx
+        if buf.strip():
             results.append({
-                "tokens": len(toks),
-                "content": para,
+                "tokens": len(tokenizer.encode(buf.strip())),
+                "content": buf.strip(),
                 "chunk_order_index": idx,
             })
             idx += 1
-        else:
-            sub = chunking_by_token_size(
+        buf, buf_tokens = "", 0
+
+    for para in paragraphs:
+        para_tokens = len(tokenizer.encode(para))
+
+        if para_tokens > chunk_token_size:
+            # Flush accumulated buffer first, then split the oversized paragraph.
+            _flush_buf()
+            for sub in chunking_by_token_size(
                 tokenizer, para,
                 chunk_overlap_token_size=chunk_overlap_token_size,
                 chunk_token_size=chunk_token_size,
-            )
-            for s in sub:
-                s["chunk_order_index"] = idx
-                results.append(s)
+            ):
+                sub["chunk_order_index"] = idx
+                results.append(sub)
                 idx += 1
+        else:
+            add_tokens = para_tokens if not buf else sep_tokens + para_tokens
+            if buf_tokens + add_tokens <= chunk_token_size:
+                buf = (buf + "\n\n" + para).strip() if buf else para
+                buf_tokens += add_tokens
+            else:
+                _flush_buf()
+                buf = para
+                buf_tokens = para_tokens
+
+    _flush_buf()
     return results
 
 
@@ -243,7 +266,12 @@ def chunking_paragraph(
 _SECTION_HEADER_PATTERNS = [
     re.compile(r"^#{1,6}\s+.+", re.MULTILINE),            # Markdown: # Title / ## Sub
     re.compile(r"^.+\n[=\-]{3,}\s*$", re.MULTILINE),      # Underlined: Title\n===
-    re.compile(r"^[A-Z][A-Z\d\s\-:,]{4,}$", re.MULTILINE), # ALL-CAPS section titles
+    # Numbered section headers: "1 Introduction", "3.2 Attention", "3.2.1 Scaled..."
+    re.compile(r"^\d+(?:\.\d+)*\s+[A-Z][^\n]{3,60}$", re.MULTILINE),
+    # ALL-CAPS title lines: 8–60 chars, only uppercase letters/spaces/hyphens.
+    # Literal space (not \s) prevents cross-line matches; no digits/colons/commas
+    # avoids false positives from table cells and reference titles.
+    re.compile(r"^[A-Z][A-Z \-]{7,59}$", re.MULTILINE),
 ]
 
 
