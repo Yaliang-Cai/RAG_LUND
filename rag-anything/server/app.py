@@ -7,8 +7,10 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Set
 
+import json as _json
+
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -398,6 +400,65 @@ async def query_endpoint(
     }
 
 
+@app.post("/query/stream")
+async def query_stream_endpoint(
+    payload: QueryRequest,
+    _auth: None = Depends(verify_api_key),
+    service: LocalRagService = Depends(get_service),
+):
+    """SSE streaming query: yields metadata first, then LLM answer tokens."""
+    _validate_doc_id(payload.doc_id)
+    top_k = max(1, min(payload.top_k, MAX_TOP_K))
+    chunk_top_k = max(1, min(payload.chunk_top_k, MAX_CHUNK_TOP_K))
+
+    async def _generate():
+        rag = await service.get_rag(payload.doc_id)
+        await rag._ensure_lightrag_initialized()
+
+        from lightrag import QueryParam
+        data_param = QueryParam(
+            mode=payload.mode, top_k=top_k,
+            chunk_top_k=chunk_top_k, enable_rerank=payload.enable_rerank,
+        )
+        retrieval: dict = {}
+        try:
+            retrieval = await rag.lightrag.aquery_data(payload.query, param=data_param)
+        except Exception:
+            pass
+
+        # Event 1: retrieval metadata (citations, keywords)
+        meta = {
+            "type": "meta",
+            "data": retrieval.get("data", {}),
+            "metadata": retrieval.get("metadata", {}),
+        }
+        yield f"data: {_json.dumps(meta, ensure_ascii=False)}\n\n"
+
+        # Event 2+: LLM answer tokens
+        try:
+            async for token in service.stream_query(
+                payload.doc_id, payload.query,
+                mode=payload.mode, top_k=top_k,
+                chunk_top_k=chunk_top_k, enable_rerank=payload.enable_rerank,
+            ):
+                ev = _json.dumps({"type": "chunk", "text": token}, ensure_ascii=False)
+                yield f"data: {ev}\n\n"
+        except Exception as exc:
+            yield f"data: {_json.dumps({'type': 'error', 'text': str(exc)})}\n\n"
+
+        # Event final: done + optional graph
+        graph_data = None
+        if payload.return_graph:
+            graph_data = await _get_query_subgraph(rag, retrieval, payload)
+        yield f"data: {_json.dumps({'type': 'done', 'graph': graph_data}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 async def _get_query_subgraph(rag, retrieval, payload):
     """从查询关键词中提取子图用于可视化"""
     try:
@@ -627,8 +688,40 @@ _ENTITY_COLORS = {
     "TECHNOLOGY": "#a55eea",
     "EVENT": "#26de81",
     "DOCUMENT": "#fd9644",
+    "PRODUCT": "#fd79a8",
+    "METHOD": "#00cec9",
+    "ALGORITHM": "#6c5ce7",
+    "DATASET": "#e17055",
+    "METRIC": "#fab1a0",
+    "TASK": "#55efc4",
+    "FIELD": "#74b9ff",
+    "INSTITUTION": "#0984e3",
+    "PAPER": "#d63031",
+    "CATEGORY": "#e84393",
 }
 _DEFAULT_NODE_COLOR = "#95a5a6"
+
+# Palette for hash-based community cluster coloring (distinct, readable)
+_CLUSTER_PALETTE = [
+    "#e74c3c", "#2ecc71", "#3498db", "#f39c12", "#9b59b6",
+    "#1abc9c", "#e67e22", "#34495e", "#e91e63", "#00bcd4",
+    "#8bc34a", "#ff5722", "#607d8b", "#ff9800", "#673ab7",
+    "#009688", "#795548", "#f44336", "#4caf50", "#2196f3",
+]
+
+
+def _entity_color_for(etype: str) -> str:
+    """Return colour for an entity type. Unknown types get a hash-based colour."""
+    c = _ENTITY_COLORS.get(etype.upper())
+    if c:
+        return c
+    if not etype.strip():
+        return _DEFAULT_NODE_COLOR
+    h = int(hashlib.md5(etype.upper().encode()).hexdigest()[:6], 16)
+    r = 100 + (h >> 16 & 0xFF) % 120
+    g = 100 + (h >> 8  & 0xFF) % 120
+    b = 100 + (h       & 0xFF) % 120
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 @app.get("/graph/{doc_id}/html")
@@ -718,6 +811,17 @@ def get_graph_html(
 
     net.from_nx(sub)
 
+    # Community detection for cluster-based colouring (fallback: entity type)
+    node_community: dict = {}
+    try:
+        from networkx.algorithms import community as _nx_comm
+        comms = list(_nx_comm.greedy_modularity_communities(sub.to_undirected()))
+        for ci, comm in enumerate(comms):
+            for n in comm:
+                node_community[n] = ci
+    except Exception:
+        pass
+
     for node in net.nodes:
         nid = node["id"]
         attrs = sub.nodes.get(nid, {})
@@ -725,10 +829,18 @@ def get_graph_html(
         safe_nid = html.escape(str(nid))
         safe_etype = html.escape(str(etype))
         safe_desc = html.escape(str(attrs.get("description", "")))
-        node["color"] = _ENTITY_COLORS.get(etype.upper(), _DEFAULT_NODE_COLOR)
+        # Colour priority: named entity type → cluster → default
+        if etype.upper() in _ENTITY_COLORS:
+            color = _ENTITY_COLORS[etype.upper()]
+        elif nid in node_community:
+            color = _CLUSTER_PALETTE[node_community[nid] % len(_CLUSTER_PALETTE)]
+        else:
+            color = _entity_color_for(etype)
+        node["color"] = color
         node["title"] = f"<b>{safe_nid}</b><br>{safe_etype}<br><br>{safe_desc}"
-        node["size"] = max(10, min(30, 10 + G.degree(nid) * 2))
+        node["size"] = max(12, min(36, 12 + G.degree(nid) * 2))
         node["label"] = str(nid)
+        node["font"] = {"size": 13}
 
     for edge in net.edges:
         desc = edge.get("description") or edge.get("label") or ""

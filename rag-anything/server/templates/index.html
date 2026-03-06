@@ -194,14 +194,16 @@
       .icon-btn.has-label { width: auto; padding: 0 10px; gap: 4px; }
     }
 
-    /* ── Main Layout ── */
+    /* ── Main Layout (three-column) ── */
     .main-container { display: flex; flex: 1; overflow: hidden; position: relative; }
 
-    /* ── PDF Panel (Left) ── */
+    /* ── PDF Panel (Left, collapsible) ── */
     .pdf-panel {
-      width: 48%; min-width: 280px; display: flex; flex-direction: column;
+      width: 36%; min-width: 280px; display: flex; flex-direction: column;
       flex-shrink: 0; overflow: hidden; background: var(--bg-source);
+      transition: width 0.25s ease, min-width 0.25s ease, opacity 0.2s ease;
     }
+    .pdf-panel.collapsed { width: 0 !important; min-width: 0 !important; opacity: 0; }
     .pdf-toolbar {
       height: 42px; padding: 0 12px; display: flex; align-items: center; gap: 8px;
       border-bottom: 1px solid var(--border); background: var(--bg-header); flex-shrink: 0;
@@ -437,37 +439,33 @@
     .send-btn svg { width: 18px; height: 18px; fill: currentColor; }
     .input-hint { text-align: center; font-size: 10px; color: var(--text-tertiary); margin-top: 8px; opacity: 0.5; }
 
-    /* ── Graph Panel (Bottom, resizable) ── */
-    .graph-panel {
-      background: var(--bg-graph); border-top: 1px solid var(--border);
+    /* ── Divider hidden state ── */
+    .divider.hidden { display: none !important; }
+
+    /* ── Graph Side Panel (Right, collapsible) ── */
+    .graph-side-panel {
       flex-shrink: 0; overflow: hidden; display: flex; flex-direction: column;
+      background: var(--bg-graph); width: 0; min-width: 0;
+      transition: width 0.25s ease, min-width 0.25s ease;
     }
-    .graph-panel.closed { height: 0 !important; }
-    .graph-resize-handle {
-      height: 5px; cursor: row-resize; background: var(--border);
-      flex-shrink: 0; position: relative; transition: background var(--transition);
+    .graph-side-panel.sidebar {
+      width: 38%; min-width: 320px; border-left: 1px solid var(--border);
     }
-    .graph-resize-handle::after {
-      content: ''; position: absolute; top: 50%; left: 50%;
-      transform: translate(-50%, -50%);
-      width: 40px; height: 3px; border-radius: 2px;
-      background: var(--text-tertiary); opacity: 0.3;
-      transition: opacity var(--transition), width var(--transition);
+    .graph-side-panel.fullscreen {
+      position: fixed; inset: 0; z-index: 1500;
+      width: 100% !important; min-width: 0; border: none;
     }
-    .graph-resize-handle:hover { background: var(--accent-medium); }
-    .graph-resize-handle:hover::after { opacity: 0.7; width: 56px; }
-    .graph-resize-handle.dragging { background: var(--accent); }
     .graph-toolbar {
-      height: 38px; padding: 0 16px; display: flex; align-items: center; gap: 8px;
+      height: 42px; padding: 0 12px; display: flex; align-items: center; gap: 8px;
       border-bottom: 1px solid var(--border); background: var(--bg-header); flex-shrink: 0;
     }
     .graph-toolbar-title {
       font-size: 11px; font-weight: 600; text-transform: uppercase;
       letter-spacing: 1px; color: var(--text-tertiary); white-space: nowrap;
     }
-    .graph-search-wrap { position: relative; flex: 1; max-width: 260px; }
+    .graph-search-wrap { position: relative; flex: 1; min-width: 0; }
     .graph-toolbar .ctrl-input { width: 100%; font-size: 11px; padding: 4px 8px; }
-    .graph-toolbar .icon-btn { width: 26px; height: 26px; }
+    .graph-toolbar .icon-btn { width: 28px; height: 28px; }
     .graph-search-results {
       position: absolute; top: calc(100% + 4px); left: 0; right: 0;
       background: var(--bg-bot-msg); border: 1px solid var(--border-strong);
@@ -499,6 +497,10 @@
       animation: spin 0.8s linear infinite;
     }
     .graph-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-tertiary); font-size: 13px; }
+
+    /* Streaming answer cursor */
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    .stream-cursor { display: inline-block; width: 2px; height: 1em; background: var(--accent); margin-left: 2px; vertical-align: text-bottom; animation: blink 1s step-end infinite; }
 
     /* ── Modal / Lightbox ── */
     .modal-overlay {
@@ -629,6 +631,9 @@
   <!-- ═══ HEADER ═══ -->
   <header>
     <div class="header-left">
+      <button class="icon-btn" id="leftPanelBtn" onclick="UI.toggleSourcePanel()" title="Toggle source panel">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+      </button>
       <div class="brand">
         <div class="brand-icon">R</div>
         <div class="brand-text">RAG Notebook</div>
@@ -741,33 +746,38 @@
         <div class="input-hint">Enter to send &middot; Shift + Enter for new line</div>
       </div>
     </div>
-  </div>
 
-  <!-- ═══ GRAPH PANEL (Bottom, resizable) ═══ -->
-  <div class="graph-panel closed" id="graphPanel">
-    <div class="graph-resize-handle" id="graphResizeHandle"></div>
-    <div class="graph-toolbar">
-      <span class="graph-toolbar-title">Knowledge Graph</span>
-      <div class="graph-search-wrap">
-        <input type="text" class="ctrl-input" id="graphSearchInput" placeholder="Search entities…"
-          oninput="GraphViewer.onSearchInput()"
-          onkeydown="GraphViewer.onSearchKeydown(event)">
-        <div class="graph-search-results" id="graphSearchResults"></div>
+    <!-- Divider 2 (between chat and graph) -->
+    <div class="divider hidden" id="divider2"></div>
+
+    <!-- ═══ GRAPH PANEL (Right sidebar / fullscreen) ═══ -->
+    <div class="graph-side-panel" id="graphPanel">
+      <div class="graph-toolbar">
+        <span class="graph-toolbar-title">Knowledge Graph</span>
+        <div class="graph-search-wrap">
+          <input type="text" class="ctrl-input" id="graphSearchInput" placeholder="Search entities…"
+            oninput="GraphViewer.onSearchInput()"
+            onkeydown="GraphViewer.onSearchKeydown(event)">
+          <div class="graph-search-results" id="graphSearchResults"></div>
+        </div>
+        <button class="icon-btn" onclick="GraphViewer.searchEntities()" title="Search">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </button>
+        <button class="icon-btn" id="graphFsBtn" onclick="GraphViewer.toggleFullscreen()" title="Fullscreen / Dock">
+          <svg id="graphFsIcon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+        </button>
+        <button class="icon-btn" onclick="GraphViewer.close()" title="Close">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
       </div>
-      <button class="icon-btn" onclick="GraphViewer.searchEntities()" title="Search">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      </button>
-      <button class="icon-btn" onclick="GraphViewer.toggle()" title="Close" style="margin-left:auto">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
-    </div>
-    <div class="graph-body">
-      <iframe id="graphIframe" class="graph-iframe"></iframe>
-      <div class="graph-loading" id="graphLoading">
-        <div class="graph-loading-spinner"></div>
-        <span>Rendering knowledge graph…</span>
+      <div class="graph-body">
+        <iframe id="graphIframe" class="graph-iframe"></iframe>
+        <div class="graph-loading" id="graphLoading">
+          <div class="graph-loading-spinner"></div>
+          <span>Rendering knowledge graph…</span>
+        </div>
+        <div class="graph-empty" id="graphEmpty">Open a workspace to view its knowledge graph</div>
       </div>
-      <div class="graph-empty" id="graphEmpty">Open a workspace to view its knowledge graph</div>
     </div>
   </div>
 
@@ -1289,45 +1299,80 @@
 
       const thinkingId = this._addThinking();
       document.getElementById('sendBtn').disabled = true;
-
-      // Start reasoning trace
       ReasoningTrace.start();
       const mode = document.getElementById('modeSelect').value;
 
       try {
-        // Step 0→1: mark "extracting keywords" as active (already done in start())
-        // Use a single slow pulse that auto-advances only if API is slow
-        const traceTimer = setTimeout(() => ReasoningTrace.advanceTo(1), 3000);
-
-        const data = await API.query(AppState.currentDocId, text, {
-          mode,
-          return_graph: AppState.graphOpen,
+        const payload = {
+          doc_id: AppState.currentDocId, query: text, mode,
+          top_k: 10, chunk_top_k: 5, vlm_enhanced: true,
+          enable_rerank: true, return_graph: AppState.graphOpen,
+        };
+        const resp = await fetch('/query/stream', {
+          method: 'POST',
+          headers: { 'x-api-key': AppState.apiKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
         });
-        clearTimeout(traceTimer);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-        AppState.lastQueryResponse = data;
+        const reader  = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '', textBuf = '', msgEl = null, metaDone = false;
 
-        // Advance trace based on actual response content
-        ReasoningTrace.advanceTo(1); // keywords extracted
-        if (data.metadata && data.metadata.keywords) {
-          ReasoningTrace.showKeywords(data.metadata.keywords);
+        const flush = () => {
+          if (!msgEl) return;
+          const cursor = '<span class="stream-cursor"></span>';
+          msgEl.innerHTML = Renderer.render(textBuf) + cursor;
+          Renderer.postProcess(msgEl);
+          msgEl.lastElementChild?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        };
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop();
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            let ev;
+            try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+
+            if (ev.type === 'meta') {
+              Citations.register(ev.data || {});
+              if (ev.metadata?.keywords) ReasoningTrace.showKeywords(ev.metadata.keywords);
+              ReasoningTrace.advanceTo(1);
+              ReasoningTrace.advanceTo(2);
+              this._removeMsg(thinkingId);
+              msgEl = this._addBot('', true);
+              metaDone = true;
+
+            } else if (ev.type === 'chunk') {
+              textBuf += ev.text;
+              flush();
+
+            } else if (ev.type === 'done') {
+              ReasoningTrace.advanceTo(3);
+              ReasoningTrace.allDone();
+              // Final render — remove cursor
+              if (msgEl) {
+                msgEl.innerHTML = Renderer.render(textBuf || 'No answer returned.');
+                Renderer.postProcess(msgEl);
+              }
+              AppState.lastQueryResponse = { answer: textBuf, data: {}, metadata: {}, graph: ev.graph };
+
+            } else if (ev.type === 'error') {
+              if (msgEl) msgEl.innerHTML = `<span style="color:var(--error)">${ev.text}</span>`;
+              else this._addBot('Error: ' + ev.text);
+            }
+          }
         }
-        ReasoningTrace.advanceTo(2); // KG searched
-        ReasoningTrace.advanceTo(3); // reranking done
-        ReasoningTrace.allDone();    // generation complete
 
-        // Register citations
-        Citations.register(data.data || {});
-
-        // Render answer
-        this._removeMsg(thinkingId);
-        const html = Renderer.render(data.answer || 'No answer returned.');
-        const msgEl = this._addBot(html, true);
-        Renderer.postProcess(msgEl);
-
-        // Update graph if data available
-        if (data.graph && data.graph.nodes && data.graph.nodes.length > 0) {
-          GraphViewer.loadData(data.graph.nodes, data.graph.edges || []);
+        // Fallback if meta event never arrived
+        if (!metaDone) {
+          this._removeMsg(thinkingId);
+          this._addBot(textBuf || 'No answer returned.');
         }
 
       } catch (e) {
@@ -1388,33 +1433,72 @@
   };
 
   /* ============================================================
-     MODULE 8: Graph Viewer (pyvis iframe — resizable, theme-aware)
+     MODULE 8: Graph Viewer — three-state: closed / sidebar / fullscreen
   ============================================================ */
   const GraphViewer = {
     _currentDocId: null,
+    _state: 'closed',        // 'closed' | 'sidebar' | 'fullscreen'
     _searchDebounce: null,
     _focusIdx: -1,
-    _DEFAULT_HEIGHT: 420,
 
     _getTheme() {
       return document.documentElement.getAttribute('data-theme') || 'dark';
     },
 
+    // Toggle: closed → fullscreen (first open); sidebar → closed; fullscreen → sidebar
     toggle() {
-      AppState.graphOpen = !AppState.graphOpen;
-      const panel = document.getElementById('graphPanel');
-      const btn = document.getElementById('graphToggleBtn');
-      if (AppState.graphOpen) {
-        const savedH = parseInt(localStorage.getItem('rag-graph-height')) || this._DEFAULT_HEIGHT;
-        panel.style.height = savedH + 'px';
-        panel.classList.remove('closed');
-        btn.classList.add('active');
-        if (AppState.currentDocId && !this._currentDocId) {
-          this._load(AppState.currentDocId);
-        }
+      if (this._state === 'closed') {
+        this._openFullscreen();
       } else {
-        panel.classList.add('closed');
-        panel.style.height = '';
+        this.close();
+      }
+    },
+
+    _openFullscreen() {
+      this._setState('fullscreen');
+      AppState.graphOpen = true;
+      if (AppState.currentDocId && !this._currentDocId) {
+        this._load(AppState.currentDocId);
+      }
+    },
+
+    toggleFullscreen() {
+      if (this._state === 'fullscreen') {
+        this._setState('sidebar');
+      } else if (this._state === 'sidebar') {
+        this._setState('fullscreen');
+      }
+    },
+
+    close() {
+      this._setState('closed');
+      AppState.graphOpen = false;
+    },
+
+    _setState(state) {
+      const panel = document.getElementById('graphPanel');
+      const btn   = document.getElementById('graphToggleBtn');
+      const div2  = document.getElementById('divider2');
+      const fsBtn = document.getElementById('graphFsBtn');
+      const fsIcon = document.getElementById('graphFsIcon');
+
+      panel.classList.remove('sidebar', 'fullscreen');
+      this._state = state;
+
+      if (state === 'sidebar') {
+        panel.classList.add('sidebar');
+        div2.classList.remove('hidden');
+        btn.classList.add('active');
+        // switch icon to collapse/shrink
+        if (fsIcon) fsIcon.innerHTML = '<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>';
+        UI._initDivider2();
+      } else if (state === 'fullscreen') {
+        panel.classList.add('fullscreen');
+        div2.classList.add('hidden');
+        btn.classList.add('active');
+        if (fsIcon) fsIcon.innerHTML = '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>';
+      } else {
+        div2.classList.add('hidden');
         btn.classList.remove('active');
         this._closeDropdown();
       }
@@ -1422,39 +1506,28 @@
 
     _load(docId, q) {
       this._currentDocId = docId;
-      const keyParam = AppState.apiKey ? `&key=${encodeURIComponent(AppState.apiKey)}` : '';
-      const qParam = q ? `&q=${encodeURIComponent(q)}` : '';
+      const keyParam   = AppState.apiKey ? `&key=${encodeURIComponent(AppState.apiKey)}` : '';
+      const qParam     = q ? `&q=${encodeURIComponent(q)}` : '';
       const themeParam = `&theme=${this._getTheme()}`;
       const url = `/graph/${docId}/html?max_nodes=60${keyParam}${qParam}${themeParam}`;
 
-      const frame = document.getElementById('graphIframe');
+      const frame   = document.getElementById('graphIframe');
       const loading = document.getElementById('graphLoading');
-      const empty = document.getElementById('graphEmpty');
+      const empty   = document.getElementById('graphEmpty');
 
       frame.style.display = 'none';
       empty.style.display = 'none';
       loading.classList.add('active');
-
-      frame.onload = () => {
-        loading.classList.remove('active');
-        frame.style.display = 'block';
-      };
-      frame.onerror = () => {
-        loading.classList.remove('active');
-        empty.style.display = 'flex';
-        empty.textContent = 'Failed to load graph';
-      };
+      frame.onload  = () => { loading.classList.remove('active'); frame.style.display = 'block'; };
+      frame.onerror = () => { loading.classList.remove('active'); empty.style.display = 'flex'; empty.textContent = 'Failed to load graph'; };
       frame.src = url;
     },
 
-    // Called by UI.toggleTheme() — reload graph with new theme colours
     reloadForTheme() {
-      if (AppState.graphOpen && this._currentDocId) {
-        this._load(this._currentDocId);
-      }
+      if (this._state !== 'closed' && this._currentDocId) this._load(this._currentDocId);
     },
 
-    // --- Search autocomplete ---
+    // --- Autocomplete search ---
     onSearchInput() {
       clearTimeout(this._searchDebounce);
       const q = document.getElementById('graphSearchInput').value.trim();
@@ -1465,20 +1538,19 @@
 
     async _fetchSuggestions(q) {
       try {
-        const data = await API.searchEntities(AppState.currentDocId, q, 15);
-        const items = (data.results || []);
-        const box = document.getElementById('graphSearchResults');
-        if (items.length === 0) {
+        const data  = await API.searchEntities(AppState.currentDocId, q, 15);
+        const items = data.results || [];
+        const box   = document.getElementById('graphSearchResults');
+        if (!items.length) {
           box.innerHTML = '<div class="graph-search-result-item no-results">No matching entities</div>';
         } else {
           const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const re = new RegExp(`(${esc})`, 'i');
+          const re  = new RegExp(`(${esc})`, 'i');
           box.innerHTML = items.map((item, i) => {
             const label = String(item.label || item);
-            const hi = label.replace(re, '<em>$1</em>');
-            const safe = label.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-            return `<div class="graph-search-result-item" data-idx="${i}" data-label="${label.replace(/"/g,'&quot;')}"
-              onmousedown="GraphViewer.selectEntity('${safe}');event.preventDefault();">${hi}</div>`;
+            const hi    = label.replace(re, '<em>$1</em>');
+            const safe  = label.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+            return `<div class="graph-search-result-item" data-idx="${i}" data-label="${label.replace(/"/g,'&quot;')}" onmousedown="GraphViewer.selectEntity('${safe}');event.preventDefault();">${hi}</div>`;
           }).join('');
         }
         box.classList.add('visible');
@@ -1486,28 +1558,18 @@
     },
 
     onSearchKeydown(e) {
-      const box = document.getElementById('graphSearchResults');
+      const box   = document.getElementById('graphSearchResults');
       const items = box.querySelectorAll('.graph-search-result-item:not(.no-results)');
       if (!items.length) { if (e.key === 'Enter') this.searchEntities(); return; }
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        this._focusIdx = Math.min(this._focusIdx + 1, items.length - 1);
-        this._highlightItem(items);
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        this._focusIdx = Math.max(this._focusIdx - 1, 0);
-        this._highlightItem(items);
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        if (this._focusIdx >= 0 && items[this._focusIdx]) {
-          this.selectEntity(items[this._focusIdx].dataset.label);
-        } else { this.searchEntities(); }
-      } else if (e.key === 'Escape') { this._closeDropdown(); }
+      if (e.key === 'ArrowDown') { e.preventDefault(); this._focusIdx = Math.min(this._focusIdx+1, items.length-1); this._hi(items); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); this._focusIdx = Math.max(this._focusIdx-1, 0); this._hi(items); }
+      else if (e.key === 'Enter') { e.preventDefault(); if (this._focusIdx >= 0 && items[this._focusIdx]) this.selectEntity(items[this._focusIdx].dataset.label); else this.searchEntities(); }
+      else if (e.key === 'Escape') this._closeDropdown();
     },
 
-    _highlightItem(items) {
-      items.forEach((el, i) => el.classList.toggle('focused', i === this._focusIdx));
-      if (items[this._focusIdx]) items[this._focusIdx].scrollIntoView({ block: 'nearest' });
+    _hi(items) {
+      items.forEach((el,i) => el.classList.toggle('focused', i===this._focusIdx));
+      if (items[this._focusIdx]) items[this._focusIdx].scrollIntoView({block:'nearest'});
     },
 
     selectEntity(label) {
@@ -1538,35 +1600,6 @@
       document.getElementById('graphEmpty').textContent = 'Open a workspace to view its knowledge graph';
       this._closeDropdown();
       document.getElementById('graphSearchInput').value = '';
-    },
-
-    initResize() {
-      const handle = document.getElementById('graphResizeHandle');
-      const panel  = document.getElementById('graphPanel');
-      let startY, startH;
-      handle.addEventListener('mousedown', e => {
-        e.preventDefault();
-        startY = e.clientY;
-        startH = panel.offsetHeight;
-        handle.classList.add('dragging');
-        document.body.style.cursor = 'row-resize';
-        document.body.style.userSelect = 'none';
-        const onMove = e2 => {
-          const dy = startY - e2.clientY;  // drag upward = taller
-          const newH = Math.max(160, Math.min(window.innerHeight * 0.75, startH + dy));
-          panel.style.height = newH + 'px';
-        };
-        const onUp = () => {
-          handle.classList.remove('dragging');
-          document.body.style.cursor = '';
-          document.body.style.userSelect = '';
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-          localStorage.setItem('rag-graph-height', panel.offsetHeight);
-        };
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-      });
     },
 
     destroy() { this.reset(); },
@@ -1912,6 +1945,49 @@
       GraphViewer.reloadForTheme();
     },
 
+    toggleSourcePanel() {
+      const panel = document.getElementById('pdfPanel');
+      const div1  = document.getElementById('divider');
+      const btn   = document.getElementById('leftPanelBtn');
+      const collapsed = panel.classList.toggle('collapsed');
+      div1.classList.toggle('hidden', collapsed);
+      btn.classList.toggle('active', collapsed);
+      localStorage.setItem('rag-left-collapsed', collapsed ? '1' : '');
+    },
+
+    _div2Inited: false,
+    _initDivider2() {
+      if (this._div2Inited) return;
+      this._div2Inited = true;
+      const div2  = document.getElementById('divider2');
+      const panel = document.getElementById('graphPanel');
+      let startX, startW;
+      div2.addEventListener('mousedown', e => {
+        e.preventDefault();
+        startX = e.clientX;
+        startW = panel.offsetWidth;
+        div2.classList.add('dragging');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        const onMove = e2 => {
+          const dx  = startX - e2.clientX;   // drag left = wider graph
+          const newW = Math.max(240, Math.min(window.innerWidth * 0.65, startW + dx));
+          panel.style.width = newW + 'px';
+          panel.style.minWidth = newW + 'px';
+        };
+        const onUp = () => {
+          div2.classList.remove('dragging');
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          localStorage.setItem('rag-graph-width', panel.offsetWidth);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    },
+
     _syncHljsTheme(theme) {
       const dark = document.getElementById('hljs-dark');
       const light = document.getElementById('hljs-light');
@@ -1999,17 +2075,35 @@
     UI.initDivider();
     UI.initTextarea();
     PDFViewer.init();
-    GraphViewer.initResize();
 
-    // Close graph search dropdown when clicking outside the search wrap
+    // Restore left panel collapse state
+    if (localStorage.getItem('rag-left-collapsed')) {
+      document.getElementById('pdfPanel').classList.add('collapsed');
+      document.getElementById('divider').classList.add('hidden');
+      document.getElementById('leftPanelBtn').classList.add('active');
+    }
+
+    // Restore graph panel width
+    const savedGW = parseInt(localStorage.getItem('rag-graph-width'));
+    if (savedGW > 0) {
+      const gp = document.getElementById('graphPanel');
+      gp.style.width    = savedGW + 'px';
+      gp.style.minWidth = savedGW + 'px';
+    }
+
+    // Close graph search dropdown when clicking outside
     document.addEventListener('mousedown', (e) => {
       const wrap = document.querySelector('.graph-search-wrap');
       if (wrap && !wrap.contains(e.target)) GraphViewer._closeDropdown();
     });
 
-    // Escape closes modal or search dropdown
+    // Escape closes modal, search dropdown, or fullscreen KG
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { UI.closeModal(); GraphViewer._closeDropdown(); }
+      if (e.key === 'Escape') {
+        UI.closeModal();
+        GraphViewer._closeDropdown();
+        if (GraphViewer._state === 'fullscreen') GraphViewer.toggleFullscreen();
+      }
     });
 
     // Restore API key

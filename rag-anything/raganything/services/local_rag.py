@@ -730,6 +730,7 @@ class LocalRagService:
             self.settings.image_wrapper_tokens_per_image,
         )
 
+        self.text_model_name = text_model
         self.text_client = AsyncOpenAI(api_key=text_key, base_url=text_base)
         self.vision_client = AsyncOpenAI(api_key=vision_key, base_url=vision_base)
         self._rag_instances: Dict[str, RAGAnything] = {}
@@ -842,6 +843,71 @@ class LocalRagService:
             str(kwargs.get("image_token_estimate_method", ""))
         )
         return await rag.aquery(query, **kwargs)
+
+    async def stream_query(
+        self,
+        doc_id: str,
+        query: str,
+        mode: str = "hybrid",
+        top_k: int = 10,
+        chunk_top_k: int = 5,
+        enable_rerank: bool = True,
+    ):
+        """Async generator that streams LLM answer tokens.
+
+        Builds a RAG prompt from aquery_data context, then calls the LLM
+        with stream=True so tokens are yielded as they arrive.
+        """
+        rag = await self.get_rag(doc_id)
+        await rag._ensure_lightrag_initialized()
+
+        from lightrag import QueryParam
+        param = QueryParam(
+            mode=mode, top_k=top_k, chunk_top_k=chunk_top_k,
+            enable_rerank=enable_rerank,
+        )
+        retrieval: dict = {}
+        try:
+            retrieval = await rag.lightrag.aquery_data(query, param=param)
+        except Exception:
+            pass
+
+        chunks = retrieval.get("data", {}).get("chunks", [])
+        ctx_parts = []
+        for i, c in enumerate(chunks):
+            content = (c.get("content") or "").strip()
+            if content:
+                ctx_parts.append(f"[{i + 1}] {content}")
+        context = "\n\n".join(ctx_parts) if ctx_parts else "No relevant context found."
+
+        system = (
+            "You are a helpful research assistant. Answer the question based on the "
+            "provided context. Use inline citation numbers [N] to reference specific "
+            "passages. Be concise but thorough."
+        )
+        user_msg = (
+            f"Context:\n{context}\n\n---\nQuestion: {query}\n\n"
+            "Please answer based on the context above, using [N] citations."
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+        try:
+            stream = await self.text_client.chat.completions.create(
+                model=self.text_model_name,
+                messages=messages,
+                temperature=self.settings.temperature,
+                max_tokens=self.settings.query_max_tokens,
+                stream=True,
+            )
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    yield delta.content
+        except Exception as exc:
+            self.logger.error("stream_query error: %s", exc)
+            yield f"\n\n[Streaming error: {exc}]"
 
 
 if __name__ == "__main__":
