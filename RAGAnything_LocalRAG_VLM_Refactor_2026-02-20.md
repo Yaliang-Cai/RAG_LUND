@@ -218,6 +218,53 @@
 
 ---
 
+## 增量更新（2026-03-09，MinerU 结果复用：删除 `rag_storage` 后避免重复解析）
+
+### 背景问题（改动前）
+- `parse_cache` 跟随 workspace（`rag_storage`）存储。
+- 当仅删除 `rag_storage`、但保留 `mineru_outputs` 时：
+  - `parse_document()` cache miss 后会直接重新调用 parser（MinerU 子进程）；
+  - 无法自动复用已存在的 `*_content_list.json`，导致重复解析、耗时显著增加。
+
+### 本次改动（最小增量，复用现有能力）
+- 仅改动：`raganything/processor.py`。
+- 在 `parse_document()` 中保留原有顺序：
+  1. 先查 `parse_cache`（不变）。
+  2. cache miss 时新增“磁盘结果复用”分支（仅 `parser=mineru`）：
+     - 扫描 `output_dir` 下已有 `*_content_list.json`；
+     - 取最新结果并做时间一致性检查（输出文件 mtime 必须不早于源文件）；
+     - 通过 `MineruParser._read_output_files(...)` 读取并复用。
+  3. 复用成功后回填 `parse_cache`（恢复后续稳定缓存命中）。
+  4. 若复用条件不满足，保持原逻辑走 parser 解析（不改变旧行为）。
+
+### 新增函数
+- `_resolve_mineru_method(...)`：统一 backend -> 目录名映射（如 `hybrid-* -> hybrid_auto`）。
+- `_find_latest_mineru_json(...)`：扫描并选择最新 `content_list` 结果文件。
+- `_try_load_existing_mineru_output(...)`：封装复用判定与读取流程。
+
+### 功能变化对照（相较未改动前）
+- 文档解析主链路：
+  - 之前：`parse_cache` miss => 一定重跑 MinerU。
+  - 现在：`parse_cache` miss => 先尝试复用已有 MinerU 输出；命中则不重跑。
+- 缓存行为：
+  - 之前：删除 `rag_storage` 后缓存断层，首次必慢。
+  - 现在：删除 `rag_storage` 后，若 `mineru_outputs` 仍在，可快速恢复并自动回填缓存。
+- 稳定性：
+  - 通过 mtime 约束避免复用过期解析结果。
+
+### 复核（按固定执行流程）
+1. 语法检查
+- `python -m py_compile raganything/processor.py` 通过。
+
+2. 逻辑级测试（内联，覆盖主链路/一致性/边界/反例）
+- 主链路：cache miss + 存在较新 MinerU 输出 => 成功复用，且未触发 `parse_pdf`。
+- 一致性：MinerU 输出早于源文件 => 不复用，回退到正常 `parse_pdf`。
+- 边界：无 MinerU 输出 => 不复用，走正常解析。
+- 反例：非复用目标类型（`.txt`）=> 不复用，走 generic parser。
+- 结果：`ALL_LOGIC_CHECKS_PASSED`。
+
+---
+
 ## 架构备忘：Query 完整链路（2026-02-26）
 
 > 纯参考性记录，无代码改动。覆盖从 HTTP 请求入口到最终 LLM 消息返回的每一层。

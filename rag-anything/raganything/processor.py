@@ -277,6 +277,124 @@ class ProcessorMixin:
         except Exception as e:
             self.logger.warning(f"Error storing to parse cache: {e}")
 
+    def _resolve_mineru_method(
+        self,
+        parse_method: Optional[str] = None,
+        **kwargs,
+    ) -> str:
+        """
+        Resolve MinerU output directory name from parse method and backend hint.
+        """
+        method = parse_method or self.config.parse_method
+        backend = kwargs.get("backend") or ""
+        if isinstance(backend, str):
+            if backend.startswith("vlm-"):
+                return "vlm"
+            if backend.startswith("hybrid-"):
+                return "hybrid_auto"
+        return method
+
+    def _find_latest_mineru_json(
+        self,
+        base_output_dir: Path,
+        file_stem: str,
+    ) -> Optional[Path]:
+        """
+        Find the latest MinerU content_list JSON under output directory.
+        """
+        candidates: list[Path] = []
+
+        direct_json = base_output_dir / f"{file_stem}_content_list.json"
+        if direct_json.exists():
+            candidates.append(direct_json)
+
+        stem_subdir = base_output_dir / file_stem
+        if stem_subdir.is_dir():
+            candidates.extend(stem_subdir.rglob(f"{file_stem}_content_list.json"))
+
+        if not candidates:
+            return None
+
+        try:
+            return max(candidates, key=lambda p: p.stat().st_mtime)
+        except Exception:
+            # Fallback to the first existing candidate if stat fails unexpectedly.
+            return candidates[0]
+
+    async def _try_load_existing_mineru_output(
+        self,
+        file_path: Path,
+        output_dir: str,
+        parse_method: str,
+        **kwargs,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Try loading already-generated MinerU output from disk.
+
+        This allows reuse of parser artifacts even when parse_cache is missing
+        (e.g., after deleting rag_storage/workspace).
+        """
+        if self.config.parser != "mineru":
+            return None
+
+        # Reuse only for file types that are handled via MinerU output artifacts.
+        if file_path.suffix.lower() not in {
+            ".pdf",
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".bmp",
+            ".tiff",
+            ".tif",
+            ".gif",
+            ".webp",
+            ".doc",
+            ".docx",
+            ".ppt",
+            ".pptx",
+            ".xls",
+            ".xlsx",
+            ".html",
+            ".htm",
+            ".xhtml",
+        }:
+            return None
+
+        base_output_dir = Path(output_dir) if output_dir else file_path.parent / "mineru_output"
+        if not base_output_dir.exists():
+            return None
+
+        file_stem = file_path.stem
+        latest_json = self._find_latest_mineru_json(base_output_dir, file_stem)
+        if latest_json is None:
+            return None
+
+        try:
+            source_mtime = file_path.stat().st_mtime
+            if latest_json.stat().st_mtime < source_mtime:
+                self.logger.debug(
+                    "Found MinerU output but it is older than source file, skip reuse: %s",
+                    latest_json,
+                )
+                return None
+        except Exception as exc:
+            self.logger.debug("Failed to compare mtime for MinerU reuse: %s", exc)
+
+        resolved_method = self._resolve_mineru_method(parse_method, **kwargs)
+        parser = MineruParser()
+        content_list, _ = parser._read_output_files(
+            base_output_dir,
+            file_stem,
+            method=resolved_method,
+        )
+        if not content_list:
+            return None
+
+        self.logger.info(
+            "Reusing existing MinerU output without re-parsing: %s", latest_json
+        )
+        return content_list
+
     async def parse_document(
         self,
         file_path: str,
@@ -327,6 +445,24 @@ class ProcessorMixin:
                     f"* Total blocks in cached content_list: {len(content_list)}"
                 )
             return content_list, doc_id
+
+        # Parse-cache miss: try to recover from existing MinerU output files.
+        reused_content = await self._try_load_existing_mineru_output(
+            file_path=file_path,
+            output_dir=output_dir,
+            parse_method=parse_method,
+            **kwargs,
+        )
+        if reused_content:
+            doc_id = self._generate_content_based_doc_id(reused_content)
+            await self._store_cached_result(
+                cache_key, reused_content, doc_id, file_path, parse_method, **kwargs
+            )
+            if display_stats:
+                self.logger.info(
+                    f"* Total blocks in reused MinerU content_list: {len(reused_content)}"
+                )
+            return reused_content, doc_id
 
         # Choose appropriate parsing method based on file extension
         ext = file_path.suffix.lower()
