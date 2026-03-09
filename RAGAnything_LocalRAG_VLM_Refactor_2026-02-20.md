@@ -702,6 +702,28 @@ uvicorn server.app:app --host 0.0.0.0 --port 9621
 - 语法：`operate.py/base.py/constants.py` 编译通过。
 - 逻辑断言：开关开/关两条预算分支行为均符合预期。
 
+## 增量更新（2026-03-09，默认模型回切 Qwen3-VL-30B-A3B-Instruct-FP8）
+
+### 摘要
+- 默认生成模型从 `Qwen3.5-35B-A3B-FP8` 回切到 `Qwen3-VL-30B-A3B-Instruct-FP8`。
+- 对齐三处入口：`raganything/constants.py`、`evaluate_local/DocBench/evaluate.py`、启动脚本别名。
+- `start_server_qwen3.5.sh` 精简为别名转发，避免双份启动参数长期漂移。
+
+### 变更文件
+- `raganything/constants.py`
+  - `DEFAULT_VISION_MODEL_PATH` -> `/data/y50056788/Yaliang/models/Qwen3-VL-30B-A3B-Instruct-FP8`
+  - `DEFAULT_LLM_MODEL_NAME` -> `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`
+- `evaluate_local/DocBench/evaluate.py`
+  - quick workflow 与 `RAG_MODEL_NAME` / `RAG_VISION_MODEL_PATH` 回切到 Qwen3-VL
+  - workflow 的 `cd` 路径修正为 `.../projects/rag-anything`（与脚本实际位置一致）
+- `start_server_qwen3.5.sh`
+  - 改为 `exec start_server_qwen3_vl.sh` 的兼容别名入口
+
+### 校验
+- 语法：`constants.py`、`evaluate.py`、`local_rag.py` 编译通过。
+- 一致性：三处入口不再引用 Qwen3.5 默认值。
+- 边界：保留 `LLM_MODEL_NAME`/`VISION_MODEL_PATH` 环境变量覆盖能力，不影响自定义部署。
+
 ## 增量更新（2026-03-04，默认模型切换到 Qwen3.5-35B-A3B-FP8）
 
 ### 摘要

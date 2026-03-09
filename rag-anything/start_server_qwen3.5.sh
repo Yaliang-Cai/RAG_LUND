@@ -16,8 +16,8 @@ python -m vllm.entrypoints.openai.api_server \
     --trust-remote-code \
     --port 8001 \
     --tensor-parallel-size 2 \
-    --gpu-memory-utilization 0.65 \
-    --max-model-len 65536 \
+    --gpu-memory-utilization 0.6 \
+    --max-model-len 49152 \
     --dtype bfloat16 \
     --quantization fp8 \
     --enable-chunked-prefill \

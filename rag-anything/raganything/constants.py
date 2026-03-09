@@ -100,7 +100,7 @@ DEFAULT_GRAPH_SEARCH_MAX_SAFE = 100     # hard cap for entity search results
 DEFAULT_TIKTOKEN_CACHE_DIR = "/data/y50056788/Yaliang/projects/lightrag/tiktoken_cache"
 DEFAULT_EMBEDDING_MODEL_PATH = "/data/h50056787/models/bge-m3"
 DEFAULT_RERANK_MODEL_PATH = "/data/h50056787/models/bge-reranker-v2-m3"
-DEFAULT_VISION_MODEL_PATH = "/data/y50056788/Yaliang/models/Qwen3.5-35B-A3B-FP8"
+DEFAULT_VISION_MODEL_PATH = "/data/y50056788/Yaliang/models/Qwen3-VL-30B-A3B-Instruct-FP8"
 DEFAULT_TOKENIZER_MODEL_PATH = DEFAULT_VISION_MODEL_PATH
 
 # =============================================================================
@@ -108,7 +108,7 @@ DEFAULT_TOKENIZER_MODEL_PATH = DEFAULT_VISION_MODEL_PATH
 # =============================================================================
 DEFAULT_VLLM_API_BASE = "http://localhost:8001/v1"
 DEFAULT_VLLM_API_KEY = "EMPTY"
-DEFAULT_LLM_MODEL_NAME = "Qwen/Qwen3.5-35B-A3B-FP8"
+DEFAULT_LLM_MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 DEFAULT_DEVICE = "cuda:0"
 
 # =============================================================================
