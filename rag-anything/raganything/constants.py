@@ -9,12 +9,18 @@ Usage:
     from raganything.constants import DEFAULT_WORKING_DIR_ROOT, DEFAULT_PARSER
 """
 
+from pathlib import Path as _Path
+
+# Root of the rag-anything package directory (constants.py lives at
+# raganything/constants.py, so .parent.parent → rag-anything/).
+_PKG_ROOT = _Path(__file__).resolve().parent.parent
+
 # =============================================================================
 # Directory defaults
 # =============================================================================
-DEFAULT_OUTPUT_DIR = "./rag-anything/output"
-DEFAULT_WORKING_DIR_ROOT = "./rag-anything/rag_workspace"
-DEFAULT_LOG_DIR = "./rag-anything/logs"
+DEFAULT_OUTPUT_DIR = str(_PKG_ROOT / "output")
+DEFAULT_WORKING_DIR_ROOT = str(_PKG_ROOT / "rag_workspace")
+DEFAULT_LOG_DIR = str(_PKG_ROOT / "logs")
 
 # =============================================================================
 # Parser configuration

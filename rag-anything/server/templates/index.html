@@ -818,6 +818,7 @@
     welcomeCleared: false,
     graphOpen: false,
     msgSeq: 0,
+    queryDefaults: { top_k: 20, chunk_top_k: 10, query_mode: 'hybrid', enable_rerank: true, vlm_enhanced: true },
   };
 
   const AppConfig = {
@@ -850,6 +851,10 @@
       if (!r.ok) throw new Error(r.status === 401 ? 'Invalid API key' : `Error ${r.status}`);
       return r.json();
     },
+    async getConfig() {
+      const r = await fetch('/config', { headers: this._headers() });
+      return r.ok ? r.json() : null;
+    },
     async getUploads(docId) {
       const r = await fetch(`/uploads/${docId}`, { headers: this._headers() });
       return r.ok ? r.json() : { files: [] };
@@ -867,8 +872,8 @@
       const body = {
         doc_id: docId, query,
         mode: opts.mode || 'hybrid',
-        top_k: opts.top_k || 10,
-        chunk_top_k: opts.chunk_top_k || 5,
+        top_k: opts.top_k || AppState.queryDefaults.top_k,
+        chunk_top_k: opts.chunk_top_k || AppState.queryDefaults.chunk_top_k,
         vlm_enhanced: opts.vlm_enhanced !== false,
         return_graph: opts.return_graph || false,
         graph_max_depth: opts.graph_max_depth || 2,
@@ -1309,8 +1314,9 @@
       try {
         const payload = {
           doc_id: AppState.currentDocId, query: text, mode,
-          top_k: 10, chunk_top_k: 5, vlm_enhanced: true,
-          enable_rerank: true, return_graph: AppState.graphOpen,
+          top_k: AppState.queryDefaults.top_k, chunk_top_k: AppState.queryDefaults.chunk_top_k,
+          vlm_enhanced: AppState.queryDefaults.vlm_enhanced,
+          enable_rerank: AppState.queryDefaults.enable_rerank, return_graph: AppState.graphOpen,
         };
         const resp = await fetch('/query/stream', {
           method: 'POST',
@@ -1634,7 +1640,8 @@
       this._resetView();
       this._setPlaceholder('Loading...', true);
       try {
-        const data = await API.getWorkspaces();
+        const [data, cfg] = await Promise.all([API.getWorkspaces(), API.getConfig()]);
+        if (cfg) Object.assign(AppState.queryDefaults, cfg);
         AppState.workspaces = data.workspaces || [];
         const sel = document.getElementById('workspaceSelect');
         if (AppState.workspaces.length === 0) {

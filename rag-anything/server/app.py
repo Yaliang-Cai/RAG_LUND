@@ -954,6 +954,21 @@ async def get_workspace_stats(
 
 
 # =========================================================================
+# 查询默认配置
+# =========================================================================
+
+@app.get("/config")
+async def get_config(_auth: None = Depends(verify_api_key)):
+    """Return server-side query defaults so the WebUI stays in sync with constants.py."""
+    return {
+        "top_k": DEFAULT_TOP_K,
+        "chunk_top_k": DEFAULT_CHUNK_TOP_K,
+        "query_mode": DEFAULT_QUERY_MODE,
+        "enable_rerank": DEFAULT_ENABLE_RERANK,
+        "vlm_enhanced": DEFAULT_VLM_ENHANCED,
+    }
+
+
 # 工作空间列表 (增强)
 # =========================================================================
 
