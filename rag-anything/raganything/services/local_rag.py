@@ -57,6 +57,7 @@ from raganything.constants import (
     DEFAULT_CHUNKING_STRATEGY,
     DEFAULT_CHUNK_TOKEN_SIZE,
     DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE,
+    DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION,
 )
 from raganything.query_message_repack import repack_query_messages
 
@@ -104,6 +105,9 @@ class LocalRagSettings:
     chunking_strategy: str = DEFAULT_CHUNKING_STRATEGY
     chunk_token_size: int = DEFAULT_CHUNK_TOKEN_SIZE
     chunk_overlap_token_size: int = DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE
+    mineru_vllm_gpu_memory_utilization: float = (
+        DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION
+    )
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -160,6 +164,12 @@ class LocalRagSettings:
             chunking_strategy=os.getenv("CHUNKING_STRATEGY", DEFAULT_CHUNKING_STRATEGY),
             chunk_token_size=int(os.getenv("CHUNK_SIZE", str(DEFAULT_CHUNK_TOKEN_SIZE))),
             chunk_overlap_token_size=int(os.getenv("CHUNK_OVERLAP_SIZE", str(DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE))),
+            mineru_vllm_gpu_memory_utilization=float(
+                os.getenv(
+                    "MINERU_VLLM_GPU_MEMORY_UTILIZATION",
+                    str(DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION),
+                )
+            ),
         )
 
 
@@ -704,6 +714,9 @@ class LocalRagService:
         )
         os.environ["IMAGE_WRAPPER_TOKENS_PER_IMAGE"] = str(
             self.settings.image_wrapper_tokens_per_image
+        )
+        os.environ["MINERU_VLLM_GPU_MEMORY_UTILIZATION"] = str(
+            self.settings.mineru_vllm_gpu_memory_utilization
         )
         self.lightrag_tokenizer = build_lightrag_tokenizer(
             self.settings.tokenizer_model_path,

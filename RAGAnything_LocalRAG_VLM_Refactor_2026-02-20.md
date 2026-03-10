@@ -833,3 +833,39 @@ python server/download_static.py
 uvicorn server.app:app --host 0.0.0.0 --port 9621
 # 日志输出：Offline mode: serving JS/CSS from server/static/
 ```
+
+## 增量更新（2026-03-10，MinerU 显存参数收敛为单一配置）
+
+### 目标
+- 将 MinerU 的 `--gpu-memory-utilization` 收敛为**单一配置源**：`MINERU_VLLM_GPU_MEMORY_UTILIZATION`。
+- 默认值统一为 `0.1`，并保证在 `LocalRagService` 路径下始终生效。
+
+### 改动范围
+- `rag-anything/raganything/constants.py`
+  - 新增 `DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION = 0.1`
+- `rag-anything/raganything/services/local_rag.py`
+  - `LocalRagSettings` 新增字段 `mineru_vllm_gpu_memory_utilization`
+  - `from_env()` 增加读取：`MINERU_VLLM_GPU_MEMORY_UTILIZATION`（未设置时回退 `0.1`）
+  - `LocalRagService.__init__()` 启动时写入：
+    `os.environ["MINERU_VLLM_GPU_MEMORY_UTILIZATION"] = <settings值>`
+
+### 本次明确不改
+- `server/templates/index.html`：不增加前端弹窗配置项
+- `server/app.py`：不增加 ingest API 参数
+- `rag-anything/raganything/parser.py`：保持按环境变量读取的原实现
+
+### 变更前后行为对比
+- 变更前：
+  - MinerU 显存参数依赖外部是否显式 `export` 环境变量，默认行为不统一。
+- 变更后：
+  - 由 `LocalRagSettings` 统一读取并回退到 `0.1`；
+  - `LocalRagService` 初始化时统一写入进程环境变量；
+  - parser 继续读取同名环境变量，因此无需改 parser 签名即可稳定生效。
+
+### 使用方式
+```bash
+# 可选：手动覆盖
+export MINERU_VLLM_GPU_MEMORY_UTILIZATION=0.1
+
+# 不设置时默认 0.1
+```

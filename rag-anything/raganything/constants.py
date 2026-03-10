@@ -23,6 +23,7 @@ DEFAULT_PARSER = "mineru"  # "mineru" or "docling"
 DEFAULT_PARSE_METHOD = "auto"  # "auto", "ocr", or "txt"
 DEFAULT_CONTENT_FORMAT = "minerU"
 DEFAULT_DISPLAY_CONTENT_STATS = True
+DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION = 0.1
 
 # =============================================================================
 # Multimodal processing
