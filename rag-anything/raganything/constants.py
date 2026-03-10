@@ -11,9 +11,10 @@ Usage:
 
 from pathlib import Path as _Path
 
-# Root of the rag-anything package directory (constants.py lives at
-# raganything/constants.py, so .parent.parent → rag-anything/).
-_PKG_ROOT = _Path(__file__).resolve().parent.parent
+# Data root: constants.py lives at raganything/constants.py
+# .parent.parent → RAG_LUND/rag-anything/
+# / "rag-anything" → RAG_LUND/rag-anything/rag-anything/  (matches web-server CWD behaviour)
+_PKG_ROOT = _Path(__file__).resolve().parent.parent / "rag-anything"
 
 # =============================================================================
 # Directory defaults
