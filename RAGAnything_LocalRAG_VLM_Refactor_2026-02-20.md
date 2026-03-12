@@ -869,3 +869,58 @@ export MINERU_VLLM_GPU_MEMORY_UTILIZATION=0.1
 
 # 不设置时默认 0.1
 ```
+
+## 增量更新（2026-03-12，KG 检索降噪：Hub 节点排序修复 + 实体/关系 Reranking）
+
+### 背景问题
+1. **Hub 节点主导关系排序**：local 模式中，种子实体的邻边按 `(edge_degree, weight)` 排序。度数高的 hub 节点（连接 100+ 实体）其所有邻边优先占满 context，与 query 相关性无关。
+2. **实体/关系无 Reranking**：chunks 有 CrossEncoder rerank，但实体和关系在 token 截断前没有任何 query-relevance 过滤，低相关内容直接消耗 token 预算。
+
+### 改动范围
+仅修改 `lightrag/lightrag/operate.py`，复用已有 `apply_rerank_if_enabled()`（`utils.py:2618`）。
+
+### 修复 1：Hub 噪声 — VDB cosine 分数权重化边排序（零额外开销）
+
+**原理**：种子实体已有 VDB cosine 相似度分数（`entities_vdb.query()` 返回的 `distance` 字段），将该分数传递给其邻边，作为排序的主要权重，替代纯结构性的 node degree。
+
+**Step A** — `_get_node_data()`（line ~5086）：
+- 在组装 entity dict 时新增 `"vdb_score": k.get("distance", 0.0)`，保留 VDB 相似度分数。
+
+**Step B** — `_find_most_related_edges_from_entities()`（line ~5162）：
+- 构建 `entity_name → vdb_score` 映射。
+- 每条边的 `_entity_relevance` = 两端点 vdb_score 的最大值。
+- 排序 key 改为 `(_entity_relevance, weight, rank)`，degree 降级为 tiebreaker。
+
+**效果**：高度数 hub 节点的边，若端点与 query 相似度低，被排到后面；与 query 相关的低度数实体的边优先进入 context。
+
+### 修复 2：实体/关系 Reranking — Stage 1.5（一次 CrossEncoder batch call）
+
+**原理**：在 `_build_query_context()` 的 Stage 1（search）和 Stage 2（token truncation）之间，插入可选的 reranking 步骤。
+
+**触发条件**：`query_param.enable_rerank=True` AND `global_config.get("rerank_model_func")` 存在。
+
+**新增函数** — `_rerank_kg_results()`（line ~4880）：
+- 为每个实体设置 `content = "{entity_name}: {description}"`。
+- 为每条关系设置 `content = "{src} → {tgt}: {description}"`。
+- 分别调用 `apply_rerank_if_enabled()` 对实体和关系做 CrossEncoder reranking。
+- `apply_rerank_if_enabled` 会在每个 dict 上写入 `rerank_score` 并按分数降序重排。
+
+**Stage 1.5 插入**（line ~4968）：
+- 在 `_build_query_context()` 的空值检查之后、Stage 2 之前调用。
+
+**效果**：CrossEncoder 一次 batch 处理 ~40 对（~20 实体 + ~20 关系），约 50-100ms GPU 时间，之后 token 截断按 rerank 顺序执行，最不相关的实体/关系自然被截掉。
+
+### 新增 import
+- `apply_rerank_if_enabled`（从 `lightrag.utils` 导入）
+
+### 效率影响
+| 修复 | 额外开销 | 说明 |
+|------|---------|------|
+| Hub 排序修复 | **零** | 只是改 sort key，dict lookup |
+| Entity/relation reranking | **~50-100ms/query** | 1 次 CrossEncoder batch，GPU 上极快 |
+
+两个修复都可以通过 `enable_rerank=False` 完全关闭（修复 1 始终生效，修复 2 受 rerank 开关控制）。
+
+### 校验
+- 语法：`ast.parse()` 通过。
+- Import：`apply_rerank_if_enabled` 在 `utils.py:2618` 已存在，接口兼容（接收 `list[dict]`，提取 `content` 字段打分）。

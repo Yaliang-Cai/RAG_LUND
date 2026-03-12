@@ -42,6 +42,7 @@ from lightrag.utils import (
     apply_source_ids_limit,
     merge_source_ids,
     make_relation_chunk_key,
+    apply_rerank_if_enabled,
 )
 from lightrag.base import (
     BaseGraphStorage,
@@ -4876,6 +4877,51 @@ async def _build_context_str(
     return result, final_data
 
 
+async def _rerank_kg_results(
+    query: str,
+    search_result: dict,
+    query_param: QueryParam,
+    global_config: dict,
+) -> dict:
+    """
+    Rerank KG search results (entities + relations) with CrossEncoder.
+    Replaces ordering of final_entities / final_relations in search_result.
+    Only called when enable_rerank=True and rerank_model_func is configured.
+    """
+    final_entities = search_result.get("final_entities", [])
+    final_relations = search_result.get("final_relations", [])
+
+    # Rerank entities
+    if final_entities:
+        for e in final_entities:
+            e["content"] = f"{e['entity_name']}: {e.get('description', '')}"
+        reranked = await apply_rerank_if_enabled(
+            query,
+            final_entities,
+            global_config,
+            enable_rerank=True,
+            top_n=len(final_entities),
+        )
+        search_result["final_entities"] = reranked
+
+    # Rerank relations
+    if final_relations:
+        for r in final_relations:
+            src = r.get("src_id") or (r["src_tgt"][0] if "src_tgt" in r else "")
+            tgt = r.get("tgt_id") or (r["src_tgt"][1] if "src_tgt" in r else "")
+            r["content"] = f"{src} → {tgt}: {r.get('description', '')}"
+        reranked = await apply_rerank_if_enabled(
+            query,
+            final_relations,
+            global_config,
+            enable_rerank=True,
+            top_n=len(final_relations),
+        )
+        search_result["final_relations"] = reranked
+
+    return search_result
+
+
 # Now let's update the old _build_query_context to use the new architecture
 async def _build_query_context(
     query: str,
@@ -4918,6 +4964,14 @@ async def _build_query_context(
         else:
             if not search_result["chunk_tracking"]:
                 return None
+
+    # Stage 1.5 (optional): Rerank entities and relations by query relevance
+    if query_param.enable_rerank and text_chunks_db.global_config.get(
+        "rerank_model_func"
+    ):
+        search_result = await _rerank_kg_results(
+            query, search_result, query_param, text_chunks_db.global_config
+        )
 
     # Stage 2: Apply token truncation for LLM efficiency
     truncation_result = await _apply_token_truncation(
@@ -5034,6 +5088,7 @@ async def _get_node_data(
             **n,
             "entity_name": k["entity_name"],
             "rank": d,
+            "vdb_score": k.get("distance", 0.0),
             "created_at": k.get("created_at"),
         }
         for k, n, d in zip(results, node_datas, node_degrees)
@@ -5104,8 +5159,21 @@ async def _find_most_related_edges_from_entities(
             }
             all_edges_data.append(combined)
 
+    # Weight edges by endpoint entity VDB relevance scores (hub noise fix)
+    entity_score_map = {
+        dp["entity_name"]: dp.get("vdb_score", 0.0) for dp in node_datas
+    }
+    for edge in all_edges_data:
+        src, tgt = edge["src_tgt"]
+        edge["_entity_relevance"] = max(
+            entity_score_map.get(src, 0.0), entity_score_map.get(tgt, 0.0)
+        )
+
+    # Sort: query relevance first, weight secondary, degree as tiebreaker
     all_edges_data = sorted(
-        all_edges_data, key=lambda x: (x["rank"], x["weight"]), reverse=True
+        all_edges_data,
+        key=lambda x: (x["_entity_relevance"], x.get("weight", 1.0), x["rank"]),
+        reverse=True,
     )
 
     return all_edges_data
