@@ -991,3 +991,35 @@ export MINERU_VLLM_GPU_MEMORY_UTILIZATION=0.1
 - 主链路：开关 False/True 对应 profile、one_sentence、prompt 文件映射正确。
 - 一致性：官方 prompt 与 RAG-Anything prompt 均可完成占位符替换；RAG-Anything 模板不依赖 `ref_text`。
 - 边界/反例：prompt 文件不存在时抛出并被上层友好处理（evaluate 早返回并记录错误）。
+
+## 增量更新（2026-03-12，MinerU 输出目录选择去旧化）
+
+### 背景
+- 在同一 `file_stem` 下可能并存多个 MinerU 子目录（如 `auto/`、`hybrid_auto/`、`vlm/`）。
+- 旧逻辑在扫描到第一个候选子目录后立即返回，存在读取旧产物的风险。
+
+### 改动范围
+- 仅修改：`rag-anything/raganything/parser.py`
+- 函数：`MineruParser._read_output_files(...)`
+
+### 变更前后行为
+- 变更前：
+  - 扫描到第一个包含 `*_content_list.json` 的子目录即使用；
+  - 多目录并存时可能命中旧目录（取决于迭代顺序）。
+- 变更后：
+  - 收集所有候选子目录；
+  - 按 `*_content_list.json` 的 `mtime` 选择最新候选；
+  - 若 `stat()` 异常则回退到首个候选；
+  - 无候选时保持原有 `method` 路径回退逻辑不变。
+
+### 价值
+- 与 `processor.py` 的“复用最新 MinerU 输出”策略保持一致，减少 cache miss 复用阶段读到旧 JSON 的概率。
+- 仅替换选择策略，不新增并行分支，不改变外部接口。
+
+### 校验（按固定执行流程）
+1. 语法
+- `python -m py_compile rag-anything/raganything/parser.py` 通过。
+
+2. 逻辑级断言（内联）
+- 主链路：同一文档存在 `auto/` 与 `hybrid_auto/` 两个候选时，命中最新 `mtime` 的 JSON。
+- 边界：无扫描候选时，仍能按 `method` 路径正常回退读取。

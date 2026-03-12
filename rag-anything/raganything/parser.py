@@ -823,26 +823,35 @@ class MineruParser(Parser):
 
         file_stem_subdir = output_dir / file_stem
         if file_stem_subdir.is_dir():
-            # Scan for actual output subdirectory instead of assuming method name
-            found = False
+            # Scan all candidate subdirectories and pick the newest JSON output.
+            # This avoids accidentally reading stale outputs when multiple
+            # backends/methods (e.g. auto/, hybrid_auto/, vlm/) coexist.
+            candidates: list[tuple[Path, Path]] = []
             for subdir in file_stem_subdir.iterdir():
                 if not subdir.is_dir():
                     continue
-                # Check if this subdirectory contains the expected JSON output file
                 candidate_json = subdir / f"{file_stem}_content_list.json"
                 if candidate_json.exists():
-                    # Found the actual output directory
-                    md_file = subdir / f"{file_stem}.md"
-                    json_file = candidate_json
-                    images_base_dir = subdir
-                    found = True
-                    cls.logger.info(
-                        f"Found MinerU output in subdirectory: {subdir.name}"
-                    )
-                    break
+                    candidates.append((subdir, candidate_json))
 
-            # Fallback to method-based path if scanning didn't find output
-            if not found:
+            if candidates:
+                try:
+                    selected_subdir, selected_json = max(
+                        candidates,
+                        key=lambda pair: pair[1].stat().st_mtime,
+                    )
+                except Exception:
+                    # Fallback to first candidate if mtime stat fails unexpectedly.
+                    selected_subdir, selected_json = candidates[0]
+
+                md_file = selected_subdir / f"{file_stem}.md"
+                json_file = selected_json
+                images_base_dir = selected_subdir
+                cls.logger.info(
+                    f"Found MinerU output in subdirectory: {selected_subdir.name}"
+                )
+            else:
+                # Fallback to method-based path if scanning didn't find output
                 cls.logger.debug(
                     f"No output found by scanning, falling back to method-based path: {method}"
                 )
