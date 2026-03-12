@@ -30,7 +30,7 @@ import os
 # ===== Limit MinerU internal vLLM GPU memory usage =====
 # 0.10 = 4.74GB, 0.15 = 7.1GB, 0.20 = 9.47GB
 # Recommended 0.15: MinerU ~= 7.1GB, GPU0 total ~= 12GB
-os.environ['MINERU_VLLM_GPU_MEMORY_UTILIZATION'] = '0.15'
+os.environ['MINERU_VLLM_GPU_MEMORY_UTILIZATION'] = '0.1'
 # =================================================
 
 import json
@@ -39,7 +39,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 from openai import AsyncOpenAI
 
 # Add parent directory to path to import local_rag
@@ -64,6 +64,7 @@ PROMPT_DUMP_DIR = OUTPUT_DIR / "prompt_dumps"
 PROMPT_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 FINAL_MESSAGES_DUMP_DIR = OUTPUT_DIR / "final_vlm_messages"
 FINAL_MESSAGES_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+GENERATION_CONFIG_FILE = OUTPUT_DIR / "generation_config.json"
 
 # RAG working directory (one isolated graph per document)
 # Example output: docbench_results/rag_workspaces/docbench_0/, docbench_1/, ...
@@ -83,18 +84,125 @@ RAG_VISION_MODEL_PATH = "/data/y50056788/Yaliang/models/Qwen3-VL-30B-A3B-Instruc
 
 RAG_MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 JUDGE_MODEL_NAME = "Qwen/Qwen2.5-32B-Instruct"
+DOCBENCH_EVAL_PROMPT_FILENAME = "evaluation_prompt.txt"
+RAGANYTHING_EVAL_PROMPT_FILENAME = "evaluation_prompt_RAG-Anything.txt"
 
 # Query parameters (DocBench tuned)
 DOCBENCH_QUERY_PARAMS = {
     "mode": "hybrid",
-    "top_k": 30,
-    "chunk_top_k": 50,
+    "top_k": 40,
+    "chunk_top_k": 20,
     "vlm_enhanced": True,
     "multimodal_top_k": 5,
     "image_token_estimate_method": "qwen_vl",
     "image_token_model_name_or_path": RAG_VISION_MODEL_PATH,
     "image_wrapper_tokens_per_image": 2,
 }
+
+ONE_SENTENCE_USER_PROMPT = (
+    "Provide the final answer in exactly one sentence. "
+    "Do not include headings, bullet points, numbering, code blocks, or a "
+    "references section."
+)
+
+_SENTENCE_END_RE = re.compile(r"[.!?。！？]")
+_BINARY_SCORE_RE = re.compile(r"(?<!\d)([01])(?!\d)")
+
+
+def _build_docbench_query_params(one_sentence: bool = False) -> dict[str, Any]:
+    query_params = dict(DOCBENCH_QUERY_PARAMS)
+    if one_sentence:
+        query_params["user_prompt"] = ONE_SENTENCE_USER_PROMPT
+        query_params["response_type"] = "Single Sentence"
+    return query_params
+
+
+def _resolve_eval_setup(use_raganything_eval_setup: bool) -> tuple[str, bool, str]:
+    if use_raganything_eval_setup:
+        return (
+            "rag_anything",
+            True,
+            RAGANYTHING_EVAL_PROMPT_FILENAME,
+        )
+    return (
+        "docbench_official",
+        False,
+        DOCBENCH_EVAL_PROMPT_FILENAME,
+    )
+
+
+def _load_eval_prompt(eval_prompt_filename: str) -> str:
+    eval_prompt_file = SCRIPT_DIR / eval_prompt_filename
+    if not eval_prompt_file.exists():
+        raise FileNotFoundError(f"Evaluation prompt file not found: {eval_prompt_file}")
+    with open(eval_prompt_file, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _save_generation_config(
+    *,
+    one_sentence: bool,
+    profile_name: str,
+    eval_prompt_filename: str,
+    effective_query_params: dict[str, Any],
+    start_id: int,
+    end_id: int,
+    resume: bool,
+) -> None:
+    payload = {
+        "profile_name": profile_name,
+        "one_sentence": bool(one_sentence),
+        "eval_prompt_filename": eval_prompt_filename,
+        "effective_query_params": dict(effective_query_params),
+        "start_id": int(start_id),
+        "end_id": int(end_id),
+        "resume": bool(resume),
+    }
+    with open(GENERATION_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _load_generation_config() -> dict[str, Any] | None:
+    if not GENERATION_CONFIG_FILE.exists():
+        return None
+    try:
+        with open(GENERATION_CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception as exc:
+        logger.warning(f"Failed to load generation config: {exc}")
+    return None
+
+
+def _coerce_one_sentence(text: str) -> str:
+    """Best-effort one-sentence post-process for DocBench generation."""
+    if not text:
+        return ""
+
+    cleaned = str(text)
+    # Remove trailing references section if model still emits it.
+    cleaned = re.split(r"(?im)^\s*#{1,6}\s*references\s*$", cleaned, maxsplit=1)[0]
+    # Remove fenced code blocks and citation bullet lines.
+    cleaned = re.sub(r"```[\s\S]*?```", " ", cleaned)
+    cleaned = re.sub(r"(?im)^\s*[-*]\s*\[\d+\].*$", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    if not cleaned:
+        return ""
+
+    match = _SENTENCE_END_RE.search(cleaned)
+    if match:
+        return cleaned[: match.end()].strip()
+    return cleaned
+
+
+def _normalize_max_async(max_async: int, default: int = 4) -> int:
+    """Clamp async worker count to a safe positive integer."""
+    try:
+        return max(1, int(max_async))
+    except Exception:
+        return default
 
 # ==========================================
 # Logging
@@ -114,6 +222,96 @@ logger = logging.getLogger(__name__)
 logging.getLogger("raganything").setLevel(logging.INFO)
 logging.getLogger("raganything.processor").setLevel(logging.INFO)
 logging.getLogger("raganything.parser").setLevel(logging.INFO)
+
+
+def _append_jsonl_record(file_obj: TextIO, payload: dict[str, Any]) -> None:
+    file_obj.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    file_obj.flush()
+
+
+def _find_doc_files(folder_path: Path) -> tuple[Path | None, Path | None]:
+    pdf_file: Path | None = None
+    qa_file: Path | None = None
+    for file in folder_path.iterdir():
+        if file.suffix.lower() == ".pdf":
+            pdf_file = file
+        elif file.name.endswith("_qa.jsonl"):
+            qa_file = file
+    return pdf_file, qa_file
+
+
+def _build_generation_result(
+    doc_name: str,
+    question: str,
+    answer: str,
+    qa_item: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "doc_id": doc_name,
+        "question": question,
+        "sys_ans": answer,
+        "ref_ans": qa_item["answer"],
+        "type": qa_item["type"],
+        "evidence": qa_item["evidence"],
+    }
+
+
+def _build_eval_prompt(eval_prompt: str, item: dict[str, Any]) -> str:
+    return (
+        eval_prompt.replace("{{question}}", item["question"])
+        .replace("{{sys_ans}}", item["sys_ans"])
+        .replace("{{ref_ans}}", item["ref_ans"])
+        .replace("{{ref_text}}", item["evidence"])
+    )
+
+
+def _parse_eval_score(eval_result: str) -> int:
+    head = (eval_result or "")[:20]
+    match = _BINARY_SCORE_RE.search(head)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+async def _cleanup_rag_instance(service: LocalRagService, rag_doc_id: str) -> None:
+    rag_instances = getattr(service, "_rag_instances", None)
+    if not isinstance(rag_instances, dict):
+        return
+
+    rag_instance = rag_instances.get(rag_doc_id)
+    if rag_instance is None:
+        logger.info(f"No RAG instance to clean for {rag_doc_id}")
+        return
+
+    try:
+        await rag_instance.finalize_storages()
+        rag_instances.pop(rag_doc_id, None)
+        logger.info(f"Cleaned up RAG instance for {rag_doc_id}")
+    except Exception as exc:
+        logger.warning(f"Failed to cleanup RAG instance {rag_doc_id}: {exc}")
+
+
+def _clear_cuda_cache(doc_id: int) -> None:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+
+        mem_before = torch.cuda.memory_allocated(0) / 1024**3
+        reserved_before = torch.cuda.memory_reserved(0) / 1024**3
+        torch.cuda.empty_cache()
+        mem_after = torch.cuda.memory_allocated(0) / 1024**3
+        reserved_after = torch.cuda.memory_reserved(0) / 1024**3
+        freed = reserved_before - reserved_after
+        logger.info(
+            f"GPU cache cleared after doc {doc_id}: "
+            f"Allocated {mem_before:.2f}→{mem_after:.2f} GB, "
+            f"Reserved {reserved_before:.2f}→{reserved_after:.2f} GB "
+            f"(freed {freed:.2f} GB)"
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to clear GPU cache after doc {doc_id}: {exc}")
 
 
 def _extract_reference_lines(raw_prompt: str) -> list[str]:
@@ -329,6 +527,9 @@ async def generate_answers(
     resume: bool = True,
     dump_raw_prompt: bool = False,
     dump_final_messages: bool = False,
+    one_sentence: bool = False,
+    profile_name: str = "docbench_official",
+    eval_prompt_filename: str = DOCBENCH_EVAL_PROMPT_FILENAME,
 ):
     """
     为 DocBench 生成系统答案
@@ -343,6 +544,17 @@ async def generate_answers(
         dump_final_messages: 是否落盘最终发送给 VLM 的 messages（用于检查引用列表）
     """
     output_file = OUTPUT_DIR / "system_answers.jsonl"
+    query_params = _build_docbench_query_params(one_sentence=one_sentence)
+    _save_generation_config(
+        one_sentence=one_sentence,
+        profile_name=profile_name,
+        eval_prompt_filename=eval_prompt_filename,
+        effective_query_params=query_params,
+        start_id=start_id,
+        end_id=end_id,
+        resume=resume,
+    )
+    logger.info(f"🧾 Generation config saved: {GENERATION_CONFIG_FILE}")
     
     # 显式配置路径，保证评测时每个文档目录和日志目录可控
     settings = _build_docbench_settings()
@@ -383,13 +595,7 @@ async def generate_answers(
                 continue
             
             # 查找 PDF 和 QA 文件
-            pdf_file = None
-            qa_file = None
-            for file in folder_path.iterdir():
-                if file.suffix == '.pdf':
-                    pdf_file = file
-                elif file.name.endswith('_qa.jsonl'):
-                    qa_file = file
+            pdf_file, qa_file = _find_doc_files(folder_path)
             
             if not pdf_file or not qa_file:
                 logger.warning(f"⚠️  [{doc_id}] Missing PDF or QA file")
@@ -398,10 +604,10 @@ async def generate_answers(
             logger.info(f"\n{'='*80}")
             logger.info(f"📄 [{doc_id}/{end_id-1}] Processing: {pdf_file.name}")
             logger.info(f"{'='*80}")
-            
+            rag_doc_id = f"docbench_{doc_name}"
+
             try:
                 # 每个文档独立的 ID
-                rag_doc_id = f"docbench_{doc_name}"
                 _set_doc_workspace(rag_doc_id)
                 logger.info(f"🔧 Processing: {pdf_file.name} → doc_id: {rag_doc_id}")
                 
@@ -427,7 +633,8 @@ async def generate_answers(
                 for qa_idx, qa_item in enumerate(qa_list):
                     question = qa_item['question']
                     logger.info(f"  [{qa_idx+1}/{len(qa_list)}] {question[:60]}...")
-                    
+                    answer = ""
+
                     try:
                         if dump_raw_prompt:
                             try:
@@ -498,12 +705,18 @@ async def generate_answers(
                             answer = await service.query(
                                 doc_id=rag_doc_id,
                                 query=question,
-                                **DOCBENCH_QUERY_PARAMS
+                                **query_params
                             )
                         finally:
                             if dump_final_messages:
                                 for completions_api, original_create in patched_completions:
                                     completions_api.create = original_create
+
+                        if one_sentence:
+                            one_sentence_answer = _coerce_one_sentence(answer)
+                            if one_sentence_answer != answer:
+                                logger.info("      One-sentence postprocess applied.")
+                            answer = one_sentence_answer
 
                         if dump_final_messages:
                             if captured_calls:
@@ -523,86 +736,23 @@ async def generate_answers(
                                 )
                         
                         logger.info(f"      ✓ Answer: {answer[:80]}...")
-                        
-                        # 保存结果（符合 DocBench 格式）
-                        result = {
-                            'doc_id': doc_name,                    # 文档ID（用于匹配）
-                            'question': question,                   # 问题
-                            'sys_ans': answer,                      # 系统答案
-                            'ref_ans': qa_item['answer'],          # 参考答案
-                            'type': qa_item['type'],                # 问题类型
-                            'evidence': qa_item['evidence'],        # 证据文本
-                        }
-                        f_out.write(json.dumps(result, ensure_ascii=False) + '\n')
-                        f_out.flush()
-                        
-                    except Exception as e:
-                        logger.error(f"      ✗ Error: {e}")
-                        # 保存空答案
-                        result = {
-                            'doc_id': doc_name,
-                            'question': question,
-                            'sys_ans': "",
-                            'ref_ans': qa_item['answer'],
-                            'type': qa_item['type'],
-                            'evidence': qa_item['evidence'],
-                        }
-                        f_out.write(json.dumps(result, ensure_ascii=False) + '\n')
-                        f_out.flush()
+                    except Exception as exc:
+                        logger.error(f"      ✗ Error: {exc}")
+
+                    result = _build_generation_result(
+                        doc_name=doc_name,
+                        question=question,
+                        answer=answer,
+                        qa_item=qa_item,
+                    )
+                    _append_jsonl_record(f_out, result)
                 
                 logger.info(f"✅ [{doc_id}] Completed: {len(qa_list)} questions answered\n")
-                
-                # 清理当前文档的 RAG 实例，释放内存
-                # 注意：必须 await finalize_storages() 而不是调用 close()
-                # 因为 close() 在 async 上下文中会异步调度清理，不会等待完成
-                if rag_doc_id in service._rag_instances:
-                    try:
-                        # 直接调用 finalize_storages() 并等待完成，确保资源真正释放
-                        await service._rag_instances[rag_doc_id].finalize_storages()
-                        del service._rag_instances[rag_doc_id]
-                        logger.info(f"🧹 Cleaned up RAG instance for {rag_doc_id}")
-                    except Exception as cleanup_error:
-                        logger.warning(f"⚠️  Failed to cleanup RAG instance: {cleanup_error}")
-                else:
-                    logger.info(f"ℹ️  No RAG instance to clean for {rag_doc_id}")
-                
-                # 每个文档处理后清理 GPU 缓存，防止内存泄漏累积
-                # 记录清理前后的 GPU 内存，验证是否真的释放了
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        # 记录清理前的内存
-                        mem_before = torch.cuda.memory_allocated(0) / 1024**3  # GB
-                        reserved_before = torch.cuda.memory_reserved(0) / 1024**3  # GB
-                        
-                        torch.cuda.empty_cache()
-                        
-                        # 记录清理后的内存
-                        mem_after = torch.cuda.memory_allocated(0) / 1024**3  # GB
-                        reserved_after = torch.cuda.memory_reserved(0) / 1024**3  # GB
-                        
-                        freed = reserved_before - reserved_after
-                        logger.info(
-                            f"🧹 GPU cache cleared after doc {doc_id}: "
-                            f"Allocated {mem_before:.2f}→{mem_after:.2f} GB, "
-                            f"Reserved {reserved_before:.2f}→{reserved_after:.2f} GB "
-                            f"(freed {freed:.2f} GB)"
-                        )
-                except Exception as cache_error:
-                    logger.warning(f"⚠️  Failed to clear GPU cache: {cache_error}")
-                
-            except Exception as e:
-                import traceback
-                logger.error(f"❌ [{doc_id}] Error: {e}")
-                logger.error(f"❌ [{doc_id}] Traceback:\n{traceback.format_exc()}")
-                # 即使出错也尝试清理
-                if 'rag_doc_id' in locals() and rag_doc_id in service._rag_instances:
-                    try:
-                        await service._rag_instances[rag_doc_id].finalize_storages()
-                        del service._rag_instances[rag_doc_id]
-                    except:
-                        pass
-                continue
+            except Exception as exc:
+                logger.exception(f"❌ [{doc_id}] Error: {exc}")
+            finally:
+                await _cleanup_rag_instance(service, rag_doc_id)
+                _clear_cuda_cache(doc_id)
     
     logger.info(f"\n{'='*80}")
     logger.info(f"✅ Answer generation complete!")
@@ -614,7 +764,11 @@ async def generate_answers(
 # Step 2: Evaluate Answers
 # ==========================================
 
-async def evaluate_answers(resume: bool = True):
+async def evaluate_answers(
+    resume: bool = True,
+    max_async_judge: int = 4,
+    eval_prompt_filename: str = DOCBENCH_EVAL_PROMPT_FILENAME,
+):
     """
     使用 Qwen2.5-32B 评估系统答案
     
@@ -625,6 +779,7 @@ async def evaluate_answers(resume: bool = True):
     """
     input_file = OUTPUT_DIR / "system_answers.jsonl"
     output_file = OUTPUT_DIR / "eval_results.jsonl"
+    max_async_judge = _normalize_max_async(max_async_judge)
     
     if not input_file.exists():
         logger.error(f"❌ Input file not found: {input_file}")
@@ -632,9 +787,11 @@ async def evaluate_answers(resume: bool = True):
         return
     
     # 加载评估 prompt
-    eval_prompt_file = SCRIPT_DIR / "evaluation_prompt.txt"
-    with open(eval_prompt_file, 'r', encoding='utf-8') as f:
-        eval_prompt = f.read()
+    try:
+        eval_prompt = _load_eval_prompt(eval_prompt_filename)
+    except FileNotFoundError as exc:
+        logger.error(f"❌ {exc}")
+        return
     
     # 加载系统答案
     with open(input_file, 'r', encoding='utf-8') as f:
@@ -656,32 +813,45 @@ async def evaluate_answers(resume: bool = True):
         base_url=JUDGE_API_BASE
     )
     
+    pending_items: list[tuple[int, dict[str, Any]]] = []
+    skipped = 0
+    for i, item in enumerate(answers, 1):
+        key = f"{item['doc_id']}_{item['question']}"
+        if resume and key in evaluated_keys:
+            skipped += 1
+            continue
+        pending_items.append((i, item))
+
     logger.info(f"\n{'='*80}")
-    logger.info(f"⚖️  Evaluating {len(answers)} answers using {JUDGE_MODEL_NAME}")
+    logger.info(
+        f"⚖️  Evaluating {len(pending_items)}/{len(answers)} answers using "
+        f"{JUDGE_MODEL_NAME} (max_async_judge={max_async_judge})"
+    )
+    logger.info(f"🧾 Eval prompt: {eval_prompt_filename}")
+    if skipped:
+        logger.info(f"⏭️  Skipped {skipped} already-evaluated answers")
     logger.info(f"{'='*80}\n")
-    
-    # 评估每个答案
-    with open(output_file, 'a', encoding='utf-8') as f_out:
-        for i, item in enumerate(answers, 1):
-            key = f"{item['doc_id']}_{item['question']}"
-            
-            # 跳过已评估
-            if resume and key in evaluated_keys:
-                logger.info(f"⏭️  [{i}/{len(answers)}] Already evaluated, skipping")
-                continue
-            
-            logger.info(f"\n[{i}/{len(answers)}] Doc {item['doc_id']}")
-            logger.info(f"  Q: {item['question'][:60]}...")
-            logger.info(f"  A: {item['sys_ans'][:60]}...")
-            
-            # 构建评估 prompt
-            cur_prompt = eval_prompt.replace('{{question}}', item['question']) \
-                                     .replace('{{sys_ans}}', item['sys_ans']) \
-                                     .replace('{{ref_ans}}', item['ref_ans']) \
-                                     .replace('{{ref_text}}', item['evidence'])
-            
+
+    if not pending_items:
+        logger.info("No pending answers to evaluate.")
+        return
+
+    semaphore = asyncio.Semaphore(max_async_judge)
+    write_lock = asyncio.Lock()
+    progress_lock = asyncio.Lock()
+    done_count = 0
+    total_pending = len(pending_items)
+
+    async def _evaluate_one(i: int, item: dict[str, Any]) -> None:
+        nonlocal done_count
+        logger.info(f"\n[{i}/{len(answers)}] Doc {item['doc_id']}")
+        logger.info(f"  Q: {item['question'][:60]}...")
+        logger.info(f"  A: {item['sys_ans'][:60]}...")
+
+        cur_prompt = _build_eval_prompt(eval_prompt, item)
+
+        async with semaphore:
             try:
-                # 调用 Judge 模型
                 response = await judge_client.chat.completions.create(
                     model=JUDGE_MODEL_NAME,
                     messages=[
@@ -691,32 +861,33 @@ async def evaluate_answers(resume: bool = True):
                     temperature=0.0,
                     max_tokens=50
                 )
-                
                 eval_result = response.choices[0].message.content.strip()
-                
-                # 解析分数（在前20个字符中查找 0 或 1）
-                score = 1 if '1' in eval_result[:20] else 0
+                score = _parse_eval_score(eval_result)
                 logger.info(f"  ⚖️  Score: {score} | {eval_result[:40]}...")
-                
-                # 保存评估结果
                 result = {
                     **item,
                     'eval': eval_result,
                     'score': score
                 }
-                f_out.write(json.dumps(result, ensure_ascii=False) + '\n')
-                f_out.flush()
-                
             except Exception as e:
                 logger.error(f"  ❌ Error: {e}")
-                # 保存错误结果（score=0）
                 result = {
                     **item,
                     'eval': f"[ERROR: {str(e)}]",
                     'score': 0
                 }
-                f_out.write(json.dumps(result, ensure_ascii=False) + '\n')
-                f_out.flush()
+
+        async with write_lock:
+            _append_jsonl_record(f_out, result)
+
+        async with progress_lock:
+            done_count += 1
+            if done_count == total_pending or done_count % max(1, total_pending // 10) == 0:
+                logger.info(f"Progress: {done_count}/{total_pending}")
+
+    with open(output_file, 'a', encoding='utf-8') as f_out:
+        tasks = [asyncio.create_task(_evaluate_one(i, item)) for i, item in pending_items]
+        await asyncio.gather(*tasks)
     
     logger.info(f"\n{'='*80}")
     logger.info(f"✅ Evaluation complete!")
@@ -728,8 +899,24 @@ async def evaluate_answers(resume: bool = True):
 # Step 3: Calculate Statistics
 # ==========================================
 
-def _build_experiment_config() -> dict[str, Any]:
+def _build_experiment_config(
+    generation_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     settings = _build_docbench_settings()
+    effective_query_params = dict(DOCBENCH_QUERY_PARAMS)
+    profile_name = "docbench_official"
+    one_sentence = None
+    eval_prompt_filename = DOCBENCH_EVAL_PROMPT_FILENAME
+    if generation_config:
+        cfg_query_params = generation_config.get("effective_query_params")
+        if isinstance(cfg_query_params, dict):
+            effective_query_params = dict(cfg_query_params)
+        if isinstance(generation_config.get("one_sentence"), bool):
+            one_sentence = generation_config["one_sentence"]
+        if isinstance(generation_config.get("profile_name"), str):
+            profile_name = generation_config["profile_name"]
+        if isinstance(generation_config.get("eval_prompt_filename"), str):
+            eval_prompt_filename = generation_config["eval_prompt_filename"]
 
     return {
         "rag_generation": {
@@ -755,7 +942,12 @@ def _build_experiment_config() -> dict[str, Any]:
             "image_token_model_name_or_path": settings.image_token_model_name_or_path,
             "image_wrapper_tokens_per_image": settings.image_wrapper_tokens_per_image,
         },
-        "query_params": dict(DOCBENCH_QUERY_PARAMS),
+        "evaluation_profile": {
+            "name": profile_name,
+            "eval_prompt_file": eval_prompt_filename,
+        },
+        "one_sentence": one_sentence,
+        "query_params": effective_query_params,
         "paths": {
             "script_dir": str(SCRIPT_DIR),
             "data_root": str(DATA_ROOT),
@@ -764,6 +956,22 @@ def _build_experiment_config() -> dict[str, Any]:
             "output_md_dir": str(OUTPUT_MD_DIR),
         },
     }
+
+
+TYPE_GROUP_ORDER = ("Txt.", "Mm.", "Una.")
+TYPE_GROUP_MAPPING = {
+    "text-only": "Txt.",
+    "multimodal-f": "Mm.",
+    "multimodal-t": "Mm.",
+    "meta-data": "Mm.",
+    "una-web": "Una.",
+    "unanswerable": "Una.",
+}
+
+
+def _map_type_group(qtype: Any) -> str | None:
+    normalized = str(qtype or "").strip().lower().replace("_", "-").replace(" ", "-")
+    return TYPE_GROUP_MAPPING.get(normalized)
 
 
 def calculate_statistics():
@@ -778,6 +986,7 @@ def calculate_statistics():
     # 加载评估结果
     with open(result_file, 'r', encoding='utf-8') as f:
         results = [json.loads(line) for line in f]
+    generation_config = _load_generation_config()
     
     logger.info(f"\n{'='*80}")
     logger.info(f"📊 DocBench Evaluation Statistics")
@@ -805,6 +1014,33 @@ def calculate_statistics():
         stats = type_stats[qtype]
         acc = stats['correct'] / stats['total'] * 100 if stats['total'] > 0 else 0
         logger.info(f"  {qtype:20s}: {acc:5.2f}% ({stats['correct']:3d}/{stats['total']:3d})")
+
+    # 按归并类型统计（Txt. / Mm. / Una.）
+    type_group_stats = {
+        group: {"correct": 0, "total": 0}
+        for group in TYPE_GROUP_ORDER
+    }
+    unknown_type_counts: dict[str, int] = {}
+    for r in results:
+        qtype_raw = r.get("type", "")
+        group = _map_type_group(qtype_raw)
+        if group is None:
+            qtype_key = str(qtype_raw)
+            unknown_type_counts[qtype_key] = unknown_type_counts.get(qtype_key, 0) + 1
+            continue
+        type_group_stats[group]["total"] += 1
+        if r.get("score", 0) == 1:
+            type_group_stats[group]["correct"] += 1
+
+    logger.info(f"\n🧩 Accuracy by Type Group:")
+    for group in TYPE_GROUP_ORDER:
+        stats = type_group_stats[group]
+        acc = stats["correct"] / stats["total"] * 100 if stats["total"] > 0 else 0
+        logger.info(
+            f"  {group:20s}: {acc:5.2f}% ({stats['correct']:3d}/{stats['total']:3d})"
+        )
+    if unknown_type_counts:
+        logger.warning(f"Unknown type labels (not grouped): {unknown_type_counts}")
     
     # 按领域统计（参考 DocBench 官方分布）
     domain_ranges = {
@@ -825,7 +1061,7 @@ def calculate_statistics():
                     if r.get('score', 0) == 1:
                         domain_stats[domain]['correct'] += 1
                     break
-        except:
+        except Exception:
             continue
     
     logger.info(f"\n🌐 Accuracy by Domain:")
@@ -837,7 +1073,7 @@ def calculate_statistics():
     
     # 保存统计到 JSON
     stats_output = {
-        'experiment_config': _build_experiment_config(),
+        'experiment_config': _build_experiment_config(generation_config),
         'overall': {'accuracy': overall_acc, 'correct': correct, 'total': total},
         'by_type': {
             qtype: {
@@ -846,6 +1082,14 @@ def calculate_statistics():
                 'total': stats['total']
             }
             for qtype, stats in type_stats.items()
+        },
+        'by_type_group': {
+            group: {
+                'accuracy': stats['correct'] / stats['total'] * 100 if stats['total'] > 0 else 0,
+                'correct': stats['correct'],
+                'total': stats['total']
+            }
+            for group, stats in type_group_stats.items()
         },
         'by_domain': {
             domain: {
@@ -930,8 +1174,24 @@ Examples:
         help='生成模式下落盘最终发给 VLM 的 messages（用于检查真实输入）'
     )
     
+    parser.add_argument(
+        '--raganything_eval_setup',
+        action='store_true',
+        help='Use RAG-Anything eval setup: one-sentence generation + evaluation_prompt_RAG-Anything.txt.'
+    )
+    parser.add_argument(
+        '--max_async_judge',
+        type=int,
+        default=4,
+        help='Max concurrent judge requests in evaluate mode (default: 4).'
+    )
+
     args = parser.parse_args()
     
+    profile_name, effective_one_sentence, eval_prompt_filename = _resolve_eval_setup(
+        args.raganything_eval_setup
+    )
+
     logger.info(f"\n{'='*80}")
     logger.info(f"🎯 DocBench Evaluation - Manual Server Mode")
     logger.info(f"{'='*80}")
@@ -940,6 +1200,10 @@ Examples:
     logger.info(f"Resume: {not args.no_resume}")
     logger.info(f"DumpRawPrompt: {args.dump_raw_prompt}")
     logger.info(f"DumpFinalMessages: {args.dump_final_messages}")
+    logger.info(f"EvalProfile: {profile_name}")
+    logger.info(f"OneSentence: {effective_one_sentence}")
+    logger.info(f"EvalPromptFile: {eval_prompt_filename}")
+    logger.info(f"MaxAsyncJudge: {args.max_async_judge}")
     logger.info(f"{'='*80}\n")
     
     # 执行对应的步骤
@@ -952,12 +1216,19 @@ Examples:
             resume=not args.no_resume,
             dump_raw_prompt=args.dump_raw_prompt,
             dump_final_messages=args.dump_final_messages,
+            one_sentence=effective_one_sentence,
+            profile_name=profile_name,
+            eval_prompt_filename=eval_prompt_filename,
         )
     
     elif args.mode == 'evaluate':
         logger.info("⚠️  Please ensure Qwen2.5-32B is running on port 8002")
         logger.info(f"   Check: curl http://localhost:8002/v1/models\n")
-        await evaluate_answers(resume=not args.no_resume)
+        await evaluate_answers(
+            resume=not args.no_resume,
+            max_async_judge=args.max_async_judge,
+            eval_prompt_filename=eval_prompt_filename,
+        )
     
     elif args.mode == 'stats':
         calculate_statistics()

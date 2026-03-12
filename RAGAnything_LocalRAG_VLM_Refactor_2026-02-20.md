@@ -924,3 +924,70 @@ export MINERU_VLLM_GPU_MEMORY_UTILIZATION=0.1
 ### 校验
 - 语法：`ast.parse()` 通过。
 - Import：`apply_rerank_if_enabled` 在 `utils.py:2618` 已存在，接口兼容（接收 `list[dict]`，提取 `content` 字段打分）。
+
+## 增量更新（2026-03-12，DocBench 评测配置开关收敛 + 评测链路精简）
+
+### 目标
+- 让 `evaluate_local/DocBench/evaluate.py` 通过一个开关在两套评测配置间切换，避免手工改多处参数。
+- 保持“评测专用改动仅落在 evaluate.py + prompt 文件”，不改核心 RAG 主流程文件。
+
+### 改动前
+- generate/evaluate 的策略组合需要手工维护（one-sentence 与评测 prompt 可能错配）。
+- 评测 prompt 固定读取 `evaluation_prompt.txt`。
+- 运行配置在统计文件中的可追溯性不足（缺 profile 与评测 prompt 文件名）。
+
+### 改动后
+1. 统一配置开关（CLI）
+- 新增：`--raganything_eval_setup`
+- `False`（默认）：DocBench 官方风格
+  - 生成：正常回答（不强制单句）
+  - 评测：`evaluation_prompt.txt`
+- `True`：RAG-Anything 风格
+  - 生成：`one_sentence` 生效（`user_prompt` + `response_type=Single Sentence` + 后处理收口）
+  - 评测：`evaluation_prompt_RAG-Anything.txt`
+
+2. 评测 prompt 文件加载收敛
+- 新增 `_load_eval_prompt()`，统一处理 prompt 读取与不存在文件报错。
+- `evaluate_answers()` 支持 `eval_prompt_filename` 参数，不再写死官方 prompt。
+
+3. 生成配置可追溯增强
+- `generation_config.json` 新增字段：
+  - `profile_name`
+  - `eval_prompt_filename`
+  - `one_sentence`
+  - `effective_query_params`
+- `statistics.json -> experiment_config` 新增 `evaluation_profile`，并记录本次有效 query params。
+
+4. evaluate.py 结构化清理（去重复）
+- 抽出通用小函数，减少循环内重复拼写与重复写文件逻辑：
+  - `_append_jsonl_record`
+  - `_find_doc_files`
+  - `_build_generation_result`
+  - `_build_eval_prompt`
+  - `_parse_eval_score`
+  - `_cleanup_rag_instance`
+  - `_clear_cuda_cache`
+- evaluate 阶段并发评测保留 `max_async_judge`，并增加日志可见性（当前 prompt 文件、跳过数、进度）。
+
+5. DocBench 类型统计增强（3 类聚合）
+- 在原始 `by_type` 基础上新增 `by_type_group`：
+  - `Txt.` / `Mm.` / `Una.`
+- 对未知标签输出 warning，便于后续数据清洗。
+
+### 新增/变更文件
+- 变更：`rag-anything/evaluate_local/DocBench/evaluate.py`
+- 新增：`rag-anything/evaluate_local/DocBench/evaluation_prompt_RAG-Anything.txt`
+
+### 移除
+- 删除无主流程依赖的临时统计脚本：
+  - `recalc_official_3types.py`
+  - `recalc_txt_mm_una_excluding_metadata.py`
+
+### 校验（按固定执行流程）
+1. 语法
+- `python -m py_compile evaluate_local/DocBench/evaluate.py` 通过。
+
+2. 逻辑级断言（内联）
+- 主链路：开关 False/True 对应 profile、one_sentence、prompt 文件映射正确。
+- 一致性：官方 prompt 与 RAG-Anything prompt 均可完成占位符替换；RAG-Anything 模板不依赖 `ref_text`。
+- 边界/反例：prompt 文件不存在时抛出并被上层友好处理（evaluate 早返回并记录错误）。
