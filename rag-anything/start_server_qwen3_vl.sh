@@ -15,8 +15,10 @@ python -m vllm.entrypoints.openai.api_server \
     --served-model-name "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8" \
     --trust-remote-code \
     --port 8001 \
-    --gpu-memory-utilization 0.9 \
-    --max-model-len 32768 \
+    --gpu-memory-utilization 0.83 \
+    --max-model-len 65536 \
     --dtype bfloat16 \
+    --quantization fp8 \
+    --enable-prefix-caching \
     --enable-chunked-prefill \
     --enforce-eager
