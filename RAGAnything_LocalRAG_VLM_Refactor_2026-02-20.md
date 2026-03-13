@@ -943,7 +943,7 @@ export MINERU_VLLM_GPU_MEMORY_UTILIZATION=0.1
   - 生成：正常回答（不强制单句）
   - 评测：`evaluation_prompt.txt`
 - `True`：RAG-Anything 风格
-  - 生成：`one_sentence` 生效（`user_prompt` + `response_type=Single Sentence` + 后处理收口）
+  - 生成：`one_sentence` 生效（`user_prompt` + `response_type=Single Sentence`）
   - 评测：`evaluation_prompt_RAG-Anything.txt`
 
 2. 评测 prompt 文件加载收敛
@@ -1023,3 +1023,45 @@ export MINERU_VLLM_GPU_MEMORY_UTILIZATION=0.1
 2. 逻辑级断言（内联）
 - 主链路：同一文档存在 `auto/` 与 `hybrid_auto/` 两个候选时，命中最新 `mtime` 的 JSON。
 - 边界：无扫描候选时，仍能按 `method` 路径正常回退读取。
+
+## 增量更新（2026-03-13，DocBench 生成阶段同文档问题并发）
+
+### 背景
+- 生成模式原实现为“文档串行 + 文档内问题串行”，在图谱已就绪后，单文档问答阶段吞吐偏低。
+- 目标是仅提升“同文档内问题回答”并发，不改变“文档级串行 ingest/独立图谱”。
+
+### 改动范围
+- 仅修改：`rag-anything/evaluate_local/DocBench/evaluate.py`
+
+### 改动内容
+1. 生成模式新增并发参数
+- 新增 CLI：`--max_async_generate`
+- 默认值：`1`
+- 生效范围：仅 `--mode generate`，仅同一文档内部问题并发。
+
+2. 并发执行模型（保持文档串行）
+- 每个文档处理流程保持不变：`ingest -> load qa -> query`。
+- 在单文档内对 `qa_list` 使用 `asyncio.Semaphore(max_async_generate)` 并发调用 `service.query(...)`。
+
+3. 结果稳定性
+- 并发返回后按 `qa_idx` 排序再写入 `system_answers.jsonl`，确保输出顺序与题号一致。
+
+4. 边界保护（反例兜底）
+- 若开启 `dump_raw_prompt` 或 `dump_final_messages`，自动强制 `max_async_generate=1`，避免并发抓取/patch 互相干扰。
+
+5. 可追溯性增强
+- `generation_config.json` 新增/记录 `max_async_generate`。
+- `statistics.json -> experiment_config` 同步记录本次 `max_async_generate`。
+
+### 明确不做
+- 不开启跨文档并发（保持 workspace 隔离与流程稳定）。
+- 不改 `local_rag.py` 主流程，不改索引构建并发策略。
+
+### 校验（按固定执行流程）
+1. 语法
+- `python -m py_compile rag-anything/evaluate_local/DocBench/evaluate.py` 通过。
+
+2. 逻辑级断言（内联）
+- 主链路：存在 `question_semaphore = asyncio.Semaphore(max_async_generate)`，同文档问题并发生效。
+- 一致性：并发结果按 `qa_idx` 排序写回，保持题号顺序。
+- 边界/反例：开启 dump 时会强制回退到 `max_async_generate=1`。

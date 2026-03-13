@@ -146,6 +146,7 @@ def _load_eval_prompt(eval_prompt_filename: str) -> str:
 def _save_generation_config(
     *,
     one_sentence: bool,
+    max_async_generate: int,
     profile_name: str,
     eval_prompt_filename: str,
     effective_query_params: dict[str, Any],
@@ -156,6 +157,7 @@ def _save_generation_config(
     payload = {
         "profile_name": profile_name,
         "one_sentence": bool(one_sentence),
+        "max_async_generate": int(max_async_generate),
         "eval_prompt_filename": eval_prompt_filename,
         "effective_query_params": dict(effective_query_params),
         "start_id": int(start_id),
@@ -540,6 +542,7 @@ async def generate_answers(
     resume: bool = True,
     dump_raw_prompt: bool = False,
     dump_final_messages: bool = False,
+    max_async_generate: int = 1,
     one_sentence: bool = False,
     profile_name: str = "docbench_official",
     eval_prompt_filename: str = DOCBENCH_EVAL_PROMPT_FILENAME,
@@ -555,11 +558,19 @@ async def generate_answers(
         resume: 是否跳过已处理的文档
         dump_raw_prompt: 是否落盘每题 raw_prompt（用于调试引用列表）
         dump_final_messages: 是否落盘最终发送给 VLM 的 messages（用于检查引用列表）
+        max_async_generate: 生成模式下每个文档内问题并发上限
     """
     output_file = OUTPUT_DIR / "system_answers.jsonl"
+    max_async_generate = _normalize_max_async(max_async_generate, default=1)
+    if (dump_raw_prompt or dump_final_messages) and max_async_generate > 1:
+        logger.warning(
+            "dump_raw_prompt/dump_final_messages is enabled, force max_async_generate=1."
+        )
+        max_async_generate = 1
     query_params = _build_docbench_query_params(one_sentence=one_sentence)
     _save_generation_config(
         one_sentence=one_sentence,
+        max_async_generate=max_async_generate,
         profile_name=profile_name,
         eval_prompt_filename=eval_prompt_filename,
         effective_query_params=query_params,
@@ -640,111 +651,131 @@ async def generate_answers(
                 with open(qa_file, 'r', encoding='utf-8') as f_qa:
                     qa_list = [json.loads(line) for line in f_qa]
                 
-                logger.info(f"\n❓ Answering {len(qa_list)} questions...")
-                
-                # 回答每个问题
-                for qa_idx, qa_item in enumerate(qa_list):
-                    question = qa_item['question']
-                    logger.info(f"  [{qa_idx+1}/{len(qa_list)}] {question[:60]}...")
+                logger.info(
+                    f"\n❓ Answering {len(qa_list)} questions "
+                    f"(max_async_generate={max_async_generate})..."
+                )
+                question_semaphore = asyncio.Semaphore(max_async_generate)
+
+                async def _answer_single_question(
+                    qa_idx: int, qa_item: dict[str, Any]
+                ) -> tuple[int, dict[str, Any]]:
+                    question = qa_item["question"]
                     answer = ""
 
-                    try:
-                        if dump_raw_prompt:
-                            try:
-                                from lightrag.base import QueryParam
-
-                                rag = await service.get_rag(rag_doc_id)
-                                raw_prompt_param = QueryParam(
-                                    **_build_raw_prompt_query_kwargs()
-                                )
-                                raw_prompt_result = await rag.lightrag.aquery(
-                                    question, param=raw_prompt_param
-                                )
-                                raw_prompt_text = (
-                                    raw_prompt_result.content
-                                    if hasattr(raw_prompt_result, "content")
-                                    else str(raw_prompt_result)
-                                )
-                                dump_path = _dump_raw_prompt(
-                                    doc_name, qa_idx, question, raw_prompt_text
-                                )
-                                ref_count = len(_extract_reference_lines(raw_prompt_text))
-                                logger.info(
-                                    f"      🔎 Prompt dumped: {dump_path} (reference lines: {ref_count})"
-                                )
-                            except Exception as dump_exc:
-                                logger.warning(f"      ⚠️ Raw prompt dump failed: {dump_exc}")
-
-                        captured_calls: list[dict[str, Any]] = []
-                        patched_completions: list[tuple[Any, Any]] = []
-                        if dump_final_messages:
-                            def _patch_client(client_name: str, client_obj: Any) -> None:
-                                if client_obj is None:
-                                    return
-                                chat_obj = getattr(client_obj, "chat", None)
-                                completions_api = getattr(chat_obj, "completions", None)
-                                if completions_api is None:
-                                    return
-                                for api_obj, _ in patched_completions:
-                                    if api_obj is completions_api:
-                                        return
-
-                                original_create = completions_api.create
-
-                                async def _capture_create(
-                                    *args,
-                                    _orig=original_create,
-                                    _client=client_name,
-                                    **kwargs,
-                                ):
-                                    messages_payload = kwargs.get("messages")
-                                    if isinstance(messages_payload, list):
-                                        captured_calls.append(
-                                            {
-                                                "client": _client,
-                                                "messages": messages_payload,
-                                            }
-                                        )
-                                    return await _orig(*args, **kwargs)
-
-                                completions_api.create = _capture_create
-                                patched_completions.append((completions_api, original_create))
-
-                            _patch_client("vision", getattr(service, "vision_client", None))
-                            _patch_client("text", getattr(service, "text_client", None))
-
-                        # 使用 RAG 查询
+                    async with question_semaphore:
+                        logger.info(
+                            f"  [{qa_idx + 1}/{len(qa_list)}] {question[:60]}..."
+                        )
                         try:
-                            answer = await service.query(
-                                doc_id=rag_doc_id,
-                                query=question,
-                                **query_params
-                            )
-                        finally:
-                            if dump_final_messages:
-                                for completions_api, original_create in patched_completions:
-                                    completions_api.create = original_create
+                            if dump_raw_prompt:
+                                try:
+                                    from lightrag.base import QueryParam
 
-                        if dump_final_messages:
-                            if captured_calls:
-                                dump_path = _dump_final_messages(
-                                    doc_name, qa_idx, question, captured_calls
+                                    rag = await service.get_rag(rag_doc_id)
+                                    raw_prompt_param = QueryParam(
+                                        **_build_raw_prompt_query_kwargs()
+                                    )
+                                    raw_prompt_result = await rag.lightrag.aquery(
+                                        question, param=raw_prompt_param
+                                    )
+                                    raw_prompt_text = (
+                                        raw_prompt_result.content
+                                        if hasattr(raw_prompt_result, "content")
+                                        else str(raw_prompt_result)
+                                    )
+                                    dump_path = _dump_raw_prompt(
+                                        doc_name, qa_idx, question, raw_prompt_text
+                                    )
+                                    ref_count = len(
+                                        _extract_reference_lines(raw_prompt_text)
+                                    )
+                                    logger.info(
+                                        f"      🔎 Prompt dumped: {dump_path} (reference lines: {ref_count})"
+                                    )
+                                except Exception as dump_exc:
+                                    logger.warning(
+                                        f"      ⚠️ Raw prompt dump failed: {dump_exc}"
+                                    )
+
+                            captured_calls: list[dict[str, Any]] = []
+                            patched_completions: list[tuple[Any, Any]] = []
+                            if dump_final_messages:
+
+                                def _patch_client(
+                                    client_name: str, client_obj: Any
+                                ) -> None:
+                                    if client_obj is None:
+                                        return
+                                    chat_obj = getattr(client_obj, "chat", None)
+                                    completions_api = getattr(chat_obj, "completions", None)
+                                    if completions_api is None:
+                                        return
+                                    for api_obj, _ in patched_completions:
+                                        if api_obj is completions_api:
+                                            return
+
+                                    original_create = completions_api.create
+
+                                    async def _capture_create(
+                                        *args,
+                                        _orig=original_create,
+                                        _client=client_name,
+                                        **kwargs,
+                                    ):
+                                        messages_payload = kwargs.get("messages")
+                                        if isinstance(messages_payload, list):
+                                            captured_calls.append(
+                                                {
+                                                    "client": _client,
+                                                    "messages": messages_payload,
+                                                }
+                                            )
+                                        return await _orig(*args, **kwargs)
+
+                                    completions_api.create = _capture_create
+                                    patched_completions.append(
+                                        (completions_api, original_create)
+                                    )
+
+                                _patch_client(
+                                    "vision", getattr(service, "vision_client", None)
                                 )
-                                final_messages = captured_calls[-1].get("messages", [])
-                                ref_count = len(
-                                    _extract_reference_lines_from_messages(final_messages)
+                                _patch_client("text", getattr(service, "text_client", None))
+
+                            try:
+                                answer = await service.query(
+                                    doc_id=rag_doc_id,
+                                    query=question,
+                                    **query_params,
                                 )
-                                logger.info(
-                                    f"      🧾 Final messages dumped: {dump_path} (calls: {len(captured_calls)}, reference lines: {ref_count})"
-                                )
-                            else:
-                                logger.warning(
-                                    "      ⚠️ Final messages not captured for this query."
-                                )
-                        
-                        logger.info(f"      ✓ Answer: {answer[:80]}...")
-                    except Exception as exc:
-                        logger.error(f"      ✗ Error: {exc}")
+                            finally:
+                                if dump_final_messages:
+                                    for completions_api, original_create in patched_completions:
+                                        completions_api.create = original_create
+
+                            if dump_final_messages:
+                                if captured_calls:
+                                    dump_path = _dump_final_messages(
+                                        doc_name, qa_idx, question, captured_calls
+                                    )
+                                    final_messages = captured_calls[-1].get("messages", [])
+                                    ref_count = len(
+                                        _extract_reference_lines_from_messages(
+                                            final_messages
+                                        )
+                                    )
+                                    logger.info(
+                                        f"      🧾 Final messages dumped: {dump_path} (calls: {len(captured_calls)}, reference lines: {ref_count})"
+                                    )
+                                else:
+                                    logger.warning(
+                                        "      ⚠️ Final messages not captured for this query."
+                                    )
+
+                            logger.info(f"      ✓ Answer: {answer[:80]}...")
+                        except Exception as exc:
+                            logger.error(f"      ✗ Error: {exc}")
 
                     result = _build_generation_result(
                         doc_name=doc_name,
@@ -752,6 +783,14 @@ async def generate_answers(
                         answer=answer,
                         qa_item=qa_item,
                     )
+                    return qa_idx, result
+
+                qa_tasks = [
+                    asyncio.create_task(_answer_single_question(qa_idx, qa_item))
+                    for qa_idx, qa_item in enumerate(qa_list)
+                ]
+                qa_results = await asyncio.gather(*qa_tasks)
+                for _, result in sorted(qa_results, key=lambda item: item[0]):
                     _append_jsonl_record(f_out, result)
                 
                 logger.info(f"✅ [{doc_id}] Completed: {len(qa_list)} questions answered\n")
@@ -913,6 +952,7 @@ def _build_experiment_config(
     effective_query_params = dict(DOCBENCH_QUERY_PARAMS)
     profile_name = "docbench_official"
     one_sentence = None
+    max_async_generate = None
     eval_prompt_filename = DOCBENCH_EVAL_PROMPT_FILENAME
     if generation_config:
         cfg_query_params = generation_config.get("effective_query_params")
@@ -920,6 +960,8 @@ def _build_experiment_config(
             effective_query_params = dict(cfg_query_params)
         if isinstance(generation_config.get("one_sentence"), bool):
             one_sentence = generation_config["one_sentence"]
+        if isinstance(generation_config.get("max_async_generate"), int):
+            max_async_generate = generation_config["max_async_generate"]
         if isinstance(generation_config.get("profile_name"), str):
             profile_name = generation_config["profile_name"]
         if isinstance(generation_config.get("eval_prompt_filename"), str):
@@ -954,6 +996,7 @@ def _build_experiment_config(
             "eval_prompt_file": eval_prompt_filename,
         },
         "one_sentence": one_sentence,
+        "max_async_generate": max_async_generate,
         "query_params": effective_query_params,
         "paths": {
             "script_dir": str(SCRIPT_DIR),
@@ -1192,6 +1235,12 @@ Examples:
         default=4,
         help='Max concurrent judge requests in evaluate mode (default: 4).'
     )
+    parser.add_argument(
+        '--max_async_generate',
+        type=int,
+        default=1,
+        help='Max concurrent question requests per document in generate mode (default: 1).'
+    )
 
     args = parser.parse_args()
     
@@ -1211,6 +1260,7 @@ Examples:
     logger.info(f"OneSentence: {effective_one_sentence}")
     logger.info(f"EvalPromptFile: {eval_prompt_filename}")
     logger.info(f"MaxAsyncJudge: {args.max_async_judge}")
+    logger.info(f"MaxAsyncGenerate: {args.max_async_generate}")
     logger.info(f"{'='*80}\n")
     
     # 执行对应的步骤
@@ -1223,6 +1273,7 @@ Examples:
             resume=not args.no_resume,
             dump_raw_prompt=args.dump_raw_prompt,
             dump_final_messages=args.dump_final_messages,
+            max_async_generate=args.max_async_generate,
             one_sentence=effective_one_sentence,
             profile_name=profile_name,
             eval_prompt_filename=eval_prompt_filename,
