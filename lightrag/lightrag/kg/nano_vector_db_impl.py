@@ -160,6 +160,11 @@ class NanoVectorDBStorage(BaseVectorStorage):
             top_k=top_k,
             better_than_threshold=self.cosine_better_than_threshold,
         )
+        # nano_vectordb 库不实际执行 better_than_threshold，在此手动过滤
+        results = [
+            dp for dp in results
+            if dp.get("__metrics__", 0.0) >= self.cosine_better_than_threshold
+        ]
         results = [
             {
                 **{k: v for k, v in dp.items() if k != "vector"},

@@ -58,6 +58,12 @@ from raganything.constants import (
     DEFAULT_CHUNK_TOKEN_SIZE,
     DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE,
     DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION,
+    DEFAULT_LLM_MODEL_MAX_ASYNC,
+    DEFAULT_ENTITY_EXTRACT_MAX_GLEANING,
+    DEFAULT_MAX_PARALLEL_INSERT,
+    DEFAULT_EMBEDDING_BATCH_NUM,
+    DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
+    DEFAULT_MIN_RERANK_SCORE,
 )
 from raganything.query_message_repack import repack_query_messages
 
@@ -787,6 +793,22 @@ class LocalRagService:
                 "chunk_token_size": self.settings.chunk_token_size,
                 "chunk_overlap_token_size": self.settings.chunk_overlap_token_size,
                 "chunking_func": get_chunking_func(self.settings.chunking_strategy),
+                # --- Indexing 并发与质量参数 ---
+                # 以下参数默认值见 raganything/constants.py 的
+                # "Indexing concurrency & quality" 区块。
+                # entity extraction LLM 最大并发（LightRAG 默认 4）
+                "llm_model_max_async": DEFAULT_LLM_MODEL_MAX_ASYNC,
+                # gleaning 补充提取轮数（0=禁用，1=多提取一次；LightRAG 默认 1）
+                "entity_extract_max_gleaning": DEFAULT_ENTITY_EXTRACT_MAX_GLEANING,
+                # 文档级最大并发插入数（LightRAG 默认 2）
+                "max_parallel_insert": DEFAULT_MAX_PARALLEL_INSERT,
+                # embedding 单批最大文本数（LightRAG 默认 10）
+                "embedding_batch_num": DEFAULT_EMBEDDING_BATCH_NUM,
+                # embedding 调用最大并发数（LightRAG 默认 8）
+                "embedding_func_max_async": DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
+                # rerank 后保留 chunk 的最低分数（LightRAG 默认 0.0 = 不过滤）
+                # BGE-reranker-v2-m3 相关 chunk 典型得分 >0.5，不相关 <0.3
+                "min_rerank_score": DEFAULT_MIN_RERANK_SCORE,
             },
         )
 

@@ -91,6 +91,13 @@ DEFAULT_QUERY_MODE = "hybrid"   # "naive" | "local" | "global" | "hybrid"
 DEFAULT_ENABLE_RERANK = True
 DEFAULT_VLM_ENHANCED = True
 
+# Reranker score 过滤阈值：rerank 完成后，得分低于此值的 chunk 会被丢弃。
+# LightRAG 原默认值为 0.0（即不过滤）；BGE-reranker-v2-m3（CrossEncoder）
+# 对相关 chunk 的典型得分 > 0.5，不相关 chunk 通常 < 0.3。
+# 设为 0.3 可过滤掉明显不相关的 chunk，同时保留模糊相关内容。
+# 调高此值（如 0.5）可进一步提升精确度，但可能降低召回率。
+DEFAULT_MIN_RERANK_SCORE = 0.3
+
 # =============================================================================
 # Knowledge graph visualization defaults
 # =============================================================================
@@ -118,6 +125,36 @@ DEFAULT_VLLM_API_BASE = "http://localhost:8001/v1"
 DEFAULT_VLLM_API_KEY = "EMPTY"
 DEFAULT_LLM_MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 DEFAULT_DEVICE = "cuda:0"
+
+# =============================================================================
+# Indexing concurrency & quality
+#
+# 这些参数控制 LightRAG indexing 阶段的并发度和提取质量，通过
+# local_rag.py._build_rag() 的 lightrag_kwargs 传入 LightRAG 实例。
+# =============================================================================
+
+# 每个 chunk 的 entity extraction LLM 调用最大并发数。
+# LightRAG 默认值为 4；A6000 48GB + FP8 30B 模型理论最大约 59，
+# 设为 16 可大幅提速同时保留安全余量。
+DEFAULT_LLM_MODEL_MAX_ASYNC = 16
+
+# Entity extraction 的 gleaning（补充提取）轮数。
+# gleaning=1 表示每个 chunk 做 2 次串行 LLM 调用（初始 + 1 次补充），
+# 可提高覆盖率但 indexing 时间翻倍。设为 0 可禁用 gleaning 换取速度。
+DEFAULT_ENTITY_EXTRACT_MAX_GLEANING = 1
+
+# 文档级最大并发插入数（pipeline 层面，非 LLM 层面）。
+# LightRAG 默认值为 2，适当增大可在多文档批量 indexing 时提升吞吐。
+DEFAULT_MAX_PARALLEL_INSERT = 4
+
+# Embedding 模型单次批处理的最大文本数。
+# LightRAG 默认值为 10；BGE-M3 支持更大 batch，设为 32 可减少
+# embedding 调用次数，提升 GPU 利用率。
+DEFAULT_EMBEDDING_BATCH_NUM = 32
+
+# Embedding 调用最大并发数（与 LLM 并发独立计数）。
+# LightRAG 默认值为 8，通常无需修改。
+DEFAULT_EMBEDDING_FUNC_MAX_ASYNC = 8
 
 # =============================================================================
 # Chunking strategy
