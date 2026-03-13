@@ -105,7 +105,6 @@ ONE_SENTENCE_USER_PROMPT = (
     "references section."
 )
 
-_SENTENCE_END_RE = re.compile(r"[.!?。！？]")
 _BINARY_SCORE_RE = re.compile(r"(?<!\d)([01])(?!\d)")
 _ACCURACY_FIELD_RE = re.compile(r'"accuracy"\s*:\s*([01])', flags=re.IGNORECASE)
 _JSON_FENCE_RE = re.compile(
@@ -178,28 +177,6 @@ def _load_generation_config() -> dict[str, Any] | None:
     except Exception as exc:
         logger.warning(f"Failed to load generation config: {exc}")
     return None
-
-
-def _coerce_one_sentence(text: str) -> str:
-    """Best-effort one-sentence post-process for DocBench generation."""
-    if not text:
-        return ""
-
-    cleaned = str(text)
-    # Remove trailing references section if model still emits it.
-    cleaned = re.split(r"(?im)^\s*#{1,6}\s*references\s*$", cleaned, maxsplit=1)[0]
-    # Remove fenced code blocks and citation bullet lines.
-    cleaned = re.sub(r"```[\s\S]*?```", " ", cleaned)
-    cleaned = re.sub(r"(?im)^\s*[-*]\s*\[\d+\].*$", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-
-    if not cleaned:
-        return ""
-
-    match = _SENTENCE_END_RE.search(cleaned)
-    if match:
-        return cleaned[: match.end()].strip()
-    return cleaned
 
 
 def _normalize_max_async(max_async: int, default: int = 4) -> int:
@@ -747,12 +724,6 @@ async def generate_answers(
                             if dump_final_messages:
                                 for completions_api, original_create in patched_completions:
                                     completions_api.create = original_create
-
-                        if one_sentence:
-                            one_sentence_answer = _coerce_one_sentence(answer)
-                            if one_sentence_answer != answer:
-                                logger.info("      One-sentence postprocess applied.")
-                            answer = one_sentence_answer
 
                         if dump_final_messages:
                             if captured_calls:
