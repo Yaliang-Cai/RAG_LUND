@@ -107,6 +107,11 @@ ONE_SENTENCE_USER_PROMPT = (
 
 _SENTENCE_END_RE = re.compile(r"[.!?。！？]")
 _BINARY_SCORE_RE = re.compile(r"(?<!\d)([01])(?!\d)")
+_ACCURACY_FIELD_RE = re.compile(r'"accuracy"\s*:\s*([01])', flags=re.IGNORECASE)
+_JSON_FENCE_RE = re.compile(
+    r"```(?:json)?\s*(.*?)\s*```",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 
 def _build_docbench_query_params(one_sentence: bool = False) -> dict[str, Any]:
@@ -266,7 +271,38 @@ def _build_eval_prompt(eval_prompt: str, item: dict[str, Any]) -> str:
 
 
 def _parse_eval_score(eval_result: str) -> int:
-    head = (eval_result or "")[:20]
+    text = (eval_result or "").strip()
+    if not text:
+        return 0
+
+    # Prefer strict JSON parsing for RAG-Anything-style prompt output.
+    candidate = text
+    fenced = _JSON_FENCE_RE.search(text)
+    if fenced:
+        candidate = fenced.group(1).strip()
+
+    for payload in (candidate, text):
+        try:
+            parsed = json.loads(payload)
+        except Exception:
+            parsed = None
+
+        if isinstance(parsed, dict) and "accuracy" in parsed:
+            value = parsed["accuracy"]
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (int, float)) and value in (0, 1):
+                return int(value)
+            if isinstance(value, str) and value.strip() in {"0", "1"}:
+                return int(value.strip())
+
+    # Fallback: extract explicit accuracy field from text.
+    accuracy_match = _ACCURACY_FIELD_RE.search(text)
+    if accuracy_match:
+        return int(accuracy_match.group(1))
+
+    # Legacy fallback for old prompt outputs.
+    head = text[:120]
     match = _BINARY_SCORE_RE.search(head)
     if match:
         return int(match.group(1))
