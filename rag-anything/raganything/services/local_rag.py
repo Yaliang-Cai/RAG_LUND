@@ -907,6 +907,7 @@ class LocalRagService:
         try:
             from lightrag import QueryParam
             rag_instance = await self.get_rag(doc_id)
+            await rag_instance._ensure_lightrag_initialized()
             param = QueryParam(
                 mode=mode,
                 top_k=top_k,
