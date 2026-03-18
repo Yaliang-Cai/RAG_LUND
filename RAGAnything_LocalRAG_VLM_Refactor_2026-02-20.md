@@ -1027,8 +1027,8 @@ export MINERU_VLLM_GPU_MEMORY_UTILIZATION=0.1
 ## 增量更新（2026-03-13，DocBench 生成阶段同文档问题并发）
 
 ### 背景
-- 生成模式原实现为“文档串行 + 文档内问题串行”，在图谱已就绪后，单文档问答阶段吞吐偏低。
-- 目标是仅提升“同文档内问题回答”并发，不改变“文档级串行 ingest/独立图谱”。
+- 生成模式原实现为”文档串行 + 文档内问题串行”，在图谱已就绪后，单文档问答阶段吞吐偏低。
+- 目标是仅提升”同文档内问题回答”并发，不改变”文档级串行 ingest/独立图谱”。
 
 ### 改动范围
 - 仅修改：`rag-anything/evaluate_local/DocBench/evaluate.py`
@@ -1065,3 +1065,93 @@ export MINERU_VLLM_GPU_MEMORY_UTILIZATION=0.1
 - 主链路：存在 `question_semaphore = asyncio.Semaphore(max_async_generate)`，同文档问题并发生效。
 - 一致性：并发结果按 `qa_idx` 排序写回，保持题号顺序。
 - 边界/反例：开启 dump 时会强制回退到 `max_async_generate=1`。
+
+---
+
+## 增量更新（2026-03-18，流式输出接入 aquery_llm + 多粒度引用透传）
+
+### 背景问题（改动前）
+- `stream_query()` 底层调用的是 `self.query()`（非流式），将完整答案作为单个 `yield` 返回。
+- `app.py` 的 `/query/stream` 端点需要先单独调用 `aquery_data()` 获取元数据，再调用 `stream_query()` 获取答案，共两次检索，资源浪费且元数据与答案来自不同调用，存在不一致风险。
+- 引用数据（chunks/entities/relations）可以透传给前端，但旧实现中未携带 `page_idx`，多模态 chunk 的页码信息在入库时丢失。
+
+### 改动 1：`stream_query()` 接入 `aquery_llm`（`local_rag.py`）
+
+**变更前**：
+```python
+answer = await self.query(doc_id, query, ...)
+yield answer or "No answer returned."
+```
+
+**变更后**：
+```python
+param = QueryParam(mode=mode, top_k=top_k, chunk_top_k=chunk_top_k,
+                   enable_rerank=enable_rerank,
+                   stream=True, include_references=True)
+result = await rag_instance.lightrag.aquery_llm(query, param=param)
+
+yield {"type": "meta", "data": result.get("data", {}), "metadata": result.get("metadata", {})}
+
+llm_response = result.get("llm_response", {})
+if llm_response.get("is_streaming"):
+    async for token in llm_response["response_iterator"]:
+        yield {"type": "chunk", "text": token}
+else:
+    yield {"type": "chunk", "text": llm_response.get("content") or "No answer returned."}
+```
+
+**关键参数**：
+- `stream=True`：使 LightRAG 返回 `response_iterator`（异步生成器），逐 token 透传给前端。
+- `include_references=True`：使 LightRAG 在同一次调用中返回结构化 `data`（chunks、entities、relations，含 `reference_id`、`file_path`、`content`）。
+
+### 改动 2：`/query/stream` 端点重构（`server/app.py`）
+
+**变更前**：两次独立检索（`aquery_data()` + `stream_query()`），meta 与 tokens 来源不一致。
+
+**变更后**：统一迭代 `stream_query()` 事件流：
+```python
+async for event in service.stream_query(...):
+    if event["type"] == "meta":
+        yield f"data: {json.dumps({'type': 'meta', 'data': event['data'], 'metadata': event['metadata']})}\n\n"
+    elif event["type"] == "chunk":
+        yield f"data: {json.dumps({'type': 'chunk', 'text': event['text']})}\n\n"
+    elif event["type"] == "error":
+        yield f"data: {json.dumps({'type': 'error', 'text': event['text']})}\n\n"
+```
+
+subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）。
+
+### 改动 3：多模态 chunk 携带 `page_idx`（`modalprocessors.py`）
+
+**背景**：`MineruParser` 输出中每个内容块均带 `page_idx`，该字段随 `item_info` 传入处理器，但在 `_create_entity_and_chunk()` 写入 `text_chunks_db` 与 `chunks_vdb` 时未被保存，导致入库后页码信息丢失。
+
+**改动**：
+- `_create_entity_and_chunk()` 新增 `page_idx: int = 0` 参数。
+- `chunk_data` 和 `chunk_vdb_data` 两个字典均新增 `"page_idx": page_idx` 字段。
+- `ImageModalProcessor`、`TableModalProcessor`、`EquationModalProcessor` 的 `process_multimodal_content()` 调用时传入：
+  ```python
+  page_idx=item_info.get("page_idx", 0) if item_info else 0
+  ```
+
+**文本 chunk 不改动**：多页文本在进入 LightRAG 前已合并为单字符串，chunking 函数不感知页边界，改动收益低、成本高，跳过。
+
+### 改动 4：引用卡片显示页码（`server/templates/index.html`）
+
+- HTML 结构新增 `<div id="citationCardPage">` 元素。
+- `CitationManager.onHover()` 中读取 `chunk.page_idx`，显示 `Page N`（0-based → 1-based 转换）：
+  ```javascript
+  pageEl.textContent = chunk.page_idx != null ? `Page ${chunk.page_idx + 1}` : '';
+  ```
+- 文本 chunk 的 `page_idx` 不存在时静默为空，不显示，无副作用。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `raganything/services/local_rag.py` | `stream_query()` 改为 `aquery_llm(stream=True, include_references=True)` |
+| `server/app.py` | `/query/stream` 改为单次迭代 `stream_query()` 事件流，移除冗余 `aquery_data()` 调用 |
+| `raganything/modalprocessors.py` | `_create_entity_and_chunk()` 新增 `page_idx` 参数，3 个处理器传值 |
+| `server/templates/index.html` | 引用 hover 卡片显示页码 |
+
+### 当前状态
+- 4 个文件已 commit（e5a319a）并 push 至 origin/main。
