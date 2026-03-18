@@ -611,6 +611,33 @@
     .upload-stage.active::before { content: '◉ '; }
     .upload-stage.done::before { content: '✓ '; }
     .upload-elapsed { margin-top: 12px; font-size: 11px; color: var(--text-tertiary); }
+    /* ── Upload File List (per-file progress) ── */
+    .upload-file-list { list-style: none; text-align: left; margin: 4px 0 8px; width: 100%; max-height: 280px; overflow-y: auto; }
+    .upload-file-row { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: var(--radius-sm); font-size: 12px; }
+    .upload-file-row.active { background: var(--accent-soft); }
+    .upload-file-row.done { color: var(--success); }
+    .upload-file-row.error { color: var(--error); }
+    .upload-file-icon { font-size: 14px; flex-shrink: 0; }
+    .upload-file-name { flex: 1; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .upload-file-status { font-size: 11px; color: var(--text-tertiary); flex-shrink: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .upload-file-row.error .upload-file-status { color: var(--error); }
+    .upload-file-row.done .upload-file-status { color: var(--success); }
+    .upload-btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+    .upload-retry-btn, .upload-close-btn { padding: 5px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); cursor: pointer; font-size: 12px; font-family: var(--font-body); background: var(--bg-hover); color: var(--text-primary); }
+    .upload-retry-btn { background: var(--accent); color: #fff; border-color: transparent; }
+    .upload-retry-btn:hover { opacity: 0.85; }
+    .upload-close-btn:hover { background: var(--border); }
+
+    /* ── Workspace Filter ── */
+    .ws-count { font-size: 11px; color: var(--text-tertiary); font-family: var(--font-mono); white-space: nowrap; }
+
+    /* ── CoT Think Block ── */
+    details.think-block { margin: 8px 0; border: 1px solid var(--accent-medium); border-radius: var(--radius-sm); background: var(--accent-glow); overflow: hidden; }
+    details.think-block summary { cursor: pointer; padding: 5px 10px; font-size: 12px; color: var(--accent); user-select: none; list-style: none; display: flex; align-items: center; gap: 6px; }
+    details.think-block summary::-webkit-details-marker { display: none; }
+    details.think-block summary::before { content: '▶'; font-size: 9px; transition: transform 0.2s; display: inline-block; }
+    details.think-block[open] summary::before { transform: rotate(90deg); }
+    .think-content { padding: 8px 12px; border-top: 1px solid var(--accent-medium); font-size: 13px; color: var(--text-secondary); }
 
     /* ── Animations ── */
     @keyframes fadeInUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
@@ -647,6 +674,8 @@
       <button class="icon-btn" onclick="FileManager.refreshWorkspaces()" title="Refresh">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6"/><path d="M2.5 22v-6h6"/><path d="M3.5 12a9 9 0 0 1 15-6.7L21.5 8"/><path d="M20.5 12a9 9 0 0 1-15 6.7L2.5 16"/></svg>
       </button>
+      <input type="search" id="wsFilter" placeholder="Filter…" class="ctrl-input" style="width:80px;min-width:0" oninput="FileManager.filterWorkspaces(this.value)" title="Filter workspaces">
+      <span id="wsCount" class="ws-count" style="display:none"></span>
       <select id="workspaceSelect" class="ctrl-select" onchange="FileManager.loadWorkspace(this.value)">
         <option value="">Enter API key to start</option>
       </select>
@@ -920,6 +949,11 @@
       const r = await fetch(`/graph/${docId}/overview?max_nodes=${maxNodes}`, { headers: this._headers() });
       return r.ok ? r.json() : { nodes: [], edges: [] };
     },
+    async retry(docId) {
+      const r = await fetch(`/retry/${encodeURIComponent(docId)}`, { method: 'POST', headers: this._headers() });
+      if (!r.ok) throw new Error(`Retry failed (${r.status})`);
+      return r.json();
+    },
     uploadUrl(docId, filename) {
       return `/uploads/${docId}/${encodeURIComponent(filename)}`;
     },
@@ -1119,6 +1153,24 @@
       // Replace [N] with clickable citation links, but skip markdown links [text](url)
       return html.replace(/\[(\d+)\](?!\()/g, (match, num) => {
         return `<span class="citation-link" data-ref="${num}" onclick="Citations.onClick('${num}')" onmouseenter="Citations.onHover('${num}', event)" onmouseleave="Citations.onLeave()">${match}</span>`;
+      });
+    },
+
+    postProcessThinkTags(container) {
+      if (!container) return;
+      const thinkEls = Array.from(container.querySelectorAll('think'));
+      if (!thinkEls.length) return;
+      thinkEls.forEach(think => {
+        const details = document.createElement('details');
+        details.className = 'think-block';
+        const summary = document.createElement('summary');
+        summary.textContent = '💭 Reasoning';
+        const div = document.createElement('div');
+        div.className = 'think-content';
+        div.innerHTML = think.innerHTML;
+        details.appendChild(summary);
+        details.appendChild(div);
+        think.replaceWith(details);
       });
     },
 
@@ -1372,6 +1424,7 @@
               if (msgEl) {
                 msgEl.innerHTML = Renderer.render(textBuf || 'No answer returned.');
                 Renderer.postProcess(msgEl);
+                Renderer.postProcessThinkTags(msgEl);
               }
               AppState.lastQueryResponse = { answer: textBuf, data: {}, metadata: {}, graph: ev.graph };
 
@@ -1666,6 +1719,7 @@
           sel.appendChild(o);
         });
         sel.disabled = false;
+        this.filterWorkspaces(document.getElementById('wsFilter')?.value || '');
       } catch (e) {
         this._setPlaceholder(e.message || 'Connection failed');
       }
@@ -1884,79 +1938,98 @@
         const files = Array.from(input.files);
         if (!files.length) return;
 
-        const stages = [
-          'Uploading file...',
-          'Parsing document layout (OCR, tables, formulas)...',
-          'Generating multimodal descriptions (VLM)...',
-          'Extracting entities & building knowledge graph...',
-          'Finalizing workspace...',
-        ];
-
         // lockedDocId: fixed after the first file succeeds so all files go to the same workspace
         let lockedDocId = targetDocId;
         let lastResult = null;
+        const failedFiles = [];
+
+        // Create one persistent overlay with per-file list
+        const overlay = document.createElement('div');
+        overlay.className = 'upload-overlay';
+        overlay.id = 'uploadOverlay';
+        const wsLabel = targetDocId || '(auto)';
+        overlay.innerHTML = `<div class="upload-dialog">
+          <div class="upload-text">Uploading <strong>${files.length} file${files.length > 1 ? 's' : ''}</strong>
+            <span style="font-size:11px;color:var(--text-tertiary);display:block;margin-top:2px;">Workspace: <span style="font-family:var(--font-mono);color:var(--accent)">${wsLabel}</span>&nbsp;·&nbsp;Strategy: ${chunkingStrategy}</span>
+          </div>
+          <ul id="uploadFileList" class="upload-file-list"></ul>
+          <div class="upload-elapsed" id="uploadElapsed">Elapsed: 0s</div>
+        </div>`;
+        document.body.appendChild(overlay);
+
+        const listEl = document.getElementById('uploadFileList');
+        files.forEach((file, idx) => {
+          const li = document.createElement('li');
+          li.id = `uFile${idx}`;
+          li.className = 'upload-file-row';
+          li.innerHTML = `<span class="upload-file-icon" id="uIcon${idx}">⏳</span><span class="upload-file-name" title="${file.name}">${file.name}</span><span class="upload-file-status" id="uStat${idx}">Waiting…</span>`;
+          listEl.appendChild(li);
+        });
+
+        const startTime = Date.now();
+        const elapsedInterval = setInterval(() => {
+          const el = document.getElementById('uploadElapsed');
+          if (el) el.textContent = `Elapsed: ${Math.round((Date.now() - startTime) / 1000)}s`;
+        }, 1000);
 
         for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
           const file = files[fileIdx];
-          const fileLabel = files.length > 1 ? `[${fileIdx + 1}/${files.length}] ` : '';
           const expectedDocId = lockedDocId || this._computeDocId(file.name);
+          const li = document.getElementById(`uFile${fileIdx}`);
+          const iconEl = document.getElementById(`uIcon${fileIdx}`);
+          const statEl = document.getElementById(`uStat${fileIdx}`);
 
-          let currentStage = 0;
-          const startTime = Date.now();
-
-          const overlay = document.createElement('div');
-          overlay.className = 'upload-overlay';
-          overlay.id = 'uploadOverlay';
-          overlay.innerHTML = `<div class="upload-dialog">
-            <div class="upload-spinner"></div>
-            <div class="upload-text">Processing <strong>${fileLabel}${file.name}</strong>
-              <span style="font-size:11px;color:var(--text-tertiary);display:block;margin-top:4px;">
-                Workspace: <span style="font-family:var(--font-mono);color:var(--accent)">${expectedDocId}</span>
-                &nbsp;·&nbsp;Strategy: ${chunkingStrategy}</span></div>
-            <div class="upload-stages" id="uploadStages">
-              ${stages.map((s, i) => `<div class="upload-stage${i === 0 ? ' active' : ''}" id="uStage${i}">${s}</div>`).join('')}
-            </div>
-            <div class="upload-elapsed" id="uploadElapsed">Elapsed: 0s</div>
-          </div>`;
-          document.body.appendChild(overlay);
-
-          const advanceInterval = setInterval(() => {
-            if (currentStage < stages.length - 1) {
-              const prev = document.getElementById(`uStage${currentStage}`);
-              if (prev) { prev.classList.remove('active'); prev.classList.add('done'); }
-              currentStage++;
-              const next = document.getElementById(`uStage${currentStage}`);
-              if (next) next.classList.add('active');
-            }
-          }, 12000);
-          const elapsedInterval = setInterval(() => {
-            const el = document.getElementById('uploadElapsed');
-            if (el) el.textContent = `Elapsed: ${Math.round((Date.now() - startTime) / 1000)}s`;
-          }, 1000);
+          if (li) li.classList.add('active');
+          if (statEl) statEl.textContent = 'Processing…';
 
           try {
             const result = await API.ingest(file, lockedDocId, chunkingStrategy);
-            clearInterval(advanceInterval);
-            clearInterval(elapsedInterval);
-            stages.forEach((_, i) => {
-              const el = document.getElementById(`uStage${i}`);
-              if (el) { el.classList.remove('active'); el.classList.add('done'); }
-            });
-            // Lock workspace for subsequent files in this batch
+            if (iconEl) iconEl.textContent = '✅';
+            if (statEl) statEl.textContent = `→ ${result.doc_id}`;
+            if (li) { li.classList.remove('active'); li.classList.add('done'); }
             lockedDocId = result.doc_id;
             lastResult = result;
-            UI.showToast(`Uploaded: ${result.filename} → workspace: ${result.doc_id}`, 'success');
           } catch (e) {
-            clearInterval(advanceInterval);
-            clearInterval(elapsedInterval);
-            UI.showToast(`Upload failed [${file.name}]: ` + e.message, 'error');
-          } finally {
-            document.getElementById('uploadOverlay')?.remove();
+            if (iconEl) iconEl.textContent = '❌';
+            if (statEl) statEl.textContent = e.message || 'Failed';
+            if (li) { li.classList.remove('active'); li.classList.add('error'); }
+            failedFiles.push({ file, docId: expectedDocId, rowIdx: fileIdx });
           }
         }
 
+        clearInterval(elapsedInterval);
+
+        // Add close / retry buttons
+        const dialog = overlay.querySelector('.upload-dialog');
+        const btnRow = document.createElement('div');
+        btnRow.className = 'upload-btns';
+        if (failedFiles.length > 0) {
+          const retryBtn = document.createElement('button');
+          retryBtn.className = 'upload-retry-btn';
+          retryBtn.textContent = `↻ Retry ${failedFiles.length} failed`;
+          retryBtn.onclick = () => {
+            failedFiles.forEach(async ({ docId, rowIdx }) => {
+              const iconEl2 = document.getElementById(`uIcon${rowIdx}`);
+              const statEl2 = document.getElementById(`uStat${rowIdx}`);
+              try {
+                await API.retry(docId);
+                if (iconEl2) iconEl2.textContent = '🔄';
+                if (statEl2) statEl2.textContent = 'Requeued';
+              } catch (e2) {
+                if (statEl2) statEl2.textContent = 'Retry failed: ' + e2.message;
+              }
+            });
+          };
+          btnRow.appendChild(retryBtn);
+        }
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'upload-close-btn';
+        closeBtn.textContent = 'Close';
+        closeBtn.onclick = () => overlay.remove();
+        btnRow.appendChild(closeBtn);
+        dialog.appendChild(btnRow);
+
         input.value = '';
-        // After all files, refresh and switch to the workspace
         if (lastResult) {
           await this.refreshWorkspaces();
           document.getElementById('workspaceSelect').value = lastResult.doc_id;
@@ -1987,6 +2060,23 @@
       document.querySelector('.pdf-empty-title').textContent = 'Document Preview';
       document.querySelector('.pdf-empty-sub').textContent = 'Select a workspace to view documents';
       document.getElementById('pdfPageInfo').textContent = '—';
+    },
+
+    filterWorkspaces(q) {
+      const sel = document.getElementById('workspaceSelect');
+      const countEl = document.getElementById('wsCount');
+      let visible = 0;
+      const total = AppState.workspaces ? AppState.workspaces.length : 0;
+      Array.from(sel.options).forEach(o => {
+        if (!o.value) return; // skip placeholder
+        const match = !q || o.value.toLowerCase().includes(q.toLowerCase());
+        o.hidden = !match;
+        if (match) visible++;
+      });
+      if (countEl) {
+        countEl.textContent = q ? `${visible}/${total}` : `${total}`;
+        countEl.style.display = total ? '' : 'none';
+      }
     },
   };
 

@@ -9,7 +9,7 @@ from typing import Optional, Set
 
 import json as _json
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -281,6 +281,40 @@ async def ingest(
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
 
     return {"doc_id": final_id, "filename": original_filename}
+
+
+@app.post("/retry/{doc_id}")
+async def retry_ingest(
+    doc_id: str,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(verify_api_key),
+    service: LocalRagService = Depends(get_service),
+):
+    """Re-trigger ingest for an existing workspace using its already-uploaded files."""
+    _validate_doc_id(doc_id)
+    upload_dir = UPLOADS_DIR / doc_id
+    if not upload_dir.exists():
+        raise HTTPException(status_code=404, detail=f"No uploads found for workspace '{doc_id}'")
+
+    files = sorted(p for p in upload_dir.iterdir() if p.is_file())
+    if not files:
+        raise HTTPException(status_code=404, detail=f"No files in workspace '{doc_id}'")
+
+    workspace_output = str(Path(service.settings.output_dir) / doc_id)
+
+    async def _do_retry():
+        for file_path in files:
+            try:
+                await service.ingest(
+                    str(file_path),
+                    doc_id=doc_id,
+                    output_dir=workspace_output,
+                )
+            except Exception as exc:
+                logger.warning("retry_ingest %s/%s failed: %s", doc_id, file_path.name, exc)
+
+    background_tasks.add_task(_do_retry)
+    return {"status": "queued", "doc_id": doc_id, "files": [f.name for f in files]}
 
 
 @app.get("/uploads/{doc_id}")
