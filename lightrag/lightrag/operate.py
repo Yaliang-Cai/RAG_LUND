@@ -4141,6 +4141,7 @@ async def _get_vector_context(
                     "source_type": "vector",  # Mark the source type
                     "chunk_id": result.get("id"),  # Add chunk_id for deduplication
                     "is_multimodal": result.get("is_multimodal", False),
+                    "page_idx": result.get("page_idx"),
                 }
                 valid_chunks.append(chunk_with_metadata)
 
@@ -4559,6 +4560,7 @@ async def _merge_all_chunks(
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
                         "is_multimodal": chunk.get("is_multimodal", False),
+                        "page_idx": chunk.get("page_idx"),
                     }
                 )
 
@@ -4574,6 +4576,7 @@ async def _merge_all_chunks(
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
                         "is_multimodal": chunk.get("is_multimodal", False),
+                        "page_idx": chunk.get("page_idx"),
                     }
                 )
 
@@ -4589,6 +4592,7 @@ async def _merge_all_chunks(
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
                         "is_multimodal": chunk.get("is_multimodal", False),
+                        "page_idx": chunk.get("page_idx"),
                     }
                 )
 
