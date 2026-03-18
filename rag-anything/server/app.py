@@ -412,44 +412,29 @@ async def query_stream_endpoint(
     chunk_top_k = max(1, min(payload.chunk_top_k, MAX_CHUNK_TOP_K))
 
     async def _generate():
-        rag = await service.get_rag(payload.doc_id)
-        await rag._ensure_lightrag_initialized()
+        retrieval_data: dict = {}
 
-        from lightrag import QueryParam
-        data_param = QueryParam(
-            mode=payload.mode, top_k=top_k,
-            chunk_top_k=chunk_top_k, enable_rerank=payload.enable_rerank,
-        )
-        retrieval: dict = {}
         try:
-            retrieval = await rag.lightrag.aquery_data(payload.query, param=data_param)
-        except Exception:
-            pass
-
-        # Event 1: retrieval metadata (citations, keywords)
-        meta = {
-            "type": "meta",
-            "data": retrieval.get("data", {}),
-            "metadata": retrieval.get("metadata", {}),
-        }
-        yield f"data: {_json.dumps(meta, ensure_ascii=False)}\n\n"
-
-        # Event 2+: LLM answer tokens
-        try:
-            async for token in service.stream_query(
+            async for event in service.stream_query(
                 payload.doc_id, payload.query,
                 mode=payload.mode, top_k=top_k,
                 chunk_top_k=chunk_top_k, enable_rerank=payload.enable_rerank,
             ):
-                ev = _json.dumps({"type": "chunk", "text": token}, ensure_ascii=False)
-                yield f"data: {ev}\n\n"
+                if event["type"] == "meta":
+                    retrieval_data = event  # keep for graph subquery
+                    yield f"data: {_json.dumps({'type': 'meta', 'data': event['data'], 'metadata': event['metadata']}, ensure_ascii=False)}\n\n"
+                elif event["type"] == "chunk":
+                    yield f"data: {_json.dumps({'type': 'chunk', 'text': event['text']}, ensure_ascii=False)}\n\n"
+                elif event["type"] == "error":
+                    yield f"data: {_json.dumps({'type': 'error', 'text': event['text']}, ensure_ascii=False)}\n\n"
         except Exception as exc:
-            yield f"data: {_json.dumps({'type': 'error', 'text': str(exc)})}\n\n"
+            yield f"data: {_json.dumps({'type': 'error', 'text': str(exc)}, ensure_ascii=False)}\n\n"
 
         # Event final: done + optional graph
         graph_data = None
         if payload.return_graph:
-            graph_data = await _get_query_subgraph(rag, retrieval, payload)
+            rag = await service.get_rag(payload.doc_id)
+            graph_data = await _get_query_subgraph(rag, retrieval_data, payload)
         yield f"data: {_json.dumps({'type': 'done', 'graph': graph_data}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(

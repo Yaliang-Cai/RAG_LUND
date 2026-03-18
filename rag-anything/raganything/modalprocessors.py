@@ -520,6 +520,7 @@ class BaseModalProcessor:
         batch_mode: bool = False,
         doc_id: str = None,
         chunk_order_index: int = 0,
+        page_idx: int = 0,
     ) -> Tuple[str, Dict[str, Any]]:
         """Create entity and text chunk"""
         # Create chunk
@@ -535,6 +536,7 @@ class BaseModalProcessor:
             "chunk_order_index": chunk_order_index,
             "full_doc_id": actual_doc_id,  # Use proper document ID
             "file_path": file_path,
+            "page_idx": page_idx,
         }
 
         # Store chunk
@@ -548,6 +550,7 @@ class BaseModalProcessor:
                 "tokens": tokens,
                 "chunk_order_index": chunk_order_index,
                 "file_path": file_path,
+                "page_idx": page_idx,
             }
         }
         await self.chunks_vdb.upsert(chunk_vdb_data)
@@ -1026,6 +1029,7 @@ class ImageModalProcessor(BaseModalProcessor):
                 batch_mode,
                 doc_id,
                 chunk_order_index,
+                page_idx=item_info.get("page_idx", 0) if item_info else 0,
             )
 
         except Exception as e:
@@ -1223,6 +1227,7 @@ class TableModalProcessor(BaseModalProcessor):
                 batch_mode,
                 doc_id,
                 chunk_order_index,
+                page_idx=item_info.get("page_idx", 0) if item_info else 0,
             )
 
         except Exception as e:
@@ -1410,6 +1415,7 @@ class EquationModalProcessor(BaseModalProcessor):
                 batch_mode,
                 doc_id,
                 chunk_order_index,
+                page_idx=item_info.get("page_idx", 0) if item_info else 0,
             )
 
         except Exception as e:

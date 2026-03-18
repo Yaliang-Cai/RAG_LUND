@@ -897,23 +897,47 @@ class LocalRagService:
         chunk_top_k: int = 5,
         enable_rerank: bool = True,
     ):
-        """Async generator — currently delegates to the unified aquery() so that
-        LightRAG's proven prompt templates (with ### References) are used.
+        """Async generator — yields structured events via LightRAG aquery_llm().
 
-        TODO: replace with true token-streaming once LightRAG exposes a streaming
-        interface, so the SSE infrastructure already in place can be leveraged.
+        Event types:
+          {"type": "meta", "data": {...}, "metadata": {...}}   # citations + entities + chunks
+          {"type": "chunk", "text": str}                       # LLM token
+          {"type": "error", "text": str}                       # error
         """
         try:
-            answer = await self.query(
-                doc_id, query,
-                mode=mode, top_k=top_k,
+            from lightrag import QueryParam
+            rag_instance = await self.get_rag(doc_id)
+            param = QueryParam(
+                mode=mode,
+                top_k=top_k,
                 chunk_top_k=chunk_top_k,
                 enable_rerank=enable_rerank,
+                stream=True,
+                include_references=True,
             )
-            yield answer or "No answer returned."
+            result = await rag_instance.lightrag.aquery_llm(query, param=param)
+
+            # Yield meta first (citations, entities, chunks, relationships)
+            yield {
+                "type": "meta",
+                "data": result.get("data", {}),
+                "metadata": result.get("metadata", {}),
+            }
+
+            # Then yield LLM tokens
+            llm_response = result.get("llm_response", {})
+            if llm_response.get("is_streaming"):
+                async for token in llm_response["response_iterator"]:
+                    if token:
+                        yield {"type": "chunk", "text": token}
+            else:
+                # Cache hit or non-streaming fallback
+                content = llm_response.get("content") or "No answer returned."
+                yield {"type": "chunk", "text": content}
+
         except Exception as exc:
             self.logger.error("stream_query error: %s", exc)
-            yield f"\n\n[Query error: {exc}]"
+            yield {"type": "error", "text": str(exc)}
 
 
 if __name__ == "__main__":

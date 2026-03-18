@@ -797,6 +797,7 @@
   <!-- Citation Hover Card -->
   <div class="citation-card" id="citationCard" style="display:none">
     <div class="citation-card-title" id="citationCardTitle"></div>
+    <div id="citationCardPage" style="font-size:0.78em;opacity:0.6;margin-bottom:4px"></div>
     <div id="citationCardContent"></div>
   </div>
 
@@ -1265,8 +1266,10 @@
       if (!chunk) return;
       const card = document.getElementById('citationCard');
       const title = document.getElementById('citationCardTitle');
+      const pageEl = document.getElementById('citationCardPage');
       const content = document.getElementById('citationCardContent');
       title.textContent = `Reference [${refId}]`;
+      pageEl.textContent = chunk.page_idx != null ? `Page ${chunk.page_idx + 1}` : '';
       const text = chunk.content || '';
       content.textContent = text.length > 300 ? text.substring(0, 300) + '...' : text;
       card.style.display = 'block';
