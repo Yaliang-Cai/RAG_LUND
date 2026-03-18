@@ -418,6 +418,7 @@ def build_llm_model_func(
     ):
         history_messages = history_messages or []
         keyword_extraction = bool(kwargs.pop("keyword_extraction", False))
+        is_streaming = bool(kwargs.pop("stream", False))
         cleaned_kwargs = _strip_internal_openai_kwargs(kwargs)
         if _is_entity_extraction_call(system_prompt, prompt):
             max_tokens = settings.ingest_max_tokens
@@ -444,6 +445,29 @@ def build_llm_model_func(
             if history_messages:
                 messages.extend(history_messages)
             messages.append({"role": "user", "content": prompt})
+
+        # Streaming path: return async generator so LightRAG wraps it as response_iterator
+        if is_streaming:
+            async def _token_stream():
+                try:
+                    stream = await client.chat.completions.create(
+                        model=model_name,
+                        messages=messages,
+                        temperature=settings.temperature,
+                        max_tokens=max_tokens,
+                        stream=True,
+                        **cleaned_kwargs,
+                    )
+                    async for chunk in stream:
+                        if chunk.choices:
+                            delta = chunk.choices[0].delta
+                            if delta and delta.content:
+                                yield delta.content
+                except Exception as exc:
+                    logger.error(f"LLM streaming error: {exc}")
+            return _token_stream()
+
+        # Non-streaming path (existing behaviour)
         try:
             if "response_format" in cleaned_kwargs:
                 response = await client.chat.completions.parse(
