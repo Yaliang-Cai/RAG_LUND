@@ -244,6 +244,7 @@ Consider the conversation history if provided to maintain conversational flow an
   - Scrutinize both `Knowledge Graph Data` and `Document Chunks` in the **Context**. Identify and extract all pieces of information that are directly relevant to answering the user query.
   - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
   - Track the reference_id of the document chunk which directly support the facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate the appropriate citations.
+  - When a specific fact is supported by a document chunk, embed the chunk's `id` as an inline citation immediately after the fact (e.g., `[DC1]`, `[DC2]`). Use the `id` field from the Document Chunks for inline citations.
   - Generate a references section at the end of the response. Each reference document must directly support the facts presented in the response.
   - Do not generate anything after the reference section.
 
@@ -348,7 +349,7 @@ Knowledge Graph Data (Relationship):
 {relations_str}
 ```
 
-Document Chunks (Each entry has a reference_id refer to the `Reference Document List`):
+Document Chunks (Each entry has an `id` for inline citation and a `reference_id` for the Reference Document List):
 
 ```json
 {text_chunks_str}

@@ -4805,6 +4805,7 @@ async def _build_context_str(
     for i, chunk in enumerate(truncated_chunks):
         chunks_context.append(
             {
+                "id": chunk.get("id", ""),        # chunk-level inline citation identifier
                 "reference_id": chunk["reference_id"],
                 "content": chunk["content"],
             }

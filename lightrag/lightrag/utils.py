@@ -3264,6 +3264,7 @@ def convert_to_user_format(
     formatted_chunks = []
     for i, chunk in enumerate(chunks):
         chunk_data = {
+            "id": chunk.get("id", ""),            # DC-N chunk-level identifier
             "reference_id": chunk.get("reference_id", ""),
             "content": chunk.get("content", ""),
             "file_path": chunk.get("file_path", "unknown_source"),

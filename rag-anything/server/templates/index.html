@@ -402,6 +402,36 @@
     }
     .citation-link:hover { border-color: var(--accent-medium); background: var(--accent-medium); }
 
+    /* Chunk-level citation marker (inline icon badge, NotebookLM style) */
+    .citation-marker {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 16px; height: 16px; border-radius: 50%;
+      background: var(--accent, #f59e0b); color: #fff;
+      font-size: 9px; font-weight: 700; line-height: 1;
+      vertical-align: super; margin: 0 1px;
+      cursor: pointer; user-select: none;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .citation-marker:hover { transform: scale(1.25); box-shadow: 0 2px 8px rgba(245,158,11,0.5); }
+
+    /* Chunk preview card (richer than citationCard, supports KaTeX) */
+    #chunkPreviewCard {
+      position: fixed; z-index: 1001;
+      background: var(--bg-bot-msg); border: 1px solid var(--border-strong);
+      border-radius: var(--radius-md); padding: 14px 16px;
+      max-width: 420px; max-height: 260px; overflow-y: auto;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.35); font-size: 12px; line-height: 1.7;
+      color: var(--text-secondary); pointer-events: none; display: none;
+    }
+    #chunkPreviewCard .chunk-card-header {
+      display: flex; align-items: center; gap: 6px;
+      font-weight: 600; color: var(--accent); font-size: 11px; margin-bottom: 6px;
+    }
+    #chunkPreviewCard .chunk-card-meta {
+      font-size: 10px; opacity: 0.55; margin-bottom: 8px;
+    }
+    #chunkPreviewCard .chunk-card-body { white-space: pre-wrap; }
+
     /* Citation hover card */
     .citation-card {
       position: fixed; z-index: 1000; background: var(--bg-bot-msg);
@@ -830,6 +860,15 @@
     <div id="citationCardContent"></div>
   </div>
 
+  <!-- Chunk-level Citation Preview Card -->
+  <div id="chunkPreviewCard">
+    <div class="chunk-card-header">
+      <span id="chunkCardLabel"></span>
+    </div>
+    <div class="chunk-card-meta" id="chunkCardMeta"></div>
+    <div class="chunk-card-body" id="chunkCardBody"></div>
+  </div>
+
   <!-- Hidden file input -->
   <input type="file" id="fileInput" style="display:none" multiple
     accept=".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.bmp,.tiff,.gif,.webp,.md,.txt">
@@ -1150,10 +1189,19 @@
     },
 
     _processCitations(html) {
-      // Replace [N] with clickable citation links, but skip markdown links [text](url)
-      return html.replace(/\[(\d+)\](?!\()/g, (match, num) => {
+      // Step 1: chunk-level [DCN] → amber icon badge (must run before [N] to avoid partial match)
+      html = html.replace(/\[DC(\d+)\](?!\()/g, (match, num) => {
+        const id = `DC${num}`;
+        return `<sup class="citation-marker" data-ref="${id}"
+                    onclick="Citations.onChunkClick('${id}')"
+                    onmouseenter="Citations.onChunkHover('${id}', event)"
+                    onmouseleave="Citations.onChunkLeave()">${num}</sup>`;
+      });
+      // Step 2: doc-level [N] → existing text link (unchanged behavior)
+      html = html.replace(/\[(\d+)\](?!\()/g, (match, num) => {
         return `<span class="citation-link" data-ref="${num}" onclick="Citations.onClick('${num}')" onmouseenter="Citations.onHover('${num}', event)" onmouseleave="Citations.onLeave()">${match}</span>`;
       });
+      return html;
     },
 
     postProcessThinkTags(container) {
@@ -1274,8 +1322,9 @@
      MODULE 6: Citations
   ============================================================ */
   const Citations = {
-    chunks: {},     // refId -> chunk data
-    references: {}, // refId -> reference data
+    chunks: {},      // reference_id → most relevant chunk for that doc (doc-level)
+    chunkById: {},   // DC-N id → specific chunk (chunk-level)
+    references: {},  // refId -> reference data
 
     register(data) {
       this.clear();
@@ -1283,14 +1332,17 @@
       const chunks = data.chunks || [];
       const refs = data.references || [];
       chunks.forEach((c, i) => {
-        const id = c.reference_id || String(i + 1);
-        if (!this.chunks[id]) this.chunks[id] = c; // keep first (most relevant)
+        const docId   = c.reference_id || String(i + 1);
+        const chunkId = c.id || '';
+        if (!this.chunks[docId]) this.chunks[docId] = c; // keep first (most relevant)
+        if (chunkId)             this.chunkById[chunkId] = c;
       });
       refs.forEach((r, i) => {
         const id = r.reference_id || String(i + 1);
         this.references[id] = r;
       });
-      console.debug('[Citations] registered:', Object.keys(this.chunks).length, 'chunks,', Object.keys(this.references).length, 'refs');
+      console.debug('[Citations] registered:', Object.keys(this.chunks).length, 'docs,',
+                    Object.keys(this.chunkById).length, 'chunks');
     },
 
     onClick(refId) {
@@ -1343,8 +1395,54 @@
       document.getElementById('citationCard').style.display = 'none';
     },
 
+    onChunkHover(dcId, event) {
+      const chunk = this.chunkById[dcId];
+      if (!chunk) return;
+      const card = document.getElementById('chunkPreviewCard');
+      document.getElementById('chunkCardLabel').textContent = dcId;
+      const filePath = chunk.file_path || '';
+      const fileName = filePath.split(/[\\/]/).pop() || filePath;
+      const pageInfo = chunk.page_idx != null ? `Page ${chunk.page_idx + 1}` : '';
+      document.getElementById('chunkCardMeta').textContent =
+          [pageInfo, fileName].filter(Boolean).join('  ·  ');
+      const body = document.getElementById('chunkCardBody');
+      const text = chunk.content || '';
+      body.textContent = text.length > 500 ? text.substring(0, 500) + '…' : text;
+      if (typeof renderMathInElement === 'function') {
+        try {
+          renderMathInElement(body, {
+            delimiters: [
+              { left: '$$', right: '$$', display: true },
+              { left: '$',  right: '$',  display: false },
+            ],
+            throwOnError: false,
+          });
+        } catch (e) {}
+      }
+      card.style.display = 'block';
+      const x = Math.max(10, Math.min(event.clientX + 16, window.innerWidth - 450));
+      const y = Math.max(10, Math.min(event.clientY + 16, window.innerHeight - 280));
+      card.style.left = x + 'px';
+      card.style.top  = y + 'px';
+    },
+
+    onChunkLeave() {
+      document.getElementById('chunkPreviewCard').style.display = 'none';
+    },
+
+    onChunkClick(dcId) {
+      const chunk = this.chunkById[dcId];
+      if (!chunk || chunk.page_idx == null) return;
+      PDFViewer.scrollToPage(chunk.page_idx + 1); // page_idx is 0-based
+      const panel = document.getElementById('pdfPanel');
+      panel.classList.remove('flash-active');
+      void panel.offsetWidth;
+      panel.classList.add('flash-active');
+    },
+
     clear() {
       this.chunks = {};
+      this.chunkById = {};
       this.references = {};
     },
   };
