@@ -1442,49 +1442,71 @@
       const chunk = this.chunkById[dcId];
       if (!chunk) return;
       if (chunk.page_idx != null) {
-        // PDF chunk: scroll to page in PDF viewer
-        PDFViewer.scrollToPage(chunk.page_idx + 1); // page_idx is 0-based
-        const panel = document.getElementById('pdfPanel');
-        panel.classList.remove('flash-active');
-        void panel.offsetWidth;
-        panel.classList.add('flash-active');
+        this._navigateToPdfChunk(chunk);
       } else {
-        // Text chunk: navigate to corresponding MD file and highlight
         this._navigateToTextChunk(chunk);
       }
     },
 
-    async _navigateToTextChunk(chunk) {
-      const filePath = chunk.file_path || '';
-      const baseName = filePath.split(/[\\/]/).pop().replace(/\.[^.]+$/, '');
-
-      // Find matching MD option in fileSelect
+    // Find the option in fileSelect whose base name matches the chunk's file_path base name
+    _findFileOption(prefix, chunkBase) {
       const sel = document.getElementById('fileSelect');
-      let mdOption = null;
       for (const opt of sel.options) {
-        if (!opt.value.startsWith('md:')) continue;
-        const mdFile = opt.value.slice(3);
-        const mdBase = mdFile.replace(/\.[^.]+$/, '');
-        if (mdBase === baseName || mdFile.includes(baseName) || baseName.includes(mdBase)) {
-          mdOption = opt;
-          break;
+        if (!opt.value.startsWith(prefix)) continue;
+        const fileName = opt.value.slice(prefix.length);
+        const fileBase = fileName.replace(/\.[^.]+$/, '');
+        if (fileBase === chunkBase || fileName === chunkBase ||
+            fileBase.includes(chunkBase) || chunkBase.includes(fileBase)) {
+          return opt;
         }
       }
+      return null;
+    },
 
-      if (mdOption) {
-        const mdName = mdOption.value.slice(3);
-        const curFile = AppState.currentFile;
-        if (!curFile || curFile.name !== mdName || curFile.type !== 'md') {
-          mdOption.selected = true;
-          await FileManager.selectFile(mdOption.value);
-          await new Promise(r => setTimeout(r, 350)); // wait for render
-        }
-      }
-
-      // Expand left panel if collapsed
+    async _navigateToPdfChunk(chunk) {
+      // Ensure left panel is visible
       const panel = document.getElementById('pdfPanel');
-      if (panel.classList.contains('collapsed')) {
-        UI.toggleSourcePanel();
+      if (panel.classList.contains('collapsed')) UI.toggleSourcePanel();
+
+      const chunkBase = (chunk.file_path || '').split(/[\\/]/).pop().replace(/\.[^.]+$/, '');
+      const pdfOption = this._findFileOption('upload:', chunkBase);
+
+      if (pdfOption) {
+        const pdfName = pdfOption.value.slice(7);
+        const cur = AppState.currentFile;
+        if (!cur || cur.name !== pdfName || cur.type !== 'pdf') {
+          pdfOption.selected = true;
+          await FileManager.selectFile(pdfOption.value);
+          // Give the iframe time to register the new src before we set the page fragment
+          await new Promise(r => setTimeout(r, 200));
+        }
+      }
+
+      PDFViewer.scrollToPage(chunk.page_idx + 1);
+      panel.classList.remove('flash-active');
+      void panel.offsetWidth;
+      panel.classList.add('flash-active');
+    },
+
+    async _navigateToTextChunk(chunk) {
+      // Ensure left panel is visible
+      const panel = document.getElementById('pdfPanel');
+      if (panel.classList.contains('collapsed')) UI.toggleSourcePanel();
+
+      const chunkBase = (chunk.file_path || '').split(/[\\/]/).pop().replace(/\.[^.]+$/, '');
+      const mdOption = this._findFileOption('md:', chunkBase);
+
+      if (!mdOption) {
+        // No matching MD file — nothing to navigate to
+        return;
+      }
+
+      const mdName = mdOption.value.slice(3);
+      const cur = AppState.currentFile;
+      if (!cur || cur.name !== mdName || cur.type !== 'md') {
+        mdOption.selected = true;
+        // selectFile awaits the full content fetch+render, no extra delay needed
+        await FileManager.selectFile(mdOption.value);
       }
 
       this._highlightChunkInMd(chunk.content);
@@ -1492,23 +1514,30 @@
 
     _highlightChunkInMd(content) {
       const viewer = document.getElementById('mdViewer');
+      // mdViewer must be visible — if we just loaded MD via selectFile it will be
       if (!viewer || viewer.style.display === 'none') return;
 
-      // Clear previous highlights
+      // Clear any previous highlight
       viewer.querySelectorAll('.dc-highlight').forEach(el => el.classList.remove('dc-highlight'));
 
       if (!content) return;
-      const searchKey = content.substring(0, 60).trim().replace(/\s+/g, ' ');
-      if (!searchKey) return;
+      const norm = content.replace(/\s+/g, ' ').trim();
+      if (!norm) return;
 
-      const blocks = viewer.querySelectorAll('p, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, pre, code');
-      for (const el of blocks) {
-        const elText = el.textContent.replace(/\s+/g, ' ');
-        if (elText.includes(searchKey.substring(0, 30))) {
-          el.classList.add('dc-highlight');
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          setTimeout(() => el.classList.remove('dc-highlight'), 3500);
-          return;
+      // Try progressively shorter prefixes so partial chunks still match
+      const candidates = [norm.substring(0, 80), norm.substring(0, 40), norm.substring(0, 20)]
+        .filter(k => k.length >= 10);
+
+      // Use block-level elements only (exclude bare `code` to avoid inner-pre duplicates)
+      const blocks = viewer.querySelectorAll('p, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, pre');
+      for (const key of candidates) {
+        for (const el of blocks) {
+          if (el.textContent.replace(/\s+/g, ' ').includes(key)) {
+            el.classList.add('dc-highlight');
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setTimeout(() => el.classList.remove('dc-highlight'), 3500);
+            return;
+          }
         }
       }
     },
