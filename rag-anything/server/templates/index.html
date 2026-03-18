@@ -432,6 +432,14 @@
     }
     #chunkPreviewCard .chunk-card-body { white-space: pre-wrap; }
 
+    /* MD viewer chunk highlight (text chunk navigation) */
+    .dc-highlight {
+      background: rgba(245,158,11,0.28) !important;
+      outline: 2px solid rgba(245,158,11,0.6);
+      border-radius: 4px;
+      transition: background 1.5s ease, outline 1.5s ease;
+    }
+
     /* Citation hover card */
     .citation-card {
       position: fixed; z-index: 1000; background: var(--bg-bot-msg);
@@ -1432,12 +1440,77 @@
 
     onChunkClick(dcId) {
       const chunk = this.chunkById[dcId];
-      if (!chunk || chunk.page_idx == null) return;
-      PDFViewer.scrollToPage(chunk.page_idx + 1); // page_idx is 0-based
+      if (!chunk) return;
+      if (chunk.page_idx != null) {
+        // PDF chunk: scroll to page in PDF viewer
+        PDFViewer.scrollToPage(chunk.page_idx + 1); // page_idx is 0-based
+        const panel = document.getElementById('pdfPanel');
+        panel.classList.remove('flash-active');
+        void panel.offsetWidth;
+        panel.classList.add('flash-active');
+      } else {
+        // Text chunk: navigate to corresponding MD file and highlight
+        this._navigateToTextChunk(chunk);
+      }
+    },
+
+    async _navigateToTextChunk(chunk) {
+      const filePath = chunk.file_path || '';
+      const baseName = filePath.split(/[\\/]/).pop().replace(/\.[^.]+$/, '');
+
+      // Find matching MD option in fileSelect
+      const sel = document.getElementById('fileSelect');
+      let mdOption = null;
+      for (const opt of sel.options) {
+        if (!opt.value.startsWith('md:')) continue;
+        const mdFile = opt.value.slice(3);
+        const mdBase = mdFile.replace(/\.[^.]+$/, '');
+        if (mdBase === baseName || mdFile.includes(baseName) || baseName.includes(mdBase)) {
+          mdOption = opt;
+          break;
+        }
+      }
+
+      if (mdOption) {
+        const mdName = mdOption.value.slice(3);
+        const curFile = AppState.currentFile;
+        if (!curFile || curFile.name !== mdName || curFile.type !== 'md') {
+          mdOption.selected = true;
+          await FileManager.selectFile(mdOption.value);
+          await new Promise(r => setTimeout(r, 350)); // wait for render
+        }
+      }
+
+      // Expand left panel if collapsed
       const panel = document.getElementById('pdfPanel');
-      panel.classList.remove('flash-active');
-      void panel.offsetWidth;
-      panel.classList.add('flash-active');
+      if (panel.classList.contains('collapsed')) {
+        UI.toggleSourcePanel();
+      }
+
+      this._highlightChunkInMd(chunk.content);
+    },
+
+    _highlightChunkInMd(content) {
+      const viewer = document.getElementById('mdViewer');
+      if (!viewer || viewer.style.display === 'none') return;
+
+      // Clear previous highlights
+      viewer.querySelectorAll('.dc-highlight').forEach(el => el.classList.remove('dc-highlight'));
+
+      if (!content) return;
+      const searchKey = content.substring(0, 60).trim().replace(/\s+/g, ' ');
+      if (!searchKey) return;
+
+      const blocks = viewer.querySelectorAll('p, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, pre, code');
+      for (const el of blocks) {
+        const elText = el.textContent.replace(/\s+/g, ' ');
+        if (elText.includes(searchKey.substring(0, 30))) {
+          el.classList.add('dc-highlight');
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setTimeout(() => el.classList.remove('dc-highlight'), 3500);
+          return;
+        }
+      }
     },
 
     clear() {
