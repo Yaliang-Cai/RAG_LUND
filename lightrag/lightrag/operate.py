@@ -238,6 +238,15 @@ _CONTENT_WINDOWS_PATH_RE = _re.compile(r"(?<!\w)[A-Za-z]:[\\/][^\s\"'`<>|]+")
 _CONTENT_POSIX_PATH_RE = _re.compile(r"(?<!\w)/(?:[^\s\"'`<>|]+)")
 _CONTENT_REL_PATH_RE = _re.compile(r"(?<!\w)(?:\.{1,2}|~)[\\/][^\s\"'`<>|]+")
 _IMAGE_PATH_LINE_RE = _re.compile(r"(?im)^\s*image path\s*:\s*(.+?)\s*$")
+_DISABLE_LOCATOR_CLEANUP_ENV = "LIGHTRAG_DISABLE_LOCATOR_ENTITY_CLEANUP"
+_PROMPT_LOCATOR_RULES_RE = _re.compile(
+    r"^\s*\*\s+\*\*(?:Document Locator Rules|Locator With Semantic Title):\*\*.*(?:\n|$)",
+    _re.MULTILINE,
+)
+_PROMPT_PURE_LAYOUT_RULE_RE = _re.compile(
+    r"\s*Do \*\*NOT\*\* extract pure layout/metadata labels .*?core subject in context\.",
+    _re.IGNORECASE,
+)
 _QUERY_IMAGE_PATH_RE = _re.compile(
     r"Image Path:\s*([^\r\n]*?\.(?:jpg|jpeg|png|gif|bmp|webp|tiff|tif))",
     _re.IGNORECASE,
@@ -401,7 +410,10 @@ def _looks_like_acronym(word: str) -> bool:
     return vowels == 0
 
 
-def _normalize_entity_surface(name: str) -> str:
+def _normalize_entity_surface(
+    name: str,
+    disable_locator_cleanup: bool = False,
+) -> str:
     # Normalize Unicode and separator artifacts first.
     normalized = unicodedata.normalize("NFKC", name or "")
     normalized = _re.sub(r"(?<=\w)_(?=\w)", " ", normalized.strip())
@@ -425,6 +437,9 @@ def _normalize_entity_surface(name: str) -> str:
                 else:
                     titled_words.append(w.capitalize())
             normalized = " ".join(titled_words)
+
+    if disable_locator_cleanup:
+        return normalized
 
     if _MODAL_ENTITY_SUFFIX_RE.search(normalized):
         return normalized
@@ -456,38 +471,42 @@ def _is_bare_locator_label(name: str) -> bool:
 def _classify_low_quality_entity(
     name: str,
     path_fragment_keys: set[str] | None = None,
+    disable_locator_cleanup: bool = False,
 ) -> tuple[bool, str]:
     if not name:
         return True, "empty"
     cleaned = name.strip()
     key = _entity_lexical_key(_strip_modal_suffix(cleaned))
 
-    if _has_semantic_locator_title(cleaned):
-        # Keep high-value locator entities with semantic titles, e.g.
-        # "Table 7: Ablation Results (table)".
-        return False, "locator_with_semantic_title"
-    if _is_bare_locator_label(cleaned):
-        return True, "bare_locator_label"
-    if cleaned.casefold().startswith("image path"):
+    if not disable_locator_cleanup:
+        if _has_semantic_locator_title(cleaned):
+            # Keep high-value locator entities with semantic titles, e.g.
+            # "Table 7: Ablation Results (table)".
+            return False, "locator_with_semantic_title"
+        if _is_bare_locator_label(cleaned):
+            return True, "bare_locator_label"
+    if not disable_locator_cleanup and cleaned.casefold().startswith("image path"):
         return True, "image_path_label"
     if key:
         if path_fragment_keys and key in path_fragment_keys:
             return True, "path_fragment_from_source"
-    if key in _LAYOUT_METADATA_ENTITIES:
+    if not disable_locator_cleanup and key in _LAYOUT_METADATA_ENTITIES:
         return True, "layout_metadata"
     if key in _AMBIGUOUS_REFERENCE_ENTITIES:
         return True, "ambiguous_reference"
     if key in _GENERIC_NOISE_ENTITIES:
         return True, "generic_noise"
-    if _PAGE_NUMBER_ENTITY_RE.match(cleaned):
+    if not disable_locator_cleanup and _PAGE_NUMBER_ENTITY_RE.match(cleaned):
         return True, "page_number_label"
-    if _COORDINATE_ENTITY_RE.match(cleaned):
+    if not disable_locator_cleanup and _COORDINATE_ENTITY_RE.match(cleaned):
         return True, "coordinate_label"
-    if ("bounding box" in key or "coordinate" in key) and _COORDINATE_BRACKET_RE.search(
-        cleaned
+    if (
+        not disable_locator_cleanup
+        and ("bounding box" in key or "coordinate" in key)
+        and _COORDINATE_BRACKET_RE.search(cleaned)
     ):
         return True, "coordinate_metadata"
-    if _IMAGE_STEM_NO_EXT_RE.match(cleaned):
+    if not disable_locator_cleanup and _IMAGE_STEM_NO_EXT_RE.match(cleaned):
         return True, "image_stem_no_ext"
     if "published by" in key:
         return True, "publisher_phrase_noise"
@@ -620,6 +639,18 @@ def _coerce_bool(value: Any, default: bool = True) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_entity_extraction_system_prompt(
+    context_base: dict[str, Any],
+    disable_locator_cleanup: bool = False,
+) -> str:
+    """Build extraction system prompt with optional locator-rule stripping."""
+    template = PROMPTS["entity_extraction_system_prompt"]
+    if disable_locator_cleanup:
+        template = _PROMPT_LOCATOR_RULES_RE.sub("", template)
+        template = _PROMPT_PURE_LAYOUT_RULE_RE.sub("", template)
+    return template.format(**context_base)
 
 
 def _chunk_token_cost(tokenizer: Tokenizer, chunk: dict) -> int:
@@ -1010,6 +1041,7 @@ async def _handle_single_entity_extraction(
     timestamp: int,
     file_path: str = "unknown_source",
     path_fragment_keys: set[str] | None = None,
+    disable_locator_cleanup: bool = False,
 ):
     if len(record_attributes) != 4 or "entity" not in record_attributes[0]:
         if len(record_attributes) > 1 and "entity" in record_attributes[0]:
@@ -1023,7 +1055,10 @@ async def _handle_single_entity_extraction(
         entity_name = sanitize_and_normalize_extracted_text(
             record_attributes[1], remove_inner_quotes=True
         )
-        entity_name = _normalize_entity_surface(entity_name)
+        entity_name = _normalize_entity_surface(
+            entity_name,
+            disable_locator_cleanup=disable_locator_cleanup,
+        )
 
         # Validate entity name after all cleaning steps
         if not entity_name or not entity_name.strip():
@@ -1041,7 +1076,9 @@ async def _handle_single_entity_extraction(
             return None
 
         is_low_quality_entity, low_quality_reason = _classify_low_quality_entity(
-            entity_name, path_fragment_keys=path_fragment_keys
+            entity_name,
+            path_fragment_keys=path_fragment_keys,
+            disable_locator_cleanup=disable_locator_cleanup,
         )
         if is_low_quality_entity:
             logger.info(
@@ -1116,6 +1153,7 @@ async def _handle_single_relationship_extraction(
     timestamp: int,
     file_path: str = "unknown_source",
     path_fragment_keys: set[str] | None = None,
+    disable_locator_cleanup: bool = False,
 ):
     if (
         len(record_attributes) != 5 or "relation" not in record_attributes[0]
@@ -1134,8 +1172,14 @@ async def _handle_single_relationship_extraction(
         target = sanitize_and_normalize_extracted_text(
             record_attributes[2], remove_inner_quotes=True
         )
-        source = _normalize_entity_surface(source)
-        target = _normalize_entity_surface(target)
+        source = _normalize_entity_surface(
+            source,
+            disable_locator_cleanup=disable_locator_cleanup,
+        )
+        target = _normalize_entity_surface(
+            target,
+            disable_locator_cleanup=disable_locator_cleanup,
+        )
 
         # Validate entity names after all cleaning steps
         if not source:
@@ -1165,10 +1209,14 @@ async def _handle_single_relationship_extraction(
             return None
 
         source_is_low_quality, source_lq_reason = _classify_low_quality_entity(
-            source, path_fragment_keys=path_fragment_keys
+            source,
+            path_fragment_keys=path_fragment_keys,
+            disable_locator_cleanup=disable_locator_cleanup,
         )
         target_is_low_quality, target_lq_reason = _classify_low_quality_entity(
-            target, path_fragment_keys=path_fragment_keys
+            target,
+            path_fragment_keys=path_fragment_keys,
+            disable_locator_cleanup=disable_locator_cleanup,
         )
         if source_is_low_quality or target_is_low_quality:
             reason_parts = []
@@ -1262,6 +1310,9 @@ async def rebuild_knowledge_from_chunks(
     """
     if not entities_to_rebuild and not relationships_to_rebuild:
         return
+    disable_locator_cleanup = _coerce_bool(
+        global_config.get("disable_locator_cleanup"), default=False
+    ) or _coerce_bool(os.getenv(_DISABLE_LOCATOR_CLEANUP_ENV), default=False)
 
     # Get all referenced chunk IDs
     all_referenced_chunk_ids = set()
@@ -1311,6 +1362,7 @@ async def rebuild_knowledge_from_chunks(
                     chunk_id=chunk_id,
                     extraction_result=result[0],
                     timestamp=result[1],
+                    disable_locator_cleanup=disable_locator_cleanup,
                 )
 
                 # Merge entities and relationships from this extraction result
@@ -1611,6 +1663,7 @@ async def _process_extraction_result(
     source_text: str = "",
     tuple_delimiter: str = "<|#|>",
     completion_delimiter: str = "<|COMPLETE|>",
+    disable_locator_cleanup: bool = False,
 ) -> tuple[dict, dict]:
     """Process a single extraction result (either initial or gleaning)
     Args:
@@ -1698,6 +1751,7 @@ async def _process_extraction_result(
             timestamp,
             file_path,
             path_fragment_keys,
+            disable_locator_cleanup=disable_locator_cleanup,
         )
         if entity_data is not None:
             truncated_name = _truncate_entity_identifier(
@@ -1717,6 +1771,7 @@ async def _process_extraction_result(
             timestamp,
             file_path,
             path_fragment_keys,
+            disable_locator_cleanup=disable_locator_cleanup,
         )
         if relationship_data is not None:
             truncated_source = _truncate_entity_identifier(
@@ -1743,6 +1798,7 @@ async def _rebuild_from_extraction_result(
     extraction_result: str,
     chunk_id: str,
     timestamp: int,
+    disable_locator_cleanup: bool = False,
 ) -> tuple[dict, dict]:
     """Parse cached extraction result using the same logic as extract_entities
 
@@ -1773,6 +1829,7 @@ async def _rebuild_from_extraction_result(
         source_text=chunk_content,
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
+        disable_locator_cleanup=disable_locator_cleanup,
     )
 
 
@@ -3508,6 +3565,9 @@ async def extract_entities(
 
     use_llm_func: callable = global_config["llm_model_func"]
     entity_extract_max_gleaning = global_config["entity_extract_max_gleaning"]
+    disable_locator_cleanup = _coerce_bool(
+        global_config.get("disable_locator_cleanup"), default=False
+    ) or _coerce_bool(os.getenv(_DISABLE_LOCATOR_CLEANUP_ENV), default=False)
 
     ordered_chunks = list(chunks.items())
     # add language and example number params to prompt
@@ -3558,9 +3618,10 @@ async def extract_entities(
 
         # Get initial extraction
         # Format system prompt without input_text for each chunk (enables OpenAI prompt caching across chunks)
-        entity_extraction_system_prompt = PROMPTS[
-            "entity_extraction_system_prompt"
-        ].format(**context_base)
+        entity_extraction_system_prompt = _build_entity_extraction_system_prompt(
+            context_base=context_base,
+            disable_locator_cleanup=disable_locator_cleanup,
+        )
         # Format user prompts with input_text for each chunk
         entity_extraction_user_prompt = PROMPTS["entity_extraction_user_prompt"].format(
             **{**context_base, "input_text": content}
@@ -3592,6 +3653,7 @@ async def extract_entities(
             source_text=content,
             tuple_delimiter=context_base["tuple_delimiter"],
             completion_delimiter=context_base["completion_delimiter"],
+            disable_locator_cleanup=disable_locator_cleanup,
         )
 
         # Process additional gleaning results only 1 time when entity_extract_max_gleaning is greater than zero.
@@ -3616,6 +3678,7 @@ async def extract_entities(
                 source_text=content,
                 tuple_delimiter=context_base["tuple_delimiter"],
                 completion_delimiter=context_base["completion_delimiter"],
+                disable_locator_cleanup=disable_locator_cleanup,
             )
 
             # Merge results - compare description lengths to choose better version
