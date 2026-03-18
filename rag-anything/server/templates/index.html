@@ -1282,15 +1282,15 @@
       if (!data) return;
       const chunks = data.chunks || [];
       const refs = data.references || [];
-      // Index by reference_id or position
       chunks.forEach((c, i) => {
         const id = c.reference_id || String(i + 1);
-        this.chunks[id] = c;
+        if (!this.chunks[id]) this.chunks[id] = c; // keep first (most relevant)
       });
       refs.forEach((r, i) => {
         const id = r.reference_id || String(i + 1);
         this.references[id] = r;
       });
+      console.debug('[Citations] registered:', Object.keys(this.chunks).length, 'chunks,', Object.keys(this.references).length, 'refs');
     },
 
     onClick(refId) {
@@ -1298,7 +1298,6 @@
       const ref = this.references[refId];
       if (!chunk && !ref) return;
 
-      // Try to determine page number from file_path
       const filePath = (chunk && chunk.file_path) || (ref && ref.file_path) || '';
       const pageMatch = filePath.match(/page[_\-]?(\d+)/i);
       const iframeVisible = document.getElementById('pdfIframe')?.style.display !== 'none';
@@ -1306,7 +1305,6 @@
         PDFViewer.scrollToPage(parseInt(pageMatch[1]));
       }
 
-      // Flash the PDF panel
       const panel = document.getElementById('pdfPanel');
       panel.classList.remove('flash-active');
       void panel.offsetWidth;
@@ -1315,19 +1313,28 @@
 
     onHover(refId, event) {
       const chunk = this.chunks[refId];
-      if (!chunk) return;
+      const ref = this.references[refId];
+      if (!chunk && !ref) return;
       const card = document.getElementById('citationCard');
       const title = document.getElementById('citationCardTitle');
       const pageEl = document.getElementById('citationCardPage');
-      const content = document.getElementById('citationCardContent');
+      const contentEl = document.getElementById('citationCardContent');
       title.textContent = `Reference [${refId}]`;
-      pageEl.textContent = chunk.page_idx != null ? `Page ${chunk.page_idx + 1}` : '';
-      const text = chunk.content || '';
-      content.textContent = text.length > 300 ? text.substring(0, 300) + '...' : text;
+      if (chunk) {
+        const filePath = chunk.file_path || '';
+        const fileName = filePath.split(/[\\/]/).pop() || filePath;
+        pageEl.textContent = chunk.page_idx != null ? `Page ${chunk.page_idx + 1}  ·  ${fileName}` : fileName;
+        const text = chunk.content || '';
+        contentEl.textContent = text.length > 400 ? text.substring(0, 400) + '…' : text;
+      } else {
+        // Fallback: only reference (no chunk content)
+        pageEl.textContent = '';
+        const fp = ref.file_path || '';
+        contentEl.textContent = fp.split(/[\\/]/).pop() || fp;
+      }
       card.style.display = 'block';
-      // Position near cursor
-      const x = Math.min(event.clientX + 10, window.innerWidth - 420);
-      const y = Math.min(event.clientY + 10, window.innerHeight - 220);
+      const x = Math.max(10, Math.min(event.clientX + 14, window.innerWidth - 430));
+      const y = Math.max(10, Math.min(event.clientY + 14, window.innerHeight - 230));
       card.style.left = x + 'px';
       card.style.top = y + 'px';
     },
@@ -1412,6 +1419,7 @@
               this._removeMsg(thinkingId);
               msgEl = this._addBot('', true);
               metaDone = true;
+              AppState._lastMeta = ev;
 
             } else if (ev.type === 'chunk') {
               textBuf += ev.text;
@@ -1426,7 +1434,8 @@
                 Renderer.postProcess(msgEl);
                 Renderer.postProcessThinkTags(msgEl);
               }
-              AppState.lastQueryResponse = { answer: textBuf, data: {}, metadata: {}, graph: ev.graph };
+              const _meta = AppState._lastMeta || {};
+              AppState.lastQueryResponse = { answer: textBuf, data: _meta.data || {}, metadata: _meta.metadata || {}, graph: ev.graph };
 
             } else if (ev.type === 'error') {
               if (msgEl) msgEl.innerHTML = `<span style="color:var(--error)">${ev.text}</span>`;
