@@ -14,6 +14,7 @@ import json
 import re
 import asyncio
 import logging
+import gc
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -94,6 +95,14 @@ logging.getLogger("raganything.parser").setLevel(logging.INFO)
 def _normalize_max_async(max_async: int, default: int = 4) -> int:
     try:
         return max(1, int(max_async))
+    except Exception:
+        return default
+
+
+def _normalize_flush_every(flush_every: int, default: int = 6) -> int:
+    try:
+        value = int(flush_every)
+        return value if value >= 0 else default
     except Exception:
         return default
 
@@ -257,12 +266,40 @@ def _clear_cuda_cache() -> None:
         logger.warning("Failed to clear GPU cache: %s", exc)
 
 
+def _clear_local_model_cache() -> None:
+    try:
+        import raganything.services.local_rag as local_rag_module
+
+        model_cache = getattr(local_rag_module, "_MODEL_CACHE", None)
+        if isinstance(model_cache, dict):
+            model_cache.clear()
+    except Exception as exc:
+        logger.warning("Failed to clear local model cache: %s", exc)
+
+
+async def _recycle_local_rag_service(
+    service: LocalRagService,
+    settings: LocalRagSettings,
+    shared_doc_id: str,
+    *,
+    clear_model_cache: bool = True,
+) -> LocalRagService:
+    await _cleanup_rag_instance(service, shared_doc_id)
+    if clear_model_cache:
+        _clear_local_model_cache()
+    del service
+    gc.collect()
+    _clear_cuda_cache()
+    return LocalRagService(settings)
+
+
 def _save_generation_config(
     *,
     profile_name: str,
     eval_prompt_filename: str,
     one_sentence: bool,
     max_async_generate: int,
+    ingest_flush_every: int,
     shared_doc_id: str,
     disable_locator_cleanup: bool,
     start_id: int,
@@ -276,6 +313,7 @@ def _save_generation_config(
             "eval_prompt_filename": eval_prompt_filename,
             "one_sentence": bool(one_sentence),
             "max_async_generate": int(max_async_generate),
+            "ingest_flush_every": int(ingest_flush_every),
             "shared_doc_id": shared_doc_id,
             "disable_locator_cleanup": bool(disable_locator_cleanup),
             "start_id": int(start_id),
@@ -291,6 +329,7 @@ async def generate_answers_shared(
     end_id: int,
     resume: bool,
     max_async_generate: int,
+    ingest_flush_every: int,
     one_sentence: bool,
     profile_name: str,
     eval_prompt_filename: str,
@@ -298,12 +337,14 @@ async def generate_answers_shared(
     disable_locator_cleanup: bool,
 ) -> None:
     max_async_generate = _normalize_max_async(max_async_generate, default=1)
+    ingest_flush_every = _normalize_flush_every(ingest_flush_every, default=6)
     query_params = _build_query_params(one_sentence=one_sentence)
     _save_generation_config(
         profile_name=profile_name,
         eval_prompt_filename=eval_prompt_filename,
         one_sentence=one_sentence,
         max_async_generate=max_async_generate,
+        ingest_flush_every=ingest_flush_every,
         shared_doc_id=shared_doc_id,
         disable_locator_cleanup=disable_locator_cleanup,
         start_id=start_id,
@@ -342,8 +383,10 @@ async def generate_answers_shared(
 
     logger.info("Shared doc_id: %s", shared_doc_id)
     logger.info("Generate range: %d-%d", start_id, end_id - 1)
+    logger.info("Ingest flush every: %d (0 = disabled)", ingest_flush_every)
 
     # Phase 1: build/update shared storage
+    ingested_since_flush = 0
     for doc_id in range(start_id, end_id):
         doc_name = str(doc_id)
         folder_path = DATA_ROOT / doc_name
@@ -366,7 +409,28 @@ async def generate_answers_shared(
             doc_id=shared_doc_id,
         )
         ingested_doc_ids.add(doc_name)
+        ingested_since_flush += 1
         _save_ingest_manifest(shared_doc_id, ingested_doc_ids)
+        if ingest_flush_every > 0 and ingested_since_flush >= ingest_flush_every:
+            logger.info(
+                "Recycling LocalRagService after %d ingested docs to control GPU cache.",
+                ingested_since_flush,
+            )
+            service = await _recycle_local_rag_service(
+                service,
+                settings,
+                shared_doc_id,
+                clear_model_cache=True,
+            )
+            ingested_since_flush = 0
+
+    # Ensure ingest-phase temporary memory is released before query phase.
+    service = await _recycle_local_rag_service(
+        service,
+        settings,
+        shared_doc_id,
+        clear_model_cache=True,
+    )
 
     # Phase 2: question answering against shared storage
     with open(SYSTEM_ANSWERS_FILE, "a", encoding="utf-8") as f_out:
@@ -428,7 +492,14 @@ async def generate_answers_shared(
             for _, payload in sorted(results, key=lambda x: x[0]):
                 _append_jsonl_record(f_out, payload)
 
-    await _cleanup_rag_instance(service, shared_doc_id)
+    service = await _recycle_local_rag_service(
+        service,
+        settings,
+        shared_doc_id,
+        clear_model_cache=False,
+    )
+    del service
+    gc.collect()
     _clear_cuda_cache()
     logger.info("Shared generate complete. Output: %s", SYSTEM_ANSWERS_FILE)
 
@@ -598,6 +669,12 @@ async def main() -> None:
     parser.add_argument("--raganything_eval_setup", action="store_true")
     parser.add_argument("--max_async_generate", type=int, default=1)
     parser.add_argument("--max_async_judge", type=int, default=4)
+    parser.add_argument(
+        "--ingest_flush_every",
+        type=int,
+        default=6,
+        help="Recycle LocalRagService every N ingested docs to limit GPU cache growth; 0 disables.",
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--disable_locator_cleanup",
@@ -621,7 +698,7 @@ async def main() -> None:
 
     logger.info(
         "Mode=%s Range=%d-%d Resume=%s SharedDocID=%s Profile=%s OneSentence=%s "
-        "EvalPrompt=%s MaxAsyncGen=%d MaxAsyncJudge=%d DisableLocatorCleanup=%s",
+        "EvalPrompt=%s MaxAsyncGen=%d MaxAsyncJudge=%d IngestFlushEvery=%d DisableLocatorCleanup=%s",
         args.mode,
         args.start_id,
         args.end_id - 1,
@@ -632,6 +709,7 @@ async def main() -> None:
         eval_prompt_filename,
         args.max_async_generate,
         args.max_async_judge,
+        args.ingest_flush_every,
         args.disable_locator_cleanup,
     )
 
@@ -641,6 +719,7 @@ async def main() -> None:
             end_id=args.end_id,
             resume=resume,
             max_async_generate=args.max_async_generate,
+            ingest_flush_every=args.ingest_flush_every,
             one_sentence=one_sentence,
             profile_name=profile_name,
             eval_prompt_filename=eval_prompt_filename,
