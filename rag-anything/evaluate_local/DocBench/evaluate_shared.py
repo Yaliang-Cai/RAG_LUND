@@ -432,65 +432,83 @@ async def generate_answers_shared(
         clear_model_cache=True,
     )
 
-    # Phase 2: question answering against shared storage
-    with open(SYSTEM_ANSWERS_FILE, "a", encoding="utf-8") as f_out:
-        for doc_id in range(start_id, end_id):
-            doc_name = str(doc_id)
-            folder_path = DATA_ROOT / doc_name
-            if not folder_path.exists():
+    # Phase 2: question answering against shared storage (global pending pool)
+    pending_questions: list[dict[str, Any]] = []
+    order_idx = 0
+    for doc_id in range(start_id, end_id):
+        doc_name = str(doc_id)
+        folder_path = DATA_ROOT / doc_name
+        if not folder_path.exists():
+            continue
+        _, qa_file = _find_doc_files(folder_path)
+        if not qa_file:
+            continue
+
+        with open(qa_file, "r", encoding="utf-8") as f_qa:
+            qa_list = [json.loads(line) for line in f_qa]
+
+        doc_pending = 0
+        for qa_idx, qa_item in enumerate(qa_list):
+            key = f"{doc_name}_{qa_item['question']}"
+            if resume and key in processed_keys:
                 continue
-            _, qa_file = _find_doc_files(folder_path)
-            if not qa_file:
-                continue
-
-            with open(qa_file, "r", encoding="utf-8") as f_qa:
-                qa_list = [json.loads(line) for line in f_qa]
-
-            pending: list[tuple[int, dict[str, Any]]] = []
-            for qa_idx, qa_item in enumerate(qa_list):
-                key = f"{doc_name}_{qa_item['question']}"
-                if resume and key in processed_keys:
-                    continue
-                pending.append((qa_idx, qa_item))
-
-            if not pending:
-                logger.info("[%s] All questions already generated, skip", doc_name)
-                continue
-
-            logger.info(
-                "[%s] Answering %d questions on shared storage (max_async_generate=%d)",
-                doc_name,
-                len(pending),
-                max_async_generate,
-            )
-            sem = asyncio.Semaphore(max_async_generate)
-
-            async def _answer_one(qa_idx: int, qa_item: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-                question = qa_item["question"]
-                async with sem:
-                    try:
-                        answer = await service.query(
-                            doc_id=shared_doc_id,
-                            query=question,
-                            **query_params,
-                        )
-                    except Exception as exc:
-                        logger.error("[%s][Q%d] query failed: %s", doc_name, qa_idx + 1, exc)
-                        answer = ""
-                result = {
-                    "doc_id": doc_name,
-                    "question": question,
-                    "sys_ans": answer,
-                    "ref_ans": qa_item["answer"],
-                    "type": qa_item["type"],
-                    "evidence": qa_item["evidence"],
+            pending_questions.append(
+                {
+                    "order_idx": order_idx,
+                    "doc_name": doc_name,
+                    "qa_idx": qa_idx,
+                    "qa_item": qa_item,
                 }
-                return qa_idx, result
+            )
+            order_idx += 1
+            doc_pending += 1
 
-            tasks = [asyncio.create_task(_answer_one(i, item)) for i, item in pending]
-            results = await asyncio.gather(*tasks)
+        if doc_pending == 0:
+            logger.info("[%s] All questions already generated, skip", doc_name)
+        else:
+            logger.info("[%s] Pending questions on shared storage: %d", doc_name, doc_pending)
+
+    if pending_questions:
+        logger.info(
+            "Answering %d questions from shared pool (max_async_generate=%d)",
+            len(pending_questions),
+            max_async_generate,
+        )
+        sem = asyncio.Semaphore(max_async_generate)
+
+        async def _answer_one(entry: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            doc_name = entry["doc_name"]
+            qa_idx = entry["qa_idx"]
+            qa_item = entry["qa_item"]
+            question = qa_item["question"]
+            async with sem:
+                try:
+                    answer = await service.query(
+                        doc_id=shared_doc_id,
+                        query=question,
+                        **query_params,
+                    )
+                except Exception as exc:
+                    logger.error("[%s][Q%d] query failed: %s", doc_name, qa_idx + 1, exc)
+                    answer = ""
+
+            result = {
+                "doc_id": doc_name,
+                "question": question,
+                "sys_ans": answer,
+                "ref_ans": qa_item["answer"],
+                "type": qa_item["type"],
+                "evidence": qa_item["evidence"],
+            }
+            return entry["order_idx"], result
+
+        tasks = [asyncio.create_task(_answer_one(item)) for item in pending_questions]
+        results = await asyncio.gather(*tasks)
+        with open(SYSTEM_ANSWERS_FILE, "a", encoding="utf-8") as f_out:
             for _, payload in sorted(results, key=lambda x: x[0]):
                 _append_jsonl_record(f_out, payload)
+    else:
+        logger.info("No pending questions to answer in shared pool.")
 
     service = await _recycle_local_rag_service(
         service,
