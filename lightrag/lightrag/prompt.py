@@ -243,7 +243,6 @@ Consider the conversation history if provided to maintain conversational flow an
   - Carefully determine the user's query intent in the context of the conversation history to fully understand the user's information need.
   - Scrutinize both `Knowledge Graph Data` and `Document Chunks` in the **Context**. Identify and extract all pieces of information that are directly relevant to answering the user query.
   - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
-  - MANDATORY INLINE CITATIONS: Every factual statement or claim MUST be immediately followed by an inline citation using the chunk's `id` field (e.g., `[DC1]`, `[DC2]`). Do NOT write any sentence containing a fact without an inline citation. Use ONLY the `id` values that appear in the Document Chunks above.
   - Track the reference_id of the document chunks which directly support the facts. Correlate reference_id with the entries in the `Reference Document List` to generate the References section.
   - Generate a references section at the end of the response. ONLY include reference_id values that actually appear in the provided `Reference Document List`. Do NOT invent or hallucinate reference_id values that are not in the list.
   - The References section is MANDATORY. Always output it even if only one source is cited.

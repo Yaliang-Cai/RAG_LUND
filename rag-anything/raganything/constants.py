@@ -180,6 +180,15 @@ DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD = "qwen_vl"
 DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE = 2
 
 # =============================================================================
+# Citation behavior
+# =============================================================================
+
+# When True, LLM is instructed to embed [DC1]/[DC2] inline citations after every
+# factual statement. When False, only the default doc-level ### References section
+# at the end of the answer is produced.
+DEFAULT_ENABLE_INLINE_CITATIONS = True
+
+# =============================================================================
 # Logging
 # =============================================================================
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB

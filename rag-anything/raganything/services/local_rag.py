@@ -64,8 +64,21 @@ from raganything.constants import (
     DEFAULT_EMBEDDING_BATCH_NUM,
     DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
     DEFAULT_MIN_RERANK_SCORE,
+    DEFAULT_ENABLE_INLINE_CITATIONS,
 )
 from raganything.query_message_repack import repack_query_messages
+
+# Inline citation toggle: read once at startup; env var ENABLE_INLINE_CITATIONS overrides constant
+_INLINE_CITATIONS_ENABLED: bool = os.environ.get(
+    "ENABLE_INLINE_CITATIONS", str(DEFAULT_ENABLE_INLINE_CITATIONS)
+).lower() in ("true", "1", "yes")
+
+_INLINE_CITATION_INSTRUCTION = (
+    "MANDATORY INLINE CITATIONS: Every factual statement or claim MUST be immediately "
+    "followed by an inline citation using the chunk's `id` field (e.g., `[DC1]`, `[DC2]`). "
+    "Do NOT write any sentence containing a fact without an inline citation. "
+    "Use ONLY the `id` values that appear in the Document Chunks above."
+)
 
 _MODEL_CACHE: Dict[str, Any] = {}
 _INTERNAL_OPENAI_KWARGS = {
@@ -939,6 +952,7 @@ class LocalRagService:
                 enable_rerank=enable_rerank,
                 stream=True,
                 include_references=True,
+                user_prompt=_INLINE_CITATION_INSTRUCTION if _INLINE_CITATIONS_ENABLED else "",
             )
             result = await rag_instance.lightrag.aquery_llm(query, param=param)
 
