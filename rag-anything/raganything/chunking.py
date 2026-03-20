@@ -266,8 +266,12 @@ def chunking_paragraph(
 _SECTION_HEADER_PATTERNS = [
     re.compile(r"^#{1,6}\s+.+", re.MULTILINE),            # Markdown: # Title / ## Sub
     re.compile(r"^.+\n[=\-]{3,}\s*$", re.MULTILINE),      # Underlined: Title\n===
-    # Numbered section headers: "1 Introduction", "3.2 Attention", "3.2.1 Scaled..."
-    re.compile(r"^\d+(?:\.\d+)*\s+[A-Z][^\n]{3,60}$", re.MULTILINE),
+    # Numbered section headers:
+    # "1 Introduction", "1. Introduction", "2) Methods", "3.2.1 Scaled Dot-Product..."
+    re.compile(
+        r"^(?:\d+(?:\.\d+)*[.)]?|[IVXLCM]+[.)])\s+[A-Z\u4e00-\u9fff][^\n]{2,100}$",
+        re.MULTILINE,
+    ),
     # ALL-CAPS title lines: 8–60 chars, only uppercase letters/spaces/hyphens.
     # Literal space (not \s) prevents cross-line matches; no digits/colons/commas
     # avoids false positives from table cells and reference titles.
@@ -282,6 +286,38 @@ def _section_boundaries(content: str) -> list[int]:
         for m in pattern.finditer(content):
             positions.add(m.start())
     return sorted(positions)
+
+
+def _prepend_section_header_if_needed(
+    tokenizer: Tokenizer,
+    chunk_content: str,
+    section_header: str,
+    chunk_token_size: int,
+) -> str:
+    """
+    Ensure recursive sub-chunks keep the originating section header verbatim.
+
+    If adding the header would exceed `chunk_token_size`, trim body tokens to fit.
+    """
+    body = (chunk_content or "").strip()
+    header = (section_header or "").strip()
+    if not header:
+        return body
+    if body.startswith(header):
+        return body
+
+    prefix = f"{header}\n"
+    prefix_tokens = tokenizer.encode(prefix)
+    body_tokens = tokenizer.encode(body)
+
+    if len(prefix_tokens) >= chunk_token_size:
+        return body
+
+    allowed_body_tokens = max(0, chunk_token_size - len(prefix_tokens))
+    trimmed_body = tokenizer.decode(body_tokens[:allowed_body_tokens]).strip()
+    if not trimmed_body:
+        return header
+    return f"{header}\n{trimmed_body}"
 
 
 def chunking_semantic(
@@ -345,6 +381,7 @@ def chunking_semantic(
 
     for section in sections:
         sec_tokens = len(tokenizer.encode(section))
+        section_header = section.splitlines()[0].strip() if section.strip() else ""
 
         if sec_tokens > chunk_token_size:
             # Flush accumulated buffer first, then split the oversized section
@@ -354,6 +391,14 @@ def chunking_semantic(
                 chunk_overlap_token_size=chunk_overlap_token_size,
                 chunk_token_size=chunk_token_size,
             ):
+                patched_content = _prepend_section_header_if_needed(
+                    tokenizer=tokenizer,
+                    chunk_content=sub["content"],
+                    section_header=section_header,
+                    chunk_token_size=chunk_token_size,
+                )
+                sub["content"] = patched_content
+                sub["tokens"] = len(tokenizer.encode(patched_content))
                 sub["chunk_order_index"] = idx
                 chunks.append(sub)
                 idx += 1
