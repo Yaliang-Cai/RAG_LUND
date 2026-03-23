@@ -38,7 +38,9 @@ import asyncio
 import logging
 import re
 import sys
+import gc
 from pathlib import Path
+from datetime import datetime
 from typing import Any, TextIO
 from openai import AsyncOpenAI
 
@@ -146,7 +148,9 @@ def _load_eval_prompt(eval_prompt_filename: str) -> str:
 def _save_generation_config(
     *,
     one_sentence: bool,
+    max_async_docs: int,
     max_async_generate: int,
+    doc_flush_every: int,
     profile_name: str,
     eval_prompt_filename: str,
     effective_query_params: dict[str, Any],
@@ -157,7 +161,9 @@ def _save_generation_config(
     payload = {
         "profile_name": profile_name,
         "one_sentence": bool(one_sentence),
+        "max_async_docs": int(max_async_docs),
         "max_async_generate": int(max_async_generate),
+        "doc_flush_every": int(doc_flush_every),
         "eval_prompt_filename": eval_prompt_filename,
         "effective_query_params": dict(effective_query_params),
         "start_id": int(start_id),
@@ -188,6 +194,15 @@ def _normalize_max_async(max_async: int, default: int = 4) -> int:
     except Exception:
         return default
 
+
+def _normalize_flush_every(flush_every: int, default: int = 4) -> int:
+    """Clamp flush interval to a safe non-negative integer."""
+    try:
+        value = int(flush_every)
+        return value if value >= 0 else default
+    except Exception:
+        return default
+
 # ==========================================
 # Logging
 # ==========================================
@@ -206,6 +221,34 @@ logger = logging.getLogger(__name__)
 logging.getLogger("raganything").setLevel(logging.INFO)
 logging.getLogger("raganything.processor").setLevel(logging.INFO)
 logging.getLogger("raganything.parser").setLevel(logging.INFO)
+
+_MASTER_LOG_PATH: Path | None = None
+
+
+def _ensure_master_log_handler() -> None:
+    """
+    Keep one consolidated evaluate log file even if LocalRagService is recycled.
+    """
+    global _MASTER_LOG_PATH
+    if _MASTER_LOG_PATH is None:
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        _MASTER_LOG_PATH = OUTPUT_DIR / "logs" / f"evaluate_generate_{ts}.log"
+        _MASTER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            base = getattr(handler, "baseFilename", "")
+            if base and Path(base) == _MASTER_LOG_PATH:
+                return
+
+    file_handler = logging.FileHandler(_MASTER_LOG_PATH, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+    root_logger.addHandler(file_handler)
+    logger.info(f"🧾 Master log file: {_MASTER_LOG_PATH}")
 
 
 def _append_jsonl_record(file_obj: TextIO, payload: dict[str, Any]) -> None:
@@ -327,6 +370,47 @@ def _clear_cuda_cache(doc_id: int) -> None:
         )
     except Exception as exc:
         logger.warning(f"Failed to clear GPU cache after doc {doc_id}: {exc}")
+
+
+async def _finalize_local_rag_service(
+    service: LocalRagService,
+    *,
+    clear_model_cache: bool = False,
+) -> None:
+    rag_instances = getattr(service, "_rag_instances", None)
+    if isinstance(rag_instances, dict):
+        for rag_doc_id in list(rag_instances.keys()):
+            await _cleanup_rag_instance(service, rag_doc_id)
+
+    if clear_model_cache:
+        try:
+            import raganything.services.local_rag as local_rag_module
+
+            model_cache = getattr(local_rag_module, "_MODEL_CACHE", None)
+            if isinstance(model_cache, dict):
+                model_cache.clear()
+        except Exception as exc:
+            logger.warning(f"Failed to clear local model cache: {exc}")
+
+    del service
+    gc.collect()
+    _clear_cuda_cache(-1)
+
+
+async def _recycle_local_rag_service(
+    service: LocalRagService,
+    settings: LocalRagSettings,
+    *,
+    clear_model_cache: bool = False,
+) -> LocalRagService:
+    await _finalize_local_rag_service(
+        service,
+        clear_model_cache=clear_model_cache,
+    )
+    new_service = LocalRagService(settings)
+    _ensure_master_log_handler()
+    _bridge_lightrag_logs_to_run_file()
+    return new_service
 
 
 def _extract_reference_lines(raw_prompt: str) -> list[str]:
@@ -543,6 +627,8 @@ async def generate_answers(
     dump_raw_prompt: bool = False,
     dump_final_messages: bool = False,
     max_async_generate: int = 1,
+    max_async_docs: int = 4,
+    doc_flush_every: int = 4,
     one_sentence: bool = False,
     profile_name: str = "docbench_official",
     eval_prompt_filename: str = DOCBENCH_EVAL_PROMPT_FILENAME,
@@ -559,18 +645,33 @@ async def generate_answers(
         dump_raw_prompt: 是否落盘每题 raw_prompt（用于调试引用列表）
         dump_final_messages: 是否落盘最终发送给 VLM 的 messages（用于检查引用列表）
         max_async_generate: 生成模式下每个文档内问题并发上限
+        max_async_docs: 生成模式下文档级并发上限（每文档独立图谱）
+        doc_flush_every: 每完成 N 个文档后重建 service；0 表示禁用
     """
     output_file = OUTPUT_DIR / "system_answers.jsonl"
     max_async_generate = _normalize_max_async(max_async_generate, default=1)
+    max_async_docs = _normalize_max_async(max_async_docs, default=4)
+    doc_flush_every = _normalize_flush_every(doc_flush_every, default=4)
     if (dump_raw_prompt or dump_final_messages) and max_async_generate > 1:
         logger.warning(
             "dump_raw_prompt/dump_final_messages is enabled, force max_async_generate=1."
         )
         max_async_generate = 1
+    if (dump_raw_prompt or dump_final_messages) and max_async_docs > 1:
+        logger.warning(
+            "dump_raw_prompt/dump_final_messages is enabled, force max_async_docs=1."
+        )
+        max_async_docs = 1
+    if max_async_docs > 1:
+        logger.info(
+            "max_async_docs > 1: skip global WORKSPACE switching to avoid cross-task races."
+        )
     query_params = _build_docbench_query_params(one_sentence=one_sentence)
     _save_generation_config(
         one_sentence=one_sentence,
+        max_async_docs=max_async_docs,
         max_async_generate=max_async_generate,
+        doc_flush_every=doc_flush_every,
         profile_name=profile_name,
         eval_prompt_filename=eval_prompt_filename,
         effective_query_params=query_params,
@@ -585,6 +686,7 @@ async def generate_answers(
     
     # 只创建一次 service
     service = LocalRagService(settings)
+    _ensure_master_log_handler()
     _bridge_lightrag_logs_to_run_file()
     logger.info(f"✅ RAG Service initialized")
     
@@ -600,205 +702,337 @@ async def generate_answers(
     logger.info(f"\n{'='*80}")
     logger.info(f"📝 Generating answers for documents {start_id} to {end_id-1}")
     logger.info(f"📂 Output: {output_file}")
+    logger.info(
+        "📌 max_async_docs=%d, max_async_generate=%d, doc_flush_every=%d",
+        max_async_docs,
+        max_async_generate,
+        doc_flush_every,
+    )
     logger.info(f"{'='*80}\n")
-    
-    # 遍历每个文档
-    with open(output_file, 'a', encoding='utf-8') as f_out:
-        for doc_id in range(start_id, end_id):
-            doc_name = str(doc_id)
-            
-            # 跳过已处理
-            if resume and doc_name in processed_docs:
-                logger.info(f"⏭️  [{doc_id}] Already processed, skipping")
-                continue
-            
-            # 检查文件夹是否存在
-            folder_path = DATA_ROOT / doc_name
-            if not folder_path.exists():
-                logger.warning(f"⚠️  [{doc_id}] Folder not found: {folder_path}")
-                continue
-            
-            # 查找 PDF 和 QA 文件
-            pdf_file, qa_file = _find_doc_files(folder_path)
-            
-            if not pdf_file or not qa_file:
-                logger.warning(f"⚠️  [{doc_id}] Missing PDF or QA file")
-                continue
-            
-            logger.info(f"\n{'='*80}")
-            logger.info(f"📄 [{doc_id}/{end_id-1}] Processing: {pdf_file.name}")
-            logger.info(f"{'='*80}")
-            rag_doc_id = f"docbench_{doc_name}"
 
-            try:
-                # 每个文档独立的 ID
+    doc_jobs: list[tuple[int, str, Path, Path]] = []
+    for doc_id in range(start_id, end_id):
+        doc_name = str(doc_id)
+
+        if resume and doc_name in processed_docs:
+            logger.info(f"⏭️  [{doc_id}] Already processed, skipping")
+            continue
+
+        folder_path = DATA_ROOT / doc_name
+        if not folder_path.exists():
+            logger.warning(f"⚠️  [{doc_id}] Folder not found: {folder_path}")
+            continue
+
+        pdf_file, qa_file = _find_doc_files(folder_path)
+        if not pdf_file or not qa_file:
+            logger.warning(f"⚠️  [{doc_id}] Missing PDF or QA file")
+            continue
+
+        doc_jobs.append((doc_id, doc_name, pdf_file, qa_file))
+
+    logger.info(f"📦 Pending docs: {len(doc_jobs)}")
+
+    async def _ingest_single_doc(
+        doc_id: int,
+        doc_name: str,
+        pdf_file: Path,
+    ) -> tuple[str, bool]:
+        rag_doc_id = f"docbench_{doc_name}"
+
+        logger.info(f"\n{'='*80}")
+        logger.info(f"📄 [{doc_id}/{end_id-1}] Ingesting: {pdf_file.name}")
+        logger.info(f"{'='*80}")
+
+        try:
+            if max_async_docs == 1:
                 _set_doc_workspace(rag_doc_id)
-                logger.info(f"🔧 Processing: {pdf_file.name} → doc_id: {rag_doc_id}")
-                
-                # MinerU 独立输出目录（避免 PDF 重名冲突）
-                doc_output_dir = str(OUTPUT_MD_DIR / f"docbench_{doc_name}")
-                
-                # Ingest 文档
-                logger.info(f"📖 Ingesting document...")
-                returned_doc_id = await service.ingest(
-                    file_path=str(pdf_file),
-                    output_dir=doc_output_dir,  # 每个文档独立 MinerU 输出
-                    doc_id=rag_doc_id
-                )
-                logger.info(f"✅ Ingestion complete, doc_id: {returned_doc_id}")
-                
-                # 加载问题
-                with open(qa_file, 'r', encoding='utf-8') as f_qa:
-                    qa_list = [json.loads(line) for line in f_qa]
-                
-                logger.info(
-                    f"\n❓ Answering {len(qa_list)} questions "
-                    f"(max_async_generate={max_async_generate})..."
-                )
-                question_semaphore = asyncio.Semaphore(max_async_generate)
 
-                async def _answer_single_question(
-                    qa_idx: int, qa_item: dict[str, Any]
-                ) -> tuple[int, dict[str, Any]]:
-                    question = qa_item["question"]
-                    answer = ""
+            logger.info(f"🔧 Processing: {pdf_file.name} → doc_id: {rag_doc_id}")
+            doc_output_dir = str(OUTPUT_MD_DIR / f"docbench_{doc_name}")
 
-                    async with question_semaphore:
-                        logger.info(
-                            f"  [{qa_idx + 1}/{len(qa_list)}] {question[:60]}..."
-                        )
-                        try:
-                            if dump_raw_prompt:
-                                try:
-                                    from lightrag.base import QueryParam
+            logger.info(f"📖 Ingesting document...")
+            returned_doc_id = await service.ingest(
+                file_path=str(pdf_file),
+                output_dir=doc_output_dir,
+                doc_id=rag_doc_id,
+            )
+            logger.info(f"✅ Ingestion complete, doc_id: {returned_doc_id}")
+            return doc_name, True
+        except Exception as exc:
+            logger.exception(f"❌ [{doc_id}] Ingest error: {exc}")
+            return doc_name, False
+        finally:
+            await _cleanup_rag_instance(service, rag_doc_id)
+            _clear_cuda_cache(doc_id)
 
-                                    rag = await service.get_rag(rag_doc_id)
-                                    raw_prompt_param = QueryParam(
-                                        **_build_raw_prompt_query_kwargs()
-                                    )
-                                    raw_prompt_result = await rag.lightrag.aquery(
-                                        question, param=raw_prompt_param
-                                    )
-                                    raw_prompt_text = (
-                                        raw_prompt_result.content
-                                        if hasattr(raw_prompt_result, "content")
-                                        else str(raw_prompt_result)
-                                    )
-                                    dump_path = _dump_raw_prompt(
-                                        doc_name, qa_idx, question, raw_prompt_text
-                                    )
-                                    ref_count = len(
-                                        _extract_reference_lines(raw_prompt_text)
-                                    )
-                                    logger.info(
-                                        f"      🔎 Prompt dumped: {dump_path} (reference lines: {ref_count})"
-                                    )
-                                except Exception as dump_exc:
-                                    logger.warning(
-                                        f"      ⚠️ Raw prompt dump failed: {dump_exc}"
-                                    )
+    async def _query_single_doc(
+        doc_id: int,
+        doc_name: str,
+        qa_file: Path,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        rag_doc_id = f"docbench_{doc_name}"
 
-                            captured_calls: list[dict[str, Any]] = []
-                            patched_completions: list[tuple[Any, Any]] = []
-                            if dump_final_messages:
+        logger.info(f"\n{'='*80}")
+        logger.info(f"📄 [{doc_id}/{end_id-1}] Querying: {rag_doc_id}")
+        logger.info(f"{'='*80}")
 
-                                def _patch_client(
-                                    client_name: str, client_obj: Any
-                                ) -> None:
-                                    if client_obj is None:
-                                        return
-                                    chat_obj = getattr(client_obj, "chat", None)
-                                    completions_api = getattr(chat_obj, "completions", None)
-                                    if completions_api is None:
-                                        return
-                                    for api_obj, _ in patched_completions:
-                                        if api_obj is completions_api:
-                                            return
+        try:
+            if max_async_docs == 1:
+                _set_doc_workspace(rag_doc_id)
 
-                                    original_create = completions_api.create
+            with open(qa_file, 'r', encoding='utf-8') as f_qa:
+                qa_list = [json.loads(line) for line in f_qa]
 
-                                    async def _capture_create(
-                                        *args,
-                                        _orig=original_create,
-                                        _client=client_name,
-                                        **kwargs,
-                                    ):
-                                        messages_payload = kwargs.get("messages")
-                                        if isinstance(messages_payload, list):
-                                            captured_calls.append(
-                                                {
-                                                    "client": _client,
-                                                    "messages": messages_payload,
-                                                }
-                                            )
-                                        return await _orig(*args, **kwargs)
+            logger.info(
+                f"\n❓ Answering {len(qa_list)} questions "
+                f"(max_async_generate={max_async_generate})..."
+            )
+            question_semaphore = asyncio.Semaphore(max_async_generate)
 
-                                    completions_api.create = _capture_create
-                                    patched_completions.append(
-                                        (completions_api, original_create)
-                                    )
+            async def _answer_single_question(
+                qa_idx: int, qa_item: dict[str, Any]
+            ) -> tuple[int, dict[str, Any]]:
+                question = qa_item["question"]
+                answer = ""
 
-                                _patch_client(
-                                    "vision", getattr(service, "vision_client", None)
-                                )
-                                _patch_client("text", getattr(service, "text_client", None))
-
-                            try:
-                                answer = await service.query(
-                                    doc_id=rag_doc_id,
-                                    query=question,
-                                    **query_params,
-                                )
-                            finally:
-                                if dump_final_messages:
-                                    for completions_api, original_create in patched_completions:
-                                        completions_api.create = original_create
-
-                            if dump_final_messages:
-                                if captured_calls:
-                                    dump_path = _dump_final_messages(
-                                        doc_name, qa_idx, question, captured_calls
-                                    )
-                                    final_messages = captured_calls[-1].get("messages", [])
-                                    ref_count = len(
-                                        _extract_reference_lines_from_messages(
-                                            final_messages
-                                        )
-                                    )
-                                    logger.info(
-                                        f"      🧾 Final messages dumped: {dump_path} (calls: {len(captured_calls)}, reference lines: {ref_count})"
-                                    )
-                                else:
-                                    logger.warning(
-                                        "      ⚠️ Final messages not captured for this query."
-                                    )
-
-                            logger.info(f"      ✓ Answer: {answer[:80]}...")
-                        except Exception as exc:
-                            logger.error(f"      ✗ Error: {exc}")
-
-                    result = _build_generation_result(
-                        doc_name=doc_name,
-                        question=question,
-                        answer=answer,
-                        qa_item=qa_item,
+                async with question_semaphore:
+                    logger.info(
+                        f"[{doc_name}][{qa_idx + 1}/{len(qa_list)}] {question[:60]}..."
                     )
-                    return qa_idx, result
+                    try:
+                        if dump_raw_prompt:
+                            try:
+                                from lightrag.base import QueryParam
 
-                qa_tasks = [
-                    asyncio.create_task(_answer_single_question(qa_idx, qa_item))
-                    for qa_idx, qa_item in enumerate(qa_list)
+                                rag = await service.get_rag(rag_doc_id)
+                                raw_prompt_param = QueryParam(
+                                    **_build_raw_prompt_query_kwargs()
+                                )
+                                raw_prompt_result = await rag.lightrag.aquery(
+                                    question, param=raw_prompt_param
+                                )
+                                raw_prompt_text = (
+                                    raw_prompt_result.content
+                                    if hasattr(raw_prompt_result, "content")
+                                    else str(raw_prompt_result)
+                                )
+                                dump_path = _dump_raw_prompt(
+                                    doc_name, qa_idx, question, raw_prompt_text
+                                )
+                                ref_count = len(
+                                    _extract_reference_lines(raw_prompt_text)
+                                )
+                                logger.info(
+                                    f"      🔎 Prompt dumped: {dump_path} (reference lines: {ref_count})"
+                                )
+                            except Exception as dump_exc:
+                                logger.warning(
+                                    f"      ⚠️ Raw prompt dump failed: {dump_exc}"
+                                )
+
+                        captured_calls: list[dict[str, Any]] = []
+                        patched_completions: list[tuple[Any, Any]] = []
+                        if dump_final_messages:
+
+                            def _patch_client(
+                                client_name: str, client_obj: Any
+                            ) -> None:
+                                if client_obj is None:
+                                    return
+                                chat_obj = getattr(client_obj, "chat", None)
+                                completions_api = getattr(chat_obj, "completions", None)
+                                if completions_api is None:
+                                    return
+                                for api_obj, _ in patched_completions:
+                                    if api_obj is completions_api:
+                                        return
+
+                                original_create = completions_api.create
+
+                                async def _capture_create(
+                                    *args,
+                                    _orig=original_create,
+                                    _client=client_name,
+                                    **kwargs,
+                                ):
+                                    messages_payload = kwargs.get("messages")
+                                    if isinstance(messages_payload, list):
+                                        captured_calls.append(
+                                            {
+                                                "client": _client,
+                                                "messages": messages_payload,
+                                            }
+                                        )
+                                    return await _orig(*args, **kwargs)
+
+                                completions_api.create = _capture_create
+                                patched_completions.append(
+                                    (completions_api, original_create)
+                                )
+
+                            _patch_client(
+                                "vision", getattr(service, "vision_client", None)
+                            )
+                            _patch_client("text", getattr(service, "text_client", None))
+
+                        try:
+                            answer = await service.query(
+                                doc_id=rag_doc_id,
+                                query=question,
+                                **query_params,
+                            )
+                        finally:
+                            if dump_final_messages:
+                                for completions_api, original_create in patched_completions:
+                                    completions_api.create = original_create
+
+                        if dump_final_messages:
+                            if captured_calls:
+                                dump_path = _dump_final_messages(
+                                    doc_name, qa_idx, question, captured_calls
+                                )
+                                final_messages = captured_calls[-1].get("messages", [])
+                                ref_count = len(
+                                    _extract_reference_lines_from_messages(
+                                        final_messages
+                                    )
+                                )
+                                logger.info(
+                                    f"      🧾 Final messages dumped: {dump_path} (calls: {len(captured_calls)}, reference lines: {ref_count})"
+                                )
+                            else:
+                                logger.warning(
+                                    "      ⚠️ Final messages not captured for this query."
+                                )
+
+                        logger.info(f"      ✓ Answer: {answer[:80]}...")
+                    except Exception as exc:
+                        logger.error(f"      ✗ Error: {exc}")
+
+                result = _build_generation_result(
+                    doc_name=doc_name,
+                    question=question,
+                    answer=answer,
+                    qa_item=qa_item,
+                )
+                return qa_idx, result
+
+            qa_tasks = [
+                asyncio.create_task(_answer_single_question(qa_idx, qa_item))
+                for qa_idx, qa_item in enumerate(qa_list)
+            ]
+            qa_results = await asyncio.gather(*qa_tasks)
+            ordered_results = [
+                result for _, result in sorted(qa_results, key=lambda item: item[0])
+            ]
+
+            logger.info(f"✅ [{doc_id}] Completed: {len(ordered_results)} questions answered\n")
+            return doc_name, ordered_results
+        except Exception as exc:
+            logger.exception(f"❌ [{doc_id}] Query error: {exc}")
+            return doc_name, []
+        finally:
+            await _cleanup_rag_instance(service, rag_doc_id)
+            _clear_cuda_cache(doc_id)
+
+    try:
+        # Phase A: all ingest first (doc-level concurrent).
+        logger.info(f"\n{'='*80}")
+        logger.info("Phase A: ingest all pending documents")
+        logger.info(f"{'='*80}")
+        ingested_docs: set[str] = set()
+        completed_since_flush = 0
+
+        for batch_start in range(0, len(doc_jobs), max_async_docs):
+            batch = doc_jobs[batch_start : batch_start + max_async_docs]
+            logger.info(
+                f"🚀 [Ingest] Running doc batch {batch_start + 1}-{batch_start + len(batch)}/{len(doc_jobs)}"
+            )
+            batch_results = await asyncio.gather(
+                *[
+                    asyncio.create_task(_ingest_single_doc(doc_id, doc_name, pdf_file))
+                    for doc_id, doc_name, pdf_file, _ in batch
                 ]
-                qa_results = await asyncio.gather(*qa_tasks)
-                for _, result in sorted(qa_results, key=lambda item: item[0]):
-                    _append_jsonl_record(f_out, result)
-                
-                logger.info(f"✅ [{doc_id}] Completed: {len(qa_list)} questions answered\n")
-            except Exception as exc:
-                logger.exception(f"❌ [{doc_id}] Error: {exc}")
-            finally:
-                await _cleanup_rag_instance(service, rag_doc_id)
-                _clear_cuda_cache(doc_id)
+            )
+
+            for doc_name, ok in batch_results:
+                if ok:
+                    ingested_docs.add(doc_name)
+                    completed_since_flush += 1
+
+            if doc_flush_every > 0 and completed_since_flush >= doc_flush_every:
+                logger.info(
+                    f"♻️ [Ingest] Recycle LocalRagService after {completed_since_flush} docs."
+                )
+                service = await _recycle_local_rag_service(
+                    service,
+                    settings,
+                    clear_model_cache=False,
+                )
+                _bridge_lightrag_logs_to_run_file()
+                completed_since_flush = 0
+
+        logger.info(f"✅ [Ingest] Completed docs: {len(ingested_docs)}/{len(doc_jobs)}")
+
+        # Keep existing recycle behavior and add one phase-boundary recycle.
+        if ingested_docs:
+            logger.info("♻️ Recycle LocalRagService at phase boundary (Ingest -> Query).")
+            service = await _recycle_local_rag_service(
+                service,
+                settings,
+                clear_model_cache=False,
+            )
+            _bridge_lightrag_logs_to_run_file()
+
+        # Phase B: all query after ingest (doc-level concurrent).
+        query_jobs = [
+            (doc_id, doc_name, qa_file)
+            for doc_id, doc_name, _, qa_file in doc_jobs
+            if doc_name in ingested_docs
+        ]
+        logger.info(f"\n{'='*80}")
+        logger.info("Phase B: query all ingested documents")
+        logger.info(f"{'='*80}")
+        logger.info(f"📦 Pending query docs: {len(query_jobs)}")
+
+        with open(output_file, 'a', encoding='utf-8') as f_out:
+            completed_since_flush = 0
+
+            for batch_start in range(0, len(query_jobs), max_async_docs):
+                batch = query_jobs[batch_start : batch_start + max_async_docs]
+                logger.info(
+                    f"🚀 [Query] Running doc batch {batch_start + 1}-{batch_start + len(batch)}/{len(query_jobs)}"
+                )
+
+                batch_results = await asyncio.gather(
+                    *[
+                        asyncio.create_task(_query_single_doc(doc_id, doc_name, qa_file))
+                        for doc_id, doc_name, qa_file in batch
+                    ]
+                )
+
+                for _, doc_records in batch_results:
+                    for record in doc_records:
+                        _append_jsonl_record(f_out, record)
+                    if doc_records:
+                        completed_since_flush += 1
+
+                if doc_flush_every > 0 and completed_since_flush >= doc_flush_every:
+                    logger.info(
+                        f"♻️ [Query] Recycle LocalRagService after {completed_since_flush} docs."
+                    )
+                    service = await _recycle_local_rag_service(
+                        service,
+                        settings,
+                        clear_model_cache=False,
+                    )
+                    _bridge_lightrag_logs_to_run_file()
+                    completed_since_flush = 0
+    finally:
+        await _finalize_local_rag_service(
+            service,
+            clear_model_cache=False,
+        )
     
     logger.info(f"\n{'='*80}")
     logger.info(f"✅ Answer generation complete!")
@@ -952,7 +1186,9 @@ def _build_experiment_config(
     effective_query_params = dict(DOCBENCH_QUERY_PARAMS)
     profile_name = "docbench_official"
     one_sentence = None
+    max_async_docs = None
     max_async_generate = None
+    doc_flush_every = None
     eval_prompt_filename = DOCBENCH_EVAL_PROMPT_FILENAME
     if generation_config:
         cfg_query_params = generation_config.get("effective_query_params")
@@ -960,8 +1196,12 @@ def _build_experiment_config(
             effective_query_params = dict(cfg_query_params)
         if isinstance(generation_config.get("one_sentence"), bool):
             one_sentence = generation_config["one_sentence"]
+        if isinstance(generation_config.get("max_async_docs"), int):
+            max_async_docs = generation_config["max_async_docs"]
         if isinstance(generation_config.get("max_async_generate"), int):
             max_async_generate = generation_config["max_async_generate"]
+        if isinstance(generation_config.get("doc_flush_every"), int):
+            doc_flush_every = generation_config["doc_flush_every"]
         if isinstance(generation_config.get("profile_name"), str):
             profile_name = generation_config["profile_name"]
         if isinstance(generation_config.get("eval_prompt_filename"), str):
@@ -996,7 +1236,9 @@ def _build_experiment_config(
             "eval_prompt_file": eval_prompt_filename,
         },
         "one_sentence": one_sentence,
+        "max_async_docs": max_async_docs,
         "max_async_generate": max_async_generate,
+        "doc_flush_every": doc_flush_every,
         "query_params": effective_query_params,
         "paths": {
             "script_dir": str(SCRIPT_DIR),
@@ -1241,6 +1483,18 @@ Examples:
         default=1,
         help='Max concurrent question requests per document in generate mode (default: 1).'
     )
+    parser.add_argument(
+        '--max_async_docs',
+        type=int,
+        default=4,
+        help='Max concurrent documents in generate mode (default: 4).'
+    )
+    parser.add_argument(
+        '--doc_flush_every',
+        type=int,
+        default=4,
+        help='Recycle LocalRagService every N completed docs in generate mode; 0 disables (default: 4).'
+    )
 
     args = parser.parse_args()
     
@@ -1261,6 +1515,8 @@ Examples:
     logger.info(f"EvalPromptFile: {eval_prompt_filename}")
     logger.info(f"MaxAsyncJudge: {args.max_async_judge}")
     logger.info(f"MaxAsyncGenerate: {args.max_async_generate}")
+    logger.info(f"MaxAsyncDocs: {args.max_async_docs}")
+    logger.info(f"DocFlushEvery: {args.doc_flush_every}")
     logger.info(f"{'='*80}\n")
     
     # 执行对应的步骤
@@ -1274,6 +1530,8 @@ Examples:
             dump_raw_prompt=args.dump_raw_prompt,
             dump_final_messages=args.dump_final_messages,
             max_async_generate=args.max_async_generate,
+            max_async_docs=args.max_async_docs,
+            doc_flush_every=args.doc_flush_every,
             one_sentence=effective_one_sentence,
             profile_name=profile_name,
             eval_prompt_filename=eval_prompt_filename,

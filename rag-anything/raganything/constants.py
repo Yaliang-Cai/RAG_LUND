@@ -147,6 +147,11 @@ DEFAULT_ENTITY_EXTRACT_MAX_GLEANING = 1
 # LightRAG 默认值为 2，适当增大可在多文档批量 indexing 时提升吞吐。
 DEFAULT_MAX_PARALLEL_INSERT = 4
 
+# Per-workspace ingest lock default:
+# True keeps same-doc_id ingest serialized (safer); False allows concurrent
+# ingest into one shared workspace when caller manages race-safety.
+DEFAULT_SERIALIZE_INGEST_BY_DOC_ID = True
+
 # Embedding 模型单次批处理的最大文本数。
 # LightRAG 默认值为 10；BGE-M3 支持更大 batch，设为 32 可减少
 # embedding 调用次数，提升 GPU 利用率。
