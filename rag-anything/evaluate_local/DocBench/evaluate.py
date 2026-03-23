@@ -769,9 +769,7 @@ async def generate_answers(
         doc_id: int,
         doc_name: str,
         qa_file: Path,
-        output_handle: TextIO,
-        output_lock: asyncio.Lock,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, list[dict[str, Any]]]:
         rag_doc_id = f"docbench_{doc_name}"
 
         logger.info(f"\n{'='*80}")
@@ -920,6 +918,7 @@ async def generate_answers(
                 return qa_idx, result
 
             answered_count = 0
+            doc_records: list[dict[str, Any]] = []
             total_batches = max(
                 1, (len(qa_list) + max_async_generate - 1) // max_async_generate
             )
@@ -938,13 +937,10 @@ async def generate_answers(
                     result for _, result in sorted(qa_results, key=lambda item: item[0])
                 ]
 
-                async with output_lock:
-                    for record in ordered_batch:
-                        _append_jsonl_record(output_handle, record)
-
+                doc_records.extend(ordered_batch)
                 answered_count += len(ordered_batch)
                 logger.info(
-                    f"[{doc_name}] Persisted question batch {batch_idx}/{total_batches} "
+                    f"[{doc_name}] Completed question batch {batch_idx}/{total_batches} "
                     f"({len(ordered_batch)} answers, total={answered_count})"
                 )
 
@@ -953,10 +949,10 @@ async def generate_answers(
                 _clear_cuda_cache(doc_id)
 
             logger.info(f"✅ [{doc_id}] Completed: {answered_count} questions answered\n")
-            return doc_name, answered_count
+            return doc_name, doc_records
         except Exception as exc:
             logger.exception(f"❌ [{doc_id}] Query error: {exc}")
-            return doc_name, 0
+            return doc_name, []
         finally:
             await _cleanup_rag_instance(service, rag_doc_id)
             _clear_cuda_cache(doc_id)
@@ -1023,7 +1019,6 @@ async def generate_answers(
 
         with open(output_file, 'a', encoding='utf-8') as f_out:
             completed_since_flush = 0
-            output_lock = asyncio.Lock()
 
             for batch_start in range(0, len(query_jobs), max_async_docs):
                 batch = query_jobs[batch_start : batch_start + max_async_docs]
@@ -1033,15 +1028,15 @@ async def generate_answers(
 
                 batch_results = await asyncio.gather(
                     *[
-                        asyncio.create_task(
-                            _query_single_doc(doc_id, doc_name, qa_file, f_out, output_lock)
-                        )
+                        asyncio.create_task(_query_single_doc(doc_id, doc_name, qa_file))
                         for doc_id, doc_name, qa_file in batch
                     ]
                 )
 
-                for _, answered_count in batch_results:
-                    if answered_count > 0:
+                for _, doc_records in batch_results:
+                    for record in doc_records:
+                        _append_jsonl_record(f_out, record)
+                    if doc_records:
                         completed_since_flush += 1
 
                 if doc_flush_every > 0 and completed_since_flush >= doc_flush_every:
