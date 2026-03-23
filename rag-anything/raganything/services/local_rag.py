@@ -827,6 +827,7 @@ class LocalRagService:
         output_dir: Optional[str] = None,
         doc_id: Optional[str] = None,
         chunking_strategy: Optional[str] = None,
+        serialize_by_doc_id: bool = True,
     ) -> str:
         file_path_obj = Path(file_path)
         if not file_path_obj.exists():
@@ -836,11 +837,7 @@ class LocalRagService:
         rag = await self.get_rag(doc_id)
         output_dir = output_dir or self.settings.output_dir
 
-        # Per-doc-id lock: serialise ingest for the same workspace so the
-        # temporary chunking_func swap never races with a concurrent ingest.
-        if doc_id not in self._ingest_locks:
-            self._ingest_locks[doc_id] = asyncio.Lock()
-        async with self._ingest_locks[doc_id]:
+        async def _run_ingest() -> None:
             old_chunking_func = None
             if chunking_strategy and chunking_strategy != self.settings.chunking_strategy:
                 new_func = get_chunking_func(chunking_strategy)
@@ -866,6 +863,16 @@ class LocalRagService:
                     rag.lightrag_kwargs["chunking_func"] = old_chunking_func
                     if rag.lightrag is not None:
                         rag.lightrag.chunking_func = old_chunking_func
+
+        if serialize_by_doc_id:
+            # Per-doc-id lock: serialise ingest for the same workspace so the
+            # temporary chunking_func swap never races with a concurrent ingest.
+            if doc_id not in self._ingest_locks:
+                self._ingest_locks[doc_id] = asyncio.Lock()
+            async with self._ingest_locks[doc_id]:
+                await _run_ingest()
+        else:
+            await _run_ingest()
 
         return doc_id
 
