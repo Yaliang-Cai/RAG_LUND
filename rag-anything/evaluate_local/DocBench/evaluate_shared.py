@@ -92,6 +92,35 @@ logging.getLogger("raganything.processor").setLevel(logging.INFO)
 logging.getLogger("raganything.parser").setLevel(logging.INFO)
 
 
+def _bridge_lightrag_logs_to_run_file() -> None:
+    """
+    Attach root file handlers to LightRAG logger so all LightRAG logs
+    are persisted in the same run log file (consistent with evaluate.py).
+    """
+    try:
+        from lightrag.utils import logger as lightrag_logger
+    except Exception as exc:
+        logger.warning("Failed to import lightrag logger: %s", exc)
+        return
+
+    root_logger = logging.getLogger()
+    file_handlers = [h for h in root_logger.handlers if isinstance(h, logging.FileHandler)]
+    if not file_handlers:
+        logger.warning("No root file handler found. LightRAG logs may be console-only.")
+        return
+
+    existing_files = {getattr(h, "baseFilename", None) for h in lightrag_logger.handlers}
+    attached = 0
+    for handler in file_handlers:
+        file_path = getattr(handler, "baseFilename", None)
+        if file_path and file_path not in existing_files:
+            lightrag_logger.addHandler(handler)
+            attached += 1
+
+    lightrag_logger.setLevel(logging.INFO)
+    logger.info("LightRAG log bridge ready (attached file handlers: %d).", attached)
+
+
 def _normalize_max_async(max_async: int, default: int = 4) -> int:
     try:
         return max(1, int(max_async))
@@ -361,6 +390,7 @@ async def generate_answers_shared(
 
     settings = _build_shared_settings()
     service = LocalRagService(settings)
+    _bridge_lightrag_logs_to_run_file()
 
     processed_keys: set[str] = set()
     if resume and SYSTEM_ANSWERS_FILE.exists():
@@ -420,8 +450,9 @@ async def generate_answers_shared(
                 service,
                 settings,
                 shared_doc_id,
-                clear_model_cache=True,
+                clear_model_cache=False,
             )
+            _bridge_lightrag_logs_to_run_file()
             ingested_since_flush = 0
 
     # Ensure ingest-phase temporary memory is released before query phase.
@@ -429,8 +460,9 @@ async def generate_answers_shared(
         service,
         settings,
         shared_doc_id,
-        clear_model_cache=True,
+        clear_model_cache=False,
     )
+    _bridge_lightrag_logs_to_run_file()
 
     # Phase 2: question answering against shared storage (global pending pool)
     pending_questions: list[dict[str, Any]] = []
@@ -475,12 +507,17 @@ async def generate_answers_shared(
             max_async_generate,
         )
         sem = asyncio.Semaphore(max_async_generate)
+        progress_lock = asyncio.Lock()
+        done_count = 0
+        total_pending = len(pending_questions)
 
         async def _answer_one(entry: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            nonlocal done_count
             doc_name = entry["doc_name"]
             qa_idx = entry["qa_idx"]
             qa_item = entry["qa_item"]
             question = qa_item["question"]
+            logger.info("[%s][Q%d] Question: %s", doc_name, qa_idx + 1, question[:80])
             async with sem:
                 try:
                     answer = await service.query(
@@ -488,6 +525,7 @@ async def generate_answers_shared(
                         query=question,
                         **query_params,
                     )
+                    logger.info("[%s][Q%d] Answer: %s", doc_name, qa_idx + 1, answer[:80])
                 except Exception as exc:
                     logger.error("[%s][Q%d] query failed: %s", doc_name, qa_idx + 1, exc)
                     answer = ""
@@ -500,6 +538,10 @@ async def generate_answers_shared(
                 "type": qa_item["type"],
                 "evidence": qa_item["evidence"],
             }
+            async with progress_lock:
+                done_count += 1
+                if done_count == total_pending or done_count % max(1, total_pending // 10) == 0:
+                    logger.info("Generate progress: %d/%d", done_count, total_pending)
             return entry["order_idx"], result
 
         tasks = [asyncio.create_task(_answer_one(item)) for item in pending_questions]
@@ -544,9 +586,11 @@ async def evaluate_answers(*, resume: bool, max_async_judge: int, eval_prompt_fi
                 evaluated_keys.add(f"{data['doc_id']}_{data['question']}")
 
     pending = []
+    skipped = 0
     for i, item in enumerate(answers, 1):
         key = f"{item['doc_id']}_{item['question']}"
         if resume and key in evaluated_keys:
+            skipped += 1
             continue
         pending.append((i, item))
 
@@ -555,20 +599,30 @@ async def evaluate_answers(*, resume: bool, max_async_judge: int, eval_prompt_fi
         return
 
     logger.info(
-        "Evaluating %d/%d answers (max_async_judge=%d, prompt=%s)",
+        "Evaluating %d/%d answers using %s (max_async_judge=%d, prompt=%s)",
         len(pending),
         len(answers),
+        JUDGE_MODEL_NAME,
         max_async_judge,
         eval_prompt_filename,
     )
+    if skipped:
+        logger.info("Skipped %d already-evaluated answers.", skipped)
 
     judge_client = AsyncOpenAI(api_key="EMPTY", base_url=JUDGE_API_BASE)
     sem = asyncio.Semaphore(_normalize_max_async(max_async_judge))
     write_lock = asyncio.Lock()
+    progress_lock = asyncio.Lock()
+    done_count = 0
+    total_pending = len(pending)
 
     with open(EVAL_RESULTS_FILE, "a", encoding="utf-8") as f_out:
 
         async def _eval_one(index: int, item: dict[str, Any]) -> None:
+            nonlocal done_count
+            logger.info("[%d/%d] Doc %s", index, len(answers), item["doc_id"])
+            logger.info("  Q: %s", item["question"][:60])
+            logger.info("  A: %s", item["sys_ans"][:60])
             prompt = _build_eval_prompt(eval_prompt, item)
             async with sem:
                 try:
@@ -583,6 +637,7 @@ async def evaluate_answers(*, resume: bool, max_async_judge: int, eval_prompt_fi
                     )
                     eval_result = response.choices[0].message.content.strip()
                     score = _parse_eval_score(eval_result)
+                    logger.info("  Score: %d | %s", score, eval_result[:80])
                 except Exception as exc:
                     logger.error("[%d] evaluate failed: %s", index, exc)
                     eval_result = f"[ERROR: {exc}]"
@@ -591,6 +646,10 @@ async def evaluate_answers(*, resume: bool, max_async_judge: int, eval_prompt_fi
             payload = {**item, "eval": eval_result, "score": score}
             async with write_lock:
                 _append_jsonl_record(f_out, payload)
+            async with progress_lock:
+                done_count += 1
+                if done_count == total_pending or done_count % max(1, total_pending // 10) == 0:
+                    logger.info("Evaluate progress: %d/%d", done_count, total_pending)
 
         tasks = [asyncio.create_task(_eval_one(i, item)) for i, item in pending]
         await asyncio.gather(*tasks)
