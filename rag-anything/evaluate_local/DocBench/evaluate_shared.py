@@ -556,6 +556,7 @@ async def generate_answers_shared(
         )
         sem = asyncio.Semaphore(max_async_generate)
         progress_lock = asyncio.Lock()
+        write_lock = asyncio.Lock()
         done_count = 0
         total_pending = len(pending_questions)
 
@@ -592,11 +593,36 @@ async def generate_answers_shared(
                     logger.info("Generate progress: %d/%d", done_count, total_pending)
             return entry["order_idx"], result
 
-        tasks = [asyncio.create_task(_answer_one(item)) for item in pending_questions]
-        results = await asyncio.gather(*tasks)
         with open(SYSTEM_ANSWERS_FILE, "a", encoding="utf-8") as f_out:
-            for _, payload in sorted(results, key=lambda x: x[0]):
-                _append_jsonl_record(f_out, payload)
+            total_batches = max(
+                1, (len(pending_questions) + max_async_generate - 1) // max_async_generate
+            )
+            persisted = 0
+            for batch_idx, batch_start in enumerate(
+                range(0, len(pending_questions), max_async_generate), start=1
+            ):
+                question_batch = pending_questions[
+                    batch_start : batch_start + max_async_generate
+                ]
+                tasks = [asyncio.create_task(_answer_one(item)) for item in question_batch]
+                results = await asyncio.gather(*tasks)
+                ordered_results = sorted(results, key=lambda x: x[0])
+
+                async with write_lock:
+                    for _, payload in ordered_results:
+                        _append_jsonl_record(f_out, payload)
+
+                persisted += len(ordered_results)
+                logger.info(
+                    "Persisted shared question batch %d/%d (%d answers, total=%d)",
+                    batch_idx,
+                    total_batches,
+                    len(ordered_results),
+                    persisted,
+                )
+
+                gc.collect()
+                _clear_cuda_cache()
     else:
         logger.info("No pending questions to answer in shared pool.")
 
