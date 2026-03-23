@@ -64,6 +64,7 @@ from raganything.constants import (
     DEFAULT_EMBEDDING_BATCH_NUM,
     DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
     DEFAULT_MIN_RERANK_SCORE,
+    DEFAULT_SERIALIZE_INGEST_BY_DOC_ID,
 )
 from raganything.query_message_repack import repack_query_messages
 
@@ -111,6 +112,7 @@ class LocalRagSettings:
     chunking_strategy: str = DEFAULT_CHUNKING_STRATEGY
     chunk_token_size: int = DEFAULT_CHUNK_TOKEN_SIZE
     chunk_overlap_token_size: int = DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE
+    serialize_ingest_by_doc_id: bool = DEFAULT_SERIALIZE_INGEST_BY_DOC_ID
     mineru_vllm_gpu_memory_utilization: float = (
         DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION
     )
@@ -170,6 +172,11 @@ class LocalRagSettings:
             chunking_strategy=os.getenv("CHUNKING_STRATEGY", DEFAULT_CHUNKING_STRATEGY),
             chunk_token_size=int(os.getenv("CHUNK_SIZE", str(DEFAULT_CHUNK_TOKEN_SIZE))),
             chunk_overlap_token_size=int(os.getenv("CHUNK_OVERLAP_SIZE", str(DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE))),
+            serialize_ingest_by_doc_id=os.getenv(
+                "RAGANYTHING_SERIALIZE_INGEST_BY_DOC_ID",
+                str(DEFAULT_SERIALIZE_INGEST_BY_DOC_ID),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
             mineru_vllm_gpu_memory_utilization=float(
                 os.getenv(
                     "MINERU_VLLM_GPU_MEMORY_UTILIZATION",
@@ -224,6 +231,27 @@ def _strip_internal_openai_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 def _model_cache_key(settings: LocalRagSettings) -> str:
     return f"{settings.embedding_model_path}|{settings.rerank_model_path}|{settings.device}"
+
+
+def _resolve_ingest_serialize_by_doc_id(
+    default_serialize_by_doc_id: bool,
+    serialize_by_doc_id: Optional[bool],
+    chunking_strategy: Optional[str],
+    default_chunking_strategy: str,
+) -> tuple[bool, bool]:
+    effective_serialize = (
+        default_serialize_by_doc_id
+        if serialize_by_doc_id is None
+        else bool(serialize_by_doc_id)
+    )
+    forced_to_serialize = (
+        not effective_serialize
+        and bool(chunking_strategy)
+        and chunking_strategy != default_chunking_strategy
+    )
+    if forced_to_serialize:
+        return True, True
+    return effective_serialize, False
 
 
 def load_models(settings: LocalRagSettings) -> tuple[SentenceTransformer, CrossEncoder]:
@@ -827,7 +855,7 @@ class LocalRagService:
         output_dir: Optional[str] = None,
         doc_id: Optional[str] = None,
         chunking_strategy: Optional[str] = None,
-        serialize_by_doc_id: bool = True,
+        serialize_by_doc_id: Optional[bool] = None,
     ) -> str:
         file_path_obj = Path(file_path)
         if not file_path_obj.exists():
@@ -836,6 +864,21 @@ class LocalRagService:
         doc_id = doc_id or _safe_doc_id(file_path_obj.stem)
         rag = await self.get_rag(doc_id)
         output_dir = output_dir or self.settings.output_dir
+        effective_serialize, forced_to_serialize = _resolve_ingest_serialize_by_doc_id(
+            default_serialize_by_doc_id=self.settings.serialize_ingest_by_doc_id,
+            serialize_by_doc_id=serialize_by_doc_id,
+            chunking_strategy=chunking_strategy,
+            default_chunking_strategy=self.settings.chunking_strategy,
+        )
+        if forced_to_serialize:
+            self.logger.warning(
+                "serialize_by_doc_id is forced to True because chunking_strategy "
+                "override requires temporary chunking_func swap (doc_id=%s, "
+                "default=%s, override=%s).",
+                doc_id,
+                self.settings.chunking_strategy,
+                chunking_strategy,
+            )
 
         async def _run_ingest() -> None:
             old_chunking_func = None
@@ -864,7 +907,7 @@ class LocalRagService:
                     if rag.lightrag is not None:
                         rag.lightrag.chunking_func = old_chunking_func
 
-        if serialize_by_doc_id:
+        if effective_serialize:
             # Per-doc-id lock: serialise ingest for the same workspace so the
             # temporary chunking_func swap never races with a concurrent ingest.
             if doc_id not in self._ingest_locks:
