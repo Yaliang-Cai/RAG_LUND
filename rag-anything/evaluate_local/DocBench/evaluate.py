@@ -769,7 +769,9 @@ async def generate_answers(
         doc_id: int,
         doc_name: str,
         qa_file: Path,
-    ) -> tuple[str, list[dict[str, Any]]]:
+        output_handle: TextIO,
+        output_lock: asyncio.Lock,
+    ) -> tuple[str, int]:
         rag_doc_id = f"docbench_{doc_name}"
 
         logger.info(f"\n{'='*80}")
@@ -917,20 +919,44 @@ async def generate_answers(
                 )
                 return qa_idx, result
 
-            qa_tasks = [
-                asyncio.create_task(_answer_single_question(qa_idx, qa_item))
-                for qa_idx, qa_item in enumerate(qa_list)
-            ]
-            qa_results = await asyncio.gather(*qa_tasks)
-            ordered_results = [
-                result for _, result in sorted(qa_results, key=lambda item: item[0])
-            ]
+            answered_count = 0
+            total_batches = max(
+                1, (len(qa_list) + max_async_generate - 1) // max_async_generate
+            )
+            for batch_idx, qa_start in enumerate(
+                range(0, len(qa_list), max_async_generate), start=1
+            ):
+                qa_batch = qa_list[qa_start : qa_start + max_async_generate]
+                qa_tasks = [
+                    asyncio.create_task(
+                        _answer_single_question(qa_start + offset, qa_item)
+                    )
+                    for offset, qa_item in enumerate(qa_batch)
+                ]
+                qa_results = await asyncio.gather(*qa_tasks)
+                ordered_batch = [
+                    result for _, result in sorted(qa_results, key=lambda item: item[0])
+                ]
 
-            logger.info(f"✅ [{doc_id}] Completed: {len(ordered_results)} questions answered\n")
-            return doc_name, ordered_results
+                async with output_lock:
+                    for record in ordered_batch:
+                        _append_jsonl_record(output_handle, record)
+
+                answered_count += len(ordered_batch)
+                logger.info(
+                    f"[{doc_name}] Persisted question batch {batch_idx}/{total_batches} "
+                    f"({len(ordered_batch)} answers, total={answered_count})"
+                )
+
+                # Release allocator pressure during long query phase.
+                gc.collect()
+                _clear_cuda_cache(doc_id)
+
+            logger.info(f"✅ [{doc_id}] Completed: {answered_count} questions answered\n")
+            return doc_name, answered_count
         except Exception as exc:
             logger.exception(f"❌ [{doc_id}] Query error: {exc}")
-            return doc_name, []
+            return doc_name, 0
         finally:
             await _cleanup_rag_instance(service, rag_doc_id)
             _clear_cuda_cache(doc_id)
@@ -997,6 +1023,7 @@ async def generate_answers(
 
         with open(output_file, 'a', encoding='utf-8') as f_out:
             completed_since_flush = 0
+            output_lock = asyncio.Lock()
 
             for batch_start in range(0, len(query_jobs), max_async_docs):
                 batch = query_jobs[batch_start : batch_start + max_async_docs]
@@ -1006,15 +1033,15 @@ async def generate_answers(
 
                 batch_results = await asyncio.gather(
                     *[
-                        asyncio.create_task(_query_single_doc(doc_id, doc_name, qa_file))
+                        asyncio.create_task(
+                            _query_single_doc(doc_id, doc_name, qa_file, f_out, output_lock)
+                        )
                         for doc_id, doc_name, qa_file in batch
                     ]
                 )
 
-                for _, doc_records in batch_results:
-                    for record in doc_records:
-                        _append_jsonl_record(f_out, record)
-                    if doc_records:
+                for _, answered_count in batch_results:
+                    if answered_count > 0:
                         completed_since_flush += 1
 
                 if doc_flush_every > 0 and completed_since_flush >= doc_flush_every:
