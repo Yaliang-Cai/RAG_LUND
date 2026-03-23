@@ -327,6 +327,7 @@ def _save_generation_config(
     profile_name: str,
     eval_prompt_filename: str,
     one_sentence: bool,
+    max_async_ingest: int,
     max_async_generate: int,
     ingest_flush_every: int,
     shared_doc_id: str,
@@ -341,6 +342,7 @@ def _save_generation_config(
             "profile_name": profile_name,
             "eval_prompt_filename": eval_prompt_filename,
             "one_sentence": bool(one_sentence),
+            "max_async_ingest": int(max_async_ingest),
             "max_async_generate": int(max_async_generate),
             "ingest_flush_every": int(ingest_flush_every),
             "shared_doc_id": shared_doc_id,
@@ -357,6 +359,7 @@ async def generate_answers_shared(
     start_id: int,
     end_id: int,
     resume: bool,
+    max_async_ingest: int,
     max_async_generate: int,
     ingest_flush_every: int,
     one_sentence: bool,
@@ -365,6 +368,7 @@ async def generate_answers_shared(
     shared_doc_id: str,
     disable_locator_cleanup: bool,
 ) -> None:
+    max_async_ingest = _normalize_max_async(max_async_ingest, default=4)
     max_async_generate = _normalize_max_async(max_async_generate, default=1)
     ingest_flush_every = _normalize_flush_every(ingest_flush_every, default=6)
     query_params = _build_query_params(one_sentence=one_sentence)
@@ -372,6 +376,7 @@ async def generate_answers_shared(
         profile_name=profile_name,
         eval_prompt_filename=eval_prompt_filename,
         one_sentence=one_sentence,
+        max_async_ingest=max_async_ingest,
         max_async_generate=max_async_generate,
         ingest_flush_every=ingest_flush_every,
         shared_doc_id=shared_doc_id,
@@ -413,10 +418,11 @@ async def generate_answers_shared(
 
     logger.info("Shared doc_id: %s", shared_doc_id)
     logger.info("Generate range: %d-%d", start_id, end_id - 1)
+    logger.info("Max async ingest: %d", max_async_ingest)
     logger.info("Ingest flush every: %d (0 = disabled)", ingest_flush_every)
 
     # Phase 1: build/update shared storage
-    ingested_since_flush = 0
+    ingest_jobs: list[tuple[str, Path]] = []
     for doc_id in range(start_id, end_id):
         doc_name = str(doc_id)
         folder_path = DATA_ROOT / doc_name
@@ -430,17 +436,59 @@ async def generate_answers_shared(
         if resume and doc_name in ingested_doc_ids:
             logger.info("[%s] Shared ingest already done, skip", doc_name)
             continue
+        ingest_jobs.append((doc_name, pdf_file))
 
-        logger.info("[%s] Ingest into shared storage: %s", doc_name, pdf_file.name)
-        doc_output_dir = str(OUTPUT_MD_DIR / f"docbench_{doc_name}")
-        await service.ingest(
-            file_path=str(pdf_file),
-            output_dir=doc_output_dir,
-            doc_id=shared_doc_id,
+    if ingest_jobs:
+        logger.info(
+            "Pending shared-ingest docs: %d (max_async_ingest=%d)",
+            len(ingest_jobs),
+            max_async_ingest,
         )
-        ingested_doc_ids.add(doc_name)
-        ingested_since_flush += 1
-        _save_ingest_manifest(shared_doc_id, ingested_doc_ids)
+    else:
+        logger.info("No pending shared-ingest docs.")
+
+    ingested_since_flush = 0
+    for batch_start in range(0, len(ingest_jobs), max_async_ingest):
+        batch = ingest_jobs[batch_start : batch_start + max_async_ingest]
+        batch_label = f"{batch_start + 1}-{batch_start + len(batch)}"
+        logger.info("Shared ingest batch [%s/%d]", batch_label, len(ingest_jobs))
+
+        async def _ingest_one(doc_name: str, pdf_file: Path) -> str:
+            logger.info("[%s] Ingest into shared storage: %s", doc_name, pdf_file.name)
+            doc_output_dir = str(OUTPUT_MD_DIR / f"docbench_{doc_name}")
+            await service.ingest(
+                file_path=str(pdf_file),
+                output_dir=doc_output_dir,
+                doc_id=shared_doc_id,
+                serialize_by_doc_id=False,
+            )
+            return doc_name
+
+        batch_results = await asyncio.gather(
+            *[_ingest_one(doc_name, pdf_file) for doc_name, pdf_file in batch],
+            return_exceptions=True,
+        )
+
+        batch_errors: list[tuple[str, Exception]] = []
+        success_count = 0
+        for (doc_name, _), result in zip(batch, batch_results):
+            if isinstance(result, Exception):
+                logger.error("[%s] Shared ingest failed: %s", doc_name, result)
+                batch_errors.append((doc_name, result))
+                continue
+            ingested_doc_ids.add(result)
+            success_count += 1
+
+        if success_count > 0:
+            ingested_since_flush += success_count
+            _save_ingest_manifest(shared_doc_id, ingested_doc_ids)
+
+        if batch_errors:
+            raise RuntimeError(
+                "Shared ingest failed for docs: "
+                + ", ".join(doc_name for doc_name, _ in batch_errors)
+            ) from batch_errors[0][1]
+
         if ingest_flush_every > 0 and ingested_since_flush >= ingest_flush_every:
             logger.info(
                 "Recycling LocalRagService after %d ingested docs to control GPU cache.",
@@ -744,6 +792,7 @@ async def main() -> None:
     parser.add_argument("--shared_doc_id", type=str, default=DEFAULT_SHARED_DOC_ID)
     parser.add_argument("--no_resume", action="store_true")
     parser.add_argument("--raganything_eval_setup", action="store_true")
+    parser.add_argument("--max_async_ingest", type=int, default=4)
     parser.add_argument("--max_async_generate", type=int, default=1)
     parser.add_argument("--max_async_judge", type=int, default=4)
     parser.add_argument(
@@ -775,7 +824,8 @@ async def main() -> None:
 
     logger.info(
         "Mode=%s Range=%d-%d Resume=%s SharedDocID=%s Profile=%s OneSentence=%s "
-        "EvalPrompt=%s MaxAsyncGen=%d MaxAsyncJudge=%d IngestFlushEvery=%d DisableLocatorCleanup=%s",
+        "EvalPrompt=%s MaxAsyncIngest=%d MaxAsyncGen=%d MaxAsyncJudge=%d "
+        "IngestFlushEvery=%d DisableLocatorCleanup=%s",
         args.mode,
         args.start_id,
         args.end_id - 1,
@@ -784,6 +834,7 @@ async def main() -> None:
         profile_name,
         one_sentence,
         eval_prompt_filename,
+        args.max_async_ingest,
         args.max_async_generate,
         args.max_async_judge,
         args.ingest_flush_every,
@@ -795,6 +846,7 @@ async def main() -> None:
             start_id=args.start_id,
             end_id=args.end_id,
             resume=resume,
+            max_async_ingest=args.max_async_ingest,
             max_async_generate=args.max_async_generate,
             ingest_flush_every=args.ingest_flush_every,
             one_sentence=one_sentence,
