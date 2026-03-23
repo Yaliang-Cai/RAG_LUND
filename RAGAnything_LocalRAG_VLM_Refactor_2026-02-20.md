@@ -1383,3 +1383,47 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
   - 一致性：输出行数只包含 ingest 成功文档；
   - 边界：`max_async_docs=2, doc_flush_every=1` 下批处理与 recycle 可正常触发；
   - 反例：模拟 doc1 ingest 异常，确认 doc1 不进入 query 阶段。
+
+---
+
+## 增量更新（2026-03-23，operate 抽取清洗策略收缩为“仅路径/碎片过滤”）
+
+### 目标
+
+- 按需求将抽取阶段清洗策略简化为：
+  - 保留：`_classify_file_or_folder_path`（路径过滤）；
+  - 保留：路径碎片过滤（`path_fragment_keys`）；
+  - 关闭：低质量实体清洗、locator/layout 清洗、实体表面规范化在抽取阶段的生效。
+
+### 改动说明
+
+- 变更文件：`lightrag/lightrag/operate.py`
+- `_handle_single_entity_extraction(...)`：
+  - 注释掉 `entity_name = _normalize_entity_surface(entity_name)`；
+  - 注释掉 `_classify_low_quality_entity(...)` 过滤分支；
+  - 增加仅路径碎片判定 `_is_path_fragment_entity(...)`。
+- `_handle_single_relationship_extraction(...)`：
+  - 注释掉 `source/target` 的 `_normalize_entity_surface(...)`；
+  - 注释掉 `_classify_low_quality_entity(...)` 过滤分支；
+  - 增加仅路径碎片判定（src/tgt 任一命中即过滤）。
+- 新增辅助函数：
+  - `_is_path_fragment_entity(name, path_fragment_keys)`。
+- 保留策略（便于后续回滚）：
+  - `_normalize_entity_surface`、`_classify_low_quality_entity` 及其相关规则定义均保留；
+  - 本次仅注释/绕过调用点，不删除原函数实现。
+
+### 行为差异（相对未改前）
+
+- 之前会过滤：`Figure 2`、`Section 3`、`page 12`、坐标标签、layout 泛词等低质量实体。
+- 现在上述规则不再在抽取入口生效；仅“路径实体/路径碎片实体”会被过滤。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查：
+  - `python -m py_compile lightrag/lightrag/operate.py` 通过。
+- 逻辑级检查（内联断言）：
+  - 主链路：`Figure 2` 实体与关系可通过；
+  - 一致性：`C:\\tmp\\a.txt` 路径实体仍被过滤；
+  - 边界：`Linked WikiText-2` 命中 `path_fragment_keys` 仍被过滤；
+  - 反例：关系端点命中路径碎片时关系被过滤。
+  - 输出标记：`OPERATE_PATH_FILTER_ONLY_CHECKS_PASSED`、`OPERATE_COMMENT_OUT_REGRESSION_CHECK_PASSED`。

@@ -392,6 +392,15 @@ def _collect_path_fragment_keys(source_text: str = "") -> set[str]:
     return fragment_keys
 
 
+def _is_path_fragment_entity(
+    name: str, path_fragment_keys: set[str] | None = None
+) -> bool:
+    if not name or not path_fragment_keys:
+        return False
+    key = _entity_lexical_key(name)
+    return bool(key and key in path_fragment_keys)
+
+
 def _looks_like_acronym(word: str) -> bool:
     if not word.isalpha():
         return False
@@ -1023,7 +1032,8 @@ async def _handle_single_entity_extraction(
         entity_name = sanitize_and_normalize_extracted_text(
             record_attributes[1], remove_inner_quotes=True
         )
-        entity_name = _normalize_entity_surface(entity_name)
+        # Disabled by request: surface normalization stage.
+        # entity_name = _normalize_entity_surface(entity_name)
 
         # Validate entity name after all cleaning steps
         if not entity_name or not entity_name.strip():
@@ -1040,12 +1050,9 @@ async def _handle_single_entity_extraction(
             )
             return None
 
-        is_low_quality_entity, low_quality_reason = _classify_low_quality_entity(
-            entity_name, path_fragment_keys=path_fragment_keys
-        )
-        if is_low_quality_entity:
+        if _is_path_fragment_entity(entity_name, path_fragment_keys):
             logger.info(
-                f"Filtered low-quality entity [reason={low_quality_reason}]: '{entity_name}'"
+                f"Filtered path fragment entity [reason=path_fragment_from_source]: '{entity_name}'"
             )
             return None
 
@@ -1134,8 +1141,9 @@ async def _handle_single_relationship_extraction(
         target = sanitize_and_normalize_extracted_text(
             record_attributes[2], remove_inner_quotes=True
         )
-        source = _normalize_entity_surface(source)
-        target = _normalize_entity_surface(target)
+        # Disabled by request: surface normalization stage.
+        # source = _normalize_entity_surface(source)
+        # target = _normalize_entity_surface(target)
 
         # Validate entity names after all cleaning steps
         if not source:
@@ -1164,20 +1172,16 @@ async def _handle_single_relationship_extraction(
             )
             return None
 
-        source_is_low_quality, source_lq_reason = _classify_low_quality_entity(
-            source, path_fragment_keys=path_fragment_keys
-        )
-        target_is_low_quality, target_lq_reason = _classify_low_quality_entity(
-            target, path_fragment_keys=path_fragment_keys
-        )
-        if source_is_low_quality or target_is_low_quality:
+        source_is_path_fragment = _is_path_fragment_entity(source, path_fragment_keys)
+        target_is_path_fragment = _is_path_fragment_entity(target, path_fragment_keys)
+        if source_is_path_fragment or target_is_path_fragment:
             reason_parts = []
-            if source_is_low_quality:
-                reason_parts.append(f"src:{source_lq_reason}")
-            if target_is_low_quality:
-                reason_parts.append(f"tgt:{target_lq_reason}")
+            if source_is_path_fragment:
+                reason_parts.append("src:path_fragment_from_source")
+            if target_is_path_fragment:
+                reason_parts.append("tgt:path_fragment_from_source")
             logger.info(
-                f"Filtered relationship with low-quality entity [reason={', '.join(reason_parts)}]: '{source}' -> '{target}'"
+                f"Filtered relationship with path-fragment entity [reason={', '.join(reason_parts)}]: '{source}' -> '{target}'"
             )
             return None
 
