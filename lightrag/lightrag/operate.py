@@ -18,6 +18,8 @@ from lightrag.exceptions import (
 from lightrag.utils import (
     logger,
     compute_mdhash_id,
+    compute_entity_id,
+    compute_entity_vdb_id,
     Tokenizer,
     is_float_regex,
     sanitize_and_normalize_extracted_text,
@@ -1820,15 +1822,19 @@ async def _rebuild_single_entity(
                 "created_at": int(time.time()),
                 "truncate": truncation_info,
             }
-            await knowledge_graph_inst.upsert_node(entity_name, updated_entity_data)
+            _disambig = global_config.get("enable_entity_disambiguation", True)
+            composite_id = compute_entity_id(entity_name, entity_type, _disambig)
+            updated_entity_data["entity_id"] = composite_id
+            await knowledge_graph_inst.upsert_node(composite_id, updated_entity_data)
 
             # Update entity in vector database (equally critical)
-            entity_vdb_id = compute_mdhash_id(entity_name, prefix="ent-")
+            entity_vdb_id = compute_entity_vdb_id(entity_name, entity_type, _disambig)
             entity_content = f"{entity_name}\n{final_description}"
 
             vdb_data = {
                 entity_vdb_id: {
                     "content": entity_content,
+                    "entity_id": composite_id,
                     "entity_name": entity_name,
                     "source_id": updated_entity_data["source_id"],
                     "description": final_description,
@@ -2216,11 +2222,14 @@ async def _rebuild_single_relationship(
 
             # Update entity_vdb for the newly created entity
             if entities_vdb is not None:
-                entity_vdb_id = compute_mdhash_id(node_id, prefix="ent-")
+                _disambig = global_config.get("enable_entity_disambiguation", True)
+                entity_vdb_id = compute_entity_vdb_id(node_id, "UNKNOWN", _disambig)
+                _composite_id = compute_entity_id(node_id, "UNKNOWN", _disambig)
                 entity_content = f"{node_id}\n{node_description}"
                 vdb_data = {
                     entity_vdb_id: {
                         "content": entity_content,
+                        "entity_id": _composite_id,
                         "entity_name": node_id,
                         "source_id": node_source_id,
                         "entity_type": "UNKNOWN",
@@ -2561,8 +2570,10 @@ async def _merge_nodes_then_upsert(
         logger.debug(status_message)
 
     # 11. Update both graph and vector db
+    _disambig = global_config.get("enable_entity_disambiguation", True)
+    composite_id = compute_entity_id(entity_name, entity_type, _disambig)
     node_data = dict(
-        entity_id=entity_name,
+        entity_id=composite_id,
         entity_type=entity_type,
         description=description,
         source_id=source_id,
@@ -2571,15 +2582,16 @@ async def _merge_nodes_then_upsert(
         truncate=truncation_info,
     )
     await knowledge_graph_inst.upsert_node(
-        entity_name,
+        composite_id,
         node_data=node_data,
     )
     node_data["entity_name"] = entity_name
     if entity_vdb is not None:
-        entity_vdb_id = compute_mdhash_id(str(entity_name), prefix="ent-")
+        entity_vdb_id = compute_entity_vdb_id(entity_name, entity_type, _disambig)
         entity_content = f"{entity_name}\n{description}"
         data_for_vdb = {
             entity_vdb_id: {
+                "entity_id": composite_id,
                 "entity_name": entity_name,
                 "entity_type": entity_type,
                 "content": entity_content,
@@ -2900,9 +2912,11 @@ async def _merge_edges_then_upsert(
 
         if existing_node is None:
             # Node doesn't exist - create new node
+            _disambig = global_config.get("enable_entity_disambiguation", True)
+            _edge_composite_id = compute_entity_id(need_insert_id, "UNKNOWN", _disambig)
             node_created_at = int(time.time())
             node_data = {
-                "entity_id": need_insert_id,
+                "entity_id": _edge_composite_id,
                 "source_id": source_id,
                 "description": description,
                 "entity_type": "UNKNOWN",
@@ -2910,7 +2924,7 @@ async def _merge_edges_then_upsert(
                 "created_at": node_created_at,
                 "truncate": "",
             }
-            await knowledge_graph_inst.upsert_node(need_insert_id, node_data=node_data)
+            await knowledge_graph_inst.upsert_node(_edge_composite_id, node_data=node_data)
 
             # Update entity_chunks_storage for the newly created entity
             if entity_chunks_storage is not None:
@@ -2926,11 +2940,12 @@ async def _merge_edges_then_upsert(
                     )
 
             if entity_vdb is not None:
-                entity_vdb_id = compute_mdhash_id(need_insert_id, prefix="ent-")
+                entity_vdb_id = compute_entity_vdb_id(need_insert_id, "UNKNOWN", _disambig)
                 entity_content = f"{need_insert_id}\n{description}"
                 vdb_data = {
                     entity_vdb_id: {
                         "content": entity_content,
+                        "entity_id": _edge_composite_id,
                         "entity_name": need_insert_id,
                         "source_id": source_id,
                         "entity_type": "UNKNOWN",
@@ -3028,16 +3043,20 @@ async def _merge_edges_then_upsert(
 
                 # Update vector database
                 if entity_vdb is not None:
-                    entity_vdb_id = compute_mdhash_id(need_insert_id, prefix="ent-")
+                    _disambig = global_config.get("enable_entity_disambiguation", True)
+                    _exist_type = existing_node.get("entity_type", "UNKNOWN")
+                    entity_vdb_id = compute_entity_vdb_id(need_insert_id, _exist_type, _disambig)
+                    _exist_composite = compute_entity_id(need_insert_id, _exist_type, _disambig)
                     entity_content = (
                         f"{need_insert_id}\n{existing_node.get('description', '')}"
                     )
                     vdb_data = {
                         entity_vdb_id: {
                             "content": entity_content,
+                            "entity_id": _exist_composite,
                             "entity_name": need_insert_id,
                             "source_id": limited_source_id_str,
-                            "entity_type": existing_node.get("entity_type", "UNKNOWN"),
+                            "entity_type": _exist_type,
                             "file_path": existing_node.get(
                                 "file_path", "unknown_source"
                             ),
@@ -3178,10 +3197,23 @@ async def merge_nodes_and_edges(
     all_nodes = defaultdict(list)
     all_edges = defaultdict(list)
 
+    _disambig = global_config.get("enable_entity_disambiguation", True)
     for maybe_nodes, maybe_edges in chunk_results:
         # Collect nodes
-        for entity_name, entities in maybe_nodes.items():
-            all_nodes[entity_name].extend(entities)
+        if _disambig:
+            # V1: group by composite key (name|type) for disambiguation
+            for entity_name, entities in maybe_nodes.items():
+                for entity in entities:
+                    group_key = compute_entity_id(
+                        entity.get("entity_name", entity_name),
+                        entity.get("entity_type", ""),
+                        True,
+                    )
+                    all_nodes[group_key].append(entity)
+        else:
+            # Original path: batch extend by entity_name — identical to upstream
+            for entity_name, entities in maybe_nodes.items():
+                all_nodes[entity_name].extend(entities)
 
         # Collect edges with sorted keys for undirected graph
         for edge_key, edges in maybe_edges.items():
@@ -3301,6 +3333,25 @@ async def merge_nodes_and_edges(
 
         if first_exception is not None:
             raise first_exception
+
+    # Build name→composite_id mapping for edge key resolution
+    _entity_name_to_composite = {}
+    if _disambig:
+        for ent in processed_entities:
+            if ent and isinstance(ent, dict):
+                ename = ent.get("entity_name", "")
+                eid = ent.get("entity_id", ename)
+                if ename and eid:
+                    _entity_name_to_composite[ename] = eid
+
+        # Remap edge keys to use composite IDs
+        remapped_edges = defaultdict(list)
+        for edge_key, edges in all_edges.items():
+            new_src = _entity_name_to_composite.get(edge_key[0], edge_key[0])
+            new_tgt = _entity_name_to_composite.get(edge_key[1], edge_key[1])
+            new_key = tuple(sorted((new_src, new_tgt)))
+            remapped_edges[new_key].extend(edges)
+        all_edges = remapped_edges
 
     # ===== Phase 2: Process all relationships concurrently =====
     log_message = f"Phase 2: Processing {total_relations_count} relations from {doc_id} (async: {graph_max_async})"
@@ -4319,10 +4370,28 @@ async def _perform_kg_search(
         f"Raw search results: {len(final_entities)} entities, {len(final_relations)} relations, {len(vector_chunks)} vector chunks"
     )
 
+    # V3: HippoRAG2-style PPR chunk ranking
+    ppr_chunks = []
+    if query_param.enable_multi_hop and chunks_vdb:
+        all_entities = final_entities
+        if all_entities:
+            ppr_chunks = await _ppr_rank_chunks(
+                query=query,
+                node_datas=all_entities,
+                knowledge_graph_inst=knowledge_graph_inst,
+                entities_vdb=entities_vdb,
+                relationships_vdb=relationships_vdb,
+                chunks_vdb=chunks_vdb,
+                text_chunks_db=text_chunks_db,
+                query_param=query_param,
+                query_embedding=query_embedding,
+            )
+
     return {
         "final_entities": final_entities,
         "final_relations": final_relations,
         "vector_chunks": vector_chunks,
+        "ppr_chunks": ppr_chunks,
         "chunk_tracking": chunk_tracking,
         "query_embedding": query_embedding,
     }
@@ -4510,13 +4579,58 @@ async def _merge_all_chunks(
     chunks_vdb: BaseVectorStorage = None,
     chunk_tracking: dict = None,
     query_embedding: list[float] = None,
+    ppr_chunks: list[dict] = None,
 ) -> list[dict]:
     """
     Merge chunks from different sources: vector_chunks + entity_chunks + relation_chunks.
+    When PPR chunks are available (V3 enable_multi_hop), they take priority.
     """
     if chunk_tracking is None:
         chunk_tracking = {}
 
+    # V3: When PPR chunks are available, they replace entity/relation chunk selection.
+    # PPR scores already encode the graph structure signal; vector_chunks supplement.
+    if ppr_chunks:
+        merged_chunks = []
+        seen_chunk_ids = set()
+
+        # PPR chunks first (highest priority — graph-based ranking)
+        for chunk in ppr_chunks:
+            chunk_id = chunk.get("chunk_id") or chunk.get("id")
+            if chunk_id and chunk_id not in seen_chunk_ids:
+                seen_chunk_ids.add(chunk_id)
+                merged_chunks.append(
+                    {
+                        "content": chunk["content"],
+                        "file_path": chunk.get("file_path", "unknown_source"),
+                        "chunk_id": chunk_id,
+                        "is_multimodal": chunk.get("is_multimodal", False),
+                        "page_idx": chunk.get("page_idx"),
+                        "ppr_score": chunk.get("ppr_score"),
+                    }
+                )
+
+        # Vector chunks as supplement
+        for chunk in vector_chunks:
+            chunk_id = chunk.get("chunk_id") or chunk.get("id")
+            if chunk_id and chunk_id not in seen_chunk_ids:
+                seen_chunk_ids.add(chunk_id)
+                merged_chunks.append(
+                    {
+                        "content": chunk["content"],
+                        "file_path": chunk.get("file_path", "unknown_source"),
+                        "chunk_id": chunk_id,
+                        "is_multimodal": chunk.get("is_multimodal", False),
+                        "page_idx": chunk.get("page_idx"),
+                    }
+                )
+
+        logger.info(
+            f"PPR-priority merged chunks: {len(ppr_chunks)} PPR + {len(vector_chunks)} vector -> {len(merged_chunks)} (deduplicated)"
+        )
+        return merged_chunks
+
+    # Original logic: round-robin merge from entity/relation/vector sources
     # Get chunks from entities
     entity_chunks = []
     if filtered_entities and text_chunks_db:
@@ -5001,6 +5115,7 @@ async def _build_query_context(
         chunks_vdb=chunks_vdb,
         chunk_tracking=search_result["chunk_tracking"],
         query_embedding=search_result["query_embedding"],
+        ppr_chunks=search_result.get("ppr_chunks"),
     )
 
     if (
@@ -5060,6 +5175,146 @@ async def _build_query_context(
     return QueryContextResult(context=context, raw_data=raw_data)
 
 
+async def _ppr_rank_chunks(
+    query: str,
+    node_datas: list[dict],
+    knowledge_graph_inst: BaseGraphStorage,
+    entities_vdb: BaseVectorStorage,
+    relationships_vdb: BaseVectorStorage,
+    chunks_vdb: BaseVectorStorage,
+    text_chunks_db: BaseKVStorage,
+    query_param: QueryParam,
+    query_embedding: list[float] = None,
+) -> list[dict]:
+    """HippoRAG2-style PPR chunk ranking.
+
+    Builds a heterogeneous graph with entity nodes (from graph storage) and
+    virtual chunk nodes (from entity source_id mappings).  Dual-signal seed
+    weights drive PPR: relation VDB scores → entity weights, chunks VDB scores
+    × passage_node_weight → chunk weights.  PPR scores directly determine
+    chunk ordering.
+
+    Returns:
+        Ranked list of chunk dicts with ``ppr_score`` and ``source_type="ppr"``.
+    """
+    from lightrag.ppr import personalized_pagerank
+
+    # Step 1: Build entity seed weights from relation VDB + entity VDB scores
+    entity_seed_weights: dict[str, float] = {}
+
+    # From entity VDB scores (already retrieved by _get_node_data)
+    for nd in node_datas:
+        eid = nd.get("entity_id", nd.get("entity_name", ""))
+        if eid:
+            vdb_score = nd.get("vdb_score", 0.0)
+            entity_seed_weights[eid] = max(entity_seed_weights.get(eid, 0), vdb_score)
+
+    # From relation VDB scores (fact-query similarity → entity seeds)
+    try:
+        rel_results = await relationships_vdb.query(
+            query, top_k=query_param.top_k, query_embedding=query_embedding
+        )
+        for rel in rel_results:
+            score = rel.get("distance", 0.0)
+            for field_name in ("src_id", "tgt_id"):
+                eid = rel.get(field_name)
+                if eid:
+                    entity_seed_weights[eid] = max(
+                        entity_seed_weights.get(eid, 0), score
+                    )
+    except Exception as e:
+        logger.warning(f"PPR: relation VDB query failed: {e}")
+
+    if not entity_seed_weights:
+        return []
+
+    # Step 2: Get subgraph (entities + edges)
+    seed_ids = list(entity_seed_weights.keys())
+    subgraph_nodes, subgraph_edges = await knowledge_graph_inst.get_subgraph_for_ppr(
+        seed_ids, max_depth=query_param.multi_hop_depth
+    )
+
+    # Step 3: Build virtual chunk nodes + chunk-entity edges from source_id
+    chunk_to_entities: dict[str, list[str]] = {}
+    for node in subgraph_nodes:
+        eid = node.get("entity_id")
+        source_ids = node.get("source_id", "")
+        if eid and source_ids:
+            for chunk_id in split_string_by_multi_markers(
+                source_ids, [GRAPH_FIELD_SEP]
+            ):
+                chunk_id = chunk_id.strip()
+                if chunk_id:
+                    chunk_to_entities.setdefault(chunk_id, []).append(eid)
+
+    if not chunk_to_entities:
+        logger.debug("PPR: no chunk-entity mappings found in subgraph")
+        return []
+
+    chunk_nodes = [{"chunk_id": cid} for cid in chunk_to_entities]
+    chunk_entity_edges = [
+        {"chunk_id": cid, "entity_id": eid}
+        for cid, eids in chunk_to_entities.items()
+        for eid in eids
+    ]
+
+    # Step 4: Get DPR chunk scores (passage_node_weight)
+    chunk_seed_weights: dict[str, float] = {}
+    passage_node_weight = query_param.passage_node_weight
+
+    try:
+        chunk_results = await chunks_vdb.query(
+            query, top_k=query_param.ppr_top_k * 2, query_embedding=query_embedding
+        )
+        if chunk_results:
+            scores = [c.get("distance", 0.0) for c in chunk_results]
+            min_s, max_s = min(scores), max(scores)
+            range_s = max_s - min_s if max_s > min_s else 1.0
+
+            for c in chunk_results:
+                cid = c.get("chunk_id") or c.get("id")
+                if cid and cid in chunk_to_entities:
+                    normalized = (c.get("distance", 0.0) - min_s) / range_s
+                    chunk_seed_weights[cid] = normalized * passage_node_weight
+    except Exception as e:
+        logger.warning(f"PPR: chunks VDB query failed: {e}")
+
+    # Step 5: Run PPR
+    ppr_ranked = personalized_pagerank(
+        entity_nodes=subgraph_nodes,
+        entity_edges=subgraph_edges,
+        chunk_nodes=chunk_nodes,
+        chunk_entity_edges=chunk_entity_edges,
+        entity_seed_weights=entity_seed_weights,
+        chunk_seed_weights=chunk_seed_weights,
+        damping=query_param.ppr_damping,
+        top_k=query_param.ppr_top_k,
+    )
+
+    if not ppr_ranked:
+        return []
+
+    # Step 6: Fetch chunk content and return
+    ranked_chunk_ids = [cid for cid, _ in ppr_ranked]
+    chunk_data_list = await text_chunks_db.get_by_ids(ranked_chunk_ids)
+
+    result_chunks = []
+    for (chunk_id, ppr_score), chunk_data in zip(ppr_ranked, chunk_data_list):
+        if chunk_data and chunk_data.get("content"):
+            chunk = chunk_data.copy()
+            chunk["chunk_id"] = chunk_id
+            chunk["source_type"] = "ppr"
+            chunk["ppr_score"] = ppr_score
+            result_chunks.append(chunk)
+
+    logger.info(
+        f"PPR chunk ranking: {len(result_chunks)} chunks from {len(subgraph_nodes)} entities, "
+        f"{len(chunk_to_entities)} virtual chunks"
+    )
+
+    return result_chunks
+
+
 async def _get_node_data(
     query: str,
     knowledge_graph_inst: BaseGraphStorage,
@@ -5077,7 +5332,8 @@ async def _get_node_data(
         return [], []
 
     # Extract all entity IDs from your results list
-    node_ids = [r["entity_name"] for r in results]
+    # Use composite entity_id (from VDB metadata) when available, fall back to entity_name
+    node_ids = [r.get("entity_id", r["entity_name"]) for r in results]
 
     # Call the batch node retrieval and degree functions concurrently.
     nodes_dict, degrees_dict = await asyncio.gather(

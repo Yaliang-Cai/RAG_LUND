@@ -3,17 +3,16 @@ import os
 from typing import Any, final
 from dataclasses import dataclass
 import numpy as np
-from lightrag.utils import logger, compute_mdhash_id
+from lightrag.utils import logger, compute_mdhash_id, compute_entity_vdb_id
 from ..base import BaseVectorStorage
 from ..constants import DEFAULT_MAX_FILE_PATH_LENGTH
 from ..kg.shared_storage import get_data_init_lock
-import pipmaster as pm
-
-if not pm.is_installed("pymilvus"):
-    pm.install("pymilvus>=2.6.2")
-
 import configparser
-from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema  # type: ignore
+
+try:
+    from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema  # type: ignore
+except ImportError:
+    raise ImportError("pymilvus package required. Install with: pip install pymilvus>=2.6.2")
 
 config = configparser.ConfigParser()
 config.read("config.ini", "utf-8")
@@ -1118,7 +1117,7 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             entity_name: The name of the entity to delete
         """
         try:
-            # Compute entity ID from name
+            # Compute entity VDB ID — entity_name may be composite ID (name|type) when disambiguation is on
             entity_id = compute_mdhash_id(entity_name, prefix="ent-")
             logger.debug(
                 f"[{self.workspace}] Attempting to delete entity {entity_name} with ID {entity_id}"

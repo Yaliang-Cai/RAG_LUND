@@ -17,17 +17,15 @@ from ..utils import logger
 from ..base import BaseGraphStorage
 from ..types import KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphEdge
 from ..kg.shared_storage import get_data_init_lock
-import pipmaster as pm
-
-if not pm.is_installed("neo4j"):
-    pm.install("neo4j")
-
-from neo4j import (  # type: ignore
-    AsyncGraphDatabase,
-    exceptions as neo4jExceptions,
-    AsyncDriver,
-    AsyncManagedTransaction,
-)
+try:
+    from neo4j import (  # type: ignore
+        AsyncGraphDatabase,
+        exceptions as neo4jExceptions,
+        AsyncDriver,
+        AsyncManagedTransaction,
+    )
+except ImportError:
+    raise ImportError("neo4j package required. Install with: pip install neo4j")
 
 from dotenv import load_dotenv
 
@@ -1101,6 +1099,57 @@ class Neo4JStorage(BaseGraphStorage):
         except Exception as e:
             logger.error(f"[{self.workspace}] Error during edge upsert: {str(e)}")
             raise
+
+    async def get_subgraph_for_ppr(
+        self, seed_node_ids: list[str], max_depth: int = 3
+    ) -> tuple[list[dict], list[dict]]:
+        """Optimised Neo4j subgraph extraction for PPR."""
+        workspace_label = self._get_workspace_label()
+        nodes: list[dict] = []
+        edges: list[dict] = []
+        seen_nodes: set[str] = set()
+        seen_edges: set[tuple[str, str]] = set()
+
+        query = (
+            f"MATCH path = (seed:`{workspace_label}`)-[*1..{max_depth}]-(neighbor:`{workspace_label}`) "
+            f"WHERE seed.entity_id IN $seed_ids "
+            f"UNWIND nodes(path) AS n "
+            f"UNWIND relationships(path) AS r "
+            f"RETURN DISTINCT "
+            f"  n.entity_id AS nid, properties(n) AS nprops, "
+            f"  startNode(r).entity_id AS src, endNode(r).entity_id AS tgt, "
+            f"  properties(r) AS rprops"
+        )
+
+        async with self._driver.session(
+            database=self._DATABASE, default_access_mode="READ"
+        ) as session:
+            try:
+                result = await session.run(query, seed_ids=seed_node_ids)
+                records = await result.data()
+                for record in records:
+                    nid = record.get("nid")
+                    if nid and nid not in seen_nodes:
+                        seen_nodes.add(nid)
+                        nprops = record.get("nprops", {})
+                        nodes.append({**nprops, "entity_id": nid})
+
+                    src = record.get("src")
+                    tgt = record.get("tgt")
+                    if src and tgt:
+                        edge_key = tuple(sorted((src, tgt)))
+                        if edge_key not in seen_edges:
+                            seen_edges.add(edge_key)
+                            rprops = record.get("rprops", {})
+                            edges.append({
+                                "src": src,
+                                "tgt": tgt,
+                                "weight": float(rprops.get("weight", 1.0)),
+                            })
+            except Exception as e:
+                logger.error(f"[{self.workspace}] PPR subgraph extraction error: {e}")
+
+        return nodes, edges
 
     async def get_knowledge_graph(
         self,

@@ -100,6 +100,8 @@ from lightrag.utils import (
     EmbeddingFunc,
     always_get_an_event_loop,
     compute_mdhash_id,
+    compute_entity_id,
+    compute_entity_vdb_id,
     lazy_external_import,
     priority_limit_async_func_call,
     get_content_summary,
@@ -161,6 +163,24 @@ class LightRAG:
     # ---
     log_level: int | None = field(default=None)
     log_file_path: str | None = field(default=None)
+
+    # Feature Toggles (V1/V2/V3)
+    # ---
+
+    enable_entity_disambiguation: bool = field(default=True)
+    """V1 base toggle: use composite key (name|type) as entity ID to resolve homonym ambiguity. V2/V3 depend on this."""
+
+    enable_synonym_linking: bool = field(default=False)
+    """V2 orthogonal toggle: build SYNONYM edges during ingestion. Independent of enable_multi_hop."""
+
+    synonymy_threshold: float = field(default=0.8)
+    """Cosine similarity threshold for synonym detection (aligned with HippoRAG2 default)."""
+
+    synonymy_topk: int = field(default=100)
+    """Number of KNN neighbors to check for synonym candidates (aligned with HippoRAG2 max 100/entity)."""
+
+    synonymy_min_entity_len: int = field(default=2)
+    """Minimum alphanumeric/CJK character count in entity name for synonym detection."""
 
     # Query parameters
     # ---
@@ -2002,6 +2022,18 @@ class LightRAG:
                                     file_path=file_path,
                                 )
 
+                                # V2: Synonym linking (ingestion-only, orthogonal to V3)
+                                if self.enable_synonym_linking:
+                                    from lightrag.synonym_linking import build_synonym_edges
+                                    await build_synonym_edges(
+                                        entities_vdb=self.entities_vdb,
+                                        knowledge_graph_inst=self.chunk_entity_relation_graph,
+                                        new_entity_ids=None,  # process all entities in this batch
+                                        synonymy_threshold=self.synonymy_threshold,
+                                        synonymy_topk=self.synonymy_topk,
+                                        min_entity_len=self.synonymy_min_entity_len,
+                                    )
+
                                 # Record processing end time
                                 processing_end_time = int(time.time())
 
@@ -2362,9 +2394,11 @@ class LightRAG:
                 update_storage = True
 
             # Insert entities into vector storage with consistent format
+            _disambig = self.enable_entity_disambiguation
             data_for_vdb = {
-                compute_mdhash_id(dp["entity_name"], prefix="ent-"): {
+                compute_entity_vdb_id(dp["entity_name"], dp["entity_type"], _disambig): {
                     "content": dp["entity_name"] + "\n" + dp["description"],
+                    "entity_id": compute_entity_id(dp["entity_name"], dp["entity_type"], _disambig),
                     "entity_name": dp["entity_name"],
                     "source_id": dp["source_id"],
                     "description": dp["description"],
@@ -3525,6 +3559,7 @@ class LightRAG:
                     )
 
                     # Delete from vector vdb
+                    # entities_to_delete contains composite IDs (name|type) when disambiguation is on
                     entity_vdb_ids = [
                         compute_mdhash_id(entity, prefix="ent-")
                         for entity in entities_to_delete

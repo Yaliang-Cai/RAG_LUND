@@ -20,7 +20,7 @@ from raganything.utils import (
     get_processor_for_type,
 )
 import asyncio
-from lightrag.utils import compute_mdhash_id
+from lightrag.utils import compute_mdhash_id, compute_entity_id, compute_entity_vdb_id
 
 
 class ProcessorMixin:
@@ -1195,12 +1195,15 @@ class ProcessorMixin:
             chunk_id = compute_mdhash_id(formatted_chunk_content, prefix="chunk-")
 
             # Generate entity_id using LightRAG's standard format
-            entity_id = compute_mdhash_id(entity_name, prefix="ent-")
+            _etype = entity_info.get("entity_type", content_type)
+            _disambig = getattr(self.lightrag, "enable_entity_disambiguation", True)
+            entity_id = compute_entity_vdb_id(entity_name, _etype, _disambig)
 
             # Create entity data in LightRAG format
             entity_data = {
                 "entity_name": entity_name,
-                "entity_type": entity_info.get("entity_type", content_type),
+                "entity_type": _etype,
+                "entity_id": compute_entity_id(entity_name, _etype, _disambig),
                 "content": entity_info.get("summary", description),
                 "source_id": chunk_id,
                 "file_path": file_ref,
@@ -1215,8 +1218,9 @@ class ProcessorMixin:
                     entity_name = entity_data["entity_name"]
 
                     # Create node data for knowledge graph
+                    _composite = entity_data.get("entity_id", entity_name)
                     node_data = {
-                        "entity_id": entity_name,
+                        "entity_id": _composite,
                         "entity_type": entity_data["entity_type"],
                         "description": entity_data["content"],
                         "source_id": entity_data["source_id"],
@@ -1224,9 +1228,9 @@ class ProcessorMixin:
                         "created_at": int(time.time()),
                     }
 
-                    # Store in knowledge graph
+                    # Store in knowledge graph using composite ID
                     await self.lightrag.chunk_entity_relation_graph.upsert_node(
-                        entity_name, node_data
+                        _composite, node_data
                     )
 
                 # Store in entities_vdb
