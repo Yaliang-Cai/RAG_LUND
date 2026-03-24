@@ -194,6 +194,34 @@ DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE = 2
 DEFAULT_ENABLE_INLINE_CITATIONS = True
 
 # =============================================================================
+# Resilience & callback (service-level optional controls)
+# =============================================================================
+# 是否在 LocalRagService 层启用重试与熔断机制。
+# 默认开启，统一由服务层承担重试/熔断能力。
+DEFAULT_ENABLE_RESILIENCE = True
+
+# 重试总次数（包含首次调用）。
+DEFAULT_RESILIENCE_MAX_ATTEMPTS = 3
+
+# ingest/query 的初始退避时间（秒）。
+DEFAULT_INGEST_RETRY_BASE_DELAY = 2.0
+DEFAULT_QUERY_RETRY_BASE_DELAY = 1.0
+
+# 单次退避等待上限（秒）。
+DEFAULT_RESILIENCE_MAX_DELAY = 20.0
+
+# 熔断阈值：在 reset_timeout 窗口内累计失败达到阈值后打开熔断。
+DEFAULT_INGEST_BREAKER_FAILURE_THRESHOLD = 8
+DEFAULT_QUERY_BREAKER_FAILURE_THRESHOLD = 12
+
+# 熔断打开后进入 half-open 试探调用前的等待时间（秒）。
+DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS = 120.0
+
+# callback 相关开关（默认关闭，按需启用）。
+DEFAULT_ENABLE_METRICS_CALLBACK = False
+DEFAULT_ENABLE_CALLBACK_EVENT_LOG = False
+
+# =============================================================================
 # Logging
 # =============================================================================
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB

@@ -28,7 +28,6 @@ os.environ.setdefault("MINERU_VLLM_GPU_MEMORY_UTILIZATION", "0.1")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
-from raganything.resilience import async_retry, CircuitBreaker
 
 
 SCRIPT_DIR = Path("/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/DocBench")
@@ -59,13 +58,6 @@ RAGANYTHING_EVAL_PROMPT_FILENAME = "evaluation_prompt_RAG-Anything.txt"
 
 DEFAULT_SHARED_DOC_ID = "docbench_shared_0_48"
 DEFAULT_INGEST_FLUSH_EVERY = 6
-DEFAULT_RESILIENCE_MAX_ATTEMPTS = 3
-DEFAULT_INGEST_RETRY_BASE_DELAY = 2.0
-DEFAULT_QUERY_RETRY_BASE_DELAY = 1.0
-DEFAULT_RESILIENCE_MAX_DELAY = 20.0
-DEFAULT_INGEST_BREAKER_FAILURE_THRESHOLD = 8
-DEFAULT_QUERY_BREAKER_FAILURE_THRESHOLD = 12
-DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS = 120.0
 
 DOCBENCH_QUERY_PARAMS = {
     "mode": "hybrid",
@@ -492,59 +484,6 @@ async def generate_answers_shared(
     service = LocalRagService(settings)
     _refresh_master_logging()
 
-    def _on_retry(exc: BaseException, attempt: int, delay: float) -> None:
-        logger.warning(
-            "Resilience retry: attempt=%d delay=%.1fs reason=%s",
-            attempt,
-            delay,
-            exc,
-        )
-
-    def _build_resilient_calls():
-        ingest_breaker = CircuitBreaker(
-            failure_threshold=DEFAULT_INGEST_BREAKER_FAILURE_THRESHOLD,
-            reset_timeout=DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS,
-            name="evaluate_shared_ingest",
-        )
-        query_breaker = CircuitBreaker(
-            failure_threshold=DEFAULT_QUERY_BREAKER_FAILURE_THRESHOLD,
-            reset_timeout=DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS,
-            name="evaluate_shared_query",
-        )
-
-        @ingest_breaker.async_call
-        @async_retry(
-            max_attempts=DEFAULT_RESILIENCE_MAX_ATTEMPTS,
-            base_delay=DEFAULT_INGEST_RETRY_BASE_DELAY,
-            max_delay=DEFAULT_RESILIENCE_MAX_DELAY,
-            on_retry=_on_retry,
-        )
-        async def _safe_ingest(*, file_path: str, output_dir: str, doc_id: str) -> None:
-            await service.ingest(
-                file_path=file_path,
-                output_dir=output_dir,
-                doc_id=doc_id,
-                serialize_by_doc_id=False,
-            )
-
-        @query_breaker.async_call
-        @async_retry(
-            max_attempts=DEFAULT_RESILIENCE_MAX_ATTEMPTS,
-            base_delay=DEFAULT_QUERY_RETRY_BASE_DELAY,
-            max_delay=DEFAULT_RESILIENCE_MAX_DELAY,
-            on_retry=_on_retry,
-        )
-        async def _safe_query(*, doc_id: str, question: str, params: dict[str, Any]) -> str:
-            return await service.query(
-                doc_id=doc_id,
-                query=question,
-                **params,
-            )
-
-        return _safe_ingest, _safe_query
-
-    safe_ingest, safe_query = _build_resilient_calls()
-
     processed_keys: set[str] = set()
     if resume and SYSTEM_ANSWERS_FILE.exists():
         with open(SYSTEM_ANSWERS_FILE, "r", encoding="utf-8") as f:
@@ -604,10 +543,11 @@ async def generate_answers_shared(
         async def _ingest_one(doc_name: str, pdf_file: Path) -> str:
             logger.info("[%s] Ingest into shared storage: %s", doc_name, pdf_file.name)
             doc_output_dir = str(OUTPUT_MD_DIR / f"docbench_{doc_name}")
-            await safe_ingest(
+            await service.ingest(
                 file_path=str(pdf_file),
                 output_dir=doc_output_dir,
                 doc_id=shared_doc_id,
+                serialize_by_doc_id=False,
             )
             return doc_name
 
@@ -647,7 +587,6 @@ async def generate_answers_shared(
                 shared_doc_id,
                 clear_model_cache=False,
             )
-            safe_ingest, safe_query = _build_resilient_calls()
             ingested_since_flush = 0
 
     # Ensure ingest-phase temporary memory is released before query phase.
@@ -657,7 +596,6 @@ async def generate_answers_shared(
         shared_doc_id,
         clear_model_cache=False,
     )
-    safe_ingest, safe_query = _build_resilient_calls()
 
     # Phase 2: question answering against shared storage (global pending pool)
     pending_questions: list[dict[str, Any]] = []
@@ -716,10 +654,10 @@ async def generate_answers_shared(
             logger.info("[%s][Q%d] Question: %s", doc_name, qa_idx + 1, question[:80])
             async with sem:
                 try:
-                    answer = await safe_query(
+                    answer = await service.query(
                         doc_id=shared_doc_id,
-                        question=question,
-                        params=query_params,
+                        query=question,
+                        **query_params,
                     )
                     logger.info("[%s][Q%d] Answer: %s", doc_name, qa_idx + 1, answer[:80])
                 except Exception as exc:
@@ -779,7 +717,6 @@ async def generate_answers_shared(
         shared_doc_id,
         clear_model_cache=False,
     )
-    safe_ingest, safe_query = _build_resilient_calls()
     del service
     gc.collect()
     _clear_cuda_cache()

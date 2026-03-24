@@ -67,6 +67,16 @@ from raganything.constants import (
     DEFAULT_MIN_RERANK_SCORE,
     DEFAULT_ENABLE_INLINE_CITATIONS,
     DEFAULT_SERIALIZE_INGEST_BY_DOC_ID,
+    DEFAULT_ENABLE_RESILIENCE,
+    DEFAULT_RESILIENCE_MAX_ATTEMPTS,
+    DEFAULT_INGEST_RETRY_BASE_DELAY,
+    DEFAULT_QUERY_RETRY_BASE_DELAY,
+    DEFAULT_RESILIENCE_MAX_DELAY,
+    DEFAULT_INGEST_BREAKER_FAILURE_THRESHOLD,
+    DEFAULT_QUERY_BREAKER_FAILURE_THRESHOLD,
+    DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS,
+    DEFAULT_ENABLE_METRICS_CALLBACK,
+    DEFAULT_ENABLE_CALLBACK_EVENT_LOG,
 )
 from raganything.resilience import CircuitBreaker, async_retry
 from raganything.query_message_repack import repack_query_messages
@@ -131,16 +141,16 @@ class LocalRagSettings:
     mineru_vllm_gpu_memory_utilization: float = (
         DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION
     )
-    enable_resilience: bool = False
-    resilience_max_attempts: int = 3
-    ingest_retry_base_delay: float = 2.0
-    query_retry_base_delay: float = 1.0
-    resilience_max_delay: float = 20.0
-    ingest_breaker_failure_threshold: int = 8
-    query_breaker_failure_threshold: int = 12
-    breaker_reset_timeout_seconds: float = 120.0
-    enable_metrics_callback: bool = False
-    enable_callback_event_log: bool = False
+    enable_resilience: bool = DEFAULT_ENABLE_RESILIENCE
+    resilience_max_attempts: int = DEFAULT_RESILIENCE_MAX_ATTEMPTS
+    ingest_retry_base_delay: float = DEFAULT_INGEST_RETRY_BASE_DELAY
+    query_retry_base_delay: float = DEFAULT_QUERY_RETRY_BASE_DELAY
+    resilience_max_delay: float = DEFAULT_RESILIENCE_MAX_DELAY
+    ingest_breaker_failure_threshold: int = DEFAULT_INGEST_BREAKER_FAILURE_THRESHOLD
+    query_breaker_failure_threshold: int = DEFAULT_QUERY_BREAKER_FAILURE_THRESHOLD
+    breaker_reset_timeout_seconds: float = DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS
+    enable_metrics_callback: bool = DEFAULT_ENABLE_METRICS_CALLBACK
+    enable_callback_event_log: bool = DEFAULT_ENABLE_CALLBACK_EVENT_LOG
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -210,38 +220,59 @@ class LocalRagSettings:
             ),
             enable_resilience=os.getenv(
                 "RAGANYTHING_ENABLE_RESILIENCE",
-                "false",
+                str(DEFAULT_ENABLE_RESILIENCE),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
             resilience_max_attempts=int(
-                os.getenv("RAGANYTHING_RESILIENCE_MAX_ATTEMPTS", "3")
+                os.getenv(
+                    "RAGANYTHING_RESILIENCE_MAX_ATTEMPTS",
+                    str(DEFAULT_RESILIENCE_MAX_ATTEMPTS),
+                )
             ),
             ingest_retry_base_delay=float(
-                os.getenv("RAGANYTHING_INGEST_RETRY_BASE_DELAY", "2.0")
+                os.getenv(
+                    "RAGANYTHING_INGEST_RETRY_BASE_DELAY",
+                    str(DEFAULT_INGEST_RETRY_BASE_DELAY),
+                )
             ),
             query_retry_base_delay=float(
-                os.getenv("RAGANYTHING_QUERY_RETRY_BASE_DELAY", "1.0")
+                os.getenv(
+                    "RAGANYTHING_QUERY_RETRY_BASE_DELAY",
+                    str(DEFAULT_QUERY_RETRY_BASE_DELAY),
+                )
             ),
             resilience_max_delay=float(
-                os.getenv("RAGANYTHING_RESILIENCE_MAX_DELAY", "20.0")
+                os.getenv(
+                    "RAGANYTHING_RESILIENCE_MAX_DELAY",
+                    str(DEFAULT_RESILIENCE_MAX_DELAY),
+                )
             ),
             ingest_breaker_failure_threshold=int(
-                os.getenv("RAGANYTHING_INGEST_BREAKER_FAILURE_THRESHOLD", "8")
+                os.getenv(
+                    "RAGANYTHING_INGEST_BREAKER_FAILURE_THRESHOLD",
+                    str(DEFAULT_INGEST_BREAKER_FAILURE_THRESHOLD),
+                )
             ),
             query_breaker_failure_threshold=int(
-                os.getenv("RAGANYTHING_QUERY_BREAKER_FAILURE_THRESHOLD", "12")
+                os.getenv(
+                    "RAGANYTHING_QUERY_BREAKER_FAILURE_THRESHOLD",
+                    str(DEFAULT_QUERY_BREAKER_FAILURE_THRESHOLD),
+                )
             ),
             breaker_reset_timeout_seconds=float(
-                os.getenv("RAGANYTHING_BREAKER_RESET_TIMEOUT_SECONDS", "120.0")
+                os.getenv(
+                    "RAGANYTHING_BREAKER_RESET_TIMEOUT_SECONDS",
+                    str(DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS),
+                )
             ),
             enable_metrics_callback=os.getenv(
                 "RAGANYTHING_ENABLE_METRICS_CALLBACK",
-                "false",
+                str(DEFAULT_ENABLE_METRICS_CALLBACK),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
             enable_callback_event_log=os.getenv(
                 "RAGANYTHING_ENABLE_CALLBACK_EVENT_LOG",
-                "false",
+                str(DEFAULT_ENABLE_CALLBACK_EVENT_LOG),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
         )
