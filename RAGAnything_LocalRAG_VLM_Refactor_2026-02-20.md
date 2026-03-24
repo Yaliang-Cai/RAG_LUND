@@ -1539,3 +1539,42 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
   - 边界：breaker 阈值=2 时连续失败可打开熔断并拒绝后续请求；
   - 反例：回调重复注册不会重复追加，同一 callback 仅注册一次；
   - 反例：已有 `rag` 实例后再注册 callback，`enable_callback_event_log=True` 时仍可正常记录并读取事件。
+
+---
+
+## 增量更新（2026-03-24，并发初始化竞态根治：_ensure_lightrag_initialized single-flight）
+
+### 问题背景
+
+- 共享 workspace 并发 ingest 时，多个协程会同时进入 `_ensure_lightrag_initialized()`。
+- 旧实现中 `parse_cache` 采用“先赋值后 initialize”的发布顺序，存在半初始化对象可见窗口。
+- 该窗口可能触发：`Error accessing parse cache: 'NoneType' object has no attribute 'get'` 警告。
+
+### 改动目标
+
+- 不靠外层降并发规避，直接在内核初始化路径做并发安全收敛。
+- 保持代码简洁：单一临界区 + 原子发布，避免重复补丁。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `rag-anything/raganything/raganything.py` | 新增 `_lightrag_init_lock` 与 `_is_lightrag_runtime_ready()`；`_ensure_lightrag_initialized()` 改为 single-flight 双重检查；`parse_cache` 改为初始化完成后再发布（原子可见） |
+
+### 行为变化（相对改动前）
+
+- 同一 `RAGAnything` 实例并发调用 `_ensure_lightrag_initialized()` 时，仅一个协程执行真实初始化，其余等待并复用结果。
+- `parse_cache` 不再出现“对象已挂载但未 initialize 完成”的半可见状态。
+- 初始化失败时不会发布半成品 `lightrag/parse_cache`，后续可干净重试。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查：
+  - `python -m py_compile raganything/raganything.py`
+  - `python -m py_compile raganything/processor.py`
+- 逻辑级检查（内联）：
+  - 主链路：并发 6 路初始化，仅发生 1 次 LightRAG 与 parse_cache 初始化；
+  - 一致性：`parse_cache.initialize()` 未完成前，`self.parse_cache` 仍为 `None`（无半初始化发布）；
+  - 边界：首次初始化故意失败后，不发布半状态，第二次可成功恢复；
+  - 反例：pre-provided LightRAG 分支并发场景同样保持 single-flight 与原子发布。
+  - 输出标记：`RAGANYTHING_INIT_SINGLE_FLIGHT_CHECK_PASSED`。
