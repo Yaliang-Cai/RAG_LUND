@@ -66,6 +66,17 @@ from raganything.constants import (
     DEFAULT_MIN_RERANK_SCORE,
     DEFAULT_ENABLE_INLINE_CITATIONS,
     DEFAULT_SERIALIZE_INGEST_BY_DOC_ID,
+    # Storage backends (neo4j-milvus branch)
+    DEFAULT_GRAPH_STORAGE_TYPE,
+    DEFAULT_NEO4J_URI,
+    DEFAULT_NEO4J_USERNAME,
+    DEFAULT_NEO4J_PASSWORD,
+    DEFAULT_VECTOR_STORAGE_TYPE,
+    DEFAULT_MILVUS_DB_URI,
+    DEFAULT_ENABLE_SYNONYM_LINKING,
+    DEFAULT_ENABLE_MULTI_HOP,
+    DEFAULT_MULTI_HOP_DEPTH,
+    DEFAULT_PPR_TOP_K,
 )
 from raganything.query_message_repack import repack_query_messages
 
@@ -129,6 +140,18 @@ class LocalRagSettings:
     mineru_vllm_gpu_memory_utilization: float = (
         DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION
     )
+
+    # Storage backends (neo4j-milvus branch)
+    graph_storage_type: str = DEFAULT_GRAPH_STORAGE_TYPE
+    neo4j_uri: str = DEFAULT_NEO4J_URI
+    neo4j_username: str = DEFAULT_NEO4J_USERNAME
+    neo4j_password: str = DEFAULT_NEO4J_PASSWORD
+    vector_storage_type: str = DEFAULT_VECTOR_STORAGE_TYPE
+    milvus_db_uri: str = DEFAULT_MILVUS_DB_URI
+    enable_synonym_linking: bool = DEFAULT_ENABLE_SYNONYM_LINKING
+    enable_multi_hop: bool = DEFAULT_ENABLE_MULTI_HOP
+    multi_hop_depth: int = DEFAULT_MULTI_HOP_DEPTH
+    ppr_top_k: int = DEFAULT_PPR_TOP_K
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -196,6 +219,21 @@ class LocalRagSettings:
                     str(DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION),
                 )
             ),
+            # Storage backends
+            graph_storage_type=os.getenv("GRAPH_STORAGE_TYPE", DEFAULT_GRAPH_STORAGE_TYPE),
+            neo4j_uri=os.getenv("NEO4J_URI", DEFAULT_NEO4J_URI),
+            neo4j_username=os.getenv("NEO4J_USERNAME", DEFAULT_NEO4J_USERNAME),
+            neo4j_password=os.getenv("NEO4J_PASSWORD", DEFAULT_NEO4J_PASSWORD),
+            vector_storage_type=os.getenv("VECTOR_STORAGE_TYPE", DEFAULT_VECTOR_STORAGE_TYPE),
+            milvus_db_uri=os.getenv("MILVUS_DB_URI", DEFAULT_MILVUS_DB_URI),
+            enable_synonym_linking=os.getenv(
+                "ENABLE_SYNONYM_LINKING", str(DEFAULT_ENABLE_SYNONYM_LINKING)
+            ).lower() in {"true", "1", "yes"},
+            enable_multi_hop=os.getenv(
+                "ENABLE_MULTI_HOP", str(DEFAULT_ENABLE_MULTI_HOP)
+            ).lower() in {"true", "1", "yes"},
+            multi_hop_depth=int(os.getenv("MULTI_HOP_DEPTH", str(DEFAULT_MULTI_HOP_DEPTH))),
+            ppr_top_k=int(os.getenv("PPR_TOP_K", str(DEFAULT_PPR_TOP_K))),
         )
 
 
