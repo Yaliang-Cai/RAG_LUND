@@ -237,6 +237,47 @@ class LocalRagSettings:
         )
 
 
+def get_storage_kwargs(settings: LocalRagSettings) -> Dict[str, Any]:
+    """
+    根据 LocalRagSettings 生成 LightRAG 的存储参数。
+
+    返回包含以下键的字典：
+    - graph_storage_cls: 图存储类
+    - graph_storage_kwargs: 图存储参数
+    - vector_storage_cls: 向量存储类
+    - vector_storage_kwargs: 向量存储参数
+    """
+    result = {}
+
+    # 图存储配置
+    if settings.graph_storage_type.lower() == "neo4j":
+        from lightrag.kg import Neo4JStorage
+        result["graph_storage_cls"] = Neo4JStorage
+        result["graph_storage_kwargs"] = {
+            "uri": settings.neo4j_uri,
+            "username": settings.neo4j_username,
+            "password": settings.neo4j_password,
+        }
+    else:
+        # 默认 NetworkX（不需要显式指定，LightRAG 会自动使用）
+        result["graph_storage_cls"] = None
+        result["graph_storage_kwargs"] = {}
+
+    # 向量存储配置
+    if settings.vector_storage_type.lower() == "milvus":
+        from lightrag.kg import MilvusVectorDBStorage
+        result["vector_storage_cls"] = MilvusVectorDBStorage
+        result["vector_storage_kwargs"] = {
+            "milvus_db_uri": settings.milvus_db_uri,
+        }
+    else:
+        # 默认 NanoVectorDB（不需要显式指定，LightRAG 会自动使用）
+        result["vector_storage_cls"] = None
+        result["vector_storage_kwargs"] = {}
+
+    return result
+
+
 def configure_logging(settings: LocalRagSettings) -> logging.Logger:
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file_path = Path(settings.log_dir) / f"run_{timestamp}.log"

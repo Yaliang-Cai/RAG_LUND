@@ -110,13 +110,14 @@ nano rag-anything/raganything/constants.py
 
 ### 第 2 步：代码中直接使用（自动读取 constants.py）
 
-使用 `LocalRagService`（推荐）：
+使用 `LocalRagService`（推荐，自动处理存储后端）：
 
 ```python
+import asyncio
 from raganything.services.local_rag import LocalRagService
 
 async def main():
-    # 自动从 constants.py 读取所有配置
+    # 自动从 constants.py 读取所有配置（包括存储后端）
     service = LocalRagService.from_env()
 
     # 索引（V2 会自动启用，如果 DEFAULT_ENABLE_SYNONYM_LINKING=True）
@@ -125,49 +126,49 @@ async def main():
     # 查询（V3 会自动启用，如果 DEFAULT_ENABLE_MULTI_HOP=True）
     result = await service.aquery("问题", "my_graph")
     print(result["response"])
+
+asyncio.run(main())
 ```
 
-或直接使用 `LightRAG`（需要手动传递存储后端）：
+或直接使用 `LightRAG` + 辅助函数（自动选择存储后端）：
 
 ```python
+import asyncio
 from lightrag import LightRAG
-from lightrag.kg import Neo4JStorage, MilvusVectorDBStorage
-from raganything.constants import (
-    DEFAULT_GRAPH_STORAGE_TYPE,
-    DEFAULT_NEO4J_URI,
-    DEFAULT_NEO4J_USERNAME,
-    DEFAULT_NEO4J_PASSWORD,
-    DEFAULT_VECTOR_STORAGE_TYPE,
-    DEFAULT_MILVUS_DB_URI,
-)
+from raganything.services.local_rag import LocalRagSettings, get_storage_kwargs
 
-# 根据 constants.py 的设置选择存储后端
-if DEFAULT_GRAPH_STORAGE_TYPE == "neo4j":
-    graph_storage_cls = Neo4JStorage
-    graph_storage_kwargs = {
-        "uri": DEFAULT_NEO4J_URI,
-        "username": DEFAULT_NEO4J_USERNAME,
-        "password": DEFAULT_NEO4J_PASSWORD,
-    }
-else:
-    graph_storage_cls = None  # 默认 NetworkX
-    graph_storage_kwargs = {}
+async def main():
+    # 从 constants.py 读取所有设置
+    settings = LocalRagSettings.from_env()
 
-if DEFAULT_VECTOR_STORAGE_TYPE == "milvus":
-    vector_storage_cls = MilvusVectorDBStorage
-    vector_storage_kwargs = {"milvus_db_uri": DEFAULT_MILVUS_DB_URI}
-else:
-    vector_storage_cls = None  # 默认 Faiss
-    vector_storage_kwargs = {}
+    # 获取存储参数（自动根据 settings 选择 Neo4j/Milvus 或默认）
+    storage_kwargs = get_storage_kwargs(settings)
 
-# 创建 RAG 实例
-rag = LightRAG(
-    working_dir="./rag_storage",
-    graph_storage_cls=graph_storage_cls,
-    graph_storage_kwargs=graph_storage_kwargs,
-    vector_storage_cls=vector_storage_cls,
-    vector_storage_kwargs=vector_storage_kwargs,
-)
+    # 创建 RAG 实例
+    rag = LightRAG(
+        working_dir=settings.working_dir_root,
+        graph_storage_cls=storage_kwargs.get("graph_storage_cls"),
+        graph_storage_kwargs=storage_kwargs.get("graph_storage_kwargs", {}),
+        vector_storage_cls=storage_kwargs.get("vector_storage_cls"),
+        vector_storage_kwargs=storage_kwargs.get("vector_storage_kwargs", {}),
+    )
+
+    # 索引
+    await rag.ainsert_file("./document.pdf", doc_id="doc1")
+
+    # 查询
+    from lightrag.base import QueryParam
+    result = await rag.aquery(
+        query="问题",
+        param=QueryParam(
+            enable_multi_hop=settings.enable_multi_hop,
+            multi_hop_depth=settings.multi_hop_depth,
+            ppr_top_k=settings.ppr_top_k,
+        )
+    )
+    print(result["response"])
+
+asyncio.run(main())
 ```
 
 ---
