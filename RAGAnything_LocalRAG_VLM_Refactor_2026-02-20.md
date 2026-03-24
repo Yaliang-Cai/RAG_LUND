@@ -1489,3 +1489,53 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 
 - 本轮未改动 `raganything/services/local_rag.py` 与 `evaluate_shared.py` 的业务逻辑。
 - 对这两个文件做了语法回归检查，当前改动不影响其导入与执行入口。
+
+---
+
+## 增量更新（2026-03-24，LocalRagService 接入服务级 resilience + callback 管理）
+
+### 目标
+
+- 在 `LocalRagService` 层提供“可配置的 retry/circuit-breaker”能力，避免仅脚本层手工包装。
+- 在 `LocalRagService` 层提供“回调注册/事件读取/指标汇总”入口，便于上层直接使用。
+- 保持默认行为兼容：不开启新开关时，不改变原有调用路径。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `rag-anything/raganything/services/local_rag.py` | 新增 resilience 配置字段、服务级 `_safe_ingest_call/_safe_query_call` 包装、callback 注册/注销与事件读取接口 |
+| `rag-anything/examples/raganything_local.py` | 示例脚本新增 `--enable_resilience`、`--enable_metrics_callback`、`--enable_callback_event_log`、`--register_demo_callback` 并演示使用 |
+
+### 关键行为
+
+- `LocalRagSettings` 新增开关/参数（均可环境变量覆盖）：
+  - `enable_resilience`
+  - `resilience_max_attempts`
+  - `ingest_retry_base_delay`
+  - `query_retry_base_delay`
+  - `resilience_max_delay`
+  - `ingest_breaker_failure_threshold`
+  - `query_breaker_failure_threshold`
+  - `breaker_reset_timeout_seconds`
+  - `enable_metrics_callback`
+  - `enable_callback_event_log`
+- `LocalRagService.ingest/query` 在开启 `enable_resilience=True` 时自动走服务级 retry + circuit breaker；默认关闭保持原行为。
+- `LocalRagService` 新增：
+  - `register_callback(callback)`
+  - `unregister_callback(callback)`
+  - `get_metrics_summary()`
+  - `get_callback_events(doc_id)`
+- 新建 RAG 实例时会自动挂载已注册 callbacks，并按配置开启 event log。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查：
+  - `python -m py_compile raganything/services/local_rag.py`
+  - `python -m py_compile examples/raganything_local.py`
+- 逻辑级检查（内联）：
+  - 主链路：开启 resilience 时，瞬时超时可重试后成功；
+  - 一致性：关闭 resilience 时调用次数不发生重试放大；
+  - 边界：breaker 阈值=2 时连续失败可打开熔断并拒绝后续请求；
+  - 反例：回调重复注册不会重复追加，同一 callback 仅注册一次；
+  - 反例：已有 `rag` 实例后再注册 callback，`enable_callback_event_log=True` 时仍可正常记录并读取事件。

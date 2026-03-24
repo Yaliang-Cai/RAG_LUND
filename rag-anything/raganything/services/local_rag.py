@@ -21,7 +21,7 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 import numpy as np
 from lightrag.types import GPTKeywordExtractionFormat
@@ -30,6 +30,7 @@ from openai import AsyncOpenAI
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from raganything import RAGAnything, RAGAnythingConfig
+from raganything.callbacks import MetricsCallback, ProcessingCallback
 from raganything.chunking import get_chunking_func
 from raganything.constants import (
     DEFAULT_LOG_MAX_BYTES,
@@ -67,6 +68,7 @@ from raganything.constants import (
     DEFAULT_ENABLE_INLINE_CITATIONS,
     DEFAULT_SERIALIZE_INGEST_BY_DOC_ID,
 )
+from raganything.resilience import CircuitBreaker, async_retry
 from raganything.query_message_repack import repack_query_messages
 
 # Inline citation toggle: read once at startup; env var ENABLE_INLINE_CITATIONS overrides constant
@@ -129,6 +131,16 @@ class LocalRagSettings:
     mineru_vllm_gpu_memory_utilization: float = (
         DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION
     )
+    enable_resilience: bool = False
+    resilience_max_attempts: int = 3
+    ingest_retry_base_delay: float = 2.0
+    query_retry_base_delay: float = 1.0
+    resilience_max_delay: float = 20.0
+    ingest_breaker_failure_threshold: int = 8
+    query_breaker_failure_threshold: int = 12
+    breaker_reset_timeout_seconds: float = 120.0
+    enable_metrics_callback: bool = False
+    enable_callback_event_log: bool = False
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -196,6 +208,42 @@ class LocalRagSettings:
                     str(DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION),
                 )
             ),
+            enable_resilience=os.getenv(
+                "RAGANYTHING_ENABLE_RESILIENCE",
+                "false",
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            resilience_max_attempts=int(
+                os.getenv("RAGANYTHING_RESILIENCE_MAX_ATTEMPTS", "3")
+            ),
+            ingest_retry_base_delay=float(
+                os.getenv("RAGANYTHING_INGEST_RETRY_BASE_DELAY", "2.0")
+            ),
+            query_retry_base_delay=float(
+                os.getenv("RAGANYTHING_QUERY_RETRY_BASE_DELAY", "1.0")
+            ),
+            resilience_max_delay=float(
+                os.getenv("RAGANYTHING_RESILIENCE_MAX_DELAY", "20.0")
+            ),
+            ingest_breaker_failure_threshold=int(
+                os.getenv("RAGANYTHING_INGEST_BREAKER_FAILURE_THRESHOLD", "8")
+            ),
+            query_breaker_failure_threshold=int(
+                os.getenv("RAGANYTHING_QUERY_BREAKER_FAILURE_THRESHOLD", "12")
+            ),
+            breaker_reset_timeout_seconds=float(
+                os.getenv("RAGANYTHING_BREAKER_RESET_TIMEOUT_SECONDS", "120.0")
+            ),
+            enable_metrics_callback=os.getenv(
+                "RAGANYTHING_ENABLE_METRICS_CALLBACK",
+                "false",
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            enable_callback_event_log=os.getenv(
+                "RAGANYTHING_ENABLE_CALLBACK_EVENT_LOG",
+                "false",
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
         )
 
 
@@ -819,6 +867,7 @@ class LocalRagService:
         self.vision_client = AsyncOpenAI(api_key=vision_key, base_url=vision_base)
         self._rag_instances: Dict[str, RAGAnything] = {}
         self._init_lock = asyncio.Lock()
+        self._registered_callbacks: list[ProcessingCallback] = []
         # Per-doc-id locks: serialise ingest for the same workspace so that the
         # temporary chunking_func swap never races with a concurrent ingest.
         self._ingest_locks: Dict[str, asyncio.Lock] = {}
@@ -838,6 +887,122 @@ class LocalRagService:
             self.logger,
             vision_model,
         )
+        self._safe_ingest_call, self._safe_query_call = self._build_resilience_wrappers()
+        if self.settings.enable_metrics_callback:
+            self.register_callback(MetricsCallback())
+
+    def _on_resilience_retry(
+        self,
+        op_name: str,
+        exc: BaseException,
+        attempt: int,
+        delay: float,
+    ) -> None:
+        self.logger.warning(
+            "Resilience retry (%s): attempt=%d delay=%.1fs reason=%s",
+            op_name,
+            attempt,
+            delay,
+            exc,
+        )
+
+    def _build_resilience_wrappers(
+        self,
+    ) -> tuple[
+        Callable[[Callable[[], Awaitable[Any]]], Awaitable[Any]],
+        Callable[[Callable[[], Awaitable[Any]]], Awaitable[Any]],
+    ]:
+        async def _plain_wrapper(func: Callable[[], Awaitable[Any]]) -> Any:
+            return await func()
+
+        if not self.settings.enable_resilience:
+            self.logger.info("Service resilience is disabled.")
+            return _plain_wrapper, _plain_wrapper
+
+        ingest_breaker = CircuitBreaker(
+            failure_threshold=max(1, self.settings.ingest_breaker_failure_threshold),
+            reset_timeout=max(0.0, self.settings.breaker_reset_timeout_seconds),
+            name="local_rag_ingest",
+        )
+        query_breaker = CircuitBreaker(
+            failure_threshold=max(1, self.settings.query_breaker_failure_threshold),
+            reset_timeout=max(0.0, self.settings.breaker_reset_timeout_seconds),
+            name="local_rag_query",
+        )
+
+        @ingest_breaker.async_call
+        @async_retry(
+            max_attempts=max(1, self.settings.resilience_max_attempts),
+            base_delay=max(0.0, self.settings.ingest_retry_base_delay),
+            max_delay=max(0.0, self.settings.resilience_max_delay),
+            on_retry=lambda exc, attempt, delay: self._on_resilience_retry(
+                "ingest", exc, attempt, delay
+            ),
+        )
+        async def _safe_ingest(func: Callable[[], Awaitable[Any]]) -> Any:
+            return await func()
+
+        @query_breaker.async_call
+        @async_retry(
+            max_attempts=max(1, self.settings.resilience_max_attempts),
+            base_delay=max(0.0, self.settings.query_retry_base_delay),
+            max_delay=max(0.0, self.settings.resilience_max_delay),
+            on_retry=lambda exc, attempt, delay: self._on_resilience_retry(
+                "query", exc, attempt, delay
+            ),
+        )
+        async def _safe_query(func: Callable[[], Awaitable[Any]]) -> Any:
+            return await func()
+
+        self.logger.info(
+            "Service resilience enabled: max_attempts=%d ingest_delay=%.1fs query_delay=%.1fs max_delay=%.1fs",
+            max(1, self.settings.resilience_max_attempts),
+            max(0.0, self.settings.ingest_retry_base_delay),
+            max(0.0, self.settings.query_retry_base_delay),
+            max(0.0, self.settings.resilience_max_delay),
+        )
+        return _safe_ingest, _safe_query
+
+    def _register_callbacks_to_rag(self, rag: RAGAnything) -> None:
+        for callback in self._registered_callbacks:
+            rag.callback_manager.register(callback)
+        if self.settings.enable_callback_event_log:
+            rag.callback_manager.enable_event_log(True)
+
+    def register_callback(self, callback: ProcessingCallback) -> None:
+        if not isinstance(callback, ProcessingCallback):
+            raise TypeError(
+                f"Expected ProcessingCallback instance, got {type(callback).__name__}"
+            )
+        if callback in self._registered_callbacks:
+            return
+        self._registered_callbacks.append(callback)
+        for rag in self._rag_instances.values():
+            rag.callback_manager.register(callback)
+            if self.settings.enable_callback_event_log:
+                rag.callback_manager.enable_event_log(True)
+
+    def unregister_callback(self, callback: ProcessingCallback) -> None:
+        if callback in self._registered_callbacks:
+            self._registered_callbacks.remove(callback)
+        for rag in self._rag_instances.values():
+            try:
+                rag.callback_manager.unregister(callback)
+            except ValueError:
+                pass
+
+    def get_metrics_summary(self) -> str:
+        lines: list[str] = []
+        for callback in self._registered_callbacks:
+            if isinstance(callback, MetricsCallback):
+                lines.append(callback.summary())
+        return "\n\n".join(lines)
+
+    def get_callback_events(self, doc_id: str) -> list[dict[str, Any]]:
+        rag = self._rag_instances.get(doc_id)
+        if rag is None:
+            return []
+        return [event.to_dict() for event in rag.callback_manager.event_log]
 
     def _build_rag(self, working_dir: str) -> RAGAnything:
         config = RAGAnythingConfig(
@@ -883,6 +1048,7 @@ class LocalRagService:
                 return self._rag_instances[doc_id]
             working_dir = str(Path(self.settings.working_dir_root) / doc_id)
             rag = self._build_rag(working_dir)
+            self._register_callbacks_to_rag(rag)
             self._rag_instances[doc_id] = rag
             return rag
 
@@ -950,9 +1116,9 @@ class LocalRagService:
             if doc_id not in self._ingest_locks:
                 self._ingest_locks[doc_id] = asyncio.Lock()
             async with self._ingest_locks[doc_id]:
-                await _run_ingest()
+                await self._safe_ingest_call(_run_ingest)
         else:
-            await _run_ingest()
+            await self._safe_ingest_call(_run_ingest)
 
         return doc_id
 
@@ -973,7 +1139,10 @@ class LocalRagService:
         kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
             str(kwargs.get("image_token_estimate_method", ""))
         )
-        return await rag.aquery(query, **kwargs)
+        async def _run_query() -> str:
+            return await rag.aquery(query, **kwargs)
+
+        return await self._safe_query_call(_run_query)
 
     async def stream_query(
         self,
