@@ -1,24 +1,12 @@
 # 🚀 离线部署快速指南（同伴版）
 
-你收到的是一个**完全离线的 RAG-Anything 系统包**。只需 **3 个命令**，即可在你的机器上运行。
+这是 **neo4j-milvus branch** 的离线部署包。
 
----
-
-## 📋 前置要求
-
-- Python 3.8+ 已安装
-- NVIDIA GPU（推荐）或 CPU（会很慢）
-- 至少 10 GB 磁盘空间
-- Linux / macOS / Windows (WSL2)
-
----
-
-## ⚡ 一键部署（推荐）
+## ⚡ 一键部署
 
 ### 步骤 1️⃣：解压离线包
 
 ```bash
-# 获得的压缩文件
 tar -xzf offline_rag_env.tar.gz
 cd offline_env_package
 ```
@@ -29,244 +17,230 @@ cd offline_env_package
 bash auto_deploy.sh
 ```
 
-**脚本会自动：**
-- ✅ 检测你的 Python/GPU 环境
-- ✅ 安装所有依赖包（离线）
-- ✅ 检测本地模型路径
-- ✅ 生成 `.env` 配置文件
-- ✅ 验证安装是否成功
-- ✅ 提示启动方式
+脚本会自动：
+- ✅ 检测 Python 和 GPU 环境
+- ✅ 离线安装所有依赖包
+- ✅ 初始化数据目录
+- ✅ 验证 LightRAG 和 RAG-Anything 导入
+- ✅ 验证 V2/V3 模块导入
 
-**耗时：** 5-15 分钟（取决于网络和硬件）
-
-### 步骤 3️⃣：选择启动方式
-
-#### 方式 A：启动 Web API（推荐）
+### 步骤 3️⃣：启动系统
 
 ```bash
 bash start_rag.sh
 ```
 
-然后访问 http://localhost:9621 在浏览器中使用。
+访问 http://localhost:9621
 
-#### 方式 B：启动 vLLM 服务（如有 VLM 模型）
+---
 
-在一个 terminal 窗口：
-```bash
-bash start_vllm.sh
+## 📋 V2/V3 配置说明
+
+本 branch 新增了两个核心功能：
+
+### V2：同义词链接 (Synonym Linking)
+
+```python
+# constants.py 中的默认值（可通过 .env 覆盖）
+ENABLE_SYNONYM_LINKING = False              # 启用/禁用
+SYNONYMY_THRESHOLD = 0.8                    # 相似度阈值
+SYNONYMY_TOPK = 100                         # KNN top-K
+SYNONYMY_MIN_ENTITY_LEN = 2                 # 最小实体长度
 ```
 
-等待输出 `Uvicorn running on http://0.0.0.0:8001`。
-
-#### 方式 C：命令行使用
-
+启用 V2：
 ```bash
-cd code
+# 方式 1：修改 constants.py
+nano code/rag-anything/raganything/constants.py
+# 找到 DEFAULT_ENABLE_SYNONYM_LINKING = False，改为 True
 
-# 索引文档
-python -m raganything.services.local_rag \
-  -p ./my_documents \
-  -i my_knowledge_graph
+# 方式 2：设置环境变量或 .env
+export ENABLE_SYNONYM_LINKING=true
+```
 
-# 查询
-python -m raganything.services.local_rag \
-  -q "你的问题" \
-  -i my_knowledge_graph
+### V3：PPR 多跳推理 (PPR Multi-hop)
+
+```python
+# 在查询时启用（QueryParam）
+enable_multi_hop=True
+multi_hop_depth=2
+ppr_damping=0.5
+ppr_top_k=50
+passage_node_weight=0.05
+```
+
+使用 V3：
+```python
+from lightrag.base import QueryParam
+
+result = await rag.aquery(
+    query="问题",
+    param=QueryParam(
+        mode="mix",
+        enable_multi_hop=True,      # 启用 V3
+        multi_hop_depth=2,
+        ppr_top_k=50,
+    )
+)
+```
+
+或命令行：
+```bash
+# 通过 QueryParam 在查询时传入
+python -c "
+from lightrag.base import QueryParam
+from raganything import RAGAnything
+import asyncio
+
+async def main():
+    rag = RAGAnything(...)
+    result = await rag.aquery(
+        'question',
+        param=QueryParam(enable_multi_hop=True)
+    )
+
+asyncio.run(main())
+"
 ```
 
 ---
 
-## 🔧 如果部署失败
-
-### 问题 1：缺少模型
-
-```
-log_warn "未找到 VLM 模型"
-```
-
-**解决：** 手动编辑 `data/.env`，找到模型实际位置：
-
-```bash
-# 查找模型
-find . -name "bge-m3" -o -name "Qwen*" -type d
-
-# 编辑 .env
-nano .env
-
-# 修改为实际路径，例如：
-RAGANYTHING_EMBEDDING_MODEL_PATH=/full/path/to/bge-m3
-```
-
-### 问题 2：GPU 内存不足
-
-```
-RuntimeError: CUDA out of memory
-```
-
-**解决：** 编辑 `start_vllm.sh`：
-
-```bash
-# 找到这一行
---gpu-memory-utilization 0.7
-
-# 改为更小的值（如 0.5）
---gpu-memory-utilization 0.5
-```
-
-### 问题 3：Python 包导入失败
-
-```
-ModuleNotFoundError: No module named 'torch'
-```
-
-**解决：** 重新运行安装
-
-```bash
-pip install --no-index --find-links ./wheels -r code/requirements.txt
-```
-
-### 问题 4：vLLM 无法连接
-
-```
-Connection refused: 8001
-```
-
-**解决：**
-1. 确保 `start_vllm.sh` 正在运行
-2. 检查防火墙是否允许 8001 端口
-3. 修改 `.env` 的 `VLLM_API_BASE`：
-
-```bash
-VLLM_API_BASE=http://127.0.0.1:8001/v1  # 改为 127.0.0.1
-```
-
----
-
-## 📁 文件结构说明
+## 📁 目录结构
 
 ```
 offline_env_package/
-├── wheels/                    ← Python 依赖包（pip install 用）
-├── models/                    ← 模型文件（Embedding, VLM 等）
-│   ├── embedding/
-│   ├── reranker/
-│   └── llm/
-├── code/                      ← RAG-Anything 源代码
-├── data/                      ← 运行时数据（索引、缓存等）
-│   ├── rag_workspace/         ← 知识图谱数据（会自动生成）
-│   ├── output/                ← 文档解析输出
-│   └── logs/                  ← 日志文件
-├── auto_deploy.sh             ← 一键部署脚本 ⭐
-├── start_rag.sh               ← 启动 Web API
-├── start_vllm.sh              ← 启动 vLLM（可选）
-├── .env                       ← 配置文件（自动生成）
-├── deploy.log                 ← 部署日志
-└── README_同伴使用.md          ← 本文件
+├── wheels/                    ← Python 依赖包
+├── code/                      ← 源代码（neo4j-milvus branch）
+│   ├── lightrag/
+│   │   ├── lightrag.py
+│   │   ├── operate.py
+│   │   ├── synonym_linking.py     ← V2 新增
+│   │   └── ppr.py                 ← V3 新增
+│   └── rag-anything/
+│       └── raganything/
+│           └── constants.py       ← 配置（V2/V3 参数在这里）
+├── data/                      ← 运行时数据
+├── .env.offline.example       ← V2/V3 参数覆盖模板
+├── auto_deploy.sh             ← 一键部署脚本
+├── start_rag.sh               ← 启动脚本
+└── deploy.log                 ← 部署日志
 ```
 
 ---
 
-## 🎯 常用命令
+## 🔧 配置 V2/V3 参数
 
-### 索引文档
+### 方式 1：编辑 constants.py（推荐）
+
+```bash
+cd code/rag-anything/raganything/
+
+# 编辑配置
+nano constants.py
+
+# 找到以下行（约第 139-158 行）
+DEFAULT_ENABLE_SYNONYM_LINKING = False
+DEFAULT_SYNONYMY_THRESHOLD = 0.8
+DEFAULT_SYNONYMY_TOPK = 100
+DEFAULT_SYNONYMY_MIN_ENTITY_LEN = 2
+```
+
+### 方式 2：创建 .env 文件覆盖（可选）
+
+```bash
+# 复制模板
+cp .env.offline.example .env
+
+# 编辑
+nano .env
+
+# 只需要修改要改的参数，其余保持默认
+```
+
+.env 文件示例：
+```bash
+# V2: 同义词链接
+ENABLE_SYNONYM_LINKING=true
+SYNONYMY_THRESHOLD=0.8
+SYNONYMY_TOPK=100
+
+# V3: PPR 多跳
+# (V3 通过 QueryParam 在查询时传入，不在 constants.py)
+```
+
+---
+
+## 🎯 使用示例
+
+### 示例 1：启用 V2 并索引文档
 
 ```bash
 cd code
 
-# 索引单个文件夹
-python -m raganything.services.local_rag \
-  -p ./documents \
-  -i my_graph_name
+# 修改 constants.py 启用 V2
+sed -i 's/DEFAULT_ENABLE_SYNONYM_LINKING = False/DEFAULT_ENABLE_SYNONYM_LINKING = True/' \
+    rag-anything/raganything/constants.py
 
-# 索引后查询
+# 索引文档（ingestion 阶段会自动建立 SYNONYM 边）
 python -m raganything.services.local_rag \
-  -q "什么是知识图谱？" \
-  -i my_graph_name
+    -p ./documents \
+    -i my_graph
 ```
 
-### 使用 Python API
+### 示例 2：查询时启用 V3
 
 ```python
 import asyncio
+from lightrag.base import QueryParam
 from raganything.services.local_rag import LocalRagService
-from raganything.services.config import LocalRagSettings
 
 async def main():
-    # 自动从 .env 读取配置
-    settings = LocalRagSettings.from_env()
-    service = LocalRagService(settings=settings)
+    service = LocalRagService.from_env()
 
-    # 查询
+    # V3: 启用 PPR 多跳推理
     result = await service.aquery(
         query="问题",
-        graph_name="my_graph_name",
-        mode="hybrid"
+        graph_name="my_graph",
+        param=QueryParam(
+            mode="hybrid",
+            enable_multi_hop=True,       # V3 启用
+            multi_hop_depth=2,
+            ppr_top_k=50,
+        )
     )
+
     print(result["response"])
 
 asyncio.run(main())
 ```
 
-### 启动 Web UI
+### 示例 3：V2 + V3 协同
 
 ```bash
-bash start_rag.sh
-# 访问 http://localhost:9621
+# 1. 修改 constants.py 启用 V2
+ENABLE_SYNONYM_LINKING=true
+
+# 2. 索引（V2 会建立同义词边）
+python -m raganything.services.local_rag -p ./docs -i my_graph
+
+# 3. 查询（V3 会利用 SYNONYM 边做多跳推理）
+python -c "
+from lightrag.base import QueryParam
+from raganything.services.local_rag import LocalRagService
+import asyncio
+
+async def main():
+    service = LocalRagService.from_env()
+    result = await service.aquery(
+        'question',
+        'my_graph',
+        param=QueryParam(enable_multi_hop=True)  # V3 启用
+    )
+    print(result['response'])
+
+asyncio.run(main())
+"
 ```
-
----
-
-## ⚙️ 性能优化
-
-### 如果索引很慢
-
-编辑 `.env`，降低并发数：
-
-```bash
-LLM_MODEL_MAX_ASYNC=2          # 从 4 改为 2
-MAX_PARALLEL_INSERT=1          # 从 2 改为 1
-```
-
-### 如果查询很慢
-
-```bash
-# 改用 "local" 模式（不查图）
-python -m raganything.services.local_rag \
-  -q "问题" \
-  -i my_graph \
-  --mode local
-
-# 或禁用重排
-ENABLE_RERANK=false
-```
-
-### 如果内存不足
-
-```bash
-# 禁用 VLM 增强查询
-ENABLE_VLM_ENHANCED=false
-
-# 减少 chunk 数量
-CHUNK_TOP_K=5
-```
-
----
-
-## 📞 需要帮助？
-
-1. **检查日志**：
-   ```bash
-   cat deploy.log
-   ```
-
-2. **查看配置**：
-   ```bash
-   cat .env
-   ```
-
-3. **联系准备者**（你的同伴）：
-   - 提供 `deploy.log` 的错误信息
-   - 说明你的硬件配置（GPU 型号、内存等）
 
 ---
 
@@ -277,92 +251,96 @@ CHUNK_TOP_K=5
 ```
 ✓ Python 版本: 3.10.x
 ✓ pip 已找到
-✓ GPU 检测: NVIDIA RTX 4090 ...
-✓ 找到嵌入模型: bge-m3
-✓ PyTorch 导入成功
+✓ 依赖包安装完成
 ✓ LightRAG 导入成功
 ✓ RAG-Anything 导入成功
-✓ Embedding 模型加载成功
+✓ V2/V3 模块导入成功
 
 ====== 部署完成！======
 ```
 
-接下来按照"后续步骤"进行即可！
-
----
-
-## 🎓 快速入门示例
-
-### 示例 1：索引一个 PDF 文件夹
-
+然后运行：
 ```bash
-mkdir test_docs
-# 将 PDF 文件放入 test_docs/
-
-python -m raganything.services.local_rag \
-  -p test_docs \
-  -i my_first_graph
-```
-
-### 示例 2：创建一个简单的查询脚本
-
-创建 `query.py`：
-
-```python
-import asyncio
-from raganything.services.local_rag import LocalRagService
-
-async def main():
-    service = LocalRagService.from_env()
-    result = await service.aquery(
-        query="请总结文档的主要内容",
-        graph_name="my_first_graph"
-    )
-    print(result["response"])
-
-asyncio.run(main())
-```
-
-运行：
-```bash
-python query.py
-```
-
----
-
-## 🔒 安全提示
-
-- ⚠️ **不要** 修改 `.env` 中的 LLM 服务地址到公网服务（会泄露数据）
-- ⚠️ **不要** 在 vLLM terminal 中输入敏感信息
-- ⚠️ **定期备份** `data/rag_workspace/` 中的知识图谱数据
-
----
-
-## 📦 包含的组件
-
-| 组件 | 版本 | 用途 |
-|------|------|------|
-| LightRAG | 最新 | 知识图谱 + 向量检索 |
-| RAG-Anything | 最新 | 多模态文档处理 |
-| PyTorch | 2.0+ | 深度学习框架 |
-| vLLM | 最新 | 本地 LLM 推理 |
-| Sentence-Transformers | 最新 | Embedding 模型 |
-
----
-
-## 💡 一句话总结
-
-```bash
-# 就这样
-bash auto_deploy.sh
 bash start_rag.sh
 # 访问 http://localhost:9621
 ```
 
-完成！🎉
+---
+
+## 🔍 关键参数速查
+
+| 功能 | 位置 | 参数 | 默认值 |
+|------|------|------|--------|
+| V2 启用 | constants.py | DEFAULT_ENABLE_SYNONYM_LINKING | False |
+| V2 阈值 | constants.py | DEFAULT_SYNONYMY_THRESHOLD | 0.8 |
+| V2 TopK | constants.py | DEFAULT_SYNONYMY_TOPK | 100 |
+| V3 启用 | QueryParam | enable_multi_hop | False |
+| V3 深度 | QueryParam | multi_hop_depth | 2 |
+| V3 TopK | QueryParam | ppr_top_k | 50 |
 
 ---
 
-**准备者注**：这个包是在 `neo4j-milvus` 分支打包的，包含最新的 V2/V3 升级（同义词链接 + PPR 多跳）。
+## 📞 问题排查
 
-有问题？检查 `deploy.log` 或联系准备者。
+### Q: 模块导入失败
+
+```bash
+# 检查日志
+cat deploy.log
+
+# 重新安装依赖
+pip install --no-index --find-links ./wheels -r code/requirements.txt
+```
+
+### Q: 如何修改 V2/V3 参数
+
+```bash
+# 编辑 constants.py
+cd code/rag-anything/raganything/
+nano constants.py
+
+# 搜索相关参数并修改
+```
+
+### Q: V3 (PPR) 如何使用
+
+V3 不在 constants.py 中，而是在查询时通过 `QueryParam` 传入：
+
+```python
+# 方式 1: Python API
+param = QueryParam(enable_multi_hop=True, ppr_top_k=50)
+result = await rag.aquery(query, param=param)
+
+# 方式 2: 继承后修改查询参数
+# (具体取决于 raganything 的查询接口)
+```
+
+---
+
+## 💡 性能优化建议
+
+如果 indexing 很慢：
+```bash
+# 编辑 constants.py，降低并发
+DEFAULT_LLM_MODEL_MAX_ASYNC=2
+MAX_PARALLEL_INSERT=1
+```
+
+如果查询很慢：
+```bash
+# 在 QueryParam 中调整
+enable_multi_hop=False          # 关闭 V3 加速
+CHUNK_TOP_K=5                   # 减少 chunk 数量
+```
+
+---
+
+简言之：
+
+✅ 部署：`bash auto_deploy.sh && bash start_rag.sh`
+
+✅ 配置 V2：编辑 `constants.py` 中的 `DEFAULT_ENABLE_SYNONYM_LINKING`
+
+✅ 使用 V3：查询时在 `QueryParam` 中设 `enable_multi_hop=True`
+
+就这么简单！🎉
