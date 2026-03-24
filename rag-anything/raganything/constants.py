@@ -194,6 +194,14 @@ DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE = 2
 DEFAULT_ENABLE_INLINE_CITATIONS = True
 
 # =============================================================================
+# V2: Synonym Linking (neo4j-milvus branch)
+# =============================================================================
+DEFAULT_ENABLE_SYNONYM_LINKING = False          # Enable/disable V2
+DEFAULT_SYNONYMY_THRESHOLD = 0.8                # cosine similarity threshold for synonyms
+DEFAULT_SYNONYMY_TOPK = 100                     # KNN top-K for synonym detection
+DEFAULT_SYNONYMY_MIN_ENTITY_LEN = 2             # Min entity name length (filter short entities)
+
+# =============================================================================
 # Logging
 # =============================================================================
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
