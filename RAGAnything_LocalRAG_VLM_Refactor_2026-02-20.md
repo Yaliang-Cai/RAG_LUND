@@ -1427,3 +1427,65 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
   - 边界：`Linked WikiText-2` 命中 `path_fragment_keys` 仍被过滤；
   - 反例：关系端点命中路径碎片时关系被过滤。
   - 输出标记：`OPERATE_PATH_FILTER_ONLY_CHECKS_PASSED`、`OPERATE_COMMENT_OUT_REGRESSION_CHECK_PASSED`。
+
+---
+
+## 增量更新（2026-03-24，按 upstream 迁入删除鲁棒性 + callbacks/resilience + full_entities 修复）
+
+### 目标
+
+- LightRAG：迁入删除链路鲁棒性（retry-safe、LLM cache 删除校验、失败恢复状态落盘）。
+- RAG-Anything：迁入 resilience 模块、callbacks/metrics 体系、full_entities 元数据保留修复、`close()/atexit` 稳定性修复。
+- 约束：不破坏现有 `raganything/services/local_rag.py` 与 `evaluate_shared.py` 链路。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `lightrag/lightrag/lightrag.py` | 新增 `_normalize_string_list`；新增 `_update_delete_retry_state`、`_get_existing_llm_cache_ids`；`adelete_by_doc_id` 对齐 upstream 鲁棒删除流程 |
+| `rag-anything/raganything/callbacks.py` | 新增 upstream callbacks/metrics 实现 |
+| `rag-anything/raganything/resilience.py` | 新增 upstream retry/async_retry/circuit breaker 实现 |
+| `rag-anything/raganything/__init__.py` | 导出 resilience 与 callbacks（按可选导入方式） |
+| `rag-anything/raganything/raganything.py` | 增加 `callback_manager` 字段；`close()` 改为 upstream 稳定分支（running/no-loop/closed-loop） |
+| `rag-anything/raganything/query.py` | 增加 query 回调：`on_query_start/on_query_complete/on_query_error` |
+| `rag-anything/raganything/batch.py` | 增加 batch 回调：`on_batch_start/on_batch_complete` |
+| `rag-anything/raganything/processor.py` | 增加 parse/multimodal/document 回调；修复 `_store_multimodal_entities_to_full_entities` 保留已有 metadata |
+
+### 行为差异（相对未改前）
+
+- `adelete_by_doc_id`：
+  - 删除过程失败时会写回可重试状态（阶段、时间、缓存键）。
+  - 删除 LLM cache 后增加“存在性校验”，避免“存储层只打日志不抛错”造成假成功。
+  - `doc_status` 删除顺序与失败恢复逻辑对齐 upstream，减少 zombie 状态风险。
+- `full_entities`：
+  - 多模态实体追加时不再覆盖已有自定义字段；按顺序去重追加 `entity_names`。
+- callbacks/resilience：
+  - 可注册 `ProcessingCallback/MetricsCallback` 观察 parse/insert/multimodal/query/batch/document 生命周期事件。
+  - 提供 `retry/async_retry/CircuitBreaker` 供上层按需接入。
+- `RAGAnything.close()`：
+  - 处理 atexit 下 event loop race，减少关闭阶段异常噪声。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查：
+  - `python -m py_compile` 覆盖以下文件并通过：
+    - `lightrag/lightrag/lightrag.py`
+    - `raganything/__init__.py`
+    - `raganything/raganything.py`
+    - `raganything/query.py`
+    - `raganything/batch.py`
+    - `raganything/processor.py`
+    - `raganything/callbacks.py`
+    - `raganything/resilience.py`
+    - `raganything/services/local_rag.py`
+    - `evaluate_local/DocBench/evaluate_shared.py`
+- 逻辑级检查（内联）：
+  - 回调链路：注册 `ProcessingCallback` 后 `on_query_start` 可被触发（`import-and-callback-check-ok`）。
+  - full_entities 修复：验证已有 metadata 字段保留、`entity_names` 顺序追加去重、`count` 同步更新（`full_entities-merge-check-ok`）。
+- 反例检查：
+  - 回调注册类型校验生效（非 `ProcessingCallback` 子类会抛 `TypeError`，行为符合 upstream）。
+
+### 兼容性结论
+
+- 本轮未改动 `raganything/services/local_rag.py` 与 `evaluate_shared.py` 的业务逻辑。
+- 对这两个文件做了语法回归检查，当前改动不影响其导入与执行入口。

@@ -7,6 +7,7 @@ Contains all query-related methods for both text and multimodal queries
 import json
 import hashlib
 import re
+import time
 from typing import Dict, List, Any
 from pathlib import Path
 from lightrag import QueryParam
@@ -169,18 +170,48 @@ class QueryMixin:
                 "VLM enhanced query requested but vision_model_func is not available, falling back to normal query"
             )
 
+        callback_manager = getattr(self, "callback_manager", None)
+        query_start_time = time.time()
+
+        if callback_manager is not None:
+            callback_manager.dispatch(
+                "on_query_start",
+                query=query,
+                mode=mode,
+            )
+
         # Create query parameters
         query_param = QueryParam(mode=mode, **kwargs)
 
         self.logger.info(f"Executing text query: {query[:100]}...")
         self.logger.info(f"Query mode: {mode}")
 
-        # Call LightRAG's query method
-        result = await self.lightrag.aquery(
-            query, param=query_param, system_prompt=system_prompt
-        )
+        try:
+            # Call LightRAG's query method
+            result = await self.lightrag.aquery(
+                query, param=query_param, system_prompt=system_prompt
+            )
+        except Exception as exc:
+            if callback_manager is not None:
+                callback_manager.dispatch(
+                    "on_query_error",
+                    query=query,
+                    mode=mode,
+                    error=exc,
+                )
+            raise
 
         self.logger.info("Text query completed")
+        if callback_manager is not None:
+            duration = time.time() - query_start_time
+            result_len = len(result) if isinstance(result, str) else 0
+            callback_manager.dispatch(
+                "on_query_complete",
+                query=query,
+                mode=mode,
+                duration_seconds=duration,
+                result_length=result_len,
+            )
         return result
 
     async def aquery_with_multimodal(
