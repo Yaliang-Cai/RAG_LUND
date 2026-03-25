@@ -37,6 +37,83 @@ ENHANCED_VLM_UPSTREAM_SYSTEM_PROMPT = (
 class QueryMixin:
     """QueryMixin class containing query functionality for RAGAnything"""
 
+    @staticmethod
+    def _split_retrieval_prompt(
+        raw_prompt: str, fallback_query: str
+    ) -> tuple[str | None, str]:
+        marker = "---User Query---"
+        if not raw_prompt:
+            return None, fallback_query
+        if marker not in raw_prompt:
+            return raw_prompt.strip() or None, fallback_query
+
+        system_part, user_part = raw_prompt.rsplit(marker, 1)
+        system_prompt = system_part.strip() or None
+        user_query = user_part.strip() or fallback_query
+        return system_prompt, user_query
+
+    @staticmethod
+    def _build_effective_history_messages(
+        conversation_history: List[Dict[str, Any]] | None,
+        history_summary: str | None,
+    ) -> List[Dict[str, str]]:
+        history_messages: List[Dict[str, str]] = []
+        summary_text = str(history_summary or "").strip()
+        if summary_text:
+            history_messages.append(
+                {
+                    "role": "assistant",
+                    "content": f"Conversation summary:\n{summary_text}",
+                }
+            )
+        for msg in conversation_history or []:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role", "")).strip()
+            if role not in {"system", "user", "assistant"}:
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, (dict, list)):
+                content = json.dumps(content, ensure_ascii=False)
+            else:
+                content = str(content)
+            content = content.strip()
+            if not content:
+                continue
+            history_messages.append({"role": role, "content": content})
+        return history_messages
+
+    async def _generate_text_answer_from_retrieval_prompt(
+        self,
+        raw_prompt: str,
+        fallback_query: str,
+        *,
+        system_prompt: str | None,
+        conversation_history: List[Dict[str, Any]] | None,
+        history_summary: str | None,
+    ) -> str:
+        llm_model_func = getattr(self.lightrag, "llm_model_func", None)
+        if llm_model_func is None:
+            raise ValueError("LightRAG llm_model_func is not available")
+
+        prompt_system, prompt_query = self._split_retrieval_prompt(
+            raw_prompt, fallback_query
+        )
+        effective_system_prompt = prompt_system or system_prompt
+        history_messages = self._build_effective_history_messages(
+            conversation_history, history_summary
+        )
+        answer = await llm_model_func(
+            prompt_query,
+            system_prompt=effective_system_prompt,
+            history_messages=history_messages,
+            enable_cot=True,
+            stream=False,
+        )
+        if isinstance(answer, str):
+            return answer
+        return str(answer)
+
     def _generate_multimodal_cache_key(
         self, query: str, multimodal_content: List[Dict[str, Any]], mode: str, **kwargs
     ) -> str:
@@ -114,7 +191,7 @@ class QueryMixin:
 
     async def aquery(
         self, query: str, mode: str = "mix", system_prompt: str | None = None, **kwargs
-    ) -> str:
+    ) -> str | dict[str, Any]:
         """
         Pure text query - directly calls LightRAG's query functionality
 
@@ -128,7 +205,9 @@ class QueryMixin:
                   with base64 encoded images for VLM processing.
 
         Returns:
-            str: Query result
+            str | dict[str, Any]: Query result.
+            - default: answer string
+            - return_trace=True: {"answer": str, "trace": dict}
         """
         init_status = await self._ensure_lightrag_initialized()
         if not init_status.get("success"):
@@ -146,6 +225,7 @@ class QueryMixin:
 
         # Check if VLM enhanced query should be used
         vlm_enhanced = kwargs.pop("vlm_enhanced", None)
+        return_trace = bool(kwargs.pop("return_trace", False))
 
         # Auto-determine VLM enhanced based on availability
         if vlm_enhanced is None:
@@ -161,7 +241,11 @@ class QueryMixin:
             and self.vision_model_func
         ):
             return await self.aquery_vlm_enhanced(
-                query, mode=mode, system_prompt=system_prompt, **kwargs
+                query,
+                mode=mode,
+                system_prompt=system_prompt,
+                return_trace=return_trace,
+                **kwargs,
             )
         elif vlm_enhanced and (
             not hasattr(self, "vision_model_func") or not self.vision_model_func
@@ -187,10 +271,18 @@ class QueryMixin:
         self.logger.info(f"Query mode: {mode}")
 
         try:
-            # Call LightRAG's query method
-            result = await self.lightrag.aquery(
-                query, param=query_param, system_prompt=system_prompt
-            )
+            if return_trace:
+                trace_result = await self.lightrag.aquery_llm(
+                    query, param=query_param, system_prompt=system_prompt
+                )
+                llm_response = trace_result.get("llm_response", {})
+                answer = llm_response.get("content") or ""
+                result: str | dict[str, Any] = {"answer": answer, "trace": trace_result}
+            else:
+                # Backward-compatible text-only path
+                result = await self.lightrag.aquery(
+                    query, param=query_param, system_prompt=system_prompt
+                )
         except Exception as exc:
             if callback_manager is not None:
                 callback_manager.dispatch(
@@ -204,7 +296,10 @@ class QueryMixin:
         self.logger.info("Text query completed")
         if callback_manager is not None:
             duration = time.time() - query_start_time
-            result_len = len(result) if isinstance(result, str) else 0
+            if isinstance(result, dict):
+                result_len = len(str(result.get("answer", "")))
+            else:
+                result_len = len(result)
             callback_manager.dispatch(
                 "on_query_complete",
                 query=query,
@@ -355,8 +450,13 @@ class QueryMixin:
         return result
 
     async def aquery_vlm_enhanced(
-        self, query: str, mode: str = "mix", system_prompt: str | None = None, **kwargs
-    ) -> str:
+        self,
+        query: str,
+        mode: str = "mix",
+        system_prompt: str | None = None,
+        return_trace: bool = False,
+        **kwargs,
+    ) -> str | dict[str, Any]:
         """
         VLM enhanced query - replaces image paths in retrieved context with base64 encoded images for VLM processing
 
@@ -367,7 +467,9 @@ class QueryMixin:
             **kwargs: Other query parameters (e.g., conversation_history/history_summary)
 
         Returns:
-            str: VLM query result
+            str | dict[str, Any]: VLM query result.
+            - default: answer string
+            - return_trace=True: {"answer": str, "trace": dict}
         """
         # Ensure VLM is available
         if not hasattr(self, "vision_model_func") or not self.vision_model_func:
@@ -393,9 +495,10 @@ class QueryMixin:
         image_cap = query_param.multimodal_top_k
         if image_cap is None:
             image_cap = DEFAULT_MULTIMODAL_TOP_K
-        raw_prompt = await self.lightrag.aquery(
+        prompt_result = await self.lightrag.aquery_llm(
             query, param=query_param, system_prompt=system_prompt
         )
+        raw_prompt = (prompt_result.get("llm_response", {}) or {}).get("content") or ""
 
         self.logger.debug("Retrieved raw prompt from LightRAG")
 
@@ -405,15 +508,39 @@ class QueryMixin:
         )
 
         if not images_found:
-            self.logger.info("No valid images found, falling back to normal query")
-            # Fallback to normal query
-            fallback_kwargs = dict(kwargs)
-            # Keep fallback behavior aligned with non-enhanced query path.
-            fallback_kwargs.pop("multimodal_top_k", None)
-            query_param = QueryParam(mode=mode, **fallback_kwargs)
-            return await self.lightrag.aquery(
-                query, param=query_param, system_prompt=system_prompt
+            self.logger.info(
+                "No valid images found, using the same retrieval trace for text answer generation"
             )
+            try:
+                fallback_answer = await self._generate_text_answer_from_retrieval_prompt(
+                    raw_prompt,
+                    query,
+                    system_prompt=system_prompt,
+                    conversation_history=query_param.conversation_history,
+                    history_summary=query_param.history_summary,
+                )
+                if return_trace:
+                    return {"answer": fallback_answer, "trace": prompt_result}
+                return fallback_answer
+            except Exception as exc:
+                self.logger.warning(
+                    "Prompt-based fallback generation failed, fallback to normal query: %s",
+                    exc,
+                )
+                fallback_kwargs = dict(kwargs)
+                fallback_kwargs.pop("multimodal_top_k", None)
+                fallback_param = QueryParam(mode=mode, **fallback_kwargs)
+                if return_trace:
+                    fallback_result = await self.lightrag.aquery_llm(
+                        query, param=fallback_param, system_prompt=system_prompt
+                    )
+                    fallback_answer = (
+                        fallback_result.get("llm_response", {}) or {}
+                    ).get("content") or ""
+                    return {"answer": fallback_answer, "trace": fallback_result}
+                return await self.lightrag.aquery(
+                    query, param=fallback_param, system_prompt=system_prompt
+                )
 
         self.logger.info(f"Processed {images_found} images for VLM")
 
@@ -430,6 +557,8 @@ class QueryMixin:
         result = await self._call_vlm_with_multimodal_content(messages)
 
         self.logger.info("VLM enhanced query completed")
+        if return_trace:
+            return {"answer": result, "trace": prompt_result}
         return result
 
     async def _process_multimodal_query_content(

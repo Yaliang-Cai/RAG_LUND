@@ -295,7 +295,7 @@ HTTP POST /query
                  │
                  └─ vlm=True
                       └─ query.py:317   aquery_vlm_enhanced()
-                           ├─ lightrag.aquery(only_need_prompt=True) → raw_prompt（走 L4-L8）
+                           ├─ lightrag.aquery_llm(only_need_prompt=True) → raw_prompt + raw_data(trace)（走 L4-L8）
                            ├─ _process_image_paths_for_vlm() → base64（上限 multimodal_top_k=3）
                            ├─ _build_vlm_messages_with_images() → 交错多模态 messages
                            └─ [L10'] local_rag.vision_model_func → vLLM Vision API
@@ -389,7 +389,7 @@ else:
 **快捷出口**：
 - `only_need_context=True`（行 3193）→ 仅返回 context 字符串，不调用答案 LLM
 - `only_need_prompt=True`（行 3214）→ 拼接 `sys_prompt + "\n\n---User Query---\n" + user_query` 后直接返回，不调用答案 LLM
-  - **VLM 增强查询的第一步就用此标志获取 raw_prompt**
+  - **VLM 增强查询的第一步通过 `aquery_llm(only_need_prompt=True)` 获取 raw_prompt + raw_data(trace)**
 
 **缓存检查**（行 3240–3250）：
 - 哈希键覆盖：mode + query + response_type + top_k + chunk_top_k + max_entity/relation_tokens + hl/ll_keywords + enable_rerank + user_prompt
@@ -487,31 +487,18 @@ Reference Document List:
 
 **Step 1 — Rerank**（行 2730–2744）：
 - `enable_rerank=True` 时调用 CrossEncoder（本地 `bge-reranker-v2-m3`）
-- `multimodal_top_k` 激活时对**全量** chunk 重排（`rerank_top_k = len(unique_chunks)`），保证文本候选充足；否则仅对前 `chunk_top_k` 个重排
+- 新增 `rerank_score_scope`：
+  - `top_k`（默认）：仅对前 `chunk_top_k` 候选打分（兼容旧行为）
+  - `all`：对全量候选打分，再执行阈值过滤与后续截断
+- `multimodal_top_k` 只控制发给 VLM 的图片上限，不改变 rerank 覆盖范围
 
 **Step 2 — Rerank 分数过滤**（行 2746–2769）：
 - `min_rerank_score=0.5`（来自 global_config）
 - 低于阈值的 chunk 过滤掉
 
-**Step 2.5 — 多模态预算分配**（行 2771–2811，`multimodal_top_k ≠ None` 时激活）：
-```
-top_window     = unique_chunks[:chunk_top_k]   # 类型无关，取前 10（rerank 排名）
-remaining_pool = unique_chunks[chunk_top_k:]   # 第 11 名以后备用
-
-selected_mm    = top_window 内 is_multimodal=True 的 chunk（数量不限）
-text_in_window = top_window 内 is_multimodal=False 的 chunk
-text_budget    = chunk_top_k - multimodal_top_k   （= 10 - 3 = 7）
-selected_text  = text_in_window[:text_budget]
-  └─ 不足 text_budget 时从 remaining_pool 中按 rerank 顺序补充文本 chunk
-
-final = sorted(selected_mm + selected_text, by rerank_score desc)
-budgets_applied = True
-```
-
-> 图片数量上限由 `query.py` 的 `_process_image_paths_for_vlm(max_images=multimodal_top_k)` 独立控制，超限的 `Image Path:` 保留原文不附图。
-
 **Step 3 — chunk_top_k 截断**（行 2813–2820）：
-- `budgets_applied=True` 时跳过此步（已由 Step 2.5 控制数量）
+- 按 rerank 顺序直接截断到 `chunk_top_k`
+- 多模态预算不在本函数内处理；预算打包在 `operate.py` 的 `_build_context_str/naive_query` 执行
 
 **Step 4 — Token 截断**（行 2822–2848）：
 - `truncate_list_by_token_size()` 按 `available_chunk_tokens` 限制总 token 数
@@ -550,8 +537,8 @@ aquery_vlm_enhanced(query, mode, **kwargs)
   ├─ 1. kwargs.setdefault("multimodal_top_k", 3)
   │
   ├─ 2. QueryParam(only_need_prompt=True, multimodal_top_k=3, ...)
-  │      → lightrag.aquery() 走完 L4–L8 后跳过 LLM，直接返回 prompt 字符串
-  │        （格式：sys_prompt + "\n\n---User Query---\n" + user_query）
+  │      → lightrag.aquery_llm() 走完 L4–L8 后跳过答案 LLM
+  │      → 同一次检索返回 prompt 字符串 + raw_data(trace)
   │
   ├─ 3. _process_image_paths_for_vlm(raw_prompt, max_images=3)
   │      - 正则扫描 r"Image Path:\s*([^\r\n]*\.(?:jpg|png|...))"
@@ -570,6 +557,10 @@ aquery_vlm_enhanced(query, mode, **kwargs)
   └─ 5. vision_model_func("", messages=messages)
          → vision_client.chat.completions.create(model, messages, max_tokens=2048)
          → return response.choices[0].message.content
+
+说明：
+- 普通查询与 VLM 增强查询都复用同一次检索+rerank 结果作为 trace。
+- VLM 增强路径仅在“答案生成阶段”改用 vision 模型；无图 fallback 默认复用同次检索 prompt 直接生成文本答案（仅当该步骤异常时才降级到普通查询）。
 ```
 
 ---
@@ -612,11 +603,12 @@ Reference Document List: {reference_list_str}
 | `top_k` | 20 | HTTP → service → aquery（rag-anything 常量）|
 | `chunk_top_k` | 10 | HTTP → service → aquery（rag-anything 常量）|
 | `enable_rerank` | `True` | HTTP 传入 |
+| `rerank_score_scope` | `"top_k"`（全局默认）/ `"all"`（evaluate_shared 默认） | 控制 rerank 打分覆盖范围 |
 | `multimodal_top_k` | `None` → `3`（VLM时）| `aquery_vlm_enhanced` 注入，控制发给 VLM 的图片上限 |
 | `max_entity_tokens` | 6000 | LightRAG 内部（env/常量）|
 | `max_relation_tokens` | 8000 | LightRAG 内部（env/常量）|
 | `max_total_tokens` | 30000 | LightRAG 内部（env/常量）|
-| `only_need_prompt` | `False` | VLM 增强第一步置为 `True`，获取 raw_prompt |
+| `only_need_prompt` | `False` | VLM 增强第一步置为 `True`，获取 raw_prompt + raw_data(trace) |
 | `stream` | `False` | HTTP 层未暴露；内部支持 |
 | `conversation_history` | `[]` | HTTP 层未暴露；内部支持多轮对话 |
 
@@ -1688,3 +1680,80 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 
 - 本轮只修文本与模板完整性，不改变既有业务语义。
 - `workspace_id` 全链路保持生效，`index` 与 API 调用链可直接使用。
+
+---
+
+## 增量更新（2026-03-25，Rerank 可观测性重构：语义日志 + 单次查询 trace + evaluate_shared 分布统计）
+
+### 目标
+
+- 修正 rerank 日志语义，避免 entity/relation 被误记为 chunks。
+- 为 chunk rerank 增加可观测性：输出全量重排分数与最终保留分数。
+- 统一普通查询与 VLM 增强查询的 trace 语义：同一次检索+rerank 产出 trace；无图 fallback 默认不额外发起第二次检索（仅异常时降级）。
+- 在 `evaluate_shared` 对每个问题落盘 rerank 分布统计，并输出全局汇总，服务后续 `min_rerank_score` 研究。
+
+### 改动范围
+
+| 文件 | 改动 |
+|------|------|
+| `lightrag/lightrag/base.py` | `QueryParam` 新增 `rerank_score_scope: "top_k" \| "all"`（默认 `top_k`） |
+| `lightrag/lightrag/utils.py` | `apply_rerank_if_enabled` 新增 `item_label`；`process_chunks_unified` 增加 scope 分支、分数日志与结构化 `rerank_debug`；`convert_to_user_format` 透传 chunk `rerank_score` |
+| `lightrag/lightrag/operate.py` | `_rerank_kg_results` 传入 `item_label=entities/relations`；KG/naive 两条链路写入 `metadata.rerank_chunk_debug`；query cache key 纳入 `rerank_score_scope` |
+| `raganything/query.py` | `aquery` 增加 `return_trace`；普通/VLM 增强均支持单次检索返回 `{"answer","trace"}` |
+| `raganything/services/local_rag.py` | 新增 `query_with_trace`，保留 `query()` 返回字符串兼容 |
+| `evaluate_local/DocBench/evaluate_shared.py` | 生成阶段改用 `query_with_trace`；新增 `rerank_chunk_stats.jsonl` 与 `rerank_chunk_summary.json`；默认 `rerank_score_scope="all"`（仅评测脚本）；`no_resume` 自动清理旧输出文件；`resume` 支持仅回填缺失的 rerank 统计 |
+| `RAGAnything_LocalRAG_VLM_Refactor_2026-02-20.md` | 修正基线描述（L8 rerank 规则、VLM trace 链路、QueryParam 字段）并新增本节 |
+
+### 改动前后对照
+
+- 改动前：
+  - `apply_rerank_if_enabled` 固定日志为 chunks，entity/relation 日志语义错误。
+  - chunk 仅有过滤后计数日志，无全量分数与最终分数明细。
+  - `LocalRagService.query()` 与 `aquery_vlm_enhanced()` 默认丢弃 `raw_data`，`evaluate_shared` 无法稳定做每题 rerank 分布统计。
+- 改动后：
+  - entity/relation/chunk 三类 rerank 日志语义分离。
+  - chunk rerank 记录 `scores_all`、`scores_after_threshold`、`scores_final`，并写入 `metadata.rerank_chunk_debug`。
+  - 普通/VLM 增强均可单次检索返回 trace；`evaluate_shared` 直接消费 trace 生成每题统计与全局汇总。
+
+### 默认行为与开关
+
+- 全局默认行为保持兼容：
+  - `rerank_score_scope="top_k"`（线上默认不变）。
+- 评测脚本默认研究模式：
+  - `evaluate_shared` 的 `DOCBENCH_QUERY_PARAMS` 默认 `rerank_score_scope="all"`。
+- `query()` 兼容性：
+  - 原接口仍返回 `str`；
+  - 新增 `query_with_trace()` 承担 trace 输出，不破坏现有调用面。
+
+### 输出物
+
+- 日志：
+  - `Successfully reranked: X entities from Y original entities`
+  - `Successfully reranked: X relations from Y original relations`
+  - `Rerank scores (all reranked chunks): [...]`
+  - `Rerank scores (final kept chunks): [...]`
+- 结构化 trace：
+  - `raw_data.metadata.rerank_chunk_debug`
+- 评测输出：
+  - `docbench_shared_results/rerank_chunk_stats.jsonl`（每题）
+  - `docbench_shared_results/rerank_chunk_summary.json`（全局汇总）
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查（通过）：
+  - `python -m py_compile lightrag/lightrag/base.py lightrag/lightrag/utils.py lightrag/lightrag/operate.py`
+  - `python -m py_compile raganything/query.py raganything/services/local_rag.py evaluate_local/DocBench/evaluate_shared.py`
+- 逻辑级检查（通过）：
+  - 单测：`python -m pytest -q tests/test_rerank_observability.py` → `4 passed`
+  - 内联主链路检查：`LOCAL_RAG_TRACE_API_PRESENT`
+  - 内联统计检查：`EVAL_SHARED_RERANK_PAYLOAD_CHECK_PASSED`
+  - 内联路径检查：`QUERY_TRACE_PATH_PRESENT`
+- 边界/反例覆盖：
+  - 非法 `rerank_score_scope` 回退 `top_k`（单测覆盖）。
+  - `query()` 返回类型保持 `str`，`query_with_trace()` 返回结构化 trace（接口分离）。
+  - `resume` 模式下通过 `processed_rerank_keys` 避免重复写入；若答案已存在但 rerank 统计缺失，会仅回填 rerank 记录。
+
+### 兼容性说明
+
+- 本轮不改 `system_answers.jsonl` 字段结构；下游 evaluate 兼容保持不变。
+- trace 数据独立输出，不混入答案正文。

@@ -166,6 +166,12 @@ class QueryParam:
     Default is True to enable reranking when rerank model is available.
     """
 
+    rerank_score_scope: Literal["top_k", "all"] = "top_k"
+    """Controls how many chunk candidates are scored by reranker.
+    - "top_k": score only up to chunk_top_k candidates (default, backward compatible).
+    - "all": score all chunk candidates before thresholding and truncation.
+    """
+
     include_references: bool = False
     """If True, includes reference list in the response for supported endpoints.
     This parameter controls whether the API response includes a references field

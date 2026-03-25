@@ -3878,6 +3878,7 @@ async def kg_query(
         query_param.response_type,
         query_param.top_k,
         query_param.chunk_top_k,
+        query_param.rerank_score_scope,
         query_param.max_entity_tokens,
         query_param.max_relation_tokens,
         query_param.max_total_tokens,
@@ -3913,6 +3914,7 @@ async def kg_query(
                 "response_type": query_param.response_type,
                 "top_k": query_param.top_k,
                 "chunk_top_k": query_param.chunk_top_k,
+                "rerank_score_scope": query_param.rerank_score_scope,
                 "max_entity_tokens": query_param.max_entity_tokens,
                 "max_relation_tokens": query_param.max_relation_tokens,
                 "max_total_tokens": query_param.max_total_tokens,
@@ -4622,6 +4624,29 @@ async def _build_context_str(
     Build the final LLM context string with token processing.
     This includes dynamic token calculation and final chunk truncation.
     """
+    def _empty_rerank_chunk_debug() -> dict[str, Any]:
+        raw_scope = str(getattr(query_param, "rerank_score_scope", "top_k") or "top_k")
+        scope = raw_scope.strip().lower()
+        if scope not in {"top_k", "all"}:
+            scope = "top_k"
+        try:
+            min_rerank_score = float(global_config.get("min_rerank_score", 0.5))
+        except (TypeError, ValueError):
+            min_rerank_score = 0.5
+        return {
+            "enabled": bool(query_param.enable_rerank and query),
+            "scope": scope,
+            "min_rerank_score": min_rerank_score,
+            "scores_all": [],
+            "scores_after_threshold": [],
+            "scores_final": [],
+            "count_input": 0,
+            "count_after_rerank": 0,
+            "count_after_threshold": 0,
+            "count_after_chunk_top_k": 0,
+            "count_final": 0,
+        }
+
     tokenizer = global_config.get("tokenizer")
     if not tokenizer:
         logger.error("Missing tokenizer, cannot build LLM context")
@@ -4635,6 +4660,8 @@ async def _build_context_str(
         )
         empty_raw_data["status"] = "failure"
         empty_raw_data["message"] = "Missing tokenizer, cannot build LLM context."
+        metadata = empty_raw_data.setdefault("metadata", {})
+        metadata["rerank_chunk_debug"] = _empty_rerank_chunk_debug()
         return "", empty_raw_data
 
     # Get token limits
@@ -4710,6 +4737,7 @@ async def _build_context_str(
         )
         available_chunk_tokens = 0
 
+    rerank_chunk_debug: dict[str, Any] = _empty_rerank_chunk_debug()
     if not enable_image_budget:
         # Official-style fallback path
         truncated_chunks = await process_chunks_unified(
@@ -4719,6 +4747,7 @@ async def _build_context_str(
             global_config=global_config,
             source_type=query_param.mode,
             chunk_token_limit=available_chunk_tokens,
+            rerank_debug=rerank_chunk_debug,
         )
         image_tokens = 0
         image_count = 0
@@ -4730,6 +4759,7 @@ async def _build_context_str(
             global_config=global_config,
             source_type=query_param.mode,
             chunk_token_limit=2**31 - 1,
+            rerank_debug=rerank_chunk_debug,
         )
 
         image_cap = int(getattr(query_param, "multimodal_top_k", 0) or 0)
@@ -4840,6 +4870,8 @@ async def _build_context_str(
         )
         empty_raw_data["status"] = "failure"
         empty_raw_data["message"] = "Query returned empty dataset."
+        metadata = empty_raw_data.setdefault("metadata", {})
+        metadata["rerank_chunk_debug"] = rerank_chunk_debug
         return "", empty_raw_data
 
     # output chunks tracking infomations
@@ -4880,6 +4912,8 @@ async def _build_context_str(
         entity_id_to_original,
         relation_id_to_original,
     )
+    metadata = final_data.setdefault("metadata", {})
+    metadata["rerank_chunk_debug"] = rerank_chunk_debug
     logger.debug(
         f"[_build_context_str] Final data after conversion: {len(final_data.get('entities', []))} entities, {len(final_data.get('relationships', []))} relationships, {len(final_data.get('chunks', []))} chunks"
     )
@@ -4910,6 +4944,7 @@ async def _rerank_kg_results(
             global_config,
             enable_rerank=True,
             top_n=len(final_entities),
+            item_label="entities",
         )
         search_result["final_entities"] = reranked
 
@@ -4925,6 +4960,7 @@ async def _rerank_kg_results(
             global_config,
             enable_rerank=True,
             top_n=len(final_relations),
+            item_label="relations",
         )
         search_result["final_relations"] = reranked
 
@@ -5771,6 +5807,7 @@ async def naive_query(
         )
         available_chunk_tokens = 0
 
+    rerank_chunk_debug: dict[str, Any] = {}
     if not enable_image_budget:
         # Official-style fallback path
         processed_chunks = await process_chunks_unified(
@@ -5780,6 +5817,7 @@ async def naive_query(
             global_config=global_config,
             source_type="vector",
             chunk_token_limit=available_chunk_tokens,
+            rerank_debug=rerank_chunk_debug,
         )
         image_tokens = 0
         image_count = 0
@@ -5791,6 +5829,7 @@ async def naive_query(
             global_config=global_config,
             source_type="vector",
             chunk_token_limit=2**31 - 1,
+            rerank_debug=rerank_chunk_debug,
         )
 
         image_cap = int(getattr(query_param, "multimodal_top_k", 0) or 0)
@@ -5885,6 +5924,7 @@ async def naive_query(
         "total_chunks_found": len(chunks),
         "final_chunks_count": len(processed_chunks_with_ref_ids),
     }
+    raw_data["metadata"]["rerank_chunk_debug"] = rerank_chunk_debug
 
     # Build chunks_context from processed chunks with reference IDs
     chunks_context = []
@@ -5936,6 +5976,7 @@ async def naive_query(
         query_param.response_type,
         query_param.top_k,
         query_param.chunk_top_k,
+        query_param.rerank_score_scope,
         query_param.max_entity_tokens,
         query_param.max_relation_tokens,
         query_param.max_total_tokens,
@@ -5967,6 +6008,7 @@ async def naive_query(
                 "response_type": query_param.response_type,
                 "top_k": query_param.top_k,
                 "chunk_top_k": query_param.chunk_top_k,
+                "rerank_score_scope": query_param.rerank_score_scope,
                 "max_entity_tokens": query_param.max_entity_tokens,
                 "max_relation_tokens": query_param.max_relation_tokens,
                 "max_total_tokens": query_param.max_total_tokens,

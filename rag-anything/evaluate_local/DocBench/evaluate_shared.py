@@ -15,6 +15,7 @@ import re
 import asyncio
 import logging
 import gc
+import math
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +45,8 @@ OUTPUT_MD_DIR.mkdir(parents=True, exist_ok=True)
 SYSTEM_ANSWERS_FILE = OUTPUT_DIR / "system_answers.jsonl"
 EVAL_RESULTS_FILE = OUTPUT_DIR / "eval_results.jsonl"
 STATS_FILE = OUTPUT_DIR / "statistics.json"
+RERANK_CHUNK_STATS_FILE = OUTPUT_DIR / "rerank_chunk_stats.jsonl"
+RERANK_CHUNK_SUMMARY_FILE = OUTPUT_DIR / "rerank_chunk_summary.json"
 GENERATION_CONFIG_FILE = OUTPUT_DIR / "generation_config.json"
 INGEST_MANIFEST_FILE = OUTPUT_DIR / "shared_ingest_manifest.json"
 INGEST_FAILURES_FILE = OUTPUT_DIR / "shared_ingest_failures.jsonl"
@@ -65,6 +68,7 @@ DOCBENCH_QUERY_PARAMS = {
     "mode": "hybrid",
     "top_k": 40,
     "chunk_top_k": 20,
+    "rerank_score_scope": "all",
     "vlm_enhanced": True,
     "multimodal_top_k": 5,
     "image_token_estimate_method": "qwen_vl",
@@ -260,6 +264,252 @@ def _append_jsonl_record(file_obj: TextIO, payload: dict[str, Any]) -> None:
 def _append_ingest_failure_record(payload: dict[str, Any]) -> None:
     with open(INGEST_FAILURES_FILE, "a", encoding="utf-8") as f:
         _append_jsonl_record(f, payload)
+
+
+def _to_float_scores(values: Any) -> list[float]:
+    scores: list[float] = []
+    if not isinstance(values, list):
+        return scores
+    for value in values:
+        try:
+            scores.append(round(float(value), 6))
+        except (TypeError, ValueError):
+            continue
+    return scores
+
+
+def _percentile(sorted_scores: list[float], q: float) -> float | None:
+    if not sorted_scores:
+        return None
+    if q <= 0:
+        return sorted_scores[0]
+    if q >= 1:
+        return sorted_scores[-1]
+
+    position = (len(sorted_scores) - 1) * q
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return sorted_scores[lower]
+    weight = position - lower
+    return sorted_scores[lower] * (1 - weight) + sorted_scores[upper] * weight
+
+
+def _build_score_distribution(scores: list[float]) -> dict[str, Any]:
+    if not scores:
+        return {
+            "count": 0,
+            "min": None,
+            "max": None,
+            "mean": None,
+            "std": None,
+            "p10": None,
+            "p25": None,
+            "p50": None,
+            "p75": None,
+            "p90": None,
+        }
+
+    sorted_scores = sorted(scores)
+    count = len(sorted_scores)
+    mean = sum(sorted_scores) / count
+    variance = sum((value - mean) ** 2 for value in sorted_scores) / count
+    std = math.sqrt(variance)
+
+    return {
+        "count": count,
+        "min": round(sorted_scores[0], 6),
+        "max": round(sorted_scores[-1], 6),
+        "mean": round(mean, 6),
+        "std": round(std, 6),
+        "p10": round(_percentile(sorted_scores, 0.10), 6),
+        "p25": round(_percentile(sorted_scores, 0.25), 6),
+        "p50": round(_percentile(sorted_scores, 0.50), 6),
+        "p75": round(_percentile(sorted_scores, 0.75), 6),
+        "p90": round(_percentile(sorted_scores, 0.90), 6),
+    }
+
+
+def _build_threshold_retention(scores: list[float]) -> list[dict[str, Any]]:
+    thresholds = [round(step * 0.05, 2) for step in range(21)]
+    total = len(scores)
+    retention: list[dict[str, Any]] = []
+    for threshold in thresholds:
+        kept = sum(1 for score in scores if score >= threshold)
+        ratio = (kept / total) if total else 0.0
+        retention.append(
+            {
+                "threshold": threshold,
+                "kept": kept,
+                "ratio": round(ratio, 6),
+            }
+        )
+    return retention
+
+
+def _extract_rerank_chunk_payload(
+    trace: dict[str, Any],
+    *,
+    query_params: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = trace.get("metadata") if isinstance(trace, dict) else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    rerank_debug = metadata.get("rerank_chunk_debug")
+    if not isinstance(rerank_debug, dict):
+        rerank_debug = {}
+
+    scores_all = _to_float_scores(rerank_debug.get("scores_all"))
+    scores_after_threshold = _to_float_scores(rerank_debug.get("scores_after_threshold"))
+    scores_final = _to_float_scores(rerank_debug.get("scores_final"))
+
+    if not scores_final:
+        data_section = trace.get("data") if isinstance(trace, dict) else {}
+        chunks = data_section.get("chunks", []) if isinstance(data_section, dict) else []
+        if isinstance(chunks, list):
+            scores_final = _to_float_scores(
+                [chunk.get("rerank_score") for chunk in chunks if isinstance(chunk, dict)]
+            )
+
+    if not scores_all and scores_final:
+        scores_all = list(scores_final)
+    if not scores_after_threshold and scores_final:
+        scores_after_threshold = list(scores_final)
+
+    count_input = rerank_debug.get("count_input")
+    count_after_rerank = rerank_debug.get("count_after_rerank")
+    count_after_threshold = rerank_debug.get("count_after_threshold")
+    count_final = rerank_debug.get("count_final")
+
+    def _safe_count(value: Any, fallback: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    return {
+        "rerank_scope": str(
+            rerank_debug.get("scope", query_params.get("rerank_score_scope", "top_k"))
+        ),
+        "min_rerank_score": rerank_debug.get("min_rerank_score"),
+        "counts": {
+            "input": _safe_count(count_input, len(scores_all)),
+            "all": _safe_count(count_after_rerank, len(scores_all)),
+            "after_threshold": _safe_count(count_after_threshold, len(scores_after_threshold)),
+            "final": _safe_count(count_final, len(scores_final)),
+        },
+        "scores": {
+            "all": scores_all,
+            "after_threshold": scores_after_threshold,
+            "final": scores_final,
+        },
+        "distribution": {
+            "all": _build_score_distribution(scores_all),
+            "after_threshold": _build_score_distribution(scores_after_threshold),
+            "final": _build_score_distribution(scores_final),
+        },
+        "threshold_retention": _build_threshold_retention(scores_all),
+    }
+
+
+def _refresh_rerank_chunk_summary() -> None:
+    if not RERANK_CHUNK_STATS_FILE.exists():
+        logger.info("Rerank stats file not found, skip summary: %s", RERANK_CHUNK_STATS_FILE)
+        return
+
+    with open(RERANK_CHUNK_STATS_FILE, "r", encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+
+    all_scores_all: list[float] = []
+    all_scores_after_threshold: list[float] = []
+    all_scores_final: list[float] = []
+    by_type_scores: dict[str, dict[str, list[float]]] = {}
+    threshold_bucket: dict[float, dict[str, float]] = {}
+
+    for record in records:
+        qtype = str(record.get("type", ""))
+        by_type_scores.setdefault(
+            qtype,
+            {"all": [], "after_threshold": [], "final": []},
+        )
+
+        score_section = record.get("scores", {}) if isinstance(record, dict) else {}
+        scores_all = _to_float_scores(score_section.get("all"))
+        scores_after_threshold = _to_float_scores(score_section.get("after_threshold"))
+        scores_final = _to_float_scores(score_section.get("final"))
+
+        all_scores_all.extend(scores_all)
+        all_scores_after_threshold.extend(scores_after_threshold)
+        all_scores_final.extend(scores_final)
+        by_type_scores[qtype]["all"].extend(scores_all)
+        by_type_scores[qtype]["after_threshold"].extend(scores_after_threshold)
+        by_type_scores[qtype]["final"].extend(scores_final)
+
+        for row in record.get("threshold_retention", []):
+            if not isinstance(row, dict):
+                continue
+            try:
+                threshold = round(float(row.get("threshold")), 2)
+            except (TypeError, ValueError):
+                continue
+            bucket = threshold_bucket.setdefault(
+                threshold,
+                {"kept_sum": 0.0, "ratio_sum": 0.0, "count": 0},
+            )
+            try:
+                kept_value = float(row.get("kept", 0))
+            except (TypeError, ValueError):
+                kept_value = 0.0
+            try:
+                ratio_value = float(row.get("ratio", 0.0))
+            except (TypeError, ValueError):
+                ratio_value = 0.0
+            bucket["kept_sum"] += kept_value
+            bucket["ratio_sum"] += ratio_value
+            bucket["count"] += 1
+
+    by_type_distribution: dict[str, Any] = {}
+    for qtype, score_groups in by_type_scores.items():
+        by_type_distribution[qtype] = {
+            "all": _build_score_distribution(score_groups["all"]),
+            "after_threshold": _build_score_distribution(score_groups["after_threshold"]),
+            "final": _build_score_distribution(score_groups["final"]),
+        }
+
+    threshold_retention_overall = []
+    for threshold in sorted(threshold_bucket):
+        bucket = threshold_bucket[threshold]
+        if bucket["count"] <= 0:
+            continue
+        threshold_retention_overall.append(
+            {
+                "threshold": threshold,
+                "avg_kept": round(bucket["kept_sum"] / bucket["count"], 6),
+                "avg_ratio": round(bucket["ratio_sum"] / bucket["count"], 6),
+            }
+        )
+
+    questions_with_trace = sum(
+        1
+        for record in records
+        if int((record.get("counts", {}) or {}).get("all", 0)) > 0
+        or int((record.get("counts", {}) or {}).get("final", 0)) > 0
+    )
+
+    summary_payload = {
+        "total_questions": len(records),
+        "questions_with_rerank_trace": questions_with_trace,
+        "overall_distribution": {
+            "all": _build_score_distribution(all_scores_all),
+            "after_threshold": _build_score_distribution(all_scores_after_threshold),
+            "final": _build_score_distribution(all_scores_final),
+        },
+        "by_type_distribution": by_type_distribution,
+        "threshold_retention_overall": threshold_retention_overall,
+        "generation_config": _load_json(GENERATION_CONFIG_FILE),
+    }
+    _save_json(RERANK_CHUNK_SUMMARY_FILE, summary_payload)
+    logger.info("Rerank chunk summary saved: %s", RERANK_CHUNK_SUMMARY_FILE)
 
 
 def _find_doc_files(folder_path: Path) -> tuple[Path | None, Path | None]:
@@ -491,6 +741,17 @@ async def generate_answers_shared(
     service = LocalRagService(settings)
     _refresh_master_logging()
 
+    if not resume:
+        for stale_output in (
+            SYSTEM_ANSWERS_FILE,
+            RERANK_CHUNK_STATS_FILE,
+            RERANK_CHUNK_SUMMARY_FILE,
+        ):
+            if stale_output.exists():
+                stale_output.unlink()
+        if INGEST_FAILURES_FILE.exists():
+            INGEST_FAILURES_FILE.unlink()
+
     processed_keys: set[str] = set()
     if resume and SYSTEM_ANSWERS_FILE.exists():
         with open(SYSTEM_ANSWERS_FILE, "r", encoding="utf-8") as f:
@@ -499,6 +760,18 @@ async def generate_answers_shared(
                 key = f"{item['doc_id']}_{item['question']}"
                 processed_keys.add(key)
         logger.info("Resume: %d answers already generated.", len(processed_keys))
+
+    processed_rerank_keys: set[str] = set()
+    if resume and RERANK_CHUNK_STATS_FILE.exists():
+        with open(RERANK_CHUNK_STATS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                item = json.loads(line)
+                key = f"{item.get('doc_id', '')}_{item.get('question', '')}"
+                processed_rerank_keys.add(key)
+        logger.info(
+            "Resume: %d rerank stat records already generated.",
+            len(processed_rerank_keys),
+        )
 
     manifest = (
         _load_ingest_manifest()
@@ -513,9 +786,6 @@ async def generate_answers_shared(
             shared_workspace_id,
         )
         ingested_doc_ids = set()
-
-    if not resume and INGEST_FAILURES_FILE.exists():
-        INGEST_FAILURES_FILE.unlink()
 
     failed_ingest_docs: dict[str, dict[str, Any]] = {}
     logger.info("Shared workspace_id: %s", shared_workspace_id)
@@ -659,14 +929,18 @@ async def generate_answers_shared(
         doc_pending = 0
         for qa_idx, qa_item in enumerate(qa_list):
             key = f"{doc_name}_{qa_item['question']}"
+            write_answer = True
             if resume and key in processed_keys:
-                continue
+                if key in processed_rerank_keys:
+                    continue
+                write_answer = False
             pending_questions.append(
                 {
                     "order_idx": order_idx,
                     "doc_name": doc_name,
                     "qa_idx": qa_idx,
                     "qa_item": qa_item,
+                    "write_answer": write_answer,
                 }
             )
             order_idx += 1
@@ -689,44 +963,74 @@ async def generate_answers_shared(
         done_count = 0
         total_pending = len(pending_questions)
 
-        async def _answer_one(entry: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        async def _answer_one(
+            entry: dict[str, Any],
+        ) -> tuple[int, dict[str, Any] | None, dict[str, Any] | None]:
             nonlocal done_count
             doc_name = entry["doc_name"]
             qa_idx = entry["qa_idx"]
             qa_item = entry["qa_item"]
             question = qa_item["question"]
+            write_answer = bool(entry.get("write_answer", True))
             logger.info("[%s][Q%d] Question: %s", doc_name, qa_idx + 1, question[:80])
             async with sem:
                 try:
-                    answer = await service.query(
+                    response = await service.query_with_trace(
                         workspace_id=shared_workspace_id,
                         query=question,
                         **query_params,
                     )
+                    answer = str(response.get("answer", ""))
+                    trace = response.get("trace", {})
                     logger.info("[%s][Q%d] Answer: %s", doc_name, qa_idx + 1, answer[:80])
                 except Exception as exc:
                     logger.error("[%s][Q%d] query failed: %s", doc_name, qa_idx + 1, exc)
                     answer = ""
+                    trace = {}
 
-            result = {
+            result = None
+            if write_answer:
+                result = {
+                    "doc_id": doc_name,
+                    "question": question,
+                    "sys_ans": answer,
+                    "ref_ans": qa_item["answer"],
+                    "type": qa_item["type"],
+                    "evidence": qa_item["evidence"],
+                }
+            rerank_stats = _extract_rerank_chunk_payload(
+                trace if isinstance(trace, dict) else {},
+                query_params=query_params,
+            )
+            rerank_payload = {
                 "doc_id": doc_name,
+                "qa_idx": qa_idx,
                 "question": question,
-                "sys_ans": answer,
-                "ref_ans": qa_item["answer"],
                 "type": qa_item["type"],
-                "evidence": qa_item["evidence"],
+                "workspace_id": shared_workspace_id,
+                "query_mode": query_params.get("mode", ""),
+                "rerank_scope": rerank_stats["rerank_scope"],
+                "min_rerank_score": rerank_stats["min_rerank_score"],
+                "counts": rerank_stats["counts"],
+                "scores": rerank_stats["scores"],
+                "distribution": rerank_stats["distribution"],
+                "threshold_retention": rerank_stats["threshold_retention"],
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
             }
             async with progress_lock:
                 done_count += 1
                 if done_count == total_pending or done_count % max(1, total_pending // 10) == 0:
                     logger.info("Generate progress: %d/%d", done_count, total_pending)
-            return entry["order_idx"], result
+            return entry["order_idx"], result, rerank_payload
 
-        with open(SYSTEM_ANSWERS_FILE, "a", encoding="utf-8") as f_out:
+        with open(SYSTEM_ANSWERS_FILE, "a", encoding="utf-8") as f_out, open(
+            RERANK_CHUNK_STATS_FILE, "a", encoding="utf-8"
+        ) as f_rerank:
             total_batches = max(
                 1, (len(pending_questions) + max_async_generate - 1) // max_async_generate
             )
             persisted = 0
+            persisted_rerank = 0
             for batch_idx, batch_start in enumerate(
                 range(0, len(pending_questions), max_async_generate), start=1
             ):
@@ -738,16 +1042,28 @@ async def generate_answers_shared(
                 ordered_results = sorted(results, key=lambda x: x[0])
 
                 async with write_lock:
-                    for _, payload in ordered_results:
-                        _append_jsonl_record(f_out, payload)
+                    written_answers_batch = 0
+                    for _, payload, rerank_payload in ordered_results:
+                        if payload is not None:
+                            _append_jsonl_record(f_out, payload)
+                            written_answers_batch += 1
+                        if rerank_payload is not None:
+                            rerank_key = (
+                                f"{rerank_payload.get('doc_id', '')}_{rerank_payload.get('question', '')}"
+                            )
+                            if rerank_key not in processed_rerank_keys:
+                                _append_jsonl_record(f_rerank, rerank_payload)
+                                processed_rerank_keys.add(rerank_key)
+                                persisted_rerank += 1
 
-                persisted += len(ordered_results)
+                persisted += written_answers_batch
                 logger.info(
-                    "Persisted shared question batch %d/%d (%d answers, total=%d)",
+                    "Persisted shared question batch %d/%d (%d answers, total=%d, rerank_stats_total=%d)",
                     batch_idx,
                     total_batches,
-                    len(ordered_results),
+                    written_answers_batch,
                     persisted,
+                    persisted_rerank,
                 )
 
                 gc.collect()
@@ -765,6 +1081,7 @@ async def generate_answers_shared(
     gc.collect()
     _clear_cuda_cache()
     logger.info("Shared generate complete. Output: %s", SYSTEM_ANSWERS_FILE)
+    _refresh_rerank_chunk_summary()
     if failed_ingest_docs:
         logger.info(
             "Shared ingest failures recorded: %d (file: %s)",
@@ -938,6 +1255,7 @@ def calculate_statistics() -> None:
     }
     _save_json(STATS_FILE, stats_payload)
     logger.info("Shared stats saved: %s", STATS_FILE)
+    _refresh_rerank_chunk_summary()
 
 
 async def main() -> None:

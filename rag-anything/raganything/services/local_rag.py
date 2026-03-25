@@ -1171,25 +1171,59 @@ class LocalRagService:
 
     async def query(self, workspace_id: str, query: str, **kwargs) -> str:
         rag = await self.get_rag(workspace_id)
-        kwargs.setdefault(
+        normalized_kwargs = dict(kwargs)
+        normalized_kwargs.setdefault(
             "image_token_estimate_method",
             self.settings.image_token_estimate_method,
         )
-        kwargs.setdefault(
+        normalized_kwargs.setdefault(
             "image_token_model_name_or_path",
             self.settings.image_token_model_name_or_path,
         )
-        kwargs.setdefault(
+        normalized_kwargs.setdefault(
             "image_wrapper_tokens_per_image",
             self.settings.image_wrapper_tokens_per_image,
         )
-        kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
-            str(kwargs.get("image_token_estimate_method", ""))
+        normalized_kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
+            str(normalized_kwargs.get("image_token_estimate_method", ""))
         )
         async def _run_query() -> str:
-            return await rag.aquery(query, **kwargs)
+            return await rag.aquery(query, **normalized_kwargs)
 
         return await self._safe_query_call(_run_query)
+
+    async def query_with_trace(
+        self, workspace_id: str, query: str, **kwargs
+    ) -> dict[str, Any]:
+        rag = await self.get_rag(workspace_id)
+        normalized_kwargs = dict(kwargs)
+        normalized_kwargs.setdefault(
+            "image_token_estimate_method",
+            self.settings.image_token_estimate_method,
+        )
+        normalized_kwargs.setdefault(
+            "image_token_model_name_or_path",
+            self.settings.image_token_model_name_or_path,
+        )
+        normalized_kwargs.setdefault(
+            "image_wrapper_tokens_per_image",
+            self.settings.image_wrapper_tokens_per_image,
+        )
+        normalized_kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
+            str(normalized_kwargs.get("image_token_estimate_method", ""))
+        )
+        normalized_kwargs["return_trace"] = True
+
+        async def _run_query_with_trace() -> dict[str, Any]:
+            result = await rag.aquery(query, **normalized_kwargs)
+            if isinstance(result, dict):
+                return {
+                    "answer": str(result.get("answer", "")),
+                    "trace": result.get("trace", {}),
+                }
+            return {"answer": str(result), "trace": {}}
+
+        return await self._safe_query_call(_run_query_with_trace)
 
     async def stream_query(
         self,
