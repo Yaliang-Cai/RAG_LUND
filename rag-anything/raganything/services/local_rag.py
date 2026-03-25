@@ -66,6 +66,10 @@ from raganything.constants import (
     DEFAULT_MIN_RERANK_SCORE,
     DEFAULT_ENABLE_INLINE_CITATIONS,
     DEFAULT_SERIALIZE_INGEST_BY_DOC_ID,
+    DEFAULT_TOP_K,
+    DEFAULT_CHUNK_TOP_K,
+    DEFAULT_QUERY_MODE,
+    DEFAULT_ENABLE_RERANK,
 )
 from raganything.query_message_repack import repack_query_messages
 
@@ -979,10 +983,10 @@ class LocalRagService:
         self,
         doc_id: str,
         query: str,
-        mode: str = "hybrid",
-        top_k: int = 10,
-        chunk_top_k: int = 5,
-        enable_rerank: bool = True,
+        mode: str = DEFAULT_QUERY_MODE,
+        top_k: int = DEFAULT_TOP_K,
+        chunk_top_k: int = DEFAULT_CHUNK_TOP_K,
+        enable_rerank: bool = DEFAULT_ENABLE_RERANK,
     ):
         """Async generator — yields structured events via LightRAG aquery_llm().
 
