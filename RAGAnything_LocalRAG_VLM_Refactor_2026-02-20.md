@@ -1576,5 +1576,115 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
   - 主链路：并发 6 路初始化，仅发生 1 次 LightRAG 与 parse_cache 初始化；
   - 一致性：`parse_cache.initialize()` 未完成前，`self.parse_cache` 仍为 `None`（无半初始化发布）；
   - 边界：首次初始化故意失败后，不发布半状态，第二次可成功恢复；
-  - 反例：pre-provided LightRAG 分支并发场景同样保持 single-flight 与原子发布。
+- 反例：pre-provided LightRAG 分支并发场景同样保持 single-flight 与原子发布。
   - 输出标记：`RAGANYTHING_INIT_SINGLE_FLIGHT_CHECK_PASSED`。
+
+---
+
+## 增量更新（2026-03-25，并发 ingest 稳定性重构：workspace_id 统一 + ingest 抛错 + warmup + 多模态原子收尾）
+
+### 目标
+
+- 消除 ingest 链路“吞错继续”与状态撕裂风险。
+- 统一“图谱级 ID”语义：`doc_id -> workspace_id`（服务层 + server API + evaluate_shared/evaluate/examples）。
+- 并发 ingest 前保证同 workspace 仅一次 warmup 初始化。
+- 多模态收尾改为单次原子写入，避免 `chunks_list/chunks_count/multimodal_processed` 不一致。
+- `evaluate_shared` 遇单文档 ingest 失败不中断全流程，失败可审计、query 自动跳过失败文档。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `rag-anything/raganything/constants.py` | `DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID` 命名统一 |
+| `rag-anything/raganything/services/local_rag.py` | `workspace_id` API 重命名；`serialize_by_workspace_id` 重命名；ingest LLM/vision 失败抛异常；workspace warmup 锁与 warmed 集合 |
+| `rag-anything/raganything/processor.py` | 新增 `_finalize_multimodal_doc_status()`，统一原子收尾；移除旧分散收尾路径 |
+| `rag-anything/server/app.py` | server 路由参数/请求体/响应体 `doc_id` 全改 `workspace_id` |
+| `rag-anything/server/templates/index.html` | 前端请求字段同步为 `workspace_id`（避免 API 硬改后 422） |
+| `rag-anything/evaluate_local/DocBench/evaluate_shared.py` | `shared_workspace_id` 重命名；ingest 失败继续；失败清单 `shared_ingest_failures.jsonl`；query 仅处理 ingest 成功文档 |
+| `rag-anything/evaluate_local/DocBench/evaluate.py` | 调用 `LocalRagService` 时改用 `workspace_id` 语义 |
+| `rag-anything/examples/raganything_local.py` | 示例 ingest/query/callback 入口改用 `workspace_id` |
+| `rag-anything/examples/raganything_local_v2.py` | 示例 ingest/query 参数改用 `workspace_id` |
+
+### 关键行为变化（相对改动前）
+
+- ingest 报错策略：
+  - 文本抽取（entity extraction/gleaning）异常不再 `return ""`，改为直接抛出。
+  - 视觉 ingest 路径保留 schema->no-schema 一次重试；重试后仍失败则抛出异常，不再伪造成功 JSON。
+- warmup：
+  - `LocalRagService.ingest()` 在并发 ingest 前自动执行 `_ensure_workspace_warmed(workspace_id)`。
+  - 同一 workspace 并发场景只初始化一次；cleanup/recycle 后可重新 warmup。
+- 多模态状态一致性：
+  - 统一走 `_finalize_multimodal_doc_status(doc_id, new_chunk_ids)`：
+    - 去重合并 `chunks_list`
+    - 重算 `chunks_count`
+    - 设置 `multimodal_processed=True`
+    - 单次 `index_done_callback()`
+- evaluate_shared 失败继续：
+  - 单文档 ingest 失败写入 `shared_ingest_failures.jsonl`，含 `doc_id/workspace_id/file_name/error/traceback_tail/time`。
+  - 批次失败仅告警，不中断后续 ingest。
+  - query 阶段自动跳过未成功 ingest 的文档。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查：
+  - `python -m py_compile` 覆盖以下文件并通过：
+    - `raganything/services/local_rag.py`
+    - `raganything/processor.py`
+    - `server/app.py`
+    - `evaluate_local/DocBench/evaluate_shared.py`
+    - `evaluate_local/DocBench/evaluate.py`
+    - `examples/raganything_local.py`
+    - `examples/raganything_local_v2.py`
+- 关键残留扫描：
+  - `serialize_by_doc_id / serialize_ingest_by_doc_id / RAGANYTHING_SERIALIZE_INGEST_BY_DOC_ID / DEFAULT_SERIALIZE_INGEST_BY_DOC_ID`：无残留。
+  - `evaluate_shared.py` 中 `shared_doc_id`：无残留。
+  - `server/app.py` 中 `doc_id`（workspace 语义）：无残留。
+  - `processor.py` 旧分散收尾函数调用：无残留。
+
+### 兼容性说明
+
+- 本轮接受破坏性接口变更：server 与 service 调用面统一使用 `workspace_id`，不保留 `doc_id` 兼容别名。
+- 历史数据不做离线 reconcile；一致性修复从本轮运行时开始生效。
+
+---
+
+## 增量更新（2026-03-25，编码污染修复与 index 可运行性恢复）
+
+### 目标
+
+- 清理本轮受污染文件中的 mojibake/断裂字符串，恢复可读与可维护状态。
+- 保留并延续已完成的 `workspace_id` 语义改造，不回退到 `doc_id`。
+- 恢复 `index` 页面关键交互可用性（上传、查询、工作空间切换）。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `rag-anything/server/templates/index.html` | 以干净文本恢复模板字符串完整性，并保留 `workspace_id` 前端请求字段（`/query`、`/ingest`） |
+| `rag-anything/server/app.py` | 清理文本污染并保持 server API 为 `workspace_id` |
+| `rag-anything/evaluate_local/DocBench/evaluate.py` | 修复断裂字符串与日志污染，保留两阶段流程与 `workspace_id` 调用链 |
+| `rag-anything/examples/raganything_local_v2.py` | 清理乱码注释/提示文本，保留 `workspace_id` 参数调用 |
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查（通过）：
+  - `python -m py_compile rag-anything/server/app.py`
+  - `python -m py_compile rag-anything/evaluate_local/DocBench/evaluate.py`
+  - `python -m py_compile rag-anything/evaluate_local/DocBench/evaluate_shared.py`
+  - `python -m py_compile rag-anything/examples/raganything_local.py`
+  - `python -m py_compile rag-anything/examples/raganything_local_v2.py`
+  - `python -m py_compile rag-anything/raganything/services/local_rag.py`
+  - `python -m py_compile rag-anything/raganything/processor.py`
+- 字段一致性检查（通过）：
+  - `server/app.py` 与 `server/templates/index.html` 无 `payload.doc_id` / `fd.append('doc_id',...)` / `result.doc_id` / `ws.doc_id` 残留。
+  - 前后端交互字段统一为 `workspace_id`。
+- 污染字符检查（通过）：
+  - 目标文件无 `閳/窶/馃/锟/�` 等典型 mojibake 残留。
+  - `evaluate.py` 中此前导致 `SyntaxError` 的断裂字符串已修复。
+- 模板完整性检查（通过）：
+  - `index.html` 的关键 `placeholder` 属性无断裂，关键 UI 文本（如 graph 渲染状态）可正常解析。
+
+### 行为结论
+
+- 本轮只修文本与模板完整性，不改变既有业务语义。
+- `workspace_id` 全链路保持生效，`index` 与 API 调用链可直接使用。

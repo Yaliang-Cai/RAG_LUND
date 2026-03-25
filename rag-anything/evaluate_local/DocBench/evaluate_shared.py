@@ -4,7 +4,7 @@
 DocBench Shared-Storage Evaluation Script
 =========================================
 
-Use one shared RAG workspace/doc_id for a document range (default: 0-48),
+Use one shared RAG workspace/workspace_id for a document range (default: 0-48),
 then evaluate generated answers.
 """
 
@@ -15,6 +15,7 @@ import re
 import asyncio
 import logging
 import gc
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -45,6 +46,7 @@ EVAL_RESULTS_FILE = OUTPUT_DIR / "eval_results.jsonl"
 STATS_FILE = OUTPUT_DIR / "statistics.json"
 GENERATION_CONFIG_FILE = OUTPUT_DIR / "generation_config.json"
 INGEST_MANIFEST_FILE = OUTPUT_DIR / "shared_ingest_manifest.json"
+INGEST_FAILURES_FILE = OUTPUT_DIR / "shared_ingest_failures.jsonl"
 
 RAG_API_BASE = "http://localhost:8001/v1"
 JUDGE_API_BASE = "http://localhost:8002/v1"
@@ -56,7 +58,7 @@ JUDGE_MODEL_NAME = "Qwen/Qwen2.5-32B-Instruct"
 DOCBENCH_EVAL_PROMPT_FILENAME = "evaluation_prompt.txt"
 RAGANYTHING_EVAL_PROMPT_FILENAME = "evaluation_prompt_RAG-Anything.txt"
 
-DEFAULT_SHARED_DOC_ID = "docbench_shared_0_48"
+DEFAULT_SHARED_WORKSPACE_ID = "docbench_shared_0_48"
 DEFAULT_INGEST_FLUSH_EVERY = 6
 
 DOCBENCH_QUERY_PARAMS = {
@@ -255,6 +257,11 @@ def _append_jsonl_record(file_obj: TextIO, payload: dict[str, Any]) -> None:
     file_obj.flush()
 
 
+def _append_ingest_failure_record(payload: dict[str, Any]) -> None:
+    with open(INGEST_FAILURES_FILE, "a", encoding="utf-8") as f:
+        _append_jsonl_record(f, payload)
+
+
 def _find_doc_files(folder_path: Path) -> tuple[Path | None, Path | None]:
     pdf_file = None
     qa_file = None
@@ -337,14 +344,14 @@ def _load_ingest_manifest() -> dict[str, Any]:
     payload = _load_json(INGEST_MANIFEST_FILE)
     if isinstance(payload, dict):
         return payload
-    return {"shared_doc_id": "", "ingested_doc_ids": []}
+    return {"shared_workspace_id": "", "ingested_doc_ids": []}
 
 
-def _save_ingest_manifest(shared_doc_id: str, ingested_doc_ids: set[str]) -> None:
+def _save_ingest_manifest(shared_workspace_id: str, ingested_doc_ids: set[str]) -> None:
     _save_json(
         INGEST_MANIFEST_FILE,
         {
-            "shared_doc_id": shared_doc_id,
+            "shared_workspace_id": shared_workspace_id,
             "ingested_doc_ids": sorted(ingested_doc_ids, key=lambda x: int(x)),
         },
     )
@@ -371,18 +378,18 @@ def _build_shared_settings() -> LocalRagSettings:
     return settings
 
 
-async def _cleanup_rag_instance(service: LocalRagService, rag_doc_id: str) -> None:
+async def _cleanup_rag_instance(service: LocalRagService, rag_workspace_id: str) -> None:
     rag_instances = getattr(service, "_rag_instances", None)
     if not isinstance(rag_instances, dict):
         return
-    rag_instance = rag_instances.get(rag_doc_id)
+    rag_instance = rag_instances.get(rag_workspace_id)
     if rag_instance is None:
         return
     try:
         await rag_instance.finalize_storages()
-        rag_instances.pop(rag_doc_id, None)
+        rag_instances.pop(rag_workspace_id, None)
     except Exception as exc:
-        logger.warning("Failed to cleanup RAG instance %s: %s", rag_doc_id, exc)
+        logger.warning("Failed to cleanup RAG instance %s: %s", rag_workspace_id, exc)
 
 
 def _clear_cuda_cache() -> None:
@@ -409,11 +416,11 @@ def _clear_local_model_cache() -> None:
 async def _recycle_local_rag_service(
     service: LocalRagService,
     settings: LocalRagSettings,
-    shared_doc_id: str,
+    shared_workspace_id: str,
     *,
     clear_model_cache: bool = True,
 ) -> LocalRagService:
-    await _cleanup_rag_instance(service, shared_doc_id)
+    await _cleanup_rag_instance(service, shared_workspace_id)
     if clear_model_cache:
         _clear_local_model_cache()
     del service
@@ -431,7 +438,7 @@ def _save_generation_config(
     one_sentence: bool,
     max_async_ingest: int,
     max_async_generate: int,
-    shared_doc_id: str,
+    shared_workspace_id: str,
     start_id: int,
     end_id: int,
     query_params: dict[str, Any],
@@ -444,7 +451,7 @@ def _save_generation_config(
             "one_sentence": bool(one_sentence),
             "max_async_ingest": int(max_async_ingest),
             "max_async_generate": int(max_async_generate),
-            "shared_doc_id": shared_doc_id,
+            "shared_workspace_id": shared_workspace_id,
             "start_id": int(start_id),
             "end_id": int(end_id),
             "effective_query_params": dict(query_params),
@@ -462,7 +469,7 @@ async def generate_answers_shared(
     one_sentence: bool,
     profile_name: str,
     eval_prompt_filename: str,
-    shared_doc_id: str,
+    shared_workspace_id: str,
 ) -> None:
     max_async_ingest = _normalize_max_async(max_async_ingest, default=4)
     max_async_generate = _normalize_max_async(max_async_generate, default=1)
@@ -474,7 +481,7 @@ async def generate_answers_shared(
         one_sentence=one_sentence,
         max_async_ingest=max_async_ingest,
         max_async_generate=max_async_generate,
-        shared_doc_id=shared_doc_id,
+        shared_workspace_id=shared_workspace_id,
         start_id=start_id,
         end_id=end_id,
         query_params=query_params,
@@ -493,17 +500,25 @@ async def generate_answers_shared(
                 processed_keys.add(key)
         logger.info("Resume: %d answers already generated.", len(processed_keys))
 
-    manifest = _load_ingest_manifest() if resume else {"shared_doc_id": "", "ingested_doc_ids": []}
+    manifest = (
+        _load_ingest_manifest()
+        if resume
+        else {"shared_workspace_id": "", "ingested_doc_ids": []}
+    )
     ingested_doc_ids = set(str(x) for x in manifest.get("ingested_doc_ids", []))
-    if manifest.get("shared_doc_id") != shared_doc_id and ingested_doc_ids:
+    if manifest.get("shared_workspace_id") != shared_workspace_id and ingested_doc_ids:
         logger.warning(
-            "Manifest shared_doc_id mismatch (%s != %s). Reset ingest manifest.",
-            manifest.get("shared_doc_id"),
-            shared_doc_id,
+            "Manifest shared_workspace_id mismatch (%s != %s). Reset ingest manifest.",
+            manifest.get("shared_workspace_id"),
+            shared_workspace_id,
         )
         ingested_doc_ids = set()
 
-    logger.info("Shared doc_id: %s", shared_doc_id)
+    if not resume and INGEST_FAILURES_FILE.exists():
+        INGEST_FAILURES_FILE.unlink()
+
+    failed_ingest_docs: dict[str, dict[str, Any]] = {}
+    logger.info("Shared workspace_id: %s", shared_workspace_id)
     logger.info("Generate range: %d-%d", start_id, end_id - 1)
     logger.info("Max async ingest: %d", max_async_ingest)
     logger.info("Ingest flush every: %d (0 = disabled)", ingest_flush_every)
@@ -546,8 +561,8 @@ async def generate_answers_shared(
             await service.ingest(
                 file_path=str(pdf_file),
                 output_dir=doc_output_dir,
-                doc_id=shared_doc_id,
-                serialize_by_doc_id=False,
+                workspace_id=shared_workspace_id,
+                serialize_by_workspace_id=False,
             )
             return doc_name
 
@@ -558,9 +573,26 @@ async def generate_answers_shared(
 
         batch_errors: list[tuple[str, Exception]] = []
         success_count = 0
-        for (doc_name, _), result in zip(batch, batch_results):
+        for (doc_name, pdf_file), result in zip(batch, batch_results):
             if isinstance(result, Exception):
                 logger.error("[%s] Shared ingest failed: %s", doc_name, result)
+                error_trace = "".join(
+                    traceback.format_exception(
+                        type(result),
+                        result,
+                        result.__traceback__,
+                    )[-3:]
+                ).strip()
+                failure_payload = {
+                    "time": datetime.now().isoformat(timespec="seconds"),
+                    "doc_id": doc_name,
+                    "workspace_id": shared_workspace_id,
+                    "file_name": pdf_file.name,
+                    "error": str(result),
+                    "traceback_tail": error_trace,
+                }
+                failed_ingest_docs[doc_name] = failure_payload
+                _append_ingest_failure_record(failure_payload)
                 batch_errors.append((doc_name, result))
                 continue
             ingested_doc_ids.add(result)
@@ -568,13 +600,14 @@ async def generate_answers_shared(
 
         if success_count > 0:
             ingested_since_flush += success_count
-            _save_ingest_manifest(shared_doc_id, ingested_doc_ids)
+            _save_ingest_manifest(shared_workspace_id, ingested_doc_ids)
 
         if batch_errors:
-            raise RuntimeError(
-                "Shared ingest failed for docs: "
-                + ", ".join(doc_name for doc_name, _ in batch_errors)
-            ) from batch_errors[0][1]
+            logger.warning(
+                "Shared ingest batch finished with %d failures (continuing): %s",
+                len(batch_errors),
+                ", ".join(doc_name for doc_name, _ in batch_errors),
+            )
 
         if ingest_flush_every > 0 and ingested_since_flush >= ingest_flush_every:
             logger.info(
@@ -584,16 +617,23 @@ async def generate_answers_shared(
             service = await _recycle_local_rag_service(
                 service,
                 settings,
-                shared_doc_id,
+                shared_workspace_id,
                 clear_model_cache=False,
             )
             ingested_since_flush = 0
+
+    logger.info(
+        "Shared ingest summary: success=%d failed=%d total=%d",
+        len(ingested_doc_ids),
+        len(failed_ingest_docs),
+        len(ingest_jobs),
+    )
 
     # Ensure ingest-phase temporary memory is released before query phase.
     service = await _recycle_local_rag_service(
         service,
         settings,
-        shared_doc_id,
+        shared_workspace_id,
         clear_model_cache=False,
     )
 
@@ -602,6 +642,10 @@ async def generate_answers_shared(
     order_idx = 0
     for doc_id in range(start_id, end_id):
         doc_name = str(doc_id)
+        if doc_name not in ingested_doc_ids:
+            if doc_name in failed_ingest_docs:
+                logger.warning("[%s] Skip query due to ingest failure", doc_name)
+            continue
         folder_path = DATA_ROOT / doc_name
         if not folder_path.exists():
             continue
@@ -655,7 +699,7 @@ async def generate_answers_shared(
             async with sem:
                 try:
                     answer = await service.query(
-                        doc_id=shared_doc_id,
+                        workspace_id=shared_workspace_id,
                         query=question,
                         **query_params,
                     )
@@ -714,13 +758,19 @@ async def generate_answers_shared(
     service = await _recycle_local_rag_service(
         service,
         settings,
-        shared_doc_id,
+        shared_workspace_id,
         clear_model_cache=False,
     )
     del service
     gc.collect()
     _clear_cuda_cache()
     logger.info("Shared generate complete. Output: %s", SYSTEM_ANSWERS_FILE)
+    if failed_ingest_docs:
+        logger.info(
+            "Shared ingest failures recorded: %d (file: %s)",
+            len(failed_ingest_docs),
+            INGEST_FAILURES_FILE,
+        )
 
 
 async def evaluate_answers(*, resume: bool, max_async_judge: int, eval_prompt_filename: str) -> None:
@@ -900,7 +950,9 @@ async def main() -> None:
     parser.add_argument("--mode", required=True, choices=["generate", "evaluate", "stats"])
     parser.add_argument("--start_id", type=int, default=0)
     parser.add_argument("--end_id", type=int, default=49)
-    parser.add_argument("--shared_doc_id", type=str, default=DEFAULT_SHARED_DOC_ID)
+    parser.add_argument(
+        "--shared_workspace_id", type=str, default=DEFAULT_SHARED_WORKSPACE_ID
+    )
     parser.add_argument("--no_resume", action="store_true")
     eval_setup_group = parser.add_mutually_exclusive_group()
     eval_setup_group.add_argument(
@@ -929,14 +981,14 @@ async def main() -> None:
     resume = not args.no_resume
 
     logger.info(
-        "Mode=%s Range=%d-%d Resume=%s SharedDocID=%s Profile=%s OneSentence=%s "
+        "Mode=%s Range=%d-%d Resume=%s SharedWorkspaceID=%s Profile=%s OneSentence=%s "
         "EvalPrompt=%s MaxAsyncIngest=%d MaxAsyncGen=%d MaxAsyncJudge=%d "
         "IngestFlushEvery=%d",
         args.mode,
         args.start_id,
         args.end_id - 1,
         resume,
-        args.shared_doc_id,
+        args.shared_workspace_id,
         profile_name,
         one_sentence,
         eval_prompt_filename,
@@ -956,7 +1008,7 @@ async def main() -> None:
             one_sentence=one_sentence,
             profile_name=profile_name,
             eval_prompt_filename=eval_prompt_filename,
-            shared_doc_id=args.shared_doc_id,
+            shared_workspace_id=args.shared_workspace_id,
         )
     elif args.mode == "evaluate":
         await evaluate_answers(

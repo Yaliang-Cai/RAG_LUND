@@ -66,7 +66,7 @@ from raganything.constants import (
     DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
     DEFAULT_MIN_RERANK_SCORE,
     DEFAULT_ENABLE_INLINE_CITATIONS,
-    DEFAULT_SERIALIZE_INGEST_BY_DOC_ID,
+    DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID,
     DEFAULT_ENABLE_RESILIENCE,
     DEFAULT_RESILIENCE_MAX_ATTEMPTS,
     DEFAULT_INGEST_RETRY_BASE_DELAY,
@@ -137,7 +137,7 @@ class LocalRagSettings:
     chunking_strategy: str = DEFAULT_CHUNKING_STRATEGY
     chunk_token_size: int = DEFAULT_CHUNK_TOKEN_SIZE
     chunk_overlap_token_size: int = DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE
-    serialize_ingest_by_doc_id: bool = DEFAULT_SERIALIZE_INGEST_BY_DOC_ID
+    serialize_ingest_by_workspace_id: bool = DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID
     mineru_vllm_gpu_memory_utilization: float = (
         DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION
     )
@@ -207,9 +207,9 @@ class LocalRagSettings:
             chunking_strategy=os.getenv("CHUNKING_STRATEGY", DEFAULT_CHUNKING_STRATEGY),
             chunk_token_size=int(os.getenv("CHUNK_SIZE", str(DEFAULT_CHUNK_TOKEN_SIZE))),
             chunk_overlap_token_size=int(os.getenv("CHUNK_OVERLAP_SIZE", str(DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE))),
-            serialize_ingest_by_doc_id=os.getenv(
-                "RAGANYTHING_SERIALIZE_INGEST_BY_DOC_ID",
-                str(DEFAULT_SERIALIZE_INGEST_BY_DOC_ID),
+            serialize_ingest_by_workspace_id=os.getenv(
+                "RAGANYTHING_SERIALIZE_INGEST_BY_WORKSPACE_ID",
+                str(DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
             mineru_vllm_gpu_memory_utilization=float(
@@ -325,16 +325,16 @@ def _model_cache_key(settings: LocalRagSettings) -> str:
     return f"{settings.embedding_model_path}|{settings.rerank_model_path}|{settings.device}"
 
 
-def _resolve_ingest_serialize_by_doc_id(
-    default_serialize_by_doc_id: bool,
-    serialize_by_doc_id: Optional[bool],
+def _resolve_ingest_serialize_by_workspace_id(
+    default_serialize_by_workspace_id: bool,
+    serialize_by_workspace_id: Optional[bool],
     chunking_strategy: Optional[str],
     default_chunking_strategy: str,
 ) -> tuple[bool, bool]:
     effective_serialize = (
-        default_serialize_by_doc_id
-        if serialize_by_doc_id is None
-        else bool(serialize_by_doc_id)
+        default_serialize_by_workspace_id
+        if serialize_by_workspace_id is None
+        else bool(serialize_by_workspace_id)
     )
     forced_to_serialize = (
         not effective_serialize
@@ -540,7 +540,8 @@ def build_llm_model_func(
         keyword_extraction = bool(kwargs.pop("keyword_extraction", False))
         is_streaming = bool(kwargs.pop("stream", False))
         cleaned_kwargs = _strip_internal_openai_kwargs(kwargs)
-        if _is_entity_extraction_call(system_prompt, prompt):
+        is_ingest_call = _is_entity_extraction_call(system_prompt, prompt)
+        if is_ingest_call:
             max_tokens = settings.ingest_max_tokens
         else:
             max_tokens = settings.query_max_tokens
@@ -614,6 +615,8 @@ def build_llm_model_func(
             return getattr(message, "content", "") or ""
         except Exception as exc:
             logger.error(f"LLM Error: {exc}")
+            if is_ingest_call:
+                raise
             return ""
 
     return llm_model_func
@@ -753,19 +756,7 @@ def build_vision_model_func(
                         exc = retry_exc
 
                 logger.error("Vision LLM Error (Ingest): %s", exc)
-                fallback_seed = base64_image if base64_image else str(prompt)
-                fallback_id = hashlib.md5(fallback_seed.encode("utf-8")).hexdigest()[:8]
-                if prompt_has_json:
-                    fallback_payload = {
-                        "detailed_description": f"{task_type} description unavailable due to vision model error.",
-                        "entity_info": {
-                            "entity_name": f"{task_type}_{fallback_id}",
-                            "entity_type": task_type,
-                            "summary": f"{task_type} description unavailable due to vision model error.",
-                        },
-                    }
-                    return json.dumps(fallback_payload, ensure_ascii=False)
-                return f"{task_type} description unavailable due to vision model error."
+                raise
 
         return await llm_fallback(
             prompt,
@@ -819,7 +810,7 @@ def _maybe_enable_internvl2_prompts(settings: LocalRagSettings, logger: logging.
     except Exception as exc:
         logger.warning(f"Failed to enable InternVL2 prompt overrides: {exc}")
 
-def _safe_doc_id(name: str) -> str:
+def _safe_workspace_id(name: str) -> str:
     cleaned = "".join(ch for ch in name if ch.isalnum() or ch in ("-", "_"))
     if cleaned:
         return cleaned
@@ -899,9 +890,11 @@ class LocalRagService:
         self._rag_instances: Dict[str, RAGAnything] = {}
         self._init_lock = asyncio.Lock()
         self._registered_callbacks: list[ProcessingCallback] = []
-        # Per-doc-id locks: serialise ingest for the same workspace so that the
+        # Per-workspace-id locks: serialise ingest for the same workspace so that the
         # temporary chunking_func swap never races with a concurrent ingest.
         self._ingest_locks: Dict[str, asyncio.Lock] = {}
+        self._workspace_warmup_locks: Dict[str, asyncio.Lock] = {}
+        self._warmed_workspaces: set[str] = set()
 
         st_model, reranker_model = load_models(self.settings)
         self.embedding_func = build_embedding_func(self.settings, st_model)
@@ -1029,11 +1022,19 @@ class LocalRagService:
                 lines.append(callback.summary())
         return "\n\n".join(lines)
 
-    def get_callback_events(self, doc_id: str) -> list[dict[str, Any]]:
-        rag = self._rag_instances.get(doc_id)
+    def get_callback_events(self, workspace_id: str) -> list[dict[str, Any]]:
+        rag = self._rag_instances.get(workspace_id)
         if rag is None:
             return []
         return [event.to_dict() for event in rag.callback_manager.event_log]
+
+    async def cleanup_workspace_instance(self, workspace_id: str) -> None:
+        rag = self._rag_instances.get(workspace_id)
+        if rag is not None:
+            await rag.finalize_storages()
+            self._rag_instances.pop(workspace_id, None)
+        self._warmed_workspaces.discard(workspace_id)
+        self._workspace_warmup_locks.pop(workspace_id, None)
 
     def _build_rag(self, working_dir: str) -> RAGAnything:
         config = RAGAnythingConfig(
@@ -1073,43 +1074,56 @@ class LocalRagService:
             },
         )
 
-    async def get_rag(self, doc_id: str) -> RAGAnything:
+    async def get_rag(self, workspace_id: str) -> RAGAnything:
         async with self._init_lock:
-            if doc_id in self._rag_instances:
-                return self._rag_instances[doc_id]
-            working_dir = str(Path(self.settings.working_dir_root) / doc_id)
+            if workspace_id in self._rag_instances:
+                return self._rag_instances[workspace_id]
+            working_dir = str(Path(self.settings.working_dir_root) / workspace_id)
             rag = self._build_rag(working_dir)
             self._register_callbacks_to_rag(rag)
-            self._rag_instances[doc_id] = rag
+            self._rag_instances[workspace_id] = rag
             return rag
+
+    async def _ensure_workspace_warmed(self, workspace_id: str) -> None:
+        if workspace_id in self._warmed_workspaces:
+            return
+        if workspace_id not in self._workspace_warmup_locks:
+            self._workspace_warmup_locks[workspace_id] = asyncio.Lock()
+        async with self._workspace_warmup_locks[workspace_id]:
+            if workspace_id in self._warmed_workspaces:
+                return
+            rag = await self.get_rag(workspace_id)
+            await rag._ensure_lightrag_initialized()
+            self._warmed_workspaces.add(workspace_id)
+            self.logger.info("Workspace warmup complete: %s", workspace_id)
 
     async def ingest(
         self,
         file_path: str,
         output_dir: Optional[str] = None,
-        doc_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
         chunking_strategy: Optional[str] = None,
-        serialize_by_doc_id: Optional[bool] = None,
+        serialize_by_workspace_id: Optional[bool] = None,
     ) -> str:
         file_path_obj = Path(file_path)
         if not file_path_obj.exists():
             raise FileNotFoundError(f"Input not found: {file_path}")
 
-        doc_id = doc_id or _safe_doc_id(file_path_obj.stem)
-        rag = await self.get_rag(doc_id)
+        workspace_id = workspace_id or _safe_workspace_id(file_path_obj.stem)
+        rag = await self.get_rag(workspace_id)
         output_dir = output_dir or self.settings.output_dir
-        effective_serialize, forced_to_serialize = _resolve_ingest_serialize_by_doc_id(
-            default_serialize_by_doc_id=self.settings.serialize_ingest_by_doc_id,
-            serialize_by_doc_id=serialize_by_doc_id,
+        effective_serialize, forced_to_serialize = _resolve_ingest_serialize_by_workspace_id(
+            default_serialize_by_workspace_id=self.settings.serialize_ingest_by_workspace_id,
+            serialize_by_workspace_id=serialize_by_workspace_id,
             chunking_strategy=chunking_strategy,
             default_chunking_strategy=self.settings.chunking_strategy,
         )
         if forced_to_serialize:
             self.logger.warning(
-                "serialize_by_doc_id is forced to True because chunking_strategy "
-                "override requires temporary chunking_func swap (doc_id=%s, "
+                "serialize_by_workspace_id is forced to True because chunking_strategy "
+                "override requires temporary chunking_func swap (workspace_id=%s, "
                 "default=%s, override=%s).",
-                doc_id,
+                workspace_id,
                 self.settings.chunking_strategy,
                 chunking_strategy,
             )
@@ -1141,20 +1155,22 @@ class LocalRagService:
                     if rag.lightrag is not None:
                         rag.lightrag.chunking_func = old_chunking_func
 
+        await self._ensure_workspace_warmed(workspace_id)
+
         if effective_serialize:
-            # Per-doc-id lock: serialise ingest for the same workspace so the
+            # Per-workspace-id lock: serialise ingest for the same workspace so the
             # temporary chunking_func swap never races with a concurrent ingest.
-            if doc_id not in self._ingest_locks:
-                self._ingest_locks[doc_id] = asyncio.Lock()
-            async with self._ingest_locks[doc_id]:
+            if workspace_id not in self._ingest_locks:
+                self._ingest_locks[workspace_id] = asyncio.Lock()
+            async with self._ingest_locks[workspace_id]:
                 await self._safe_ingest_call(_run_ingest)
         else:
             await self._safe_ingest_call(_run_ingest)
 
-        return doc_id
+        return workspace_id
 
-    async def query(self, doc_id: str, query: str, **kwargs) -> str:
-        rag = await self.get_rag(doc_id)
+    async def query(self, workspace_id: str, query: str, **kwargs) -> str:
+        rag = await self.get_rag(workspace_id)
         kwargs.setdefault(
             "image_token_estimate_method",
             self.settings.image_token_estimate_method,
@@ -1177,7 +1193,7 @@ class LocalRagService:
 
     async def stream_query(
         self,
-        doc_id: str,
+        workspace_id: str,
         query: str,
         mode: str = "hybrid",
         top_k: int = 10,
@@ -1193,7 +1209,7 @@ class LocalRagService:
         """
         try:
             from lightrag import QueryParam
-            rag_instance = await self.get_rag(doc_id)
+            rag_instance = await self.get_rag(workspace_id)
             await rag_instance._ensure_lightrag_initialized()
             param = QueryParam(
                 mode=mode,
@@ -1233,7 +1249,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="RAG 后台管理工具")
     parser.add_argument("--path", "-p", required=True, help="要入库的文件或文件夹路径")
-    parser.add_argument("--id", "-i", required=True, help="工作空间名称 (doc_id)")
+    parser.add_argument("--id", "-i", required=True, help="工作空间名称 (workspace_id)")
     args = parser.parse_args()
     
     async def main():
@@ -1248,7 +1264,7 @@ if __name__ == "__main__":
         print(f"目标工作区: {settings.working_dir_root}/{workspace_name}")
 
         try:
-            await service.ingest(file_path=target_path, doc_id=workspace_name)
+            await service.ingest(file_path=target_path, workspace_id=workspace_name)
 
             print(f"\n 入库成功！")
             print(f"知识图谱已更新: {settings.working_dir_root}/{workspace_name}/graph_chunk_entity_relation.graphml")

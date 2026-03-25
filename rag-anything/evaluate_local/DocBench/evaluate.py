@@ -248,7 +248,7 @@ def _ensure_master_log_handler() -> None:
         logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     )
     root_logger.addHandler(file_handler)
-    logger.info(f"🧾 Master log file: {_MASTER_LOG_PATH}")
+    logger.info(f"Master log file: {_MASTER_LOG_PATH}")
 
 
 def _append_jsonl_record(file_obj: TextIO, payload: dict[str, Any]) -> None:
@@ -331,22 +331,22 @@ def _parse_eval_score(eval_result: str) -> int:
     return 0
 
 
-async def _cleanup_rag_instance(service: LocalRagService, rag_doc_id: str) -> None:
+async def _cleanup_rag_instance(service: LocalRagService, rag_workspace_id: str) -> None:
     rag_instances = getattr(service, "_rag_instances", None)
     if not isinstance(rag_instances, dict):
         return
 
-    rag_instance = rag_instances.get(rag_doc_id)
+    rag_instance = rag_instances.get(rag_workspace_id)
     if rag_instance is None:
-        logger.info(f"No RAG instance to clean for {rag_doc_id}")
+        logger.info(f"No RAG instance to clean for {rag_workspace_id}")
         return
 
     try:
         await rag_instance.finalize_storages()
-        rag_instances.pop(rag_doc_id, None)
-        logger.info(f"Cleaned up RAG instance for {rag_doc_id}")
+        rag_instances.pop(rag_workspace_id, None)
+        logger.info(f"Cleaned up RAG instance for {rag_workspace_id}")
     except Exception as exc:
-        logger.warning(f"Failed to cleanup RAG instance {rag_doc_id}: {exc}")
+        logger.warning(f"Failed to cleanup RAG instance {rag_workspace_id}: {exc}")
 
 
 def _clear_cuda_cache(doc_id: int) -> None:
@@ -364,8 +364,8 @@ def _clear_cuda_cache(doc_id: int) -> None:
         freed = reserved_before - reserved_after
         logger.info(
             f"GPU cache cleared after doc {doc_id}: "
-            f"Allocated {mem_before:.2f}→{mem_after:.2f} GB, "
-            f"Reserved {reserved_before:.2f}→{reserved_after:.2f} GB "
+            f"Allocated {mem_before:.2f}->{mem_after:.2f} GB, "
+            f"Reserved {reserved_before:.2f}->{reserved_after:.2f} GB "
             f"(freed {freed:.2f} GB)"
         )
     except Exception as exc:
@@ -379,8 +379,8 @@ async def _finalize_local_rag_service(
 ) -> None:
     rag_instances = getattr(service, "_rag_instances", None)
     if isinstance(rag_instances, dict):
-        for rag_doc_id in list(rag_instances.keys()):
-            await _cleanup_rag_instance(service, rag_doc_id)
+        for workspace_id in list(rag_instances.keys()):
+            await _cleanup_rag_instance(service, workspace_id)
 
     if clear_model_cache:
         try:
@@ -634,19 +634,19 @@ async def generate_answers(
     eval_prompt_filename: str = DOCBENCH_EVAL_PROMPT_FILENAME,
 ):
     """
-    为 DocBench 生成系统答案
-    
-    前提：Qwen3-VL-30B-A3B-Instruct-FP8 服务已在 8001 端口运行
-    
+    Generate system answers for DocBench.
+
+    Prerequisite: Qwen3-VL-30B-A3B-Instruct-FP8 service is running on port 8001.
+
     Args:
-        start_id: 起始文档 ID
-        end_id: 结束文档 ID（不包含）
-        resume: 是否跳过已处理的文档
-        dump_raw_prompt: 是否落盘每题 raw_prompt（用于调试引用列表）
-        dump_final_messages: 是否落盘最终发送给 VLM 的 messages（用于检查引用列表）
-        max_async_generate: 生成模式下每个文档内问题并发上限
-        max_async_docs: 生成模式下文档级并发上限（每文档独立图谱）
-        doc_flush_every: 每完成 N 个文档后重建 service；0 表示禁用
+        start_id: Start document ID (inclusive).
+        end_id: End document ID (exclusive).
+        resume: Skip already-processed documents.
+        dump_raw_prompt: Dump per-question raw retrieval prompt for debugging.
+        dump_final_messages: Dump final VLM messages for debugging.
+        max_async_generate: Max concurrent questions per document.
+        max_async_docs: Max concurrent documents in generate mode.
+        doc_flush_every: Recycle service every N docs; 0 disables recycle.
     """
     output_file = OUTPUT_DIR / "system_answers.jsonl"
     max_async_generate = _normalize_max_async(max_async_generate, default=1)
@@ -679,31 +679,31 @@ async def generate_answers(
         end_id=end_id,
         resume=resume,
     )
-    logger.info(f"🧾 Generation config saved: {GENERATION_CONFIG_FILE}")
+    logger.info(f"Generation config saved: {GENERATION_CONFIG_FILE}")
     
-    # 显式配置路径，保证评测时每个文档目录和日志目录可控
+    # Build explicit settings so output/log paths remain controlled.
     settings = _build_docbench_settings()
     
-    # 只创建一次 service
+    # Initialize service once.
     service = LocalRagService(settings)
     _ensure_master_log_handler()
     _bridge_lightrag_logs_to_run_file()
-    logger.info(f"✅ RAG Service initialized")
+    logger.info("RAG service initialized")
     
-    # 加载已处理的文档（用于断点续传）
+    # Load processed docs for resume mode.
     processed_docs = set()
     if resume and output_file.exists():
         with open(output_file, 'r', encoding='utf-8') as f:
             for line in f:
                 data = json.loads(line)
                 processed_docs.add(data['doc_id'])
-        logger.info(f"📁 Resume: found {len(processed_docs)} processed documents")
+        logger.info(f"Resume: found {len(processed_docs)} processed documents")
     
     logger.info(f"\n{'='*80}")
-    logger.info(f"📝 Generating answers for documents {start_id} to {end_id-1}")
-    logger.info(f"📂 Output: {output_file}")
+    logger.info(f"Generating answers for documents {start_id} to {end_id-1}")
+    logger.info(f"Output: {output_file}")
     logger.info(
-        "📌 max_async_docs=%d, max_async_generate=%d, doc_flush_every=%d",
+        "max_async_docs=%d, max_async_generate=%d, doc_flush_every=%d",
         max_async_docs,
         max_async_generate,
         doc_flush_every,
@@ -715,54 +715,54 @@ async def generate_answers(
         doc_name = str(doc_id)
 
         if resume and doc_name in processed_docs:
-            logger.info(f"⏭️  [{doc_id}] Already processed, skipping")
+            logger.info(f"[skip] [{doc_id}] Already processed")
             continue
 
         folder_path = DATA_ROOT / doc_name
         if not folder_path.exists():
-            logger.warning(f"⚠️  [{doc_id}] Folder not found: {folder_path}")
+            logger.warning(f"[{doc_id}] Folder not found: {folder_path}")
             continue
 
         pdf_file, qa_file = _find_doc_files(folder_path)
         if not pdf_file or not qa_file:
-            logger.warning(f"⚠️  [{doc_id}] Missing PDF or QA file")
+            logger.warning(f"[{doc_id}] Missing PDF or QA file")
             continue
 
         doc_jobs.append((doc_id, doc_name, pdf_file, qa_file))
 
-    logger.info(f"📦 Pending docs: {len(doc_jobs)}")
+    logger.info(f"Pending docs: {len(doc_jobs)}")
 
     async def _ingest_single_doc(
         doc_id: int,
         doc_name: str,
         pdf_file: Path,
     ) -> tuple[str, bool]:
-        rag_doc_id = f"docbench_{doc_name}"
+        workspace_id = f"docbench_{doc_name}"
 
         logger.info(f"\n{'='*80}")
-        logger.info(f"📄 [{doc_id}/{end_id-1}] Ingesting: {pdf_file.name}")
+        logger.info(f"[{doc_id}/{end_id-1}] Ingesting: {pdf_file.name}")
         logger.info(f"{'='*80}")
 
         try:
             if max_async_docs == 1:
-                _set_doc_workspace(rag_doc_id)
+                _set_doc_workspace(workspace_id)
 
-            logger.info(f"🔧 Processing: {pdf_file.name} → doc_id: {rag_doc_id}")
+            logger.info(f"Processing: {pdf_file.name} -> workspace_id: {workspace_id}")
             doc_output_dir = str(OUTPUT_MD_DIR / f"docbench_{doc_name}")
 
-            logger.info(f"📖 Ingesting document...")
-            returned_doc_id = await service.ingest(
+            logger.info("Ingesting document...")
+            returned_workspace_id = await service.ingest(
                 file_path=str(pdf_file),
                 output_dir=doc_output_dir,
-                doc_id=rag_doc_id,
+                workspace_id=workspace_id,
             )
-            logger.info(f"✅ Ingestion complete, doc_id: {returned_doc_id}")
+            logger.info(f"Ingestion complete, workspace_id: {returned_workspace_id}")
             return doc_name, True
         except Exception as exc:
-            logger.exception(f"❌ [{doc_id}] Ingest error: {exc}")
+            logger.exception(f"[{doc_id}] Ingest error: {exc}")
             return doc_name, False
         finally:
-            await _cleanup_rag_instance(service, rag_doc_id)
+            await _cleanup_rag_instance(service, workspace_id)
             _clear_cuda_cache(doc_id)
 
     async def _query_single_doc(
@@ -770,21 +770,21 @@ async def generate_answers(
         doc_name: str,
         qa_file: Path,
     ) -> tuple[str, list[dict[str, Any]]]:
-        rag_doc_id = f"docbench_{doc_name}"
+        workspace_id = f"docbench_{doc_name}"
 
         logger.info(f"\n{'='*80}")
-        logger.info(f"📄 [{doc_id}/{end_id-1}] Querying: {rag_doc_id}")
+        logger.info(f"[{doc_id}/{end_id-1}] Querying: {workspace_id}")
         logger.info(f"{'='*80}")
 
         try:
             if max_async_docs == 1:
-                _set_doc_workspace(rag_doc_id)
+                _set_doc_workspace(workspace_id)
 
             with open(qa_file, 'r', encoding='utf-8') as f_qa:
                 qa_list = [json.loads(line) for line in f_qa]
 
             logger.info(
-                f"\n❓ Answering {len(qa_list)} questions "
+                f"\nAnswering {len(qa_list)} questions "
                 f"(max_async_generate={max_async_generate})..."
             )
             question_semaphore = asyncio.Semaphore(max_async_generate)
@@ -804,7 +804,7 @@ async def generate_answers(
                             try:
                                 from lightrag.base import QueryParam
 
-                                rag = await service.get_rag(rag_doc_id)
+                                rag = await service.get_rag(workspace_id)
                                 raw_prompt_param = QueryParam(
                                     **_build_raw_prompt_query_kwargs()
                                 )
@@ -823,11 +823,11 @@ async def generate_answers(
                                     _extract_reference_lines(raw_prompt_text)
                                 )
                                 logger.info(
-                                    f"      🔎 Prompt dumped: {dump_path} (reference lines: {ref_count})"
+                                    f"      Prompt dumped: {dump_path} (reference lines: {ref_count})"
                                 )
                             except Exception as dump_exc:
                                 logger.warning(
-                                    f"      ⚠️ Raw prompt dump failed: {dump_exc}"
+                                    f"      Raw prompt dump failed: {dump_exc}"
                                 )
 
                         captured_calls: list[dict[str, Any]] = []
@@ -877,7 +877,7 @@ async def generate_answers(
 
                         try:
                             answer = await service.query(
-                                doc_id=rag_doc_id,
+                                workspace_id=workspace_id,
                                 query=question,
                                 **query_params,
                             )
@@ -898,16 +898,16 @@ async def generate_answers(
                                     )
                                 )
                                 logger.info(
-                                    f"      🧾 Final messages dumped: {dump_path} (calls: {len(captured_calls)}, reference lines: {ref_count})"
+                                    f"      Final messages dumped: {dump_path} (calls: {len(captured_calls)}, reference lines: {ref_count})"
                                 )
                             else:
                                 logger.warning(
-                                    "      ⚠️ Final messages not captured for this query."
+                                    "      Final messages not captured for this query."
                                 )
 
-                        logger.info(f"      ✓ Answer: {answer[:80]}...")
+                        logger.info(f"      Answer: {answer[:80]}...")
                     except Exception as exc:
-                        logger.error(f"      ✗ Error: {exc}")
+                        logger.error(f"      Error: {exc}")
 
                 result = _build_generation_result(
                     doc_name=doc_name,
@@ -948,13 +948,13 @@ async def generate_answers(
                 gc.collect()
                 _clear_cuda_cache(doc_id)
 
-            logger.info(f"✅ [{doc_id}] Completed: {answered_count} questions answered\n")
+            logger.info(f"[{doc_id}] Completed: {answered_count} questions answered\n")
             return doc_name, doc_records
         except Exception as exc:
-            logger.exception(f"❌ [{doc_id}] Query error: {exc}")
+            logger.exception(f"[{doc_id}] Query error: {exc}")
             return doc_name, []
         finally:
-            await _cleanup_rag_instance(service, rag_doc_id)
+            await _cleanup_rag_instance(service, workspace_id)
             _clear_cuda_cache(doc_id)
 
     try:
@@ -968,7 +968,7 @@ async def generate_answers(
         for batch_start in range(0, len(doc_jobs), max_async_docs):
             batch = doc_jobs[batch_start : batch_start + max_async_docs]
             logger.info(
-                f"🚀 [Ingest] Running doc batch {batch_start + 1}-{batch_start + len(batch)}/{len(doc_jobs)}"
+                f"[Ingest] Running doc batch {batch_start + 1}-{batch_start + len(batch)}/{len(doc_jobs)}"
             )
             batch_results = await asyncio.gather(
                 *[
@@ -984,7 +984,7 @@ async def generate_answers(
 
             if doc_flush_every > 0 and completed_since_flush >= doc_flush_every:
                 logger.info(
-                    f"♻️ [Ingest] Recycle LocalRagService after {completed_since_flush} docs."
+                    f"[Ingest] Recycle LocalRagService after {completed_since_flush} docs."
                 )
                 service = await _recycle_local_rag_service(
                     service,
@@ -994,11 +994,11 @@ async def generate_answers(
                 _bridge_lightrag_logs_to_run_file()
                 completed_since_flush = 0
 
-        logger.info(f"✅ [Ingest] Completed docs: {len(ingested_docs)}/{len(doc_jobs)}")
+        logger.info(f"[Ingest] Completed docs: {len(ingested_docs)}/{len(doc_jobs)}")
 
         # Keep existing recycle behavior and add one phase-boundary recycle.
         if ingested_docs:
-            logger.info("♻️ Recycle LocalRagService at phase boundary (Ingest -> Query).")
+            logger.info("Recycle LocalRagService at phase boundary (Ingest -> Query).")
             service = await _recycle_local_rag_service(
                 service,
                 settings,
@@ -1015,7 +1015,7 @@ async def generate_answers(
         logger.info(f"\n{'='*80}")
         logger.info("Phase B: query all ingested documents")
         logger.info(f"{'='*80}")
-        logger.info(f"📦 Pending query docs: {len(query_jobs)}")
+        logger.info(f"Pending query docs: {len(query_jobs)}")
 
         with open(output_file, 'a', encoding='utf-8') as f_out:
             completed_since_flush = 0
@@ -1023,7 +1023,7 @@ async def generate_answers(
             for batch_start in range(0, len(query_jobs), max_async_docs):
                 batch = query_jobs[batch_start : batch_start + max_async_docs]
                 logger.info(
-                    f"🚀 [Query] Running doc batch {batch_start + 1}-{batch_start + len(batch)}/{len(query_jobs)}"
+                    f"[Query] Running doc batch {batch_start + 1}-{batch_start + len(batch)}/{len(query_jobs)}"
                 )
 
                 batch_results = await asyncio.gather(
@@ -1041,7 +1041,7 @@ async def generate_answers(
 
                 if doc_flush_every > 0 and completed_since_flush >= doc_flush_every:
                     logger.info(
-                        f"♻️ [Query] Recycle LocalRagService after {completed_since_flush} docs."
+                        f"[Query] Recycle LocalRagService after {completed_since_flush} docs."
                     )
                     service = await _recycle_local_rag_service(
                         service,
@@ -1057,8 +1057,8 @@ async def generate_answers(
         )
     
     logger.info(f"\n{'='*80}")
-    logger.info(f"✅ Answer generation complete!")
-    logger.info(f"📁 Saved to: {output_file}")
+    logger.info("Answer generation complete!")
+    logger.info(f"Saved to: {output_file}")
     logger.info(f"{'='*80}")
 
 
@@ -1072,34 +1072,34 @@ async def evaluate_answers(
     eval_prompt_filename: str = DOCBENCH_EVAL_PROMPT_FILENAME,
 ):
     """
-    使用 Qwen2.5-32B 评估系统答案
-    
-    前提：Qwen2.5-32B 服务已在 8002 端口运行
-    
+    Evaluate system answers with Qwen2.5-32B judge model.
+
+    Prerequisite: Qwen2.5-32B service is running on port 8002.
+
     Args:
-        resume: 是否跳过已评估的答案
+        resume: Skip already-evaluated records.
     """
     input_file = OUTPUT_DIR / "system_answers.jsonl"
     output_file = OUTPUT_DIR / "eval_results.jsonl"
     max_async_judge = _normalize_max_async(max_async_judge)
     
     if not input_file.exists():
-        logger.error(f"❌ Input file not found: {input_file}")
-        logger.info("💡 Please run: python evaluate.py --mode generate first")
+        logger.error(f"Input file not found: {input_file}")
+        logger.info("Please run: python evaluate.py --mode generate first")
         return
     
-    # 加载评估 prompt
+    # Load evaluation prompt.
     try:
         eval_prompt = _load_eval_prompt(eval_prompt_filename)
     except FileNotFoundError as exc:
-        logger.error(f"❌ {exc}")
+        logger.error(str(exc))
         return
     
-    # 加载系统答案
+    # Load generated system answers.
     with open(input_file, 'r', encoding='utf-8') as f:
         answers = [json.loads(line) for line in f]
     
-    # 加载已评估的答案（用于断点续传）
+    # Load evaluated keys for resume mode.
     evaluated_keys = set()
     if resume and output_file.exists():
         with open(output_file, 'r', encoding='utf-8') as f:
@@ -1107,9 +1107,9 @@ async def evaluate_answers(
                 data = json.loads(line)
                 key = f"{data['doc_id']}_{data['question']}"
                 evaluated_keys.add(key)
-        logger.info(f"📁 Resume: found {len(evaluated_keys)} evaluated answers")
+        logger.info(f"Resume: found {len(evaluated_keys)} evaluated answers")
     
-    # 初始化 Judge 客户端
+    # Initialize judge client.
     judge_client = AsyncOpenAI(
         api_key="EMPTY",
         base_url=JUDGE_API_BASE
@@ -1126,12 +1126,12 @@ async def evaluate_answers(
 
     logger.info(f"\n{'='*80}")
     logger.info(
-        f"⚖️  Evaluating {len(pending_items)}/{len(answers)} answers using "
+        f"Evaluating {len(pending_items)}/{len(answers)} answers using "
         f"{JUDGE_MODEL_NAME} (max_async_judge={max_async_judge})"
     )
-    logger.info(f"🧾 Eval prompt: {eval_prompt_filename}")
+    logger.info(f"Eval prompt: {eval_prompt_filename}")
     if skipped:
-        logger.info(f"⏭️  Skipped {skipped} already-evaluated answers")
+        logger.info(f"Skipped {skipped} already-evaluated answers")
     logger.info(f"{'='*80}\n")
 
     if not pending_items:
@@ -1165,14 +1165,14 @@ async def evaluate_answers(
                 )
                 eval_result = response.choices[0].message.content.strip()
                 score = _parse_eval_score(eval_result)
-                logger.info(f"  ⚖️  Score: {score} | {eval_result[:40]}...")
+                logger.info(f"  Score: {score} | {eval_result[:40]}...")
                 result = {
                     **item,
                     'eval': eval_result,
                     'score': score
                 }
             except Exception as e:
-                logger.error(f"  ❌ Error: {e}")
+                logger.error(f"  Error: {e}")
                 result = {
                     **item,
                     'eval': f"[ERROR: {str(e)}]",
@@ -1192,8 +1192,8 @@ async def evaluate_answers(
         await asyncio.gather(*tasks)
     
     logger.info(f"\n{'='*80}")
-    logger.info(f"✅ Evaluation complete!")
-    logger.info(f"📁 Saved to: {output_file}")
+    logger.info("Evaluation complete!")
+    logger.info(f"Saved to: {output_file}")
     logger.info(f"{'='*80}")
 
 
@@ -1289,31 +1289,31 @@ def _map_type_group(qtype: Any) -> str | None:
 
 
 def calculate_statistics():
-    """计算评估统计数据"""
+    """Calculate evaluation statistics."""
     result_file = OUTPUT_DIR / "eval_results.jsonl"
     
     if not result_file.exists():
-        logger.error(f"❌ Result file not found: {result_file}")
-        logger.info("💡 Please run: python evaluate.py --mode evaluate first")
+        logger.error(f"Result file not found: {result_file}")
+        logger.info("Please run: python evaluate.py --mode evaluate first")
         return
     
-    # 加载评估结果
+    # Load evaluation results.
     with open(result_file, 'r', encoding='utf-8') as f:
         results = [json.loads(line) for line in f]
     generation_config = _load_generation_config()
     
     logger.info(f"\n{'='*80}")
-    logger.info(f"📊 DocBench Evaluation Statistics")
+    logger.info("DocBench Evaluation Statistics")
     logger.info(f"{'='*80}\n")
     
-    # 总体准确率
+    # Overall accuracy.
     total = len(results)
     correct = sum(1 for r in results if r.get('score', 0) == 1)
     overall_acc = correct / total * 100 if total > 0 else 0
     
     logger.info(f"Overall Accuracy: {overall_acc:.2f}% ({correct}/{total})")
     
-    # 按问题类型统计
+    # Accuracy by question type.
     type_stats = {}
     for r in results:
         qtype = r['type']
@@ -1323,13 +1323,13 @@ def calculate_statistics():
         if r.get('score', 0) == 1:
             type_stats[qtype]['correct'] += 1
     
-    logger.info(f"\n📋 Accuracy by Question Type:")
+    logger.info("\nAccuracy by Question Type:")
     for qtype in sorted(type_stats.keys()):
         stats = type_stats[qtype]
         acc = stats['correct'] / stats['total'] * 100 if stats['total'] > 0 else 0
         logger.info(f"  {qtype:20s}: {acc:5.2f}% ({stats['correct']:3d}/{stats['total']:3d})")
 
-    # 按归并类型统计（Txt. / Mm. / Una.）
+    # Accuracy by type group (Txt. / Mm. / Una.).
     type_group_stats = {
         group: {"correct": 0, "total": 0}
         for group in TYPE_GROUP_ORDER
@@ -1346,7 +1346,7 @@ def calculate_statistics():
         if r.get("score", 0) == 1:
             type_group_stats[group]["correct"] += 1
 
-    logger.info(f"\n🧩 Accuracy by Type Group:")
+    logger.info("\nAccuracy by Type Group:")
     for group in TYPE_GROUP_ORDER:
         stats = type_group_stats[group]
         acc = stats["correct"] / stats["total"] * 100 if stats["total"] > 0 else 0
@@ -1356,7 +1356,7 @@ def calculate_statistics():
     if unknown_type_counts:
         logger.warning(f"Unknown type labels (not grouped): {unknown_type_counts}")
     
-    # 按领域统计（参考 DocBench 官方分布）
+    # Domain-level statistics (DocBench official ranges).
     domain_ranges = {
         'Academic': range(0, 49),
         'Finance': range(49, 89),
@@ -1378,14 +1378,14 @@ def calculate_statistics():
         except Exception:
             continue
     
-    logger.info(f"\n🌐 Accuracy by Domain:")
+    logger.info("\nAccuracy by Domain:")
     for domain in ['Academic', 'Finance', 'Government', 'Law', 'News']:
         stats = domain_stats[domain]
         if stats['total'] > 0:
             acc = stats['correct'] / stats['total'] * 100
             logger.info(f"  {domain:15s}: {acc:5.2f}% ({stats['correct']:3d}/{stats['total']:3d})")
     
-    # 保存统计到 JSON
+    # Save statistics to JSON.
     stats_output = {
         'experiment_config': _build_experiment_config(generation_config),
         'overall': {'accuracy': overall_acc, 'correct': correct, 'total': total},
@@ -1419,7 +1419,7 @@ def calculate_statistics():
     with open(stats_file, 'w', encoding='utf-8') as f:
         json.dump(stats_output, f, indent=2, ensure_ascii=False)
     
-    logger.info(f"\n📁 Statistics saved to: {stats_file}")
+    logger.info(f"\nStatistics saved to: {stats_file}")
     logger.info(f"{'='*80}\n")
 
 
@@ -1435,87 +1435,77 @@ async def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # 生成所有文档的答案
   python evaluate.py --mode generate
-  
-  # 生成部分文档的答案
   python evaluate.py --mode generate --start_id 0 --end_id 10
-  
-  # 评估所有答案
   python evaluate.py --mode evaluate
-  
-  # 查看统计
   python evaluate.py --mode stats
-  
-  # 后台运行（推荐）
   nohup python evaluate.py --mode generate > run.log 2>&1 &
   tail -f run.log
-        """
+        """,
     )
-    
+
     parser.add_argument(
-        '--mode',
+        "--mode",
         type=str,
         required=True,
-        choices=['generate', 'evaluate', 'stats'],
-        help='运行模式'
+        choices=["generate", "evaluate", "stats"],
+        help="Run mode.",
     )
     parser.add_argument(
-        '--start_id',
+        "--start_id",
         type=int,
         default=0,
-        help='起始文档 ID'
+        help="Start document ID (inclusive).",
     )
     parser.add_argument(
-        '--end_id',
+        "--end_id",
         type=int,
         default=229,
-        help='结束文档 ID（不包含）'
+        help="End document ID (exclusive).",
     )
     parser.add_argument(
-        '--no_resume',
-        action='store_true',
-        help='不恢复之前的进度，从头开始'
+        "--no_resume",
+        action="store_true",
+        help="Disable resume mode.",
     )
     parser.add_argument(
-        '--dump_raw_prompt',
-        action='store_true',
-        help='生成模式下落盘每题 raw_prompt（用于检查 Reference Document List）'
+        "--dump_raw_prompt",
+        action="store_true",
+        help="Dump raw retrieval prompt for each query.",
     )
     parser.add_argument(
-        '--dump_final_messages',
-        action='store_true',
-        help='生成模式下落盘最终发给 VLM 的 messages（用于检查真实输入）'
-    )
-    
-    parser.add_argument(
-        '--raganything_eval_setup',
-        action='store_true',
-        help='Use RAG-Anything eval setup: one-sentence generation + evaluation_prompt_RAG-Anything.txt.'
+        "--dump_final_messages",
+        action="store_true",
+        help="Dump final VLM messages for each query.",
     )
     parser.add_argument(
-        '--max_async_judge',
+        "--raganything_eval_setup",
+        action="store_true",
+        help="Use RAG-Anything eval setup.",
+    )
+    parser.add_argument(
+        "--max_async_judge",
         type=int,
         default=4,
-        help='Max concurrent judge requests in evaluate mode (default: 4).'
+        help="Max concurrent judge requests in evaluate mode.",
     )
     parser.add_argument(
-        '--max_async_generate',
+        "--max_async_generate",
         type=int,
         default=1,
-        help='Max concurrent question requests per document in generate mode (default: 1).'
+        help="Max concurrent question requests per document in generate mode.",
     )
     parser.add_argument(
-        '--max_async_docs',
+        "--max_async_docs",
         type=int,
         default=4,
-        help='Max concurrent documents in generate mode (default: 4).'
+        help="Max concurrent documents in generate mode.",
     )
     parser.add_argument(
-        '--doc_flush_every',
+        "--doc_flush_every",
         type=int,
         default=4,
-        help='Recycle LocalRagService every N completed docs in generate mode; 0 disables (default: 4).'
+        help="Recycle LocalRagService every N completed docs in generate mode; 0 disables.",
     )
 
     args = parser.parse_args()
@@ -1525,7 +1515,7 @@ Examples:
     )
 
     logger.info(f"\n{'='*80}")
-    logger.info(f"🎯 DocBench Evaluation - Manual Server Mode")
+    logger.info("DocBench Evaluation - Manual Server Mode")
     logger.info(f"{'='*80}")
     logger.info(f"Mode: {args.mode}")
     logger.info(f"Range: {args.start_id} to {args.end_id-1}")
@@ -1541,9 +1531,9 @@ Examples:
     logger.info(f"DocFlushEvery: {args.doc_flush_every}")
     logger.info(f"{'='*80}\n")
     
-    # 执行对应的步骤
+    # Run selected mode.
     if args.mode == 'generate':
-        logger.info("⚠️  Please ensure Qwen3-VL-30B-A3B-Instruct-FP8 is running on port 8001")
+        logger.info("Please ensure Qwen3-VL-30B-A3B-Instruct-FP8 is running on port 8001")
         logger.info(f"   Check: curl http://localhost:8001/v1/models\n")
         await generate_answers(
             start_id=args.start_id,
@@ -1560,7 +1550,7 @@ Examples:
         )
     
     elif args.mode == 'evaluate':
-        logger.info("⚠️  Please ensure Qwen2.5-32B is running on port 8002")
+        logger.info("Please ensure Qwen2.5-32B is running on port 8002")
         logger.info(f"   Check: curl http://localhost:8002/v1/models\n")
         await evaluate_answers(
             resume=not args.no_resume,
@@ -1571,7 +1561,7 @@ Examples:
     elif args.mode == 'stats':
         calculate_statistics()
     
-    logger.info(f"\n✅ Done!")
+    logger.info("\nDone!")
 
 
 if __name__ == "__main__":

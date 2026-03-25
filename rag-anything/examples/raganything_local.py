@@ -44,8 +44,12 @@ class DemoLoggingCallback(ProcessingCallback):
         )
 
 
-async def process_with_rag(service: LocalRagService, file_path: str, doc_id: str) -> None:
-    final_doc_id = await service.ingest(file_path, doc_id=doc_id)
+async def process_with_rag(
+    service: LocalRagService, file_path: str, workspace_id: str
+) -> None:
+    final_workspace_id = await service.ingest(
+        file_path, workspace_id=workspace_id
+    )
 
     queries = [
         "What is the paper's main contribution?",
@@ -56,7 +60,7 @@ async def process_with_rag(service: LocalRagService, file_path: str, doc_id: str
     for i, query in enumerate(queries, 1):
         service.logger.info("Query %d/%d: %s", i, len(queries), query)
         result = await service.query(
-            final_doc_id,
+            final_workspace_id,
             query,
             mode="hybrid",
             enable_rerank=True,
@@ -68,15 +72,17 @@ async def process_with_rag(service: LocalRagService, file_path: str, doc_id: str
     if metrics_summary:
         service.logger.info("\n%s", metrics_summary)
 
-    events = service.get_callback_events(final_doc_id)
+    events = service.get_callback_events(final_workspace_id)
     if events:
-        service.logger.info("Callback event count for %s: %d", final_doc_id, len(events))
+        service.logger.info(
+            "Callback event count for %s: %d", final_workspace_id, len(events)
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="RAGAnything local example")
     parser.add_argument("--path", "-p", required=True, help="Input file or folder path")
-    parser.add_argument("--id", "-i", required=True, help="Workspace name (doc_id)")
+    parser.add_argument("--id", "-i", required=True, help="Workspace name (workspace_id)")
     parser.add_argument(
         "--enable_resilience",
         action="store_true",

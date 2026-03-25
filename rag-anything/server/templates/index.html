@@ -947,7 +947,7 @@
     },
     async query(docId, query, opts = {}) {
       const body = {
-        doc_id: docId, query,
+        workspace_id: docId, query,
         mode: opts.mode || 'hybrid',
         top_k: opts.top_k || AppState.queryDefaults.top_k,
         chunk_top_k: opts.chunk_top_k || AppState.queryDefaults.chunk_top_k,
@@ -981,7 +981,7 @@
     async ingest(file, docId, chunkingStrategy) {
       const fd = new FormData();
       fd.append('file', file);
-      if (docId) fd.append('doc_id', docId);
+      if (docId) fd.append('workspace_id', docId);
       if (chunkingStrategy) fd.append('chunking_strategy', chunkingStrategy);
       const r = await fetch('/ingest', { method: 'POST', headers: this._headers(), body: fd });
       if (!r.ok) throw new Error(`Ingest failed (${r.status})`);
@@ -1575,7 +1575,7 @@
 
       try {
         const payload = {
-          doc_id: AppState.currentDocId, query: text, mode,
+          workspace_id: AppState.currentDocId, query: text, mode,
           top_k: AppState.queryDefaults.top_k, chunk_top_k: AppState.queryDefaults.chunk_top_k,
           vlm_enhanced: AppState.queryDefaults.vlm_enhanced,
           enable_rerank: AppState.queryDefaults.enable_rerank, return_graph: AppState.graphOpen,
@@ -1923,8 +1923,8 @@
         sel.innerHTML = '<option value="">Select workspace</option>';
         AppState.workspaces.forEach(ws => {
           const o = document.createElement('option');
-          o.value = ws.doc_id;
-          o.textContent = ws.doc_id + (ws.uploaded_files && ws.uploaded_files.length > 0 ? ` (${ws.uploaded_files.length} files)` : '');
+          o.value = ws.workspace_id;
+          o.textContent = ws.workspace_id + (ws.uploaded_files && ws.uploaded_files.length > 0 ? ` (${ws.uploaded_files.length} files)` : '');
           sel.appendChild(o);
         });
         sel.disabled = false;
@@ -2047,7 +2047,7 @@
       }
     },
 
-    // Mirror server-side _compute_doc_id(): strip non-alphanum/-/_ from filename stem
+    // Mirror server-side workspace id sanitization: strip non-alphanum/-/_ from filename stem
     _computeDocId(filename) {
       const stem = filename.replace(/\.[^.]+$/, '');
       const cleaned = stem.replace(/[^a-zA-Z0-9\-_]/g, '');
@@ -2067,10 +2067,10 @@
 
       // Build workspace options: "New workspace" first, then existing ones
       const existingOpts = AppState.workspaces.map(ws => {
-        const label = ws.doc_id + (ws.uploaded_files && ws.uploaded_files.length > 0
+        const label = ws.workspace_id + (ws.uploaded_files && ws.uploaded_files.length > 0
           ? ` (${ws.uploaded_files.length} files)` : '');
-        const sel = ws.doc_id === AppState.currentDocId ? ' selected' : '';
-        return `<option value="${ws.doc_id}"${sel}>${label}</option>`;
+        const sel = ws.workspace_id === AppState.currentDocId ? ' selected' : '';
+        return `<option value="${ws.workspace_id}"${sel}>${label}</option>`;
       }).join('');
 
       const settingsEl = document.createElement('div');
@@ -2111,7 +2111,7 @@
 
       // If a workspace is currently selected, pre-select it; otherwise stay on "new"
       const wsTargetSelect = document.getElementById('wsTargetSelect');
-      if (AppState.currentDocId && AppState.workspaces.some(ws => ws.doc_id === AppState.currentDocId)) {
+      if (AppState.currentDocId && AppState.workspaces.some(ws => ws.workspace_id === AppState.currentDocId)) {
         wsTargetSelect.value = AppState.currentDocId;
       }
 
@@ -2194,9 +2194,9 @@
           try {
             const result = await API.ingest(file, lockedDocId, chunkingStrategy);
             if (iconEl) iconEl.textContent = '✅';
-            if (statEl) statEl.textContent = `→ ${result.doc_id}`;
+            if (statEl) statEl.textContent = `→ ${result.workspace_id}`;
             if (li) { li.classList.remove('active'); li.classList.add('done'); }
-            lockedDocId = result.doc_id;
+            lockedDocId = result.workspace_id;
             lastResult = result;
           } catch (e) {
             if (iconEl) iconEl.textContent = '❌';
@@ -2241,8 +2241,8 @@
         input.value = '';
         if (lastResult) {
           await this.refreshWorkspaces();
-          document.getElementById('workspaceSelect').value = lastResult.doc_id;
-          await this.loadWorkspace(lastResult.doc_id);
+          document.getElementById('workspaceSelect').value = lastResult.workspace_id;
+          await this.loadWorkspace(lastResult.workspace_id);
         }
       };
       input.click();
