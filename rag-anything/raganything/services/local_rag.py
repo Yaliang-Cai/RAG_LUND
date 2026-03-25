@@ -66,17 +66,6 @@ from raganything.constants import (
     DEFAULT_MIN_RERANK_SCORE,
     DEFAULT_ENABLE_INLINE_CITATIONS,
     DEFAULT_SERIALIZE_INGEST_BY_DOC_ID,
-    # Storage backends (neo4j-milvus branch)
-    DEFAULT_GRAPH_STORAGE_TYPE,
-    DEFAULT_NEO4J_URI,
-    DEFAULT_NEO4J_USERNAME,
-    DEFAULT_NEO4J_PASSWORD,
-    DEFAULT_VECTOR_STORAGE_TYPE,
-    DEFAULT_MILVUS_DB_URI,
-    DEFAULT_ENABLE_SYNONYM_LINKING,
-    DEFAULT_ENABLE_MULTI_HOP,
-    DEFAULT_MULTI_HOP_DEPTH,
-    DEFAULT_PPR_TOP_K,
 )
 from raganything.query_message_repack import repack_query_messages
 
@@ -140,18 +129,6 @@ class LocalRagSettings:
     mineru_vllm_gpu_memory_utilization: float = (
         DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION
     )
-
-    # Storage backends (neo4j-milvus branch)
-    graph_storage_type: str = DEFAULT_GRAPH_STORAGE_TYPE
-    neo4j_uri: str = DEFAULT_NEO4J_URI
-    neo4j_username: str = DEFAULT_NEO4J_USERNAME
-    neo4j_password: str = DEFAULT_NEO4J_PASSWORD
-    vector_storage_type: str = DEFAULT_VECTOR_STORAGE_TYPE
-    milvus_db_uri: str = DEFAULT_MILVUS_DB_URI
-    enable_synonym_linking: bool = DEFAULT_ENABLE_SYNONYM_LINKING
-    enable_multi_hop: bool = DEFAULT_ENABLE_MULTI_HOP
-    multi_hop_depth: int = DEFAULT_MULTI_HOP_DEPTH
-    ppr_top_k: int = DEFAULT_PPR_TOP_K
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -219,63 +196,7 @@ class LocalRagSettings:
                     str(DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION),
                 )
             ),
-            # Storage backends
-            graph_storage_type=os.getenv("GRAPH_STORAGE_TYPE", DEFAULT_GRAPH_STORAGE_TYPE),
-            neo4j_uri=os.getenv("NEO4J_URI", DEFAULT_NEO4J_URI),
-            neo4j_username=os.getenv("NEO4J_USERNAME", DEFAULT_NEO4J_USERNAME),
-            neo4j_password=os.getenv("NEO4J_PASSWORD", DEFAULT_NEO4J_PASSWORD),
-            vector_storage_type=os.getenv("VECTOR_STORAGE_TYPE", DEFAULT_VECTOR_STORAGE_TYPE),
-            milvus_db_uri=os.getenv("MILVUS_DB_URI", DEFAULT_MILVUS_DB_URI),
-            enable_synonym_linking=os.getenv(
-                "ENABLE_SYNONYM_LINKING", str(DEFAULT_ENABLE_SYNONYM_LINKING)
-            ).lower() in {"true", "1", "yes"},
-            enable_multi_hop=os.getenv(
-                "ENABLE_MULTI_HOP", str(DEFAULT_ENABLE_MULTI_HOP)
-            ).lower() in {"true", "1", "yes"},
-            multi_hop_depth=int(os.getenv("MULTI_HOP_DEPTH", str(DEFAULT_MULTI_HOP_DEPTH))),
-            ppr_top_k=int(os.getenv("PPR_TOP_K", str(DEFAULT_PPR_TOP_K))),
         )
-
-
-def get_storage_kwargs(settings: LocalRagSettings) -> Dict[str, Any]:
-    """
-    根据 LocalRagSettings 生成 LightRAG 的存储参数。
-
-    返回包含以下键的字典：
-    - graph_storage_cls: 图存储类
-    - graph_storage_kwargs: 图存储参数
-    - vector_storage_cls: 向量存储类
-    - vector_storage_kwargs: 向量存储参数
-    """
-    result = {}
-
-    # 图存储配置
-    if settings.graph_storage_type.lower() == "neo4j":
-        from lightrag.kg import Neo4JStorage
-        result["graph_storage_cls"] = Neo4JStorage
-        result["graph_storage_kwargs"] = {
-            "uri": settings.neo4j_uri,
-            "username": settings.neo4j_username,
-            "password": settings.neo4j_password,
-        }
-    else:
-        # 默认 NetworkX（不需要显式指定，LightRAG 会自动使用）
-        result["graph_storage_cls"] = None
-        result["graph_storage_kwargs"] = {}
-
-    # 向量存储配置
-    if settings.vector_storage_type.lower() == "milvus":
-        from lightrag.kg import MilvusVectorDBStorage
-        result["vector_storage_cls"] = MilvusVectorDBStorage
-        result["vector_storage_kwargs"] = {
-            "milvus_db_uri": settings.milvus_db_uri,
-        }
-    else:
-        # 默认 NanoVectorDB（不需要显式指定，LightRAG 会自动使用）
-        result["vector_storage_cls"] = None
-        result["vector_storage_kwargs"] = {}
-
-    return result
 
 
 def configure_logging(settings: LocalRagSettings) -> logging.Logger:

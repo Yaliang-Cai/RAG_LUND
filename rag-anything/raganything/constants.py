@@ -211,25 +211,6 @@ DEFAULT_PPR_TOP_K = 50                          # Number of chunks returned by P
 DEFAULT_PASSAGE_NODE_WEIGHT = 0.05              # HippoRAG2 param: DPR chunk score scaling in PPR seed
 
 # =============================================================================
-# Storage Backend (neo4j-milvus branch)
-# =============================================================================
-# Graph storage: "networkx" (memory, no persistence) or "neo4j" (persistent)
-DEFAULT_GRAPH_STORAGE_TYPE = "networkx"
-
-# Neo4j configuration (used if graph_storage_type == "neo4j")
-DEFAULT_NEO4J_URI = "bolt://localhost:7687"
-DEFAULT_NEO4J_USERNAME = "neo4j"
-DEFAULT_NEO4J_PASSWORD = "password"
-
-# Vector storage: "nanovectordb" (default, local file) or "milvus" (persistent)
-DEFAULT_VECTOR_STORAGE_TYPE = "nanovectordb"
-
-# Milvus configuration (used if vector_storage_type == "milvus")
-# - "sqlite:///./milvus.db" for Milvus Lite (local single file)
-# - "http://localhost:19530" for Milvus Server
-DEFAULT_MILVUS_DB_URI = "sqlite:///./milvus.db"
-
-# =============================================================================
 # Logging
 # =============================================================================
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
