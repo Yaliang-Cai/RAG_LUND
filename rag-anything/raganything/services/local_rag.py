@@ -444,7 +444,7 @@ def _build_modal_analysis_response_format() -> dict[str, Any]:
         "type": "json_schema",
         "json_schema": {
             "name": "modal_analysis",
-            "strict": False,
+            "strict": True,
             "schema": {
                 "type": "object",
                 "properties": {
