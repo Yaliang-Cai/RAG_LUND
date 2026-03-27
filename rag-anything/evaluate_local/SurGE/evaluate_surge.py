@@ -30,6 +30,7 @@ RAG_OUTPUT_DIR = SCRIPT_DIR / "rag_outputs"
 DEFAULT_DATA_ROOT = "/data/y50056788/Yaliang/datasets_for_eval/data_for_SurGE"
 DEFAULT_SUBSET_DIR = "subset_output"
 DEFAULT_QUERIES = "subset_queries.json"
+DEFAULT_SURVEYS = "subset_surveys.json"
 DEFAULT_CHUNKS = "subset_chunks.jsonl"
 DEFAULT_CORPUS = "subset_corpus.json"
 DEFAULT_WORKSPACE = "surge_subset_shared"
@@ -43,6 +44,12 @@ RUN_MANIFEST = RETRIEVAL_DIR / "run_manifest.json"
 INGEST_MANIFEST = RETRIEVAL_DIR / "shared_ingest_manifest.json"
 INGEST_FAILURES = RETRIEVAL_DIR / "shared_ingest_failures.jsonl"
 SURVEY_STATUS = SURVEY_DIR / "survey_mode_status.json"
+SURVEY_PER_FILE = SURVEY_DIR / "survey_retrieval_per_survey.jsonl"
+SURVEY_SUMMARY_FILE = SURVEY_DIR / "survey_retrieval_summary.json"
+SURVEY_RERANK_STATS_FILE = SURVEY_DIR / "survey_rerank_chunk_stats.jsonl"
+SURVEY_RERANK_SUMMARY_FILE = SURVEY_DIR / "survey_rerank_chunk_summary.json"
+SURVEY_WARNINGS_FILE = SURVEY_DIR / "survey_mapping_warnings.jsonl"
+SURVEY_RUN_MANIFEST = SURVEY_DIR / "survey_run_manifest.json"
 
 INT_RE = re.compile(r"^-?\d+$")
 MASTER_LOG: Path | None = None
@@ -121,6 +128,13 @@ def parse_int(v: Any) -> int | None:
     return None
 
 
+def parse_non_negative_int(v: Any) -> int | None:
+    iv = parse_int(v)
+    if iv is None or iv < 0:
+        return None
+    return iv
+
+
 def parse_doc_id_from_file_path(v: Any) -> int | None:
     if not isinstance(v, str) or not v.strip():
         return None
@@ -161,6 +175,53 @@ def ensure_dirs() -> None:
         p.mkdir(parents=True, exist_ok=True)
 
 
+def prune_non_master_file_handlers(master_log: Path) -> None:
+    def prune_logger(target_logger: logging.Logger) -> None:
+        for handler in list(target_logger.handlers):
+            if not isinstance(handler, logging.FileHandler):
+                continue
+            file_path = Path(getattr(handler, "baseFilename", ""))
+            if file_path == master_log:
+                continue
+            target_logger.removeHandler(handler)
+            handler.close()
+
+    prune_logger(logging.getLogger())
+    for logger_obj in list(logging.root.manager.loggerDict.values()):
+        if isinstance(logger_obj, logging.Logger):
+            prune_logger(logger_obj)
+    for run_log in LOG_DIR.glob("run_*.log"):
+        try:
+            run_log.unlink()
+        except Exception:
+            pass
+
+
+def bridge_lightrag_file_handlers(root: logging.Logger) -> None:
+    try:
+        from lightrag.utils import logger as lightrag_logger
+    except Exception:
+        return
+
+    for handler in root.handlers:
+        if not isinstance(handler, logging.FileHandler):
+            continue
+        if all(
+            getattr(existing, "baseFilename", None) != getattr(handler, "baseFilename", None)
+            for existing in lightrag_logger.handlers
+        ):
+            lightrag_logger.addHandler(handler)
+    lightrag_logger.setLevel(logging.INFO)
+
+
+def sync_master_logging_handlers() -> None:
+    if MASTER_LOG is None:
+        return
+    root = logging.getLogger()
+    prune_non_master_file_handlers(MASTER_LOG)
+    bridge_lightrag_file_handlers(root)
+
+
 def refresh_logging(mode: str) -> None:
     global MASTER_LOG
     logging.getLogger("raganything").setLevel(logging.INFO)
@@ -172,34 +233,19 @@ def refresh_logging(mode: str) -> None:
         MASTER_LOG = LOG_DIR / f"evaluate_surge_{mode}_{ts}.log"
     root = logging.getLogger()
     has_master = False
-    for h in list(root.handlers):
+    for h in root.handlers:
         if isinstance(h, logging.FileHandler):
             p = Path(getattr(h, "baseFilename", ""))
             if p == MASTER_LOG:
                 has_master = True
-                continue
-            root.removeHandler(h)
-            h.close()
+                break
     if not has_master:
         fh = logging.FileHandler(MASTER_LOG, encoding="utf-8")
         fh.setLevel(logging.INFO)
         fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
         root.addHandler(fh)
         logger.info("Master log file: %s", MASTER_LOG)
-    for run_log in LOG_DIR.glob("run_*.log"):
-        try:
-            run_log.unlink()
-        except Exception:
-            pass
-    try:
-        from lightrag.utils import logger as lightrag_logger
-        for h in root.handlers:
-            if isinstance(h, logging.FileHandler):
-                if all(getattr(eh, "baseFilename", None) != getattr(h, "baseFilename", None) for eh in lightrag_logger.handlers):
-                    lightrag_logger.addHandler(h)
-        lightrag_logger.setLevel(logging.INFO)
-    except Exception:
-        pass
+    sync_master_logging_handlers()
 
 
 def settings_for_surge() -> LocalRagSettings:
@@ -258,6 +304,15 @@ def load_queries(path: Path, limit: int) -> list[dict[str, Any]]:
     return q[:limit] if limit > 0 else q
 
 
+def load_surveys(path: Path, limit: int) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError(f"surveys must be list: {path}")
+    return data[:limit] if limit > 0 else data
+
+
 def load_abstract_index(path: Path) -> dict[str, list[int]]:
     if not path.exists():
         raise FileNotFoundError(path)
@@ -272,9 +327,8 @@ def load_abstract_index(path: Path) -> dict[str, list[int]]:
     return idx
 
 
-def build_chunk_row_lookup(rows: Any) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+def build_chunk_row_lookup(rows: Any) -> dict[str, dict[str, Any]]:
     by_chunk_id: dict[str, dict[str, Any]] = {}
-    ordered_rows: list[dict[str, Any]] = []
     if isinstance(rows, dict):
         iterable = rows.values()
     elif isinstance(rows, list):
@@ -284,7 +338,6 @@ def build_chunk_row_lookup(rows: Any) -> tuple[dict[str, dict[str, Any]], list[d
     for row in iterable:
         if not isinstance(row, dict):
             continue
-        ordered_rows.append(row)
         rid = str(
             row.get("chunk_id")
             or row.get("id")
@@ -295,11 +348,7 @@ def build_chunk_row_lookup(rows: Any) -> tuple[dict[str, dict[str, Any]], list[d
         ).strip()
         if rid:
             by_chunk_id[rid] = row
-    return by_chunk_id, ordered_rows
-
-
-def chunk_id_for_doc(doc_id: str) -> str:
-    return f"surge-chunk-{doc_id}"
+    return by_chunk_id
 
 
 def iter_batches(values: list[str], batch_size: int) -> list[list[str]]:
@@ -331,6 +380,78 @@ async def fetch_existing_chunk_ids(store: Any, expected_ids: list[str], batch_si
             if rid:
                 found.add(rid)
     return found
+
+
+def normalize_status_value(v: Any) -> str:
+    if hasattr(v, "value"):
+        v = getattr(v, "value")
+    return str(v or "").strip().lower()
+
+
+def normalize_chunk_id_list(v: Any) -> list[str]:
+    if not isinstance(v, list):
+        return []
+    out: list[str] = []
+    for item in v:
+        cid = str(item or "").strip()
+        if cid:
+            out.append(cid)
+    return out
+
+
+async def inspect_workspace_index_state(rag: Any, target_docs: list[str]) -> dict[str, Any]:
+    processed_statuses = {"processed", "preprocessed"}
+    target_set = set(target_docs)
+    missing_full_set = set(await rag.lightrag.full_docs.filter_keys(target_set))
+
+    status_rows = await rag.lightrag.doc_status.get_by_ids(target_docs)
+    if not isinstance(status_rows, list):
+        status_rows = []
+    if len(status_rows) < len(target_docs):
+        status_rows = status_rows + [None] * (len(target_docs) - len(status_rows))
+
+    missing_doc_status_set: set[str] = set()
+    status_not_processed_set: set[str] = set()
+    missing_chunk_set: set[str] = set()
+    missing_vdb_set: set[str] = set()
+    chunk_ids_by_doc: dict[str, list[str]] = {}
+
+    for doc_id, row in zip(target_docs, status_rows):
+        if not isinstance(row, dict):
+            missing_doc_status_set.add(doc_id)
+            continue
+        status_value = normalize_status_value(row.get("status"))
+        if status_value not in processed_statuses:
+            status_not_processed_set.add(doc_id)
+            continue
+        chunk_ids = normalize_chunk_id_list(row.get("chunks_list"))
+        if not chunk_ids:
+            missing_chunk_set.add(doc_id)
+            missing_vdb_set.add(doc_id)
+            continue
+        chunk_ids_by_doc[doc_id] = chunk_ids
+
+    all_expected_chunk_ids = sorted({cid for ids in chunk_ids_by_doc.values() for cid in ids})
+    if all_expected_chunk_ids:
+        existing_text_chunk_ids = await fetch_existing_chunk_ids(
+            rag.lightrag.text_chunks, all_expected_chunk_ids
+        )
+        existing_vdb_chunk_ids = await fetch_existing_chunk_ids(
+            rag.lightrag.chunks_vdb, all_expected_chunk_ids
+        )
+        for doc_id, chunk_ids in chunk_ids_by_doc.items():
+            if any(cid not in existing_text_chunk_ids for cid in chunk_ids):
+                missing_chunk_set.add(doc_id)
+            if any(cid not in existing_vdb_chunk_ids for cid in chunk_ids):
+                missing_vdb_set.add(doc_id)
+
+    return {
+        "missing_full_set": missing_full_set,
+        "missing_doc_status_set": missing_doc_status_set,
+        "status_not_processed_set": status_not_processed_set,
+        "missing_chunk_set": missing_chunk_set,
+        "missing_vdb_set": missing_vdb_set,
+    }
 
 
 async def ensure_rag_runtime_ready(rag: Any, workspace_id: str) -> None:
@@ -398,15 +519,35 @@ def extract_rerank_payload(retrieval: dict[str, Any], query_params: dict[str, An
         scores_all = list(scores_final)
     if not scores_thr and scores_final:
         scores_thr = list(scores_final)
+    input_count = parse_non_negative_int(dbg.get("count_input"))
+    all_count = parse_non_negative_int(dbg.get("count_after_rerank"))
+    thr_count = parse_non_negative_int(dbg.get("count_after_threshold"))
+    final_count = parse_non_negative_int(dbg.get("count_final"))
+    counts = {
+        "input": input_count if input_count is not None else len(scores_all),
+        "all": all_count if all_count is not None else len(scores_all),
+        "after_threshold": thr_count if thr_count is not None else len(scores_thr),
+        "final": final_count if final_count is not None else len(scores_final),
+    }
+    denom = counts["input"] if counts["input"] > 0 else None
+    retention = {
+        "all_over_input": round(counts["all"] / denom, 6) if denom else None,
+        "after_threshold_over_input": round(counts["after_threshold"] / denom, 6) if denom else None,
+        "final_over_input": round(counts["final"] / denom, 6) if denom else None,
+        "final_over_after_threshold": (
+            round(counts["final"] / counts["after_threshold"], 6)
+            if counts["after_threshold"] > 0
+            else None
+        ),
+    }
     return {
         "rerank_scope": str(dbg.get("scope", query_params.get("rerank_score_scope", "top_k"))),
         "min_rerank_score": dbg.get("min_rerank_score"),
-        "counts": {
-            "input": int(dbg.get("count_input", len(scores_all))) if str(dbg.get("count_input", "")).isdigit() else len(scores_all),
-            "all": int(dbg.get("count_after_rerank", len(scores_all))) if str(dbg.get("count_after_rerank", "")).isdigit() else len(scores_all),
-            "after_threshold": int(dbg.get("count_after_threshold", len(scores_thr))) if str(dbg.get("count_after_threshold", "")).isdigit() else len(scores_thr),
-            "final": int(dbg.get("count_final", len(scores_final))) if str(dbg.get("count_final", "")).isdigit() else len(scores_final),
-        },
+        "counts": counts,
+        "retention": retention,
+        "scores_all": scores_all,
+        "scores_after_threshold": scores_thr,
+        "scores_final": scores_final,
         "scores": {"all": scores_all, "after_threshold": scores_thr, "final": scores_final},
         "distribution": {
             "all": score_distribution(scores_all),
@@ -419,32 +560,34 @@ def extract_rerank_payload(retrieval: dict[str, Any], query_params: dict[str, An
 async def ensure_workspace_index(service: LocalRagService, workspace_id: str, chunks_by_doc: dict[str, dict[str, Any]], retries: int) -> dict[str, Any]:
     rag = await service.get_rag(workspace_id)
     await ensure_rag_runtime_ready(rag, workspace_id)
-    target = set(chunks_by_doc.keys())
+    target_docs = sorted(chunks_by_doc.keys(), key=lambda x: (0, int(x)) if x.isdigit() else (1, x))
+    target = set(target_docs)
     sort_key = lambda x: (0, int(x)) if x.isdigit() else (1, x)
-    missing_before_full = await rag.lightrag.full_docs.filter_keys(target)
-    missing_before_full_set = set(missing_before_full)
-    chunk_id_map = {doc_id: chunk_id_for_doc(doc_id) for doc_id in target}
-    expected_chunk_ids = list(chunk_id_map.values())
-    existing_text_chunk_ids = await fetch_existing_chunk_ids(
-        rag.lightrag.text_chunks, expected_chunk_ids
-    )
-    existing_vdb_chunk_ids = await fetch_existing_chunk_ids(
-        rag.lightrag.chunks_vdb, expected_chunk_ids
-    )
-    missing_before_chunk_set = {
-        doc_id for doc_id, chunk_id in chunk_id_map.items() if chunk_id not in existing_text_chunk_ids
-    }
-    missing_before_vdb_set = {
-        doc_id for doc_id, chunk_id in chunk_id_map.items() if chunk_id not in existing_vdb_chunk_ids
-    }
+    before_state = await inspect_workspace_index_state(rag, target_docs)
+    missing_before_full_set = set(before_state["missing_full_set"])
+    missing_before_doc_status_set = set(before_state["missing_doc_status_set"])
+    missing_before_status_set = set(before_state["status_not_processed_set"])
+    missing_before_chunk_set = set(before_state["missing_chunk_set"])
+    missing_before_vdb_set = set(before_state["missing_vdb_set"])
     to_ingest = sorted(
-        missing_before_full_set | missing_before_chunk_set | missing_before_vdb_set,
+        missing_before_full_set
+        | missing_before_doc_status_set
+        | missing_before_status_set
+        | missing_before_chunk_set
+        | missing_before_vdb_set,
         key=sort_key,
     )
     logger.info(
-        "Workspace %s missing full_docs: %d/%d, missing text_chunks: %d/%d, missing vdb_chunks: %d/%d",
+        (
+            "Workspace %s missing full_docs: %d/%d, missing doc_status: %d/%d, "
+            "status not processed: %d/%d, missing text_chunks: %d/%d, missing vdb_chunks: %d/%d"
+        ),
         workspace_id,
         len(missing_before_full_set),
+        len(target),
+        len(missing_before_doc_status_set),
+        len(target),
+        len(missing_before_status_set),
         len(target),
         len(missing_before_chunk_set),
         len(target),
@@ -467,10 +610,7 @@ async def ensure_workspace_index(service: LocalRagService, workspace_id: str, ch
         failures.append(failure)
         append_jsonl_line(INGEST_FAILURES, failure)
 
-    stale_docs = sorted(
-        (missing_before_chunk_set | missing_before_vdb_set) - missing_before_full_set,
-        key=sort_key,
-    )
+    stale_docs = sorted((set(to_ingest) - missing_before_full_set), key=sort_key)
     for doc_id in stale_docs:
         try:
             await with_retries(
@@ -509,26 +649,18 @@ async def ensure_workspace_index(service: LocalRagService, workspace_id: str, ch
             logger.info("Ingest progress: %d/%d", idx, len(to_ingest))
             gc.collect()
             clear_cuda_cache()
-    missing_after_full = await rag.lightrag.full_docs.filter_keys(target)
-    missing_after_full_set = set(missing_after_full)
-    existing_after_text_chunk_ids = await fetch_existing_chunk_ids(
-        rag.lightrag.text_chunks, expected_chunk_ids
-    )
-    existing_after_vdb_chunk_ids = await fetch_existing_chunk_ids(
-        rag.lightrag.chunks_vdb, expected_chunk_ids
-    )
-    missing_after_chunks = sorted(
-        [doc_id for doc_id, chunk_id in chunk_id_map.items() if chunk_id not in existing_after_text_chunk_ids],
-        key=sort_key,
-    )
-    missing_after_vdb = sorted(
-        [doc_id for doc_id, chunk_id in chunk_id_map.items() if chunk_id not in existing_after_vdb_chunk_ids],
-        key=sort_key,
-    )
+    after_state = await inspect_workspace_index_state(rag, target_docs)
+    missing_after_full_set = set(after_state["missing_full_set"])
+    missing_after_doc_status = sorted(list(after_state["missing_doc_status_set"]), key=sort_key)
+    missing_after_status = sorted(list(after_state["status_not_processed_set"]), key=sort_key)
+    missing_after_chunks = sorted(list(after_state["missing_chunk_set"]), key=sort_key)
+    missing_after_vdb = sorted(list(after_state["missing_vdb_set"]), key=sort_key)
     summary = {
         "workspace_id": workspace_id,
         "target_doc_count": len(target),
         "missing_before_full_doc_count": len(missing_before_full_set),
+        "missing_before_doc_status_count": len(missing_before_doc_status_set),
+        "missing_before_status_not_processed_count": len(missing_before_status_set),
         "missing_before_chunk_doc_count": len(missing_before_chunk_set),
         "missing_before_vdb_doc_count": len(missing_before_vdb_set),
         "stale_doc_count": len(stale_docs),
@@ -538,10 +670,16 @@ async def ensure_workspace_index(service: LocalRagService, workspace_id: str, ch
         "ingested_now_count": ingested,
         "ingest_failure_count": len(failures),
         "missing_after_full_doc_count": len(missing_after_full_set),
+        "missing_after_doc_status_count": len(missing_after_doc_status),
+        "missing_after_status_not_processed_count": len(missing_after_status),
         "missing_after_chunk_doc_count": len(missing_after_chunks),
         "missing_after_vdb_doc_count": len(missing_after_vdb),
         "missing_before_full_doc_sample": sorted(list(missing_before_full_set), key=sort_key)[:20],
+        "missing_before_doc_status_sample": sorted(list(missing_before_doc_status_set), key=sort_key)[:20],
+        "missing_before_status_not_processed_sample": sorted(list(missing_before_status_set), key=sort_key)[:20],
         "missing_after_full_doc_sample": sorted(list(missing_after_full_set), key=sort_key)[:20],
+        "missing_after_doc_status_sample": missing_after_doc_status[:20],
+        "missing_after_status_not_processed_sample": missing_after_status[:20],
         "missing_after_chunk_doc_sample": missing_after_chunks[:20],
         "missing_after_vdb_doc_sample": missing_after_vdb[:20],
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -560,24 +698,213 @@ def recall_at_k(gt: set[int], retrieved: list[int], ks: list[int]) -> dict[str, 
     return out
 
 
+def collect_ingest_blockers(summary: dict[str, Any]) -> dict[str, str]:
+    blocker_keys = [
+        "ingest_failure_count",
+        "missing_after_full_doc_count",
+        "missing_after_doc_status_count",
+        "missing_after_status_not_processed_count",
+        "missing_after_chunk_doc_count",
+        "missing_after_vdb_doc_count",
+    ]
+    blockers: dict[str, str] = {}
+    for key in blocker_keys:
+        if key not in summary:
+            blockers[key] = "missing"
+            continue
+        iv = parse_int(summary.get(key))
+        if iv is None:
+            blockers[key] = "invalid"
+            continue
+        if iv > 0:
+            blockers[key] = str(iv)
+    return blockers
+
+
+def resolve_chunk_top_k(raw_chunk_top_k: int, ks: list[int]) -> int:
+    if raw_chunk_top_k > 0:
+        return raw_chunk_top_k
+    return max(ks)
+
+
+async def map_chunks_to_doc_ids(
+    rag: Any,
+    retrieval: dict[str, Any],
+    abstract_idx: dict[str, list[int]],
+    record_key: str,
+    record_id: Any,
+) -> tuple[list[int], list[dict[str, Any]]]:
+    chunks = retrieval.get("data", {}).get("chunks", []) if isinstance(retrieval, dict) else []
+    if not isinstance(chunks, list):
+        chunks = []
+    chunk_ids = [
+        str(c.get("chunk_id", "")).strip()
+        for c in chunks
+        if isinstance(c, dict) and str(c.get("chunk_id", "")).strip()
+    ]
+    rows = await rag.lightrag.text_chunks.get_by_ids(chunk_ids) if chunk_ids else []
+    row_by_chunk_id = build_chunk_row_lookup(rows)
+    warns: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    retrieved: list[int] = []
+
+    for c in chunks:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("chunk_id", "")).strip()
+        row = row_by_chunk_id.get(cid) if cid else None
+        doc_id = parse_int(c.get("full_doc_id") or c.get("doc_id"))
+        if doc_id is None and isinstance(row, dict):
+            doc_id = parse_int((row or {}).get("full_doc_id") or (row or {}).get("doc_id"))
+        if doc_id is None:
+            fp = (row or {}).get("file_path") if isinstance(row, dict) else c.get("file_path")
+            doc_id = parse_doc_id_from_file_path(fp)
+        if doc_id is None:
+            txt = str(c.get("content") or c.get("text") or "").strip()
+            if not txt and isinstance(row, dict):
+                txt = str(row.get("content") or row.get("text") or "").strip()
+            cand = abstract_idx.get(txt, [])
+            if len(cand) == 1:
+                doc_id = cand[0]
+        if doc_id is None:
+            warns.append({record_key: record_id, "chunk_id": cid, "reason": "cannot map doc_id"})
+            continue
+        if doc_id not in seen:
+            seen.add(doc_id)
+            retrieved.append(doc_id)
+    return retrieved, warns
+
+
+def compute_macro_recall(rows: list[dict[str, Any]], ks: list[int]) -> dict[str, float | None]:
+    macro: dict[str, float | None] = {}
+    for k in ks:
+        key = str(k)
+        vals = [
+            float(r.get("recall_at_k", {}).get(key))
+            for r in rows
+            if isinstance(r.get("recall_at_k", {}).get(key), (int, float))
+        ]
+        macro[key] = round(sum(vals) / len(vals), 6) if vals else None
+    return macro
+
+
+def compute_micro_recall(rows: list[dict[str, Any]], ks: list[int]) -> dict[str, float | None]:
+    denom = sum(int(r.get("gt_count", 0)) for r in rows if int(r.get("gt_count", 0)) > 0)
+    micro: dict[str, float | None] = {}
+    for k in ks:
+        key = str(k)
+        if denom <= 0:
+            micro[key] = None
+            continue
+        hits = sum(
+            int(r.get("hit_at_k", {}).get(key, 0))
+            for r in rows
+            if isinstance(r.get("hit_at_k", {}).get(key), int)
+        )
+        micro[key] = round(hits / denom, 6)
+    return micro
+
+
+def to_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in {"1", "true", "yes", "y", "on"}:
+            return True
+        if t in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(v)
+
+
+def has_matching_survey_retrieval(
+    summary: dict[str, Any],
+    manifest: dict[str, Any],
+    args: argparse.Namespace,
+    ks: list[int],
+    expected_survey_count: int | None = None,
+) -> bool:
+    expected_chunk_top_k = resolve_chunk_top_k(args.chunk_top_k, ks)
+    expected_subset = Path(args.data_root) / args.subset_dir
+    summary_checks = {
+        "mode": "survey",
+        "survey_stage": "retrieval",
+        "workspace_id": str(args.workspace_id),
+        "query_mode": str(args.query_mode),
+    }
+    for key, value in summary_checks.items():
+        if str(summary.get(key)) != value:
+            return False
+    if parse_int(summary.get("top_k")) != args.top_k:
+        return False
+    if parse_int(summary.get("chunk_top_k")) != expected_chunk_top_k:
+        return False
+    if to_bool(summary.get("enable_rerank")) != bool(args.enable_rerank):
+        return False
+    if list(summary.get("k_list") or []) != ks:
+        return False
+
+    manifest_checks = {
+        "mode": "survey",
+        "survey_stage": "retrieval",
+        "workspace_id": str(args.workspace_id),
+        "data_root": str(Path(args.data_root)),
+        "subset_dir": str(expected_subset),
+        "surveys_file": str(expected_subset / args.surveys_file),
+        "chunks_file": str(expected_subset / args.chunks_file),
+        "corpus_file": str(expected_subset / args.corpus_file),
+    }
+    for key, value in manifest_checks.items():
+        if str(manifest.get(key)) != value:
+            return False
+    params = manifest.get("effective_query_params", {})
+    if not isinstance(params, dict):
+        return False
+    if str(params.get("mode")) != str(args.query_mode):
+        return False
+    if parse_int(params.get("top_k")) != args.top_k:
+        return False
+    if parse_int(params.get("chunk_top_k")) != expected_chunk_top_k:
+        return False
+    if to_bool(params.get("enable_rerank")) != bool(args.enable_rerank):
+        return False
+    if list(params.get("k_list") or []) != ks:
+        return False
+    if expected_survey_count is not None:
+        if parse_int(summary.get("survey_count")) != expected_survey_count:
+            return False
+    return True
+
+
 async def run_retrieval(args: argparse.Namespace) -> int:
+    ks = parse_k_list(args.k_list)
+    chunk_top_k = resolve_chunk_top_k(args.chunk_top_k, ks)
     QueryParam, LocalRagService, _ = import_rag_dependencies()
-    refresh_logging("retrieval")
     data_root = Path(args.data_root)
     subset = data_root / args.subset_dir
     chunks_by_doc, chunk_stats = load_chunks(subset / args.chunks_file)
     queries = load_queries(subset / args.queries_file, args.limit)
     abstract_idx = load_abstract_index(subset / args.corpus_file)
-    ks = parse_k_list(args.k_list)
-    if args.chunk_top_k <= 0:
-        args.chunk_top_k = max(ks)
     settings = settings_for_surge()
     service = LocalRagService(settings)
-    refresh_logging("retrieval")
     ingest_summary = await ensure_workspace_index(service, args.workspace_id, chunks_by_doc, args.max_retries)
+    sync_master_logging_handlers()
+    blockers = collect_ingest_blockers(ingest_summary)
+    if blockers:
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(blockers.items()))
+        logger.error("Ingest integrity check failed before retrieval: %s", detail)
+        raise RuntimeError(
+            f"Workspace ingest incomplete; abort retrieval evaluation. Details: {detail}"
+        )
     rag = await service.get_rag(args.workspace_id)
     await ensure_rag_runtime_ready(rag, args.workspace_id)
-    query_params = {"mode": args.query_mode, "top_k": args.top_k, "chunk_top_k": args.chunk_top_k, "enable_rerank": args.enable_rerank, "rerank_score_scope": "top_k"}
+    query_params = {
+        "mode": args.query_mode,
+        "top_k": args.top_k,
+        "chunk_top_k": chunk_top_k,
+        "enable_rerank": args.enable_rerank,
+        "rerank_score_scope": "top_k",
+    }
     sem = asyncio.Semaphore(max(1, args.max_concurrency))
     done = 0
     lock = asyncio.Lock()
@@ -597,39 +924,20 @@ async def run_retrieval(args: argparse.Namespace) -> int:
             try:
                 if not q:
                     raise ValueError("empty prefix_titles_query")
-                param = QueryParam(mode=args.query_mode, top_k=args.top_k, chunk_top_k=args.chunk_top_k, enable_rerank=args.enable_rerank)
+                param = QueryParam(
+                    mode=args.query_mode,
+                    top_k=args.top_k,
+                    chunk_top_k=chunk_top_k,
+                    enable_rerank=args.enable_rerank,
+                )
                 retrieval = await with_retries(lambda: rag.lightrag.aquery_data(q, param=param), label=f"query {qid}", retries=args.max_retries)
-                chunks = retrieval.get("data", {}).get("chunks", [])
-                chunk_ids = [str(c.get("chunk_id", "")).strip() for c in chunks if isinstance(c, dict) and str(c.get("chunk_id", "")).strip()]
-                rows = await rag.lightrag.text_chunks.get_by_ids(chunk_ids) if chunk_ids else []
-                row_by_chunk_id, row_list = build_chunk_row_lookup(rows)
-                seen = set()
-                for idx, c in enumerate(chunks):
-                    if not isinstance(c, dict):
-                        continue
-                    cid = str(c.get("chunk_id", "")).strip()
-                    row = row_by_chunk_id.get(cid) if cid else None
-                    if row is None and idx < len(row_list):
-                        row = row_list[idx]
-                    doc_id = parse_int(c.get("full_doc_id") or c.get("doc_id"))
-                    if doc_id is None and isinstance(row, dict):
-                        doc_id = parse_int((row or {}).get("full_doc_id") or (row or {}).get("doc_id"))
-                    if doc_id is None:
-                        fp = (row or {}).get("file_path") if isinstance(row, dict) else c.get("file_path")
-                        doc_id = parse_doc_id_from_file_path(fp)
-                    if doc_id is None:
-                        txt = str(c.get("content") or c.get("text") or "").strip()
-                        if not txt and isinstance(row, dict):
-                            txt = str(row.get("content") or row.get("text") or "").strip()
-                        cand = abstract_idx.get(txt, [])
-                        if len(cand) == 1:
-                            doc_id = cand[0]
-                    if doc_id is None:
-                        warns.append({"query_id": qid, "chunk_id": cid, "reason": "cannot map doc_id"})
-                        continue
-                    if doc_id not in seen:
-                        seen.add(doc_id)
-                        retrieved.append(doc_id)
+                retrieved, warns = await map_chunks_to_doc_ids(
+                    rag=rag,
+                    retrieval=retrieval,
+                    abstract_idx=abstract_idx,
+                    record_key="query_id",
+                    record_id=qid,
+                )
             except Exception as exc:
                 error = {
                     "query_id": qid,
@@ -645,6 +953,7 @@ async def run_retrieval(args: argparse.Namespace) -> int:
             "retrieved_count": len(retrieved),
             "gt_doc_ids": sorted(gt),
             "retrieved_doc_ids": retrieved,
+            "hit_at_k": {str(k): len(gt & set(retrieved[:k])) for k in ks},
             "recall_at_k": recall_at_k(gt, retrieved, ks),
             "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
             "error": error,
@@ -657,7 +966,7 @@ async def run_retrieval(args: argparse.Namespace) -> int:
             "workspace_id": args.workspace_id,
             "query_mode": args.query_mode,
             "top_k": args.top_k,
-            "chunk_top_k": args.chunk_top_k,
+            "chunk_top_k": chunk_top_k,
             "enable_rerank": args.enable_rerank,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             **rerank,
@@ -679,18 +988,14 @@ async def run_retrieval(args: argparse.Namespace) -> int:
     append_jsonl(PER_QUERY_FILE, per_rows)
     append_jsonl(RERANK_STATS_FILE, rerank_rows)
     append_jsonl(WARNINGS_FILE, warnings)
-    avg = {}
-    for k in ks:
-        key = str(k)
-        vals = [float(r["recall_at_k"][key]) for r in per_rows if isinstance(r.get("recall_at_k", {}).get(key), (int, float))]
-        avg[key] = round(sum(vals) / len(vals), 6) if vals else None
+    avg = compute_macro_recall(per_rows, ks)
     save_json(SUMMARY_FILE, {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "mode": "retrieval",
         "workspace_id": args.workspace_id,
         "query_mode": args.query_mode,
         "top_k": args.top_k,
-        "chunk_top_k": args.chunk_top_k,
+        "chunk_top_k": chunk_top_k,
         "enable_rerank": args.enable_rerank,
         "k_list": ks,
         "query_count": len(per_rows),
@@ -739,50 +1044,351 @@ async def run_retrieval(args: argparse.Namespace) -> int:
     return 0
 
 
-async def run_survey_placeholder(args: argparse.Namespace) -> int:
-    refresh_logging("survey")
+async def run_survey_retrieval(args: argparse.Namespace) -> int:
+    survey_ks = parse_k_list(args.survey_k_list)
+    chunk_top_k = resolve_chunk_top_k(args.chunk_top_k, survey_ks)
+    QueryParam, LocalRagService, _ = import_rag_dependencies()
+    data_root = Path(args.data_root)
+    subset = data_root / args.subset_dir
+    chunks_by_doc, chunk_stats = load_chunks(subset / args.chunks_file)
+    surveys = load_surveys(subset / args.surveys_file, args.limit)
+    abstract_idx = load_abstract_index(subset / args.corpus_file)
+    settings = settings_for_surge()
+    service = LocalRagService(settings)
+    ingest_summary = await ensure_workspace_index(service, args.workspace_id, chunks_by_doc, args.max_retries)
+    sync_master_logging_handlers()
+    blockers = collect_ingest_blockers(ingest_summary)
+    if blockers:
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(blockers.items()))
+        logger.error("Ingest integrity check failed before survey retrieval: %s", detail)
+        raise RuntimeError(
+            f"Workspace ingest incomplete; abort survey retrieval evaluation. Details: {detail}"
+        )
+
+    rag = await service.get_rag(args.workspace_id)
+    await ensure_rag_runtime_ready(rag, args.workspace_id)
+    query_params = {
+        "mode": args.query_mode,
+        "top_k": args.top_k,
+        "chunk_top_k": chunk_top_k,
+        "enable_rerank": args.enable_rerank,
+        "rerank_score_scope": "top_k",
+    }
+
+    sem = asyncio.Semaphore(max(1, args.max_concurrency))
+    done = 0
+    lock = asyncio.Lock()
+    total = len(surveys)
+
+    async def one(i: int, item: dict[str, Any]):
+        nonlocal done
+        survey_id = item.get("survey_id", i + 1)
+        survey_title = str(item.get("survey_title") or "").strip()
+        gt = {int(x) for x in item.get("all_cites", []) if parse_int(x) is not None}
+        t0 = time.perf_counter()
+        warns = []
+        error = None
+        retrieved: list[int] = []
+        retrieval = {}
+
+        async with sem:
+            try:
+                if not survey_title:
+                    raise ValueError("empty survey_title")
+                param = QueryParam(
+                    mode=args.query_mode,
+                    top_k=args.top_k,
+                    chunk_top_k=chunk_top_k,
+                    enable_rerank=args.enable_rerank,
+                )
+                retrieval = await with_retries(
+                    lambda: rag.lightrag.aquery_data(survey_title, param=param),
+                    label=f"survey {survey_id}",
+                    retries=args.max_retries,
+                )
+                retrieved, warns = await map_chunks_to_doc_ids(
+                    rag=rag,
+                    retrieval=retrieval,
+                    abstract_idx=abstract_idx,
+                    record_key="survey_id",
+                    record_id=survey_id,
+                )
+            except Exception as exc:
+                error = {
+                    "survey_id": survey_id,
+                    "error": str(exc),
+                    "traceback_tail": "".join(
+                        traceback.format_exception(type(exc), exc, exc.__traceback__)[-3:]
+                    ).strip(),
+                }
+
+        row = {
+            "survey_id": survey_id,
+            "survey_title": survey_title,
+            "gt_count": len(gt),
+            "retrieved_count": len(retrieved),
+            "gt_doc_ids": sorted(gt),
+            "retrieved_doc_ids": retrieved,
+            "hit_at_k": {str(k): len(gt & set(retrieved[:k])) for k in survey_ks},
+            "recall_at_k": recall_at_k(gt, retrieved, survey_ks),
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
+            "error": error,
+        }
+        rerank = extract_rerank_payload(retrieval, query_params)
+        rerank_row = {
+            "survey_id": survey_id,
+            "survey_title": survey_title,
+            "workspace_id": args.workspace_id,
+            "query_mode": args.query_mode,
+            "top_k": args.top_k,
+            "chunk_top_k": chunk_top_k,
+            "enable_rerank": args.enable_rerank,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **rerank,
+        }
+        async with lock:
+            done += 1
+            if done == total or done % max(1, total // 5) == 0:
+                logger.info("Survey retrieval progress: %d/%d", done, total)
+        return row, rerank_row, warns, error
+
+    results = await asyncio.gather(*[asyncio.create_task(one(i, s)) for i, s in enumerate(surveys)])
+    per_rows: list[dict[str, Any]] = []
+    rerank_rows: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for pr, rr, ws, err in results:
+        per_rows.append(pr)
+        rerank_rows.append(rr)
+        warnings.extend(ws)
+        if err:
+            errors.append(err)
+
+    append_jsonl(SURVEY_PER_FILE, per_rows)
+    append_jsonl(SURVEY_RERANK_STATS_FILE, rerank_rows)
+    append_jsonl(SURVEY_WARNINGS_FILE, warnings)
+
+    macro = compute_macro_recall(per_rows, survey_ks)
+    micro = compute_micro_recall(per_rows, survey_ks)
+
+    save_json(SURVEY_SUMMARY_FILE, {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "mode": "survey",
+        "survey_stage": "retrieval",
+        "workspace_id": args.workspace_id,
+        "query_mode": args.query_mode,
+        "top_k": args.top_k,
+        "chunk_top_k": chunk_top_k,
+        "enable_rerank": args.enable_rerank,
+        "k_list": survey_ks,
+        "survey_count": len(per_rows),
+        "success_count": sum(1 for r in per_rows if r.get("error") is None),
+        "failed_count": len(errors),
+        "mapping_warning_count": len(warnings),
+        "non_empty_retrieval_count": sum(1 for r in per_rows if int(r.get("retrieved_count", 0)) > 0),
+        "macro_recall_at_k": macro,
+        "micro_recall_at_k": micro,
+        "ingest_summary": ingest_summary,
+        "chunks_source_stats": chunk_stats,
+    })
+
+    all_scores = [s for r in rerank_rows for s in r.get("scores", {}).get("all", []) if isinstance(s, (int, float))]
+    thr_scores = [s for r in rerank_rows for s in r.get("scores", {}).get("after_threshold", []) if isinstance(s, (int, float))]
+    fin_scores = [s for r in rerank_rows for s in r.get("scores", {}).get("final", []) if isinstance(s, (int, float))]
+    save_json(SURVEY_RERANK_SUMMARY_FILE, {
+        "total_surveys": len(rerank_rows),
+        "overall_distribution": {
+            "all": score_distribution([float(x) for x in all_scores]),
+            "after_threshold": score_distribution([float(x) for x in thr_scores]),
+            "final": score_distribution([float(x) for x in fin_scores]),
+        },
+    })
+
+    save_json(SURVEY_RUN_MANIFEST, {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "mode": "survey",
+        "survey_stage": "retrieval",
+        "data_root": str(data_root),
+        "subset_dir": str(subset),
+        "surveys_file": str(subset / args.surveys_file),
+        "chunks_file": str(subset / args.chunks_file),
+        "corpus_file": str(subset / args.corpus_file),
+        "workspace_id": args.workspace_id,
+        "effective_query_params": query_params | {
+            "max_concurrency": args.max_concurrency,
+            "max_retries": args.max_retries,
+            "k_list": survey_ks,
+        },
+        "result_files": {
+            "per_survey": str(SURVEY_PER_FILE),
+            "summary": str(SURVEY_SUMMARY_FILE),
+            "rerank_stats": str(SURVEY_RERANK_STATS_FILE),
+            "rerank_summary": str(SURVEY_RERANK_SUMMARY_FILE),
+            "mapping_warnings": str(SURVEY_WARNINGS_FILE),
+            "ingest_manifest": str(INGEST_MANIFEST),
+            "ingest_failures": str(INGEST_FAILURES),
+        },
+    })
+    logger.info("Survey retrieval complete: %s", SURVEY_SUMMARY_FILE)
+    gc.collect()
+    clear_cuda_cache()
+    return 0
+
+
+async def run_survey_generate_placeholder(args: argparse.Namespace) -> int:
+    survey_ks = parse_k_list(args.survey_k_list)
+    data_root = Path(args.data_root)
+    subset = data_root / args.subset_dir
+    expected_survey_count = len(load_surveys(subset / args.surveys_file, args.limit))
+
+    need_retrieval = True
+    if (
+        SURVEY_SUMMARY_FILE.exists()
+        and SURVEY_PER_FILE.exists()
+        and SURVEY_RERANK_STATS_FILE.exists()
+        and SURVEY_RUN_MANIFEST.exists()
+    ):
+        try:
+            summary = json.loads(SURVEY_SUMMARY_FILE.read_text(encoding="utf-8"))
+            manifest = json.loads(SURVEY_RUN_MANIFEST.read_text(encoding="utf-8"))
+            if isinstance(summary, dict) and isinstance(manifest, dict):
+                need_retrieval = not has_matching_survey_retrieval(
+                    summary=summary,
+                    manifest=manifest,
+                    args=args,
+                    ks=survey_ks,
+                    expected_survey_count=expected_survey_count,
+                )
+        except Exception:
+            need_retrieval = True
+
+    if need_retrieval:
+        logger.info("Survey generate stage requires survey retrieval results; auto-running retrieval stage.")
+        await run_survey_retrieval(args)
+    else:
+        logger.info("Survey retrieval results exist and match current parameters; skip auto-retrieval.")
+
     save_json(SURVEY_STATUS, {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "mode": "survey",
+        "survey_stage": "generate",
         "status": "not_implemented",
         "message": "Survey generation/evaluation is not implemented yet in evaluate_surge.py",
         "workspace_id": args.workspace_id,
+        "depends_on_survey_retrieval": str(SURVEY_SUMMARY_FILE),
     })
-    logger.info("Survey placeholder written: %s", SURVEY_STATUS)
+    logger.info("Survey generate placeholder written: %s", SURVEY_STATUS)
     return 0
+
+
+async def run_survey(args: argparse.Namespace) -> int:
+    if args.survey_stage == "retrieval":
+        return await run_survey_retrieval(args)
+    if args.survey_stage == "generate":
+        return await run_survey_generate_placeholder(args)
+    raise ValueError(f"Unsupported survey-stage: {args.survey_stage}")
+
+
+def resolve_log_mode(args: argparse.Namespace) -> str:
+    if args.mode == "survey":
+        return f"survey_{args.survey_stage}"
+    return "retrieval"
+
+
+def resolve_log_mode_from_argv(argv: list[str]) -> str:
+    mode = "retrieval"
+    survey_stage = "retrieval"
+    for i, token in enumerate(argv):
+        if token.startswith("--mode="):
+            mode = token.split("=", 1)[1].strip() or mode
+        elif token == "--mode" and i + 1 < len(argv):
+            mode = argv[i + 1].strip() or mode
+        elif token.startswith("--survey-stage="):
+            survey_stage = token.split("=", 1)[1].strip() or survey_stage
+        elif token == "--survey-stage" and i + 1 < len(argv):
+            survey_stage = argv[i + 1].strip() or survey_stage
+    if mode == "survey":
+        return f"survey_{survey_stage}"
+    return "retrieval"
+
+
+def parse_args_and_bootstrap(argv: list[str] | None = None) -> argparse.Namespace:
+    if argv is None:
+        argv = sys.argv[1:]
+    ensure_dirs()
+    refresh_logging(resolve_log_mode_from_argv(argv))
+    try:
+        args = build_parser().parse_args(argv)
+    except SystemExit as exc:
+        code = int(exc.code) if isinstance(exc.code, int) else 2
+        if code != 0:
+            logger.error("Argument parsing failed with exit code %s", code)
+        raise
+    refresh_logging(resolve_log_mode(args))
+    logger.info("Args: %s", {k: getattr(args, k) for k in sorted(vars(args).keys())})
+    return args
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    parse_k_list(args.k_list)
+    parse_k_list(args.survey_k_list)
+    if args.top_k <= 0:
+        raise ValueError(f"--top-k must be > 0, got {args.top_k}")
+    if args.chunk_top_k == 0:
+        pass
+    elif args.chunk_top_k < 0:
+        raise ValueError(
+            f"--chunk-top-k must be > 0 or 0(auto), got {args.chunk_top_k}"
+        )
+    if args.max_concurrency <= 0:
+        raise ValueError(
+            f"--max-concurrency must be > 0, got {args.max_concurrency}"
+        )
+    if args.max_retries < 0:
+        raise ValueError(f"--max-retries must be >= 0, got {args.max_retries}")
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="SurGE evaluation for RAGAnything")
     p.add_argument("--mode", choices=["retrieval", "survey"], default="retrieval")
+    p.add_argument("--survey-stage", choices=["retrieval", "generate"], default="retrieval")
     p.add_argument("--data-root", default=DEFAULT_DATA_ROOT)
     p.add_argument("--subset-dir", default=DEFAULT_SUBSET_DIR)
     p.add_argument("--queries-file", default=DEFAULT_QUERIES)
+    p.add_argument("--surveys-file", default=DEFAULT_SURVEYS)
     p.add_argument("--chunks-file", default=DEFAULT_CHUNKS)
     p.add_argument("--corpus-file", default=DEFAULT_CORPUS)
     p.add_argument("--workspace-id", default=DEFAULT_WORKSPACE)
-    p.add_argument("--query-mode", choices=["local", "global", "hybrid", "naive", "mix", "bypass"], default="hybrid")
+    p.add_argument(
+        "--query-mode",
+        choices=["local", "global", "hybrid", "naive", "mix", "bypass"],
+        default="hybrid",
+    )
     p.add_argument("--top-k", type=int, default=40)
     p.add_argument("--chunk-top-k", type=int, default=0, help="<=0 means auto use max(k-list)")
     p.add_argument("--k-list", default="20,30,100,200,500,1000")
+    p.add_argument("--survey-k-list", default="50,100,200,500,1000")
     p.add_argument("--enable-rerank", type=as_bool, default=True)
     p.add_argument("--max-concurrency", type=int, default=8)
     p.add_argument("--max-retries", type=int, default=0)
-    p.add_argument("--limit", type=int, default=0, help="0 means all queries")
+    p.add_argument("--limit", type=int, default=0, help="0 means all queries/surveys")
     return p
 
 
 async def amain(args: argparse.Namespace) -> int:
-    ensure_dirs()
+    validate_args(args)
     if args.mode == "retrieval":
         return await run_retrieval(args)
-    return await run_survey_placeholder(args)
+    return await run_survey(args)
 
 
 def main() -> int:
-    args = build_parser().parse_args()
     try:
+        args = parse_args_and_bootstrap()
         return asyncio.run(amain(args))
+    except SystemExit as exc:
+        code = int(exc.code) if isinstance(exc.code, int) else 2
+        return code
     except KeyboardInterrupt:
         logger.warning("Interrupted by user")
         return 130
