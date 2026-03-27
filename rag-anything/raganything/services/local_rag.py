@@ -878,6 +878,8 @@ class LocalRagService:
                 # rerank 后保留 chunk 的最低分数（LightRAG 默认 0.0 = 不过滤）
                 # BGE-reranker-v2-m3 相关 chunk 典型得分 >0.5，不相关 <0.3
                 "min_rerank_score": DEFAULT_MIN_RERANK_SCORE,
+                "graph_storage": "Neo4JStorage",
+                "vector_storage": "MilvusVectorDBStorage",
             },
         )
 
