@@ -125,8 +125,33 @@ def parse_doc_id_from_file_path(v: Any) -> int | None:
     if not isinstance(v, str) or not v.strip():
         return None
     base = os.path.basename(v.strip())
-    m = re.search(r"(?:surge_doc_)?(\d+)(?:\.[^.]+)?$", base)
+    if base.startswith("surge_doc_"):
+        tail = base[len("surge_doc_") :]
+        m = re.match(r"(\d+)", tail)
+        if m:
+            return int(m.group(1))
+    m = re.search(r"^(\d+)(?:\.[^.]+)?$", base)
     return int(m.group(1)) if m else None
+
+
+def slugify_title(v: Any, max_len: int = 80) -> str:
+    if not isinstance(v, str):
+        return "untitled"
+    text = v.strip()
+    if not text:
+        return "untitled"
+    ascii_text = text.encode("ascii", "ignore").decode("ascii")
+    ascii_text = re.sub(r"\s+", "_", ascii_text)
+    ascii_text = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_text).strip("_.-")
+    if not ascii_text:
+        return "untitled"
+    return ascii_text[:max_len]
+
+
+def build_virtual_file_path(doc_id: str, row: dict[str, Any]) -> str:
+    title = row.get("title") or row.get("Title") or ""
+    slug = slugify_title(title)
+    return f"surge_doc_{doc_id}__{slug}.txt"
 
 
 def ensure_dirs() -> None:
@@ -273,6 +298,41 @@ def build_chunk_row_lookup(rows: Any) -> tuple[dict[str, dict[str, Any]], list[d
     return by_chunk_id, ordered_rows
 
 
+def chunk_id_for_doc(doc_id: str) -> str:
+    return f"surge-chunk-{doc_id}"
+
+
+def iter_batches(values: list[str], batch_size: int) -> list[list[str]]:
+    return [values[i : i + batch_size] for i in range(0, len(values), batch_size)]
+
+
+def parse_chunk_store_row_id(row: Any) -> str | None:
+    if not isinstance(row, dict):
+        return None
+    rid = str(
+        row.get("chunk_id")
+        or row.get("id")
+        or row.get("_id")
+        or row.get("__id__")
+        or row.get("key")
+        or ""
+    ).strip()
+    return rid or None
+
+
+async def fetch_existing_chunk_ids(store: Any, expected_ids: list[str], batch_size: int = 2000) -> set[str]:
+    found: set[str] = set()
+    for batch in iter_batches(expected_ids, batch_size):
+        rows = await store.get_by_ids(batch)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            rid = parse_chunk_store_row_id(row)
+            if rid:
+                found.add(rid)
+    return found
+
+
 async def ensure_rag_runtime_ready(rag: Any, workspace_id: str) -> None:
     init_result = await rag._ensure_lightrag_initialized()
     if isinstance(init_result, dict) and not init_result.get("success", True):
@@ -360,11 +420,41 @@ async def ensure_workspace_index(service: LocalRagService, workspace_id: str, ch
     rag = await service.get_rag(workspace_id)
     await ensure_rag_runtime_ready(rag, workspace_id)
     target = set(chunks_by_doc.keys())
-    missing_before = await rag.lightrag.full_docs.filter_keys(target)
-    missing_sorted = sorted(missing_before, key=lambda x: int(x) if x.isdigit() else x)
-    logger.info("Workspace %s missing docs: %d/%d", workspace_id, len(missing_sorted), len(target))
+    sort_key = lambda x: (0, int(x)) if x.isdigit() else (1, x)
+    missing_before_full = await rag.lightrag.full_docs.filter_keys(target)
+    missing_before_full_set = set(missing_before_full)
+    chunk_id_map = {doc_id: chunk_id_for_doc(doc_id) for doc_id in target}
+    expected_chunk_ids = list(chunk_id_map.values())
+    existing_text_chunk_ids = await fetch_existing_chunk_ids(
+        rag.lightrag.text_chunks, expected_chunk_ids
+    )
+    existing_vdb_chunk_ids = await fetch_existing_chunk_ids(
+        rag.lightrag.chunks_vdb, expected_chunk_ids
+    )
+    missing_before_chunk_set = {
+        doc_id for doc_id, chunk_id in chunk_id_map.items() if chunk_id not in existing_text_chunk_ids
+    }
+    missing_before_vdb_set = {
+        doc_id for doc_id, chunk_id in chunk_id_map.items() if chunk_id not in existing_vdb_chunk_ids
+    }
+    to_ingest = sorted(
+        missing_before_full_set | missing_before_chunk_set | missing_before_vdb_set,
+        key=sort_key,
+    )
+    logger.info(
+        "Workspace %s missing full_docs: %d/%d, missing text_chunks: %d/%d, missing vdb_chunks: %d/%d",
+        workspace_id,
+        len(missing_before_full_set),
+        len(target),
+        len(missing_before_chunk_set),
+        len(target),
+        len(missing_before_vdb_set),
+        len(target),
+    )
     failures: list[dict[str, Any]] = []
     ingested = 0
+    stale_cleanup_ok = 0
+    stale_cleanup_failed = 0
     with open(INGEST_FAILURES, "w", encoding="utf-8") as _:
         pass
 
@@ -377,36 +467,83 @@ async def ensure_workspace_index(service: LocalRagService, workspace_id: str, ch
         failures.append(failure)
         append_jsonl_line(INGEST_FAILURES, failure)
 
-    for idx, doc_id in enumerate(missing_sorted, start=1):
+    stale_docs = sorted(
+        (missing_before_chunk_set | missing_before_vdb_set) - missing_before_full_set,
+        key=sort_key,
+    )
+    for doc_id in stale_docs:
+        try:
+            await with_retries(
+                lambda: rag.lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=False),
+                label=f"cleanup stale doc_id={doc_id}",
+                retries=retries,
+            )
+            stale_cleanup_ok += 1
+        except Exception as exc:
+            stale_cleanup_failed += 1
+            record_failure(doc_id, f"stale cleanup failed: {exc}")
+
+    for idx, doc_id in enumerate(to_ingest, start=1):
         row = chunks_by_doc.get(doc_id)
         text = str((row or {}).get("text") or (row or {}).get("abstract") or "").strip()
         if not row or not text:
             record_failure(doc_id, "missing row or empty text")
             continue
         content_list = [{"type": "text", "text": text, "page_idx": 0}]
+        file_path = build_virtual_file_path(doc_id, row)
         try:
             await with_retries(
-                lambda: rag.insert_content_list(content_list=content_list, file_path=f"surge_doc_{doc_id}.txt", doc_id=doc_id, display_stats=False),
+                lambda: rag.insert_content_list(
+                    content_list=content_list,
+                    file_path=file_path,
+                    doc_id=doc_id,
+                    display_stats=False,
+                ),
                 label=f"ingest doc_id={doc_id}",
                 retries=retries,
             )
             ingested += 1
         except Exception as exc:
-            record_failure(doc_id, str(exc))
+            record_failure(doc_id, f"ingest failed: {exc}")
         if idx % 100 == 0:
-            logger.info("Ingest progress: %d/%d", idx, len(missing_sorted))
+            logger.info("Ingest progress: %d/%d", idx, len(to_ingest))
             gc.collect()
             clear_cuda_cache()
-    missing_after = await rag.lightrag.full_docs.filter_keys(target)
+    missing_after_full = await rag.lightrag.full_docs.filter_keys(target)
+    missing_after_full_set = set(missing_after_full)
+    existing_after_text_chunk_ids = await fetch_existing_chunk_ids(
+        rag.lightrag.text_chunks, expected_chunk_ids
+    )
+    existing_after_vdb_chunk_ids = await fetch_existing_chunk_ids(
+        rag.lightrag.chunks_vdb, expected_chunk_ids
+    )
+    missing_after_chunks = sorted(
+        [doc_id for doc_id, chunk_id in chunk_id_map.items() if chunk_id not in existing_after_text_chunk_ids],
+        key=sort_key,
+    )
+    missing_after_vdb = sorted(
+        [doc_id for doc_id, chunk_id in chunk_id_map.items() if chunk_id not in existing_after_vdb_chunk_ids],
+        key=sort_key,
+    )
     summary = {
         "workspace_id": workspace_id,
         "target_doc_count": len(target),
-        "missing_before_count": len(missing_sorted),
+        "missing_before_full_doc_count": len(missing_before_full_set),
+        "missing_before_chunk_doc_count": len(missing_before_chunk_set),
+        "missing_before_vdb_doc_count": len(missing_before_vdb_set),
+        "stale_doc_count": len(stale_docs),
+        "stale_cleanup_success_count": stale_cleanup_ok,
+        "stale_cleanup_failure_count": stale_cleanup_failed,
+        "ingest_attempt_count": len(to_ingest),
         "ingested_now_count": ingested,
         "ingest_failure_count": len(failures),
-        "missing_after_count": len(missing_after),
-        "missing_before_sample": missing_sorted[:20],
-        "missing_after_sample": sorted(list(missing_after))[:20],
+        "missing_after_full_doc_count": len(missing_after_full_set),
+        "missing_after_chunk_doc_count": len(missing_after_chunks),
+        "missing_after_vdb_doc_count": len(missing_after_vdb),
+        "missing_before_full_doc_sample": sorted(list(missing_before_full_set), key=sort_key)[:20],
+        "missing_after_full_doc_sample": sorted(list(missing_after_full_set), key=sort_key)[:20],
+        "missing_after_chunk_doc_sample": missing_after_chunks[:20],
+        "missing_after_vdb_doc_sample": missing_after_vdb[:20],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     save_json(INGEST_MANIFEST, summary)
