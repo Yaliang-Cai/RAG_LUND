@@ -1757,3 +1757,51 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 
 - 本轮不改 `system_answers.jsonl` 字段结构；下游 evaluate 兼容保持不变。
 - trace 数据独立输出，不混入答案正文。
+
+---
+
+## 增量更新（2026-03-27，多模态 ingest 防卡死最小重构：固定大超时 + strict 双阶段 + 失败仅补跑）
+
+### 目标
+
+- 保持 shared workspace 并行 ingest 吞吐不变（不改串行）。
+- 避免多模态阶段在 `Using regex fallback for JSON parsing` 后长时间无进展。
+- 支持“本轮不中断，后续只补跑失败文档”。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `raganything/constants.py` | 新增多模态 guardrail 默认值：`DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS=600`、`DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS=3600`、`DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS=10`、`DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK=True`；新增 `DEFAULT_EVAL_RETRY_FAILED_ONLY=False` |
+| `raganything/services/local_rag.py` | `LocalRagSettings` 新增多模态超时/strict-fallback 配置（含 env 覆盖）；`build_vision_model_func` 对 ingest 调用引入 `asyncio.wait_for` 单 item 超时；strict 双阶段（`strict=true` 失败后自动走 `strict=false`）；失败继续抛异常；将多模态 guardrail 参数通过 `addon_params` 注入运行时 |
+| `raganything/processor.py` | 从 `self.lightrag.addon_params` 读取多模态超时参数；单 item 使用 `wait_for`；batch `gather` 增加 watchdog 超时；超时后取消 pending task 并做取消回收；增加 timeout/model/parse/other 分类统计日志；保持 `_finalize_multimodal_doc_status` 原子收尾 |
+| `evaluate_local/DocBench/evaluate_shared.py` | 新增失败清单加载/重写函数；新增 CLI：`--retry_failed_only`（默认 False）、`--clear_failures_on_success`（默认 True）与 `--no_clear_failures_on_success`；`retry_failed_only` 时仅 ingest 失败清单与区间交集；成功后可自动清理失败条目 |
+
+### 改动前后对照
+
+- 改动前：
+  - 多模态 item 可能无边界等待，batch 依赖裸 `gather`，单任务卡住会拖慢或阻塞整批推进。
+  - `evaluate_shared` 失败补跑依赖手工筛选，失败文件无法“按失败清单精准重放”。
+- 改动后：
+  - 多模态 ingest 增加 item/batch 两层边界（600s/3600s），并在 watchdog 超时后做任务取消回收，不再无限等待。
+  - strict JSON 采用双阶段：先 `strict=true`，失败自动降级 `strict=false`；两阶段都失败则抛错，由上层失败清单接管。
+  - `evaluate_shared` 支持 `--retry_failed_only` 仅补跑失败文档，且可在成功后清理失败条目。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查（通过）：
+  - `python -m py_compile raganything/constants.py raganything/services/local_rag.py raganything/processor.py evaluate_local/DocBench/evaluate_shared.py`
+- 逻辑级检查（通过）：
+  - 内联环境变量映射检查：`LocalRagSettings.from_env()` 可读取多模态新参数（item/batch/cancel/strict fallback）。
+  - 内联失败清单检查：`_rewrite_ingest_failures()` 与 `_load_ingest_failures()` 可读写并在空集合时删除文件。
+  - 输出标记：`MULTIMODAL_TIMEOUT_AND_FAILURE_RETRY_CHECK_PASSED`
+- 边界/反例：
+  - `retry_failed_only=True` 且无失败文件时会告警，不会误 ingest 全量。
+  - `clear_failures_on_success=True` 时仅清理已成功文档条目；`--no_clear_failures_on_success` 可保留历史失败记录。
+
+### 兼容性说明
+
+- 默认行为保持兼容：
+  - `--retry_failed_only` 默认 `False`，不改变现有 resume 扫描逻辑。
+  - 并发 ingest 仍保持原有并发模式，不降级为串行。
+- 本轮未改 `DEFAULT_TIMEOUT / DEFAULT_LLM_TIMEOUT` 语义，仅增加多模态专属 guardrail。

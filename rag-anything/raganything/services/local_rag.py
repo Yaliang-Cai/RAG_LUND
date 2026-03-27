@@ -55,6 +55,10 @@ from raganything.constants import (
     DEFAULT_VLM_ENABLE_JSON_SCHEMA,
     DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD,
     DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE,
+    DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS,
+    DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS,
+    DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS,
+    DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK,
     DEFAULT_CHUNKING_STRATEGY,
     DEFAULT_CHUNK_TOKEN_SIZE,
     DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE,
@@ -130,6 +134,12 @@ class LocalRagSettings:
     ingest_max_tokens: int = DEFAULT_INGEST_MAX_TOKENS
 
     vlm_enable_json_schema: bool = DEFAULT_VLM_ENABLE_JSON_SCHEMA
+    multimodal_item_timeout_seconds: float = DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS
+    multimodal_batch_watchdog_seconds: float = (
+        DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS
+    )
+    multimodal_cancel_grace_seconds: float = DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS
+    multimodal_enable_strict_fallback: bool = DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK
     image_token_estimate_method: str = DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD
     image_token_model_name_or_path: str = ""
     image_wrapper_tokens_per_image: int = DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE
@@ -191,6 +201,29 @@ class LocalRagSettings:
             ),
             vlm_enable_json_schema=os.getenv(
                 "RAGANYTHING_VLM_ENABLE_JSON_SCHEMA", str(DEFAULT_VLM_ENABLE_JSON_SCHEMA)
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            multimodal_item_timeout_seconds=float(
+                os.getenv(
+                    "RAGANYTHING_MULTIMODAL_ITEM_TIMEOUT_SECONDS",
+                    str(DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS),
+                )
+            ),
+            multimodal_batch_watchdog_seconds=float(
+                os.getenv(
+                    "RAGANYTHING_MULTIMODAL_BATCH_WATCHDOG_SECONDS",
+                    str(DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS),
+                )
+            ),
+            multimodal_cancel_grace_seconds=float(
+                os.getenv(
+                    "RAGANYTHING_MULTIMODAL_CANCEL_GRACE_SECONDS",
+                    str(DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS),
+                )
+            ),
+            multimodal_enable_strict_fallback=os.getenv(
+                "RAGANYTHING_MULTIMODAL_ENABLE_STRICT_FALLBACK",
+                str(DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
             image_token_estimate_method=os.getenv(
@@ -630,6 +663,45 @@ def build_vision_model_func(
 ):
     llm_fallback = build_llm_model_func(settings, client, logger, model_name)
     schema_stats = {"total": 0, "success": 0, "fallback": 0}
+    item_timeout = max(1.0, float(settings.multimodal_item_timeout_seconds))
+
+    async def _vision_once(
+        *,
+        messages_payload: list[dict[str, Any]],
+        request_kwargs: dict[str, Any],
+        task_type: str,
+        strict_mode: str,
+        attempt: int,
+    ):
+        try:
+            logger.info(
+                "Vision ingest request: task_type=%s strict_mode=%s timeout=%.1fs attempt=%d",
+                task_type,
+                strict_mode,
+                item_timeout,
+                attempt,
+            )
+            return await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model_name,
+                    messages=messages_payload,
+                    temperature=settings.temperature,
+                    max_tokens=settings.ingest_max_tokens,
+                    **request_kwargs,
+                ),
+                timeout=item_timeout,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Vision ingest request failed: task_type=%s strict_mode=%s timeout=%.1fs attempt=%d error_class=%s error=%s",
+                task_type,
+                strict_mode,
+                item_timeout,
+                attempt,
+                type(exc).__name__,
+                exc,
+            )
+            raise
 
     async def vision_model_func(
         prompt,
@@ -710,12 +782,12 @@ def build_vision_model_func(
                 )
 
             try:
-                response = await client.chat.completions.create(
-                    model=model_name,
-                    messages=msgs,
-                    temperature=settings.temperature,
-                    max_tokens=settings.ingest_max_tokens,
-                    **request_kwargs,
+                response = await _vision_once(
+                    messages_payload=msgs,
+                    request_kwargs=request_kwargs,
+                    task_type=task_type,
+                    strict_mode="strict=true" if "response_format" in request_kwargs else "none",
+                    attempt=1,
                 )
                 if use_schema:
                     schema_stats["success"] += 1
@@ -728,7 +800,11 @@ def build_vision_model_func(
                     )
                 return response.choices[0].message.content
             except Exception as exc:
-                if "response_format" in request_kwargs:
+                can_fallback = (
+                    "response_format" in request_kwargs
+                    and settings.multimodal_enable_strict_fallback
+                )
+                if can_fallback:
                     schema_stats["fallback"] += 1
                     logger.warning(
                         "Vision ingest json_schema call failed, retrying without schema: %s",
@@ -736,12 +812,12 @@ def build_vision_model_func(
                     )
                     request_kwargs.pop("response_format", None)
                     try:
-                        response = await client.chat.completions.create(
-                            model=model_name,
-                            messages=msgs,
-                            temperature=settings.temperature,
-                            max_tokens=settings.ingest_max_tokens,
-                            **request_kwargs,
+                        response = await _vision_once(
+                            messages_payload=msgs,
+                            request_kwargs=request_kwargs,
+                            task_type=task_type,
+                            strict_mode="strict=false",
+                            attempt=2,
                         )
                         success_rate = schema_stats["success"] / max(schema_stats["total"], 1)
                         fallback_rate = schema_stats["fallback"] / max(schema_stats["total"], 1)
@@ -1036,6 +1112,28 @@ class LocalRagService:
         self._warmed_workspaces.discard(workspace_id)
         self._workspace_warmup_locks.pop(workspace_id, None)
 
+    def _apply_multimodal_guardrails_to_rag(self, rag: RAGAnything) -> None:
+        """
+        Inject multimodal guardrail settings into LightRAG addon_params without
+        overwriting existing upstream addon keys (e.g. language/entity_types).
+        """
+        lightrag_inst = getattr(rag, "lightrag", None)
+        if lightrag_inst is None:
+            return
+        addon_params = getattr(lightrag_inst, "addon_params", None)
+        if not isinstance(addon_params, dict):
+            addon_params = {}
+            lightrag_inst.addon_params = addon_params
+        addon_params["multimodal_item_timeout_seconds"] = float(
+            self.settings.multimodal_item_timeout_seconds
+        )
+        addon_params["multimodal_batch_watchdog_seconds"] = float(
+            self.settings.multimodal_batch_watchdog_seconds
+        )
+        addon_params["multimodal_cancel_grace_seconds"] = float(
+            self.settings.multimodal_cancel_grace_seconds
+        )
+
     def _build_rag(self, working_dir: str) -> RAGAnything:
         config = RAGAnythingConfig(
             working_dir=working_dir,
@@ -1094,6 +1192,7 @@ class LocalRagService:
                 return
             rag = await self.get_rag(workspace_id)
             await rag._ensure_lightrag_initialized()
+            self._apply_multimodal_guardrails_to_rag(rag)
             self._warmed_workspaces.add(workspace_id)
             self.logger.info("Workspace warmup complete: %s", workspace_id)
 

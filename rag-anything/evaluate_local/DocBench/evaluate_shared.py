@@ -30,6 +30,7 @@ os.environ.setdefault("MINERU_VLLM_GPU_MEMORY_UTILIZATION", "0.1")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
+from raganything.constants import DEFAULT_EVAL_RETRY_FAILED_ONLY
 
 
 SCRIPT_DIR = Path("/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/DocBench")
@@ -607,6 +608,36 @@ def _save_ingest_manifest(shared_workspace_id: str, ingested_doc_ids: set[str]) 
     )
 
 
+def _load_ingest_failures() -> dict[str, dict[str, Any]]:
+    failures: dict[str, dict[str, Any]] = {}
+    if not INGEST_FAILURES_FILE.exists():
+        return failures
+    with open(INGEST_FAILURES_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            doc_id = str(payload.get("doc_id", "")).strip()
+            if not doc_id:
+                continue
+            failures[doc_id] = payload
+    return failures
+
+
+def _rewrite_ingest_failures(failures: dict[str, dict[str, Any]]) -> None:
+    if not failures:
+        if INGEST_FAILURES_FILE.exists():
+            INGEST_FAILURES_FILE.unlink()
+        return
+    with open(INGEST_FAILURES_FILE, "w", encoding="utf-8") as f:
+        for doc_id in sorted(failures.keys(), key=lambda x: int(x) if x.isdigit() else x):
+            _append_jsonl_record(f, failures[doc_id])
+
+
 def _build_shared_settings() -> LocalRagSettings:
     settings = LocalRagSettings.from_env()
     settings.working_dir_root = str(WORKING_DIR_ROOT)
@@ -720,6 +751,8 @@ async def generate_answers_shared(
     profile_name: str,
     eval_prompt_filename: str,
     shared_workspace_id: str,
+    retry_failed_only: bool,
+    clear_failures_on_success: bool,
 ) -> None:
     max_async_ingest = _normalize_max_async(max_async_ingest, default=4)
     max_async_generate = _normalize_max_async(max_async_generate, default=1)
@@ -749,7 +782,8 @@ async def generate_answers_shared(
         ):
             if stale_output.exists():
                 stale_output.unlink()
-        if INGEST_FAILURES_FILE.exists():
+        # Keep failure manifest when retry_failed_only is requested, even with no_resume.
+        if INGEST_FAILURES_FILE.exists() and not retry_failed_only:
             INGEST_FAILURES_FILE.unlink()
 
     processed_keys: set[str] = set()
@@ -773,6 +807,15 @@ async def generate_answers_shared(
             len(processed_rerank_keys),
         )
 
+    existing_failures = _load_ingest_failures() if (resume or retry_failed_only) else {}
+    if existing_failures:
+        logger.info("Resume: %d ingest failures loaded.", len(existing_failures))
+    elif retry_failed_only:
+        logger.warning(
+            "retry_failed_only is enabled but no failure records found: %s",
+            INGEST_FAILURES_FILE,
+        )
+
     manifest = (
         _load_ingest_manifest()
         if resume
@@ -787,11 +830,14 @@ async def generate_answers_shared(
         )
         ingested_doc_ids = set()
 
-    failed_ingest_docs: dict[str, dict[str, Any]] = {}
+    failed_ingest_docs: dict[str, dict[str, Any]] = dict(existing_failures)
+    resolved_failure_docs: set[str] = set()
     logger.info("Shared workspace_id: %s", shared_workspace_id)
     logger.info("Generate range: %d-%d", start_id, end_id - 1)
     logger.info("Max async ingest: %d", max_async_ingest)
     logger.info("Ingest flush every: %d (0 = disabled)", ingest_flush_every)
+    logger.info("Retry failed only: %s", retry_failed_only)
+    logger.info("Clear failures on success: %s", clear_failures_on_success)
 
     # Phase 1: build/update shared storage
     ingest_jobs: list[tuple[str, Path]] = []
@@ -805,7 +851,19 @@ async def generate_answers_shared(
         if not pdf_file or not qa_file:
             logger.warning("[%s] Missing PDF or QA file", doc_name)
             continue
-        if resume and doc_name in ingested_doc_ids:
+        if retry_failed_only:
+            if doc_name not in failed_ingest_docs:
+                continue
+            if doc_name in ingested_doc_ids:
+                logger.info(
+                    "[%s] Already ingested in manifest, skip retry_failed_only replay.",
+                    doc_name,
+                )
+                if clear_failures_on_success:
+                    failed_ingest_docs.pop(doc_name, None)
+                    resolved_failure_docs.add(doc_name)
+                continue
+        elif resume and doc_name in ingested_doc_ids:
             logger.info("[%s] Shared ingest already done, skip", doc_name)
             continue
         ingest_jobs.append((doc_name, pdf_file))
@@ -867,6 +925,10 @@ async def generate_answers_shared(
                 continue
             ingested_doc_ids.add(result)
             success_count += 1
+            if clear_failures_on_success:
+                if result in failed_ingest_docs:
+                    failed_ingest_docs.pop(result, None)
+                resolved_failure_docs.add(result)
 
         if success_count > 0:
             ingested_since_flush += success_count
@@ -898,6 +960,13 @@ async def generate_answers_shared(
         len(failed_ingest_docs),
         len(ingest_jobs),
     )
+    if clear_failures_on_success:
+        _rewrite_ingest_failures(failed_ingest_docs)
+        if resolved_failure_docs:
+            logger.info(
+                "Cleared %d resolved ingest failure entries.",
+                len(resolved_failure_docs),
+            )
 
     # Ensure ingest-phase temporary memory is released before query phase.
     service = await _recycle_local_rag_service(
@@ -1289,6 +1358,25 @@ async def main() -> None:
     parser.add_argument("--max_async_ingest", type=int, default=4)
     parser.add_argument("--max_async_generate", type=int, default=1)
     parser.add_argument("--max_async_judge", type=int, default=4)
+    parser.add_argument(
+        "--retry_failed_only",
+        action="store_true",
+        default=DEFAULT_EVAL_RETRY_FAILED_ONLY,
+        help="Only ingest docs listed in shared_ingest_failures.jsonl within [start_id, end_id).",
+    )
+    parser.add_argument(
+        "--clear_failures_on_success",
+        dest="clear_failures_on_success",
+        action="store_true",
+        default=True,
+        help="Remove resolved docs from shared_ingest_failures.jsonl after successful ingest.",
+    )
+    parser.add_argument(
+        "--no_clear_failures_on_success",
+        dest="clear_failures_on_success",
+        action="store_false",
+        help="Keep historical failure records even when docs succeed later.",
+    )
     args = parser.parse_args()
 
     _ensure_master_log_handler()
@@ -1301,7 +1389,7 @@ async def main() -> None:
     logger.info(
         "Mode=%s Range=%d-%d Resume=%s SharedWorkspaceID=%s Profile=%s OneSentence=%s "
         "EvalPrompt=%s MaxAsyncIngest=%d MaxAsyncGen=%d MaxAsyncJudge=%d "
-        "IngestFlushEvery=%d",
+        "IngestFlushEvery=%d RetryFailedOnly=%s ClearFailuresOnSuccess=%s",
         args.mode,
         args.start_id,
         args.end_id - 1,
@@ -1314,6 +1402,8 @@ async def main() -> None:
         args.max_async_generate,
         args.max_async_judge,
         DEFAULT_INGEST_FLUSH_EVERY,
+        args.retry_failed_only,
+        args.clear_failures_on_success,
     )
 
     if args.mode == "generate":
@@ -1327,6 +1417,8 @@ async def main() -> None:
             profile_name=profile_name,
             eval_prompt_filename=eval_prompt_filename,
             shared_workspace_id=args.shared_workspace_id,
+            retry_failed_only=args.retry_failed_only,
+            clear_failures_on_success=args.clear_failures_on_success,
         )
     elif args.mode == "evaluate":
         await evaluate_answers(

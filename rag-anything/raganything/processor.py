@@ -21,6 +21,11 @@ from raganything.utils import (
 )
 import asyncio
 from lightrag.utils import compute_mdhash_id
+from raganything.constants import (
+    DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS,
+    DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS,
+    DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS,
+)
 
 
 class ProcessorMixin:
@@ -870,6 +875,35 @@ class ProcessorMixin:
             self.logger.debug("No multimodal content to process")
             return
 
+        addon_params = getattr(self.lightrag, "addon_params", {}) or {}
+        item_timeout_seconds = max(
+            1.0,
+            float(
+                addon_params.get(
+                    "multimodal_item_timeout_seconds",
+                    DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS,
+                )
+            ),
+        )
+        batch_watchdog_seconds = max(
+            item_timeout_seconds,
+            float(
+                addon_params.get(
+                    "multimodal_batch_watchdog_seconds",
+                    DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS,
+                )
+            ),
+        )
+        cancel_grace_seconds = max(
+            0.0,
+            float(
+                addon_params.get(
+                    "multimodal_cancel_grace_seconds",
+                    DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS,
+                )
+            ),
+        )
+
         # Get existing chunks count for proper order indexing
         try:
             existing_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
@@ -921,11 +955,14 @@ class ProcessorMixin:
                     (
                         description,
                         entity_info,
-                    ) = await processor.generate_description_only(
-                        modal_content=item,
-                        content_type=content_type,
-                        item_info=item_info,
-                        entity_name=None,  # Let LLM auto-generate
+                    ) = await asyncio.wait_for(
+                        processor.generate_description_only(
+                            modal_content=item,
+                            content_type=content_type,
+                            item_info=item_info,
+                            entity_name=None,  # Let LLM auto-generate
+                        ),
+                        timeout=item_timeout_seconds,
                     )
 
                     # Update progress (non-blocking)
@@ -978,16 +1015,99 @@ class ProcessorMixin:
             for i, item in enumerate(multimodal_items)
         ]
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=batch_watchdog_seconds,
+            )
+        except asyncio.TimeoutError:
+            self.logger.error(
+                "Multimodal batch watchdog timeout after %.1fs (doc_id=%s). Cancelling pending tasks.",
+                batch_watchdog_seconds,
+                doc_id,
+            )
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if cancel_grace_seconds > 0:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=cancel_grace_seconds,
+                    )
+                except Exception as cancel_exc:
+                    self.logger.warning(
+                        "Timed out while waiting cancelled multimodal tasks to exit (grace=%.1fs): %s",
+                        cancel_grace_seconds,
+                        cancel_exc,
+                    )
+            results = []
+            for task in tasks:
+                if not task.done():
+                    results.append(asyncio.TimeoutError("pending task not finished"))
+                    continue
+                if task.cancelled():
+                    results.append(asyncio.CancelledError("task cancelled by watchdog"))
+                    continue
+                try:
+                    results.append(task.result())
+                except BaseException as exc:
+                    results.append(exc)
 
         # Filter successful results
         multimodal_data_list = []
+        failure_stats = {
+            "timeout": 0,
+            "parse": 0,
+            "model": 0,
+            "cancelled": 0,
+            "other": 0,
+        }
         for result in results:
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 self.logger.error(f"Task failed: {result}")
+                if isinstance(result, asyncio.TimeoutError):
+                    failure_stats["timeout"] += 1
+                elif isinstance(result, asyncio.CancelledError):
+                    failure_stats["cancelled"] += 1
+                else:
+                    text = str(result).lower()
+                    if isinstance(result, (ValueError, json.JSONDecodeError)) or (
+                        "json" in text or "parse" in text
+                    ):
+                        failure_stats["parse"] += 1
+                    elif any(
+                        key in text
+                        for key in (
+                            "connection",
+                            "timeout",
+                            "rate limit",
+                            "api",
+                            "vllm",
+                            "openai",
+                        )
+                    ):
+                        failure_stats["model"] += 1
+                    else:
+                        failure_stats["other"] += 1
                 continue
-            if result is not None:
+            if isinstance(result, dict):
                 multimodal_data_list.append(result)
+            elif result is not None:
+                self.logger.error(
+                    "Unexpected multimodal task result type: %s",
+                    type(result).__name__,
+                )
+                failure_stats["other"] += 1
+
+        failed_count = len(results) - len(multimodal_data_list)
+        if failed_count > 0:
+            self.logger.warning(
+                "Multimodal batch partial failures: failed=%d/%d details=%s",
+                failed_count,
+                len(results),
+                failure_stats,
+            )
 
         if not multimodal_data_list:
             self.logger.warning("No valid multimodal descriptions generated")

@@ -42,6 +42,17 @@ DEFAULT_ENABLE_EQUATION_PROCESSING = True
 # Maximum number of multimodal chunks kept after reranking in VLM-enhanced query
 DEFAULT_MULTIMODAL_TOP_K = 3
 
+# Multimodal ingest timeout/guardrail defaults
+# Single multimodal item request timeout (seconds)
+DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS = 600
+# Whole multimodal batch watchdog timeout (seconds)
+DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS = 3600
+# Grace period for cancelled multimodal tasks to exit (seconds)
+DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS = 10
+# Enable two-stage strict fallback for multimodal ingest:
+# strict=true first, then fallback strict=false path on failure.
+DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK = True
+
 # =============================================================================
 # Batch processing
 # =============================================================================
@@ -220,6 +231,13 @@ DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS = 120.0
 # callback 相关开关（默认关闭，按需启用）。
 DEFAULT_ENABLE_METRICS_CALLBACK = False
 DEFAULT_ENABLE_CALLBACK_EVENT_LOG = False
+
+# =============================================================================
+# Evaluation defaults
+# =============================================================================
+# When True, evaluate_shared generate mode ingests only failed docs listed in
+# shared_ingest_failures.jsonl (within start_id/end_id range).
+DEFAULT_EVAL_RETRY_FAILED_ONLY = False
 
 # =============================================================================
 # Logging
