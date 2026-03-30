@@ -6,33 +6,71 @@
 ---
 
 ## 零、Neo4j + Milvus 完整使用说明
+先pip install pymilvus neo4j
 
-### 0.1 配置方式：.env 文件（唯一入口）
+### 0.1 配置方式：.env 文件 + 代码显式传参
 
-项目根目录的 `.env` 文件在 `raganything.py` 启动时被自动加载（`load_dotenv(".env", override=False)`），无需在代码里写任何路径或密码。
+#### .env 文件加载
+
+项目根目录的 `.env` 文件在 `raganything.py` 启动时被自动加载。加载代码（`raganything/raganything.py`）：
+
+```python
+# 修复后（2026-03-27）：find_dotenv(usecwd=True) 从当前目录向上递归查找 .env
+# 无论从哪个子目录运行，都能找到项目根目录的 .env
+load_dotenv(dotenv_path=find_dotenv(usecwd=True) or ".env", override=False)
+```
+
+> **修复前的问题**：原来是 `load_dotenv(dotenv_path=".env", override=False)`，使用相对路径。
+> 从 `rag-anything/` 子目录运行时找不到根目录的 `.env`，导致 Neo4j/Milvus 连接变量未加载。
+
+`.env` 文件内容（项目根目录 `D:\HUAWEI\RAG_LUND\.env`）：
 
 ```bash
-# .env（项目根目录）
-
-# 图数据库：Neo4j
+# 图数据库：Neo4j 连接凭证
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=changeme
 NEO4J_DATABASE=neo4j
 
-# 向量数据库：Milvus Lite（本地单文件）
+# 向量数据库：Milvus Lite（本地单文件，无需启动服务）
 MILVUS_URI=./milvus_lite.db
 MILVUS_DB_NAME=lightrag
 
-# 存储后端选择（告诉 LightRAG 使用哪个实现类）
-LIGHTRAG_GRAPH_STORAGE=Neo4JStorage
-LIGHTRAG_VECTOR_STORAGE=MilvusVectorDBStorage
+# 以下两行对 LocalRagService 无效（见下方说明），可删除
+# LIGHTRAG_GRAPH_STORAGE=Neo4JStorage
+# LIGHTRAG_VECTOR_STORAGE=MilvusVectorDBStorage
 ```
 
-LightRAG 读取 `LIGHTRAG_GRAPH_STORAGE` 的代码位置：
-- `lightrag/lightrag/api/config.py` 第 337、340 行
-- `lightrag/lightrag/kg/__init__.py` 第 56 行（Neo4j 必需环境变量校验：`NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`）
-- `lightrag/lightrag/kg/__init__.py` 第 75 行（Milvus 必需环境变量校验：`MILVUS_URI`）
+#### 重要：LIGHTRAG_GRAPH_STORAGE 的生效范围
+
+`LIGHTRAG_GRAPH_STORAGE` / `LIGHTRAG_VECTOR_STORAGE` 这两个环境变量**只对 LightRAG API Server 生效**：
+
+| 使用方式 | env var 生效？ | 后端选择方式 |
+|---|:---:|---|
+| `lightrag_server.py`（API Server） | ✅ | `api/config.py:336-340` 读取并传给构造函数 |
+| `LocalRagService` / `RAGAnything` | ❌ | `local_rag.py` 的 `lightrag_kwargs` 显式传参 |
+| 直接 `LightRAG(...)` | ❌ | 构造函数参数 |
+
+`LightRAG.__post_init__`（`lightrag.py:495-507`）不读取这两个变量，只做连接参数校验。
+
+#### LocalRagService 的后端激活方式
+
+Neo4J 和 Milvus 通过 `local_rag.py` 的 `_build_rag()` 方法中的 `lightrag_kwargs` 显式激活：
+
+```python
+# rag-anything/raganything/services/local_rag.py: _build_rag() 方法
+lightrag_kwargs={
+    ...
+    "graph_storage": "Neo4JStorage",        # 显式指定，不依赖 env var
+    "vector_storage": "MilvusVectorDBStorage",
+}
+```
+
+连接凭证（`NEO4J_URI` 等）仍从 `.env` 读取，由 LightRAG 内部的 `check_storage_env_vars()` 校验。
+
+LightRAG 读取连接变量的代码位置：
+- `lightrag/lightrag/kg/__init__.py` 第 56 行（Neo4j 必需：`NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`）
+- `lightrag/lightrag/kg/__init__.py` 第 75 行（Milvus 必需：`MILVUS_URI`）
 
 ---
 
@@ -153,10 +191,11 @@ rag = LightRAG(
 result = await rag.aquery(query="问题", param=QueryParam(mode="hybrid"))
 ```
 
-同时在 `.env` 中注释掉 Neo4j + Milvus 行，使用默认 NetworkX + NanoVectorDB：
-```bash
-# LIGHTRAG_GRAPH_STORAGE=Neo4JStorage
-# LIGHTRAG_VECTOR_STORAGE=MilvusVectorDBStorage
+同时在 `local_rag.py` 的 `_build_rag()` 中注释掉（或删除）storage 指定行，使用默认 NetworkX + NanoVectorDB：
+```python
+# local_rag.py: _build_rag() 的 lightrag_kwargs 中
+# "graph_storage": "Neo4JStorage",         # 注释掉
+# "vector_storage": "MilvusVectorDBStorage", # 注释掉
 ```
 
 ---
@@ -460,7 +499,10 @@ Milvus Lite 以 `MILVUS_URI=./milvus_lite.db` 单文件方式运行，无需启�
 - 移除 `pipmaster` 自动安装，改为 `try/except ImportError`
 
 **`.env`**（新建）
-- Neo4j 连接参数 + Milvus Lite 路径 + 存储后端选择变量
+- Neo4j 连接参数 + Milvus Lite 路径（`LIGHTRAG_GRAPH_STORAGE`/`LIGHTRAG_VECTOR_STORAGE` 仅对 API Server 有效，LocalRagService 不读取）
+
+**`rag-anything/raganything/services/local_rag.py`**（`_build_rag()` 方法）
+- `lightrag_kwargs` 中新增 `"graph_storage": "Neo4JStorage"` 和 `"vector_storage": "MilvusVectorDBStorage"`，显式激活新后端
 
 ---
 
@@ -594,6 +636,8 @@ passage_node_weight: float = 0.05      # 第 219 行
 | `lightrag/lightrag/kg/milvus_impl.py` | +8 / -5 | V0 | pipmaster 移除 |
 | `rag-anything/raganything/modalprocessors.py` | +21 / -10 | V1 | 多模态处理器 entity ID 更新 |
 | `rag-anything/raganything/processor.py` | +16 / -5 | V1 | 处理器 entity ID 更新 |
+| `rag-anything/raganything/raganything.py` | +2 / -1 | V0 | `load_dotenv` 改用 `find_dotenv(usecwd=True)`，修复从子目录运行时找不到 `.env` 的问题 |
+| `rag-anything/raganything/services/local_rag.py` | +2 | V0 | `_build_rag()` 的 `lightrag_kwargs` 中显式指定 `graph_storage`/`vector_storage` |
 
 ### 新增文件（3 个）
 

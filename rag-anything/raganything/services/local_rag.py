@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from dotenv import load_dotenv
+
 import numpy as np
 from lightrag.types import GPTKeywordExtractionFormat
 from lightrag.utils import EmbeddingFunc, Tokenizer
@@ -1173,6 +1175,8 @@ class LocalRagService:
                 # rerank 后保留 chunk 的最低分数（LightRAG 默认 0.0 = 不过滤）
                 # BGE-reranker-v2-m3 相关 chunk 典型得分 >0.5，不相关 <0.3
                 "min_rerank_score": DEFAULT_MIN_RERANK_SCORE,
+                "graph_storage": "Neo4JStorage",
+                "vector_storage": "MilvusVectorDBStorage",
             },
         )
 
@@ -1383,7 +1387,9 @@ class LocalRagService:
 
 
 if __name__ == "__main__":
-    
+    # 加载 .env 文件中的环境变量
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="RAG 后台管理工具")
     parser.add_argument("--path", "-p", required=True, help="要入库的文件或文件夹路径")
     parser.add_argument("--id", "-i", required=True, help="工作空间名称 (workspace_id)")

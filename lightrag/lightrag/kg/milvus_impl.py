@@ -21,11 +21,33 @@ config.read("config.ini", "utf-8")
 @final
 @dataclass
 class MilvusVectorDBStorage(BaseVectorStorage):
+    def _is_milvus_lite(self) -> bool:
+        """Detect if we are using milvus-lite (local .db file, not HTTP server)"""
+        uri = getattr(self, "_milvus_uri", None)
+        if uri is None:
+            return False
+        return not uri.startswith(("http", "https", "tcp", "unix"))
+
     def _create_schema_for_namespace(self) -> CollectionSchema:
         """Create schema based on the current instance's namespace"""
 
         # Get vector dimension from embedding_func
         dimension = self.embedding_func.embedding_dim
+
+        # milvus-lite does not support nullable=True on FieldSchema.
+        # Use plain NOT NULL VARCHAR for all modes; upsert will fill "" when absent.
+        is_lite = self._is_milvus_lite()
+
+        def varchar_field(name, max_length):
+            """Create a VARCHAR field: nullable for full Milvus, NOT NULL for lite."""
+            kwargs = {
+                "name": name,
+                "dtype": DataType.VARCHAR,
+                "max_length": max_length,
+            }
+            if not is_lite:
+                kwargs["nullable"] = True
+            return FieldSchema(**kwargs)
 
         # Base fields (common to all collections)
         base_fields = [
@@ -39,64 +61,29 @@ class MilvusVectorDBStorage(BaseVectorStorage):
         # Determine specific fields based on namespace
         if self.namespace.endswith("entities"):
             specific_fields = [
-                FieldSchema(
-                    name="entity_name",
-                    dtype=DataType.VARCHAR,
-                    max_length=512,
-                    nullable=True,
-                ),
-                FieldSchema(
-                    name="file_path",
-                    dtype=DataType.VARCHAR,
-                    max_length=DEFAULT_MAX_FILE_PATH_LENGTH,
-                    nullable=True,
-                ),
+                varchar_field("entity_name", 512),
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG entities vector storage"
 
         elif self.namespace.endswith("relationships"):
             specific_fields = [
-                FieldSchema(
-                    name="src_id", dtype=DataType.VARCHAR, max_length=512, nullable=True
-                ),
-                FieldSchema(
-                    name="tgt_id", dtype=DataType.VARCHAR, max_length=512, nullable=True
-                ),
-                FieldSchema(
-                    name="file_path",
-                    dtype=DataType.VARCHAR,
-                    max_length=DEFAULT_MAX_FILE_PATH_LENGTH,
-                    nullable=True,
-                ),
+                varchar_field("src_id", 512),
+                varchar_field("tgt_id", 512),
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG relationships vector storage"
 
         elif self.namespace.endswith("chunks"):
             specific_fields = [
-                FieldSchema(
-                    name="full_doc_id",
-                    dtype=DataType.VARCHAR,
-                    max_length=64,
-                    nullable=True,
-                ),
-                FieldSchema(
-                    name="file_path",
-                    dtype=DataType.VARCHAR,
-                    max_length=DEFAULT_MAX_FILE_PATH_LENGTH,
-                    nullable=True,
-                ),
+                varchar_field("full_doc_id", 64),
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG chunks vector storage"
 
         else:
-            # Default generic schema (backward compatibility)
             specific_fields = [
-                FieldSchema(
-                    name="file_path",
-                    dtype=DataType.VARCHAR,
-                    max_length=DEFAULT_MAX_FILE_PATH_LENGTH,
-                    nullable=True,
-                ),
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG generic vector storage"
 
@@ -990,32 +977,55 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             try:
                 # Create MilvusClient if not already created
                 if self._client is None:
-                    self._client = MilvusClient(
-                        uri=os.environ.get(
-                            "MILVUS_URI",
-                            config.get(
-                                "milvus",
-                                "uri",
-                                fallback=os.path.join(
-                                    self.global_config["working_dir"], "milvus_lite.db"
-                                ),
-                            ),
-                        ),
-                        user=os.environ.get(
+                    # Get URI from environment or config
+                    uri = os.environ.get("MILVUS_URI")
+                    if not uri:
+                        uri = config.get("milvus", "uri", fallback=None)
+
+                    # Default to local milvus-lite if no URI specified
+                    # For milvus-lite: pymilvus requires .db file path (not directory)
+                    if not uri:
+                        # Use a .db file as the milvus-lite data store
+                        # milvus-lite will manage collections within this database
+                        uri = os.path.join(
+                            self.global_config["working_dir"], "milvus.db"
+                        )
+                        logger.info(
+                            f"[{self.workspace}] Using milvus-lite with local storage at {uri}"
+                        )
+
+                    # For milvus-lite, don't pass user/password/token credentials
+                    # Only use them if connecting to a remote HTTP server
+                    client_kwargs = {"uri": uri}
+
+                    # Only add credentials if URI looks like an HTTP endpoint
+                    if uri.startswith("http"):
+                        user = os.environ.get(
                             "MILVUS_USER", config.get("milvus", "user", fallback=None)
-                        ),
-                        password=os.environ.get(
+                        )
+                        password = os.environ.get(
                             "MILVUS_PASSWORD",
                             config.get("milvus", "password", fallback=None),
-                        ),
-                        token=os.environ.get(
+                        )
+                        token = os.environ.get(
                             "MILVUS_TOKEN", config.get("milvus", "token", fallback=None)
-                        ),
-                        db_name=os.environ.get(
-                            "MILVUS_DB_NAME",
-                            config.get("milvus", "db_name", fallback=None),
-                        ),
+                        )
+                        if user:
+                            client_kwargs["user"] = user
+                        if password:
+                            client_kwargs["password"] = password
+                        if token:
+                            client_kwargs["token"] = token
+
+                    db_name = os.environ.get(
+                        "MILVUS_DB_NAME",
+                        config.get("milvus", "db_name", fallback=None),
                     )
+                    if db_name:
+                        client_kwargs["db_name"] = db_name
+
+                    self._milvus_uri = uri
+                    self._client = MilvusClient(**client_kwargs)
                     logger.debug(
                         f"[{self.workspace}] MilvusClient created successfully"
                     )
@@ -1044,14 +1054,23 @@ class MilvusVectorDBStorage(BaseVectorStorage):
 
         current_time = int(time.time())
 
-        list_data: list[dict[str, Any]] = [
-            {
+        # In milvus-lite mode fields are NOT NULL, so fill missing meta_fields with ""
+        # In full Milvus mode fields are nullable, so missing fields can be omitted
+        _lite = self._is_milvus_lite()
+
+        def _row(k, v):
+            row = {
                 "id": k,
                 "created_at": current_time,
                 **{k1: v1 for k1, v1 in v.items() if k1 in self.meta_fields},
             }
-            for k, v in data.items()
-        ]
+            if _lite:
+                for field in self.meta_fields - {"created_at", "content", "source_id"}:
+                    if field not in row:
+                        row[field] = ""
+            return row
+
+        list_data: list[dict[str, Any]] = [_row(k, v) for k, v in data.items()]
         contents = [v["content"] for v in data.values()]
         batches = [
             contents[i : i + self._max_batch_size]
