@@ -1576,8 +1576,9 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             entity_name: The name of the entity to delete
         """
         try:
-            # Compute entity ID from name
-            entity_id = compute_mdhash_id(entity_name, prefix="ent-")
+            # Compute entity VDB ID — must match how IDs were generated at insert time.
+            # compute_entity_vdb_id handles the disambiguation composite key (name|type).
+            entity_id = compute_entity_vdb_id(entity_name)
             logger.debug(
                 f"[{self.workspace}] Attempting to delete entity {entity_name} with ID {entity_id}"
             )
