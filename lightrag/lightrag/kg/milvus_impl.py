@@ -21,11 +21,29 @@ config.read("config.ini", "utf-8")
 @final
 @dataclass
 class MilvusVectorDBStorage(BaseVectorStorage):
+    def _is_milvus_lite(self) -> bool:
+        """Detect if we are using milvus-lite (local .db file, not HTTP server)"""
+        uri = getattr(self, "_milvus_uri", None)
+        if uri is None:
+            return False
+        return not uri.startswith(("http", "https", "tcp", "unix"))
+
     def _create_schema_for_namespace(self) -> CollectionSchema:
         """Create schema based on the current instance's namespace"""
 
         # Get vector dimension from embedding_func
         dimension = self.embedding_func.embedding_dim
+
+        # milvus-lite does not support nullable fields
+        use_nullable = not self._is_milvus_lite()
+
+        def varchar_field(name, max_length):
+            kwargs = {"name": name, "dtype": DataType.VARCHAR, "max_length": max_length}
+            if use_nullable:
+                kwargs["nullable"] = True
+            else:
+                kwargs["default_value"] = ""
+            return FieldSchema(**kwargs)
 
         # Base fields (common to all collections)
         base_fields = [
@@ -39,64 +57,30 @@ class MilvusVectorDBStorage(BaseVectorStorage):
         # Determine specific fields based on namespace
         if self.namespace.endswith("entities"):
             specific_fields = [
-                FieldSchema(
-                    name="entity_name",
-                    dtype=DataType.VARCHAR,
-                    max_length=512,
-                    nullable=True,
-                ),
-                FieldSchema(
-                    name="file_path",
-                    dtype=DataType.VARCHAR,
-                    max_length=DEFAULT_MAX_FILE_PATH_LENGTH,
-                    nullable=True,
-                ),
+                varchar_field("entity_name", 512),
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG entities vector storage"
 
         elif self.namespace.endswith("relationships"):
             specific_fields = [
-                FieldSchema(
-                    name="src_id", dtype=DataType.VARCHAR, max_length=512, nullable=True
-                ),
-                FieldSchema(
-                    name="tgt_id", dtype=DataType.VARCHAR, max_length=512, nullable=True
-                ),
-                FieldSchema(
-                    name="file_path",
-                    dtype=DataType.VARCHAR,
-                    max_length=DEFAULT_MAX_FILE_PATH_LENGTH,
-                    nullable=True,
-                ),
+                varchar_field("src_id", 512),
+                varchar_field("tgt_id", 512),
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG relationships vector storage"
 
         elif self.namespace.endswith("chunks"):
             specific_fields = [
-                FieldSchema(
-                    name="full_doc_id",
-                    dtype=DataType.VARCHAR,
-                    max_length=64,
-                    nullable=True,
-                ),
-                FieldSchema(
-                    name="file_path",
-                    dtype=DataType.VARCHAR,
-                    max_length=DEFAULT_MAX_FILE_PATH_LENGTH,
-                    nullable=True,
-                ),
+                varchar_field("full_doc_id", 64),
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG chunks vector storage"
 
         else:
             # Default generic schema (backward compatibility)
             specific_fields = [
-                FieldSchema(
-                    name="file_path",
-                    dtype=DataType.VARCHAR,
-                    max_length=DEFAULT_MAX_FILE_PATH_LENGTH,
-                    nullable=True,
-                ),
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG generic vector storage"
 
@@ -1037,6 +1021,7 @@ class MilvusVectorDBStorage(BaseVectorStorage):
                     if db_name:
                         client_kwargs["db_name"] = db_name
 
+                    self._milvus_uri = uri
                     self._client = MilvusClient(**client_kwargs)
                     logger.debug(
                         f"[{self.workspace}] MilvusClient created successfully"
