@@ -1849,22 +1849,66 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 
 ---
 
+## 增量更新（2026-03-30，SurGE ingest 批量化：减少单文档循环开销）
+
+### 目标
+
+- 避免 `evaluate_surge.py` 在 ingest 阶段“每个 doc 一次 `insert_content_list`”带来的高频调度开销与日志噪声。
+- 保持评测口径不变（仍按论文 `doc_id` 检查完整性与计算召回）。
+- 在不改主链路默认常量的前提下，为 SurGE 纯文本 chunk 场景提升吞吐。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `evaluate_local/SurGE/evaluate_surge.py` | `ensure_workspace_index` 改为 batched `lightrag.ainsert`；新增 `--ingest-batch-size`（默认 `128`）；失败批次自动回退到逐 doc 重试并记录失败清单；保留并强化 ingest 完整性闸门与论文级校验 |
+
+### 改动前后对照
+
+- 改动前：
+  - 每个 doc 独立调用 `insert_content_list`，外层协程并发高但调用粒度过细。
+  - ingest 开销中包含大量重复启动/收尾与状态写入噪声。
+- 改动后：
+  - 每批 docs 使用一次 `ainsert(input=[...], ids=[...], file_paths=[...])`。
+  - `--ingest-concurrency` 继续用于运行时覆盖 `max_parallel_insert`。
+  - 新增 `--ingest-batch-size` 控制每次提交的 doc 数。
+  - 批次失败自动降级为逐 doc 回退，确保失败可定位到 `doc_id`。
+  - `split_by_character_only=True` 并按批次动态选择安全分隔符，避免分隔符碰撞导致误切分。
+  - ingest 完整性新增“每文档 chunk 数必须为 1”校验；若 `chunks_list` 非 1 条则阻断评测。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查（通过）：
+  - `python -m py_compile evaluate_local/SurGE/evaluate_surge.py`
+- 参数与边界检查（通过）：
+  - `python evaluate_local/SurGE/evaluate_surge.py --help` 显示新增 `--ingest-batch-size`。
+  - 反例：`--ingest-batch-size 0` 正确 fail-fast（参数校验触发）。
+
+### 兼容性说明
+
+- 不改变 query-level / survey-level 指标口径与输出结构。
+- 仍以论文级 `doc_id` 做 ingest 完整性检查（`full_docs/doc_status/text_chunks/vdb_chunks`），并额外校验 `chunks_list` 长度必须为 1。
+- 不修改 `constants.py` 全局默认值，仅影响 `evaluate_surge.py` 的运行参数与 ingest 实现。
+
+---
+
 ## 增量更新（2026-03-30，main -> neo4j-milvus 合并说明：冲突解决 + 高风险语义修复）
 
 ### 目标
 
 - 在 `neo4j-milvus` 分支合入 `main`，不改当前 `main` 工作区。
-- 解决 3 个文本冲突，并修复自动合并未报错但有高风险的语义问题。
+- 解决文本冲突，并修复自动合并未报错但有高风险的语义问题。
 - 保持改动最小，避免新增并行冗余逻辑。
 
 ### 合并范围
 
 - 执行位置：隔离 worktree `E:\\RAG\\Data\\_tmp_neo4j_milvus_wt`
 - 合并方式：`git merge --no-ff --no-commit main`
-- 真实冲突文件（3 个）：
+- 本轮冲突文件：
   - `rag-anything/raganything/constants.py`
   - `rag-anything/raganything/processor.py`
   - `rag-anything/raganything/services/local_rag.py`
+  - `RAGAnything_LocalRAG_VLM_Refactor_2026-02-20.md`
 
 ### 冲突处理与决策
 
@@ -1877,6 +1921,8 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 - `raganything/services/local_rag.py`
   - import 合并为并集：保留 `DEFAULT_QUERY_MODE/TOP_K/CHUNK_TOP_K/ENABLE_RERANK` + `workspace/resilience/callback` 常量。
   - 去掉未使用的 `DEFAULT_SERIALIZE_INGEST_BY_DOC_ID`。
+- 本文档冲突
+  - 同时保留 `SurGE ingest 批量化` 与本节 `main -> neo4j-milvus 合并说明`。
 
 ### 高风险语义修复（自动合并未报冲突部分）
 
@@ -1895,11 +1941,11 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 ### 改动前后对照
 
 - 改动前：
-  - 三个文件存在 merge 冲突，无法完成合并提交。
+  - 多个文件存在 merge 冲突，无法完成合并提交。
   - 存在实体键二次拼接/混用风险，删除链路有漏删残留隐患。
   - `aquery_data` 未透传 `rerank_score_scope`。
 - 改动后：
-  - 冲突已全部消除，三处冲突块按并集合并完成。
+  - 冲突全部消除，冲突块按并集合并完成。
   - 实体 ID 与 `full_entities/entity_chunks` 键口径统一，删除链路命中更稳定。
   - `query_data` 与 `aquery_llm` 在 rerank score scope 口径对齐。
 
