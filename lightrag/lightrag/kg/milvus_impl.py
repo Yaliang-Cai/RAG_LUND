@@ -337,9 +337,7 @@ class MilvusVectorDBStorage(BaseVectorStorage):
 
     def _is_milvus_lite(self) -> bool:
         """Return True when we are connected to a local milvus-lite .db file."""
-        uri = getattr(self, "_milvus_uri", None)
-        if uri is None:
-            return False
+        uri = self._get_milvus_connection_kwargs(include_db_name=False)["uri"]
         return not self._uri_is_remote(uri)
 
     def _get_milvus_connection_kwargs(self, include_db_name: bool = True) -> dict:
@@ -408,9 +406,6 @@ class MilvusVectorDBStorage(BaseVectorStorage):
         """
         kwargs = self._get_milvus_connection_kwargs(include_db_name=False)
         uri = kwargs["uri"]
-        # Store URI so _is_milvus_lite() can be called afterwards
-        self._milvus_uri = uri
-
         client = MilvusClient(**kwargs)
 
         # Database management is only available on remote Milvus servers.
@@ -1432,7 +1427,6 @@ class MilvusVectorDBStorage(BaseVectorStorage):
 
         # Initialize client as None - will be created in initialize() method
         self._client = None
-        self._milvus_uri: Optional[str] = None  # set by _create_milvus_client()
         self._max_batch_size = self.global_config["embedding_batch_num"]
         self._initialized = False
 
