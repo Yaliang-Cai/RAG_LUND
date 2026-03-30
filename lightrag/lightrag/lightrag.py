@@ -721,8 +721,16 @@ class LightRAG:
                 self.doc_status,
             ):
                 if storage:
-                    # logger.debug(f"Initializing storage: {storage}")
-                    await storage.initialize()
+                    storage_name = storage.__class__.__name__
+                    try:
+                        # logger.debug(f"Initializing storage: {storage}")
+                        await storage.initialize()
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to initialize {storage_name}: {e}",
+                            exc_info=True
+                        )
+                        raise
 
             self._storages_status = StoragesStatus.INITIALIZED
             logger.debug("All storage types initialized")
