@@ -2643,6 +2643,7 @@ async def apply_rerank_if_enabled(
     global_config: dict,
     enable_rerank: bool = True,
     top_n: int = None,
+    item_label: str = "chunks",
 ) -> list[dict]:
     """
     Apply reranking to retrieved documents if rerank is enabled.
@@ -2653,6 +2654,7 @@ async def apply_rerank_if_enabled(
         global_config: Global configuration containing rerank settings
         enable_rerank: Whether to enable reranking from query parameter
         top_n: Number of top documents to return after reranking
+        item_label: Target item label for logging (e.g. chunks/entities/relations)
 
     Returns:
         Reranked documents if rerank is enabled, otherwise original documents
@@ -2705,19 +2707,23 @@ async def apply_rerank_if_enabled(
                         reranked_docs.append(doc)
 
                 logger.info(
-                    f"Successfully reranked: {len(reranked_docs)} chunks from {len(retrieved_docs)} original chunks"
+                    f"Successfully reranked: {len(reranked_docs)} {item_label} from {len(retrieved_docs)} original {item_label}"
                 )
                 return reranked_docs
             else:
                 # Legacy format: assume it's already reranked documents
-                logger.info(f"Using legacy rerank format: {len(rerank_results)} chunks")
+                logger.info(
+                    f"Using legacy rerank format: {len(rerank_results)} {item_label}"
+                )
                 return rerank_results[:top_n] if top_n else rerank_results
         else:
-            logger.warning("Rerank returned empty results, using original chunks")
+            logger.warning(
+                f"Rerank returned empty results, using original {item_label}"
+            )
             return retrieved_docs
 
     except Exception as e:
-        logger.error(f"Error during reranking: {e}, using original chunks")
+        logger.error(f"Error during reranking: {e}, using original {item_label}")
         return retrieved_docs
 
 
@@ -2728,6 +2734,7 @@ async def process_chunks_unified(
     global_config: dict,
     source_type: str = "mixed",
     chunk_token_limit: int = None,  # Add parameter for dynamic token limit
+    rerank_debug: dict[str, Any] | None = None,
 ) -> list[dict]:
     """
     Unified processing for text chunks: deduplication, chunk_top_k limiting, reranking, and token truncation.
@@ -2744,47 +2751,130 @@ async def process_chunks_unified(
         Processed and filtered list of text chunks
     """
     if not unique_chunks:
+        if rerank_debug is not None:
+            rerank_debug.clear()
+            rerank_debug.update(
+                {
+                    "enabled": False,
+                    "scope": "top_k",
+                    "min_rerank_score": 0.0,
+                    "scores_all": [],
+                    "scores_after_threshold": [],
+                    "scores_final": [],
+                    "count_input": 0,
+                    "count_after_rerank": 0,
+                    "count_after_threshold": 0,
+                    "count_after_chunk_top_k": 0,
+                    "count_final": 0,
+                }
+            )
         return []
 
     origin_count = len(unique_chunks)
+    rerank_enabled = bool(query_param.enable_rerank and query)
+    raw_scope = str(getattr(query_param, "rerank_score_scope", "top_k") or "top_k")
+    rerank_scope = raw_scope.strip().lower()
+    if rerank_scope not in {"top_k", "all"}:
+        logger.warning(
+            "Unknown rerank_score_scope '%s', fallback to 'top_k'",
+            raw_scope,
+        )
+        rerank_scope = "top_k"
+
+    try:
+        min_rerank_score = float(global_config.get("min_rerank_score", 0.5))
+    except (TypeError, ValueError):
+        min_rerank_score = 0.5
+
+    def _extract_scores(items: list[dict]) -> list[float]:
+        scores: list[float] = []
+        for item in items:
+            score = item.get("rerank_score")
+            if score is None:
+                continue
+            try:
+                scores.append(round(float(score), 6))
+            except (TypeError, ValueError):
+                continue
+        return scores
+
+    scores_all: list[float] = []
+    scores_after_threshold: list[float] = []
+    count_after_rerank = len(unique_chunks)
+    count_after_threshold = len(unique_chunks)
+    count_after_chunk_top_k = len(unique_chunks)
 
     # 1. Apply reranking if enabled and query is provided.
     # Candidate selection stays in strict rerank order; multimodal_top_k only
     # controls how many image paths are turned into images downstream.
-    if query_param.enable_rerank and query and unique_chunks:
-        rerank_top_k = query_param.chunk_top_k or len(unique_chunks)
+    if rerank_enabled and unique_chunks:
+        rerank_top_k = (
+            len(unique_chunks)
+            if rerank_scope == "all"
+            else (query_param.chunk_top_k or len(unique_chunks))
+        )
         unique_chunks = await apply_rerank_if_enabled(
             query=query,
             retrieved_docs=unique_chunks,
             global_config=global_config,
             enable_rerank=query_param.enable_rerank,
             top_n=rerank_top_k,
+            item_label="chunks",
         )
+        count_after_rerank = len(unique_chunks)
+        scores_all = _extract_scores(unique_chunks)
+        logger.info("Rerank scores (all reranked chunks): %s", scores_all)
 
     # 2. Filter by minimum rerank score if reranking is enabled
-    if query_param.enable_rerank and unique_chunks:
-        min_rerank_score = global_config.get("min_rerank_score", 0.5)
+    if rerank_enabled and unique_chunks:
         if min_rerank_score > 0.0:
             original_count = len(unique_chunks)
 
             # Filter chunks with score below threshold
             filtered_chunks = []
             for chunk in unique_chunks:
-                rerank_score = chunk.get(
-                    "rerank_score", 1.0
-                )  # Default to 1.0 if no score
+                rerank_score_raw = chunk.get("rerank_score")
+                try:
+                    rerank_score = (
+                        float(rerank_score_raw) if rerank_score_raw is not None else 1.0
+                    )
+                except (TypeError, ValueError):
+                    rerank_score = 1.0
                 if rerank_score >= min_rerank_score:
                     filtered_chunks.append(chunk)
 
             unique_chunks = filtered_chunks
             filtered_count = original_count - len(unique_chunks)
+            count_after_threshold = len(unique_chunks)
+            scores_after_threshold = _extract_scores(unique_chunks)
 
             if filtered_count > 0:
                 logger.info(
                     f"Rerank filtering: {len(unique_chunks)} chunks remained (min rerank score: {min_rerank_score})"
                 )
             if not unique_chunks:
+                if rerank_debug is not None:
+                    rerank_debug.clear()
+                    rerank_debug.update(
+                        {
+                            "enabled": rerank_enabled,
+                            "scope": rerank_scope,
+                            "min_rerank_score": min_rerank_score,
+                            "scores_all": scores_all,
+                            "scores_after_threshold": scores_after_threshold,
+                            "scores_final": [],
+                            "count_input": origin_count,
+                            "count_after_rerank": count_after_rerank,
+                            "count_after_threshold": 0,
+                            "count_after_chunk_top_k": 0,
+                            "count_final": 0,
+                        }
+                    )
+                logger.info("Rerank scores (final kept chunks): []")
                 return []
+        else:
+            count_after_threshold = len(unique_chunks)
+            scores_after_threshold = _extract_scores(unique_chunks)
 
     # 3. Apply chunk_top_k limiting in strict rerank order.
     if query_param.chunk_top_k is not None and query_param.chunk_top_k > 0:
@@ -2793,6 +2883,7 @@ async def process_chunks_unified(
         logger.debug(
             f"Kept chunk_top-k: {len(unique_chunks)} chunks (deduplicated original: {origin_count})"
         )
+    count_after_chunk_top_k = len(unique_chunks)
 
     multimodal_top_k = getattr(query_param, "multimodal_top_k", None)
     if multimodal_top_k is not None and unique_chunks:
@@ -2837,6 +2928,28 @@ async def process_chunks_unified(
         chunk_with_id = chunk.copy()
         chunk_with_id["id"] = f"DC{i + 1}"
         final_chunks.append(chunk_with_id)
+
+    scores_final = _extract_scores(final_chunks)
+    if rerank_enabled:
+        logger.info("Rerank scores (final kept chunks): %s", scores_final)
+
+    if rerank_debug is not None:
+        rerank_debug.clear()
+        rerank_debug.update(
+            {
+                "enabled": rerank_enabled,
+                "scope": rerank_scope,
+                "min_rerank_score": min_rerank_score,
+                "scores_all": scores_all,
+                "scores_after_threshold": scores_after_threshold,
+                "scores_final": scores_final,
+                "count_input": origin_count,
+                "count_after_rerank": count_after_rerank,
+                "count_after_threshold": count_after_threshold,
+                "count_after_chunk_top_k": count_after_chunk_top_k,
+                "count_final": len(final_chunks),
+            }
+        )
 
     return final_chunks
 
@@ -3292,6 +3405,7 @@ def convert_to_user_format(
             "file_path": chunk.get("file_path", "unknown_source"),
             "chunk_id": chunk.get("chunk_id", ""),
             "page_idx": chunk.get("page_idx"),
+            "rerank_score": chunk.get("rerank_score"),
         }
         formatted_chunks.append(chunk_data)
 

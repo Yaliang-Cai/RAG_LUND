@@ -42,6 +42,17 @@ DEFAULT_ENABLE_EQUATION_PROCESSING = True
 # Maximum number of multimodal chunks kept after reranking in VLM-enhanced query
 DEFAULT_MULTIMODAL_TOP_K = 3
 
+# Multimodal ingest timeout/guardrail defaults
+# Single multimodal item request timeout (seconds)
+DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS = 600
+# Whole multimodal batch watchdog timeout (seconds)
+DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS = 3600
+# Grace period for cancelled multimodal tasks to exit (seconds)
+DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS = 10
+# Enable two-stage strict fallback for multimodal ingest:
+# strict=true first, then fallback strict=false path on failure.
+DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK = True
+
 # =============================================================================
 # Batch processing
 # =============================================================================
@@ -148,9 +159,9 @@ DEFAULT_ENTITY_EXTRACT_MAX_GLEANING = 1
 DEFAULT_MAX_PARALLEL_INSERT = 4
 
 # Per-workspace ingest lock default:
-# True keeps same-doc_id ingest serialized (safer); False allows concurrent
+# True keeps same-workspace ingest serialized (safer); False allows concurrent
 # ingest into one shared workspace when caller manages race-safety.
-DEFAULT_SERIALIZE_INGEST_BY_DOC_ID = True
+DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID = True
 
 # Embedding 模型单次批处理的最大文本数。
 # LightRAG 默认值为 10；BGE-M3 支持更大 batch，设为 32 可减少
@@ -209,6 +220,39 @@ DEFAULT_MULTI_HOP_DEPTH = 2                     # PPR graph search depth
 DEFAULT_PPR_DAMPING = 0.5                       # PPR damping factor (alpha)
 DEFAULT_PPR_TOP_K = 50                          # Number of chunks returned by PPR
 DEFAULT_PASSAGE_NODE_WEIGHT = 0.05              # HippoRAG2 param: DPR chunk score scaling in PPR seed
+# Resilience & callback (service-level optional controls)
+# =============================================================================
+# 是否在 LocalRagService 层启用重试与熔断机制。
+# 默认开启，统一由服务层承担重试/熔断能力。
+DEFAULT_ENABLE_RESILIENCE = True
+
+# 重试总次数（包含首次调用）。
+DEFAULT_RESILIENCE_MAX_ATTEMPTS = 3
+
+# ingest/query 的初始退避时间（秒）。
+DEFAULT_INGEST_RETRY_BASE_DELAY = 2.0
+DEFAULT_QUERY_RETRY_BASE_DELAY = 1.0
+
+# 单次退避等待上限（秒）。
+DEFAULT_RESILIENCE_MAX_DELAY = 20.0
+
+# 熔断阈值：在 reset_timeout 窗口内累计失败达到阈值后打开熔断。
+DEFAULT_INGEST_BREAKER_FAILURE_THRESHOLD = 8
+DEFAULT_QUERY_BREAKER_FAILURE_THRESHOLD = 12
+
+# 熔断打开后进入 half-open 试探调用前的等待时间（秒）。
+DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS = 120.0
+
+# callback 相关开关（默认关闭，按需启用）。
+DEFAULT_ENABLE_METRICS_CALLBACK = False
+DEFAULT_ENABLE_CALLBACK_EVENT_LOG = False
+
+# =============================================================================
+# Evaluation defaults
+# =============================================================================
+# When True, evaluate_shared generate mode ingests only failed docs listed in
+# shared_ingest_failures.jsonl (within start_id/end_id range).
+DEFAULT_EVAL_RETRY_FAILED_ONLY = False
 
 # =============================================================================
 # Logging

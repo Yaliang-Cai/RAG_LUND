@@ -295,7 +295,7 @@ HTTP POST /query
                  │
                  └─ vlm=True
                       └─ query.py:317   aquery_vlm_enhanced()
-                           ├─ lightrag.aquery(only_need_prompt=True) → raw_prompt（走 L4-L8）
+                           ├─ lightrag.aquery_llm(only_need_prompt=True) → raw_prompt + raw_data(trace)（走 L4-L8）
                            ├─ _process_image_paths_for_vlm() → base64（上限 multimodal_top_k=3）
                            ├─ _build_vlm_messages_with_images() → 交错多模态 messages
                            └─ [L10'] local_rag.vision_model_func → vLLM Vision API
@@ -389,7 +389,7 @@ else:
 **快捷出口**：
 - `only_need_context=True`（行 3193）→ 仅返回 context 字符串，不调用答案 LLM
 - `only_need_prompt=True`（行 3214）→ 拼接 `sys_prompt + "\n\n---User Query---\n" + user_query` 后直接返回，不调用答案 LLM
-  - **VLM 增强查询的第一步就用此标志获取 raw_prompt**
+  - **VLM 增强查询的第一步通过 `aquery_llm(only_need_prompt=True)` 获取 raw_prompt + raw_data(trace)**
 
 **缓存检查**（行 3240–3250）：
 - 哈希键覆盖：mode + query + response_type + top_k + chunk_top_k + max_entity/relation_tokens + hl/ll_keywords + enable_rerank + user_prompt
@@ -487,31 +487,18 @@ Reference Document List:
 
 **Step 1 — Rerank**（行 2730–2744）：
 - `enable_rerank=True` 时调用 CrossEncoder（本地 `bge-reranker-v2-m3`）
-- `multimodal_top_k` 激活时对**全量** chunk 重排（`rerank_top_k = len(unique_chunks)`），保证文本候选充足；否则仅对前 `chunk_top_k` 个重排
+- 新增 `rerank_score_scope`：
+  - `top_k`（默认）：仅对前 `chunk_top_k` 候选打分（兼容旧行为）
+  - `all`：对全量候选打分，再执行阈值过滤与后续截断
+- `multimodal_top_k` 只控制发给 VLM 的图片上限，不改变 rerank 覆盖范围
 
 **Step 2 — Rerank 分数过滤**（行 2746–2769）：
 - `min_rerank_score=0.5`（来自 global_config）
 - 低于阈值的 chunk 过滤掉
 
-**Step 2.5 — 多模态预算分配**（行 2771–2811，`multimodal_top_k ≠ None` 时激活）：
-```
-top_window     = unique_chunks[:chunk_top_k]   # 类型无关，取前 10（rerank 排名）
-remaining_pool = unique_chunks[chunk_top_k:]   # 第 11 名以后备用
-
-selected_mm    = top_window 内 is_multimodal=True 的 chunk（数量不限）
-text_in_window = top_window 内 is_multimodal=False 的 chunk
-text_budget    = chunk_top_k - multimodal_top_k   （= 10 - 3 = 7）
-selected_text  = text_in_window[:text_budget]
-  └─ 不足 text_budget 时从 remaining_pool 中按 rerank 顺序补充文本 chunk
-
-final = sorted(selected_mm + selected_text, by rerank_score desc)
-budgets_applied = True
-```
-
-> 图片数量上限由 `query.py` 的 `_process_image_paths_for_vlm(max_images=multimodal_top_k)` 独立控制，超限的 `Image Path:` 保留原文不附图。
-
 **Step 3 — chunk_top_k 截断**（行 2813–2820）：
-- `budgets_applied=True` 时跳过此步（已由 Step 2.5 控制数量）
+- 按 rerank 顺序直接截断到 `chunk_top_k`
+- 多模态预算不在本函数内处理；预算打包在 `operate.py` 的 `_build_context_str/naive_query` 执行
 
 **Step 4 — Token 截断**（行 2822–2848）：
 - `truncate_list_by_token_size()` 按 `available_chunk_tokens` 限制总 token 数
@@ -550,8 +537,8 @@ aquery_vlm_enhanced(query, mode, **kwargs)
   ├─ 1. kwargs.setdefault("multimodal_top_k", 3)
   │
   ├─ 2. QueryParam(only_need_prompt=True, multimodal_top_k=3, ...)
-  │      → lightrag.aquery() 走完 L4–L8 后跳过 LLM，直接返回 prompt 字符串
-  │        （格式：sys_prompt + "\n\n---User Query---\n" + user_query）
+  │      → lightrag.aquery_llm() 走完 L4–L8 后跳过答案 LLM
+  │      → 同一次检索返回 prompt 字符串 + raw_data(trace)
   │
   ├─ 3. _process_image_paths_for_vlm(raw_prompt, max_images=3)
   │      - 正则扫描 r"Image Path:\s*([^\r\n]*\.(?:jpg|png|...))"
@@ -570,6 +557,10 @@ aquery_vlm_enhanced(query, mode, **kwargs)
   └─ 5. vision_model_func("", messages=messages)
          → vision_client.chat.completions.create(model, messages, max_tokens=2048)
          → return response.choices[0].message.content
+
+说明：
+- 普通查询与 VLM 增强查询都复用同一次检索+rerank 结果作为 trace。
+- VLM 增强路径仅在“答案生成阶段”改用 vision 模型；无图 fallback 默认复用同次检索 prompt 直接生成文本答案（仅当该步骤异常时才降级到普通查询）。
 ```
 
 ---
@@ -612,11 +603,12 @@ Reference Document List: {reference_list_str}
 | `top_k` | 20 | HTTP → service → aquery（rag-anything 常量）|
 | `chunk_top_k` | 10 | HTTP → service → aquery（rag-anything 常量）|
 | `enable_rerank` | `True` | HTTP 传入 |
+| `rerank_score_scope` | `"top_k"`（全局默认）/ `"all"`（evaluate_shared 默认） | 控制 rerank 打分覆盖范围 |
 | `multimodal_top_k` | `None` → `3`（VLM时）| `aquery_vlm_enhanced` 注入，控制发给 VLM 的图片上限 |
 | `max_entity_tokens` | 6000 | LightRAG 内部（env/常量）|
 | `max_relation_tokens` | 8000 | LightRAG 内部（env/常量）|
 | `max_total_tokens` | 30000 | LightRAG 内部（env/常量）|
-| `only_need_prompt` | `False` | VLM 增强第一步置为 `True`，获取 raw_prompt |
+| `only_need_prompt` | `False` | VLM 增强第一步置为 `True`，获取 raw_prompt + raw_data(trace) |
 | `stream` | `False` | HTTP 层未暴露；内部支持 |
 | `conversation_history` | `[]` | HTTP 层未暴露；内部支持多轮对话 |
 
@@ -1427,3 +1419,503 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
   - 边界：`Linked WikiText-2` 命中 `path_fragment_keys` 仍被过滤；
   - 反例：关系端点命中路径碎片时关系被过滤。
   - 输出标记：`OPERATE_PATH_FILTER_ONLY_CHECKS_PASSED`、`OPERATE_COMMENT_OUT_REGRESSION_CHECK_PASSED`。
+
+---
+
+## 增量更新（2026-03-24，按 upstream 迁入删除鲁棒性 + callbacks/resilience + full_entities 修复）
+
+### 目标
+
+- LightRAG：迁入删除链路鲁棒性（retry-safe、LLM cache 删除校验、失败恢复状态落盘）。
+- RAG-Anything：迁入 resilience 模块、callbacks/metrics 体系、full_entities 元数据保留修复、`close()/atexit` 稳定性修复。
+- 约束：不破坏现有 `raganything/services/local_rag.py` 与 `evaluate_shared.py` 链路。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `lightrag/lightrag/lightrag.py` | 新增 `_normalize_string_list`；新增 `_update_delete_retry_state`、`_get_existing_llm_cache_ids`；`adelete_by_doc_id` 对齐 upstream 鲁棒删除流程 |
+| `rag-anything/raganything/callbacks.py` | 新增 upstream callbacks/metrics 实现 |
+| `rag-anything/raganything/resilience.py` | 新增 upstream retry/async_retry/circuit breaker 实现 |
+| `rag-anything/raganything/__init__.py` | 导出 resilience 与 callbacks（按可选导入方式） |
+| `rag-anything/raganything/raganything.py` | 增加 `callback_manager` 字段；`close()` 改为 upstream 稳定分支（running/no-loop/closed-loop） |
+| `rag-anything/raganything/query.py` | 增加 query 回调：`on_query_start/on_query_complete/on_query_error` |
+| `rag-anything/raganything/batch.py` | 增加 batch 回调：`on_batch_start/on_batch_complete` |
+| `rag-anything/raganything/processor.py` | 增加 parse/multimodal/document 回调；修复 `_store_multimodal_entities_to_full_entities` 保留已有 metadata |
+
+### 行为差异（相对未改前）
+
+- `adelete_by_doc_id`：
+  - 删除过程失败时会写回可重试状态（阶段、时间、缓存键）。
+  - 删除 LLM cache 后增加“存在性校验”，避免“存储层只打日志不抛错”造成假成功。
+  - `doc_status` 删除顺序与失败恢复逻辑对齐 upstream，减少 zombie 状态风险。
+- `full_entities`：
+  - 多模态实体追加时不再覆盖已有自定义字段；按顺序去重追加 `entity_names`。
+- callbacks/resilience：
+  - 可注册 `ProcessingCallback/MetricsCallback` 观察 parse/insert/multimodal/query/batch/document 生命周期事件。
+  - 提供 `retry/async_retry/CircuitBreaker` 供上层按需接入。
+- `RAGAnything.close()`：
+  - 处理 atexit 下 event loop race，减少关闭阶段异常噪声。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查：
+  - `python -m py_compile` 覆盖以下文件并通过：
+    - `lightrag/lightrag/lightrag.py`
+    - `raganything/__init__.py`
+    - `raganything/raganything.py`
+    - `raganything/query.py`
+    - `raganything/batch.py`
+    - `raganything/processor.py`
+    - `raganything/callbacks.py`
+    - `raganything/resilience.py`
+    - `raganything/services/local_rag.py`
+    - `evaluate_local/DocBench/evaluate_shared.py`
+- 逻辑级检查（内联）：
+  - 回调链路：注册 `ProcessingCallback` 后 `on_query_start` 可被触发（`import-and-callback-check-ok`）。
+  - full_entities 修复：验证已有 metadata 字段保留、`entity_names` 顺序追加去重、`count` 同步更新（`full_entities-merge-check-ok`）。
+- 反例检查：
+  - 回调注册类型校验生效（非 `ProcessingCallback` 子类会抛 `TypeError`，行为符合 upstream）。
+
+### 兼容性结论
+
+- 本轮未改动 `raganything/services/local_rag.py` 与 `evaluate_shared.py` 的业务逻辑。
+- 对这两个文件做了语法回归检查，当前改动不影响其导入与执行入口。
+
+---
+
+## 增量更新（2026-03-24，LocalRagService 接入服务级 resilience + callback 管理）
+
+### 目标
+
+- 在 `LocalRagService` 层提供“可配置的 retry/circuit-breaker”能力，避免仅脚本层手工包装。
+- 在 `LocalRagService` 层提供“回调注册/事件读取/指标汇总”入口，便于上层直接使用。
+- 保持默认行为兼容：不开启新开关时，不改变原有调用路径。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `rag-anything/raganything/services/local_rag.py` | 新增 resilience 配置字段、服务级 `_safe_ingest_call/_safe_query_call` 包装、callback 注册/注销与事件读取接口 |
+| `rag-anything/examples/raganything_local.py` | 示例脚本新增 `--enable_resilience`、`--enable_metrics_callback`、`--enable_callback_event_log`、`--register_demo_callback` 并演示使用 |
+
+### 关键行为
+
+- `LocalRagSettings` 新增开关/参数（均可环境变量覆盖）：
+  - `enable_resilience`
+  - `resilience_max_attempts`
+  - `ingest_retry_base_delay`
+  - `query_retry_base_delay`
+  - `resilience_max_delay`
+  - `ingest_breaker_failure_threshold`
+  - `query_breaker_failure_threshold`
+  - `breaker_reset_timeout_seconds`
+  - `enable_metrics_callback`
+  - `enable_callback_event_log`
+- `LocalRagService.ingest/query` 在开启 `enable_resilience=True` 时自动走服务级 retry + circuit breaker；默认关闭保持原行为。
+- `LocalRagService` 新增：
+  - `register_callback(callback)`
+  - `unregister_callback(callback)`
+  - `get_metrics_summary()`
+  - `get_callback_events(doc_id)`
+- 新建 RAG 实例时会自动挂载已注册 callbacks，并按配置开启 event log。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查：
+  - `python -m py_compile raganything/services/local_rag.py`
+  - `python -m py_compile examples/raganything_local.py`
+- 逻辑级检查（内联）：
+  - 主链路：开启 resilience 时，瞬时超时可重试后成功；
+  - 一致性：关闭 resilience 时调用次数不发生重试放大；
+  - 边界：breaker 阈值=2 时连续失败可打开熔断并拒绝后续请求；
+  - 反例：回调重复注册不会重复追加，同一 callback 仅注册一次；
+  - 反例：已有 `rag` 实例后再注册 callback，`enable_callback_event_log=True` 时仍可正常记录并读取事件。
+
+---
+
+## 增量更新（2026-03-24，并发初始化竞态根治：_ensure_lightrag_initialized single-flight）
+
+### 问题背景
+
+- 共享 workspace 并发 ingest 时，多个协程会同时进入 `_ensure_lightrag_initialized()`。
+- 旧实现中 `parse_cache` 采用“先赋值后 initialize”的发布顺序，存在半初始化对象可见窗口。
+- 该窗口可能触发：`Error accessing parse cache: 'NoneType' object has no attribute 'get'` 警告。
+
+### 改动目标
+
+- 不靠外层降并发规避，直接在内核初始化路径做并发安全收敛。
+- 保持代码简洁：单一临界区 + 原子发布，避免重复补丁。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `rag-anything/raganything/raganything.py` | 新增 `_lightrag_init_lock` 与 `_is_lightrag_runtime_ready()`；`_ensure_lightrag_initialized()` 改为 single-flight 双重检查；`parse_cache` 改为初始化完成后再发布（原子可见） |
+
+### 行为变化（相对改动前）
+
+- 同一 `RAGAnything` 实例并发调用 `_ensure_lightrag_initialized()` 时，仅一个协程执行真实初始化，其余等待并复用结果。
+- `parse_cache` 不再出现“对象已挂载但未 initialize 完成”的半可见状态。
+- 初始化失败时不会发布半成品 `lightrag/parse_cache`，后续可干净重试。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查：
+  - `python -m py_compile raganything/raganything.py`
+  - `python -m py_compile raganything/processor.py`
+- 逻辑级检查（内联）：
+  - 主链路：并发 6 路初始化，仅发生 1 次 LightRAG 与 parse_cache 初始化；
+  - 一致性：`parse_cache.initialize()` 未完成前，`self.parse_cache` 仍为 `None`（无半初始化发布）；
+  - 边界：首次初始化故意失败后，不发布半状态，第二次可成功恢复；
+- 反例：pre-provided LightRAG 分支并发场景同样保持 single-flight 与原子发布。
+  - 输出标记：`RAGANYTHING_INIT_SINGLE_FLIGHT_CHECK_PASSED`。
+
+---
+
+## 增量更新（2026-03-25，并发 ingest 稳定性重构：workspace_id 统一 + ingest 抛错 + warmup + 多模态原子收尾）
+
+### 目标
+
+- 消除 ingest 链路“吞错继续”与状态撕裂风险。
+- 统一“图谱级 ID”语义：`doc_id -> workspace_id`（服务层 + server API + evaluate_shared/evaluate/examples）。
+- 并发 ingest 前保证同 workspace 仅一次 warmup 初始化。
+- 多模态收尾改为单次原子写入，避免 `chunks_list/chunks_count/multimodal_processed` 不一致。
+- `evaluate_shared` 遇单文档 ingest 失败不中断全流程，失败可审计、query 自动跳过失败文档。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `rag-anything/raganything/constants.py` | `DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID` 命名统一 |
+| `rag-anything/raganything/services/local_rag.py` | `workspace_id` API 重命名；`serialize_by_workspace_id` 重命名；ingest LLM/vision 失败抛异常；workspace warmup 锁与 warmed 集合 |
+| `rag-anything/raganything/processor.py` | 新增 `_finalize_multimodal_doc_status()`，统一原子收尾；移除旧分散收尾路径 |
+| `rag-anything/server/app.py` | server 路由参数/请求体/响应体 `doc_id` 全改 `workspace_id` |
+| `rag-anything/server/templates/index.html` | 前端请求字段同步为 `workspace_id`（避免 API 硬改后 422） |
+| `rag-anything/evaluate_local/DocBench/evaluate_shared.py` | `shared_workspace_id` 重命名；ingest 失败继续；失败清单 `shared_ingest_failures.jsonl`；query 仅处理 ingest 成功文档 |
+| `rag-anything/evaluate_local/DocBench/evaluate.py` | 调用 `LocalRagService` 时改用 `workspace_id` 语义 |
+| `rag-anything/examples/raganything_local.py` | 示例 ingest/query/callback 入口改用 `workspace_id` |
+| `rag-anything/examples/raganything_local_v2.py` | 示例 ingest/query 参数改用 `workspace_id` |
+
+### 关键行为变化（相对改动前）
+
+- ingest 报错策略：
+  - 文本抽取（entity extraction/gleaning）异常不再 `return ""`，改为直接抛出。
+  - 视觉 ingest 路径保留 schema->no-schema 一次重试；重试后仍失败则抛出异常，不再伪造成功 JSON。
+- warmup：
+  - `LocalRagService.ingest()` 在并发 ingest 前自动执行 `_ensure_workspace_warmed(workspace_id)`。
+  - 同一 workspace 并发场景只初始化一次；cleanup/recycle 后可重新 warmup。
+- 多模态状态一致性：
+  - 统一走 `_finalize_multimodal_doc_status(doc_id, new_chunk_ids)`：
+    - 去重合并 `chunks_list`
+    - 重算 `chunks_count`
+    - 设置 `multimodal_processed=True`
+    - 单次 `index_done_callback()`
+- evaluate_shared 失败继续：
+  - 单文档 ingest 失败写入 `shared_ingest_failures.jsonl`，含 `doc_id/workspace_id/file_name/error/traceback_tail/time`。
+  - 批次失败仅告警，不中断后续 ingest。
+  - query 阶段自动跳过未成功 ingest 的文档。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查：
+  - `python -m py_compile` 覆盖以下文件并通过：
+    - `raganything/services/local_rag.py`
+    - `raganything/processor.py`
+    - `server/app.py`
+    - `evaluate_local/DocBench/evaluate_shared.py`
+    - `evaluate_local/DocBench/evaluate.py`
+    - `examples/raganything_local.py`
+    - `examples/raganything_local_v2.py`
+- 关键残留扫描：
+  - `serialize_by_doc_id / serialize_ingest_by_doc_id / RAGANYTHING_SERIALIZE_INGEST_BY_DOC_ID / DEFAULT_SERIALIZE_INGEST_BY_DOC_ID`：无残留。
+  - `evaluate_shared.py` 中 `shared_doc_id`：无残留。
+  - `server/app.py` 中 `doc_id`（workspace 语义）：无残留。
+  - `processor.py` 旧分散收尾函数调用：无残留。
+
+### 兼容性说明
+
+- 本轮接受破坏性接口变更：server 与 service 调用面统一使用 `workspace_id`，不保留 `doc_id` 兼容别名。
+- 历史数据不做离线 reconcile；一致性修复从本轮运行时开始生效。
+
+---
+
+## 增量更新（2026-03-25，编码污染修复与 index 可运行性恢复）
+
+### 目标
+
+- 清理本轮受污染文件中的 mojibake/断裂字符串，恢复可读与可维护状态。
+- 保留并延续已完成的 `workspace_id` 语义改造，不回退到 `doc_id`。
+- 恢复 `index` 页面关键交互可用性（上传、查询、工作空间切换）。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `rag-anything/server/templates/index.html` | 以干净文本恢复模板字符串完整性，并保留 `workspace_id` 前端请求字段（`/query`、`/ingest`） |
+| `rag-anything/server/app.py` | 清理文本污染并保持 server API 为 `workspace_id` |
+| `rag-anything/evaluate_local/DocBench/evaluate.py` | 修复断裂字符串与日志污染，保留两阶段流程与 `workspace_id` 调用链 |
+| `rag-anything/examples/raganything_local_v2.py` | 清理乱码注释/提示文本，保留 `workspace_id` 参数调用 |
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查（通过）：
+  - `python -m py_compile rag-anything/server/app.py`
+  - `python -m py_compile rag-anything/evaluate_local/DocBench/evaluate.py`
+  - `python -m py_compile rag-anything/evaluate_local/DocBench/evaluate_shared.py`
+  - `python -m py_compile rag-anything/examples/raganything_local.py`
+  - `python -m py_compile rag-anything/examples/raganything_local_v2.py`
+  - `python -m py_compile rag-anything/raganything/services/local_rag.py`
+  - `python -m py_compile rag-anything/raganything/processor.py`
+- 字段一致性检查（通过）：
+  - `server/app.py` 与 `server/templates/index.html` 无 `payload.doc_id` / `fd.append('doc_id',...)` / `result.doc_id` / `ws.doc_id` 残留。
+  - 前后端交互字段统一为 `workspace_id`。
+- 污染字符检查（通过）：
+  - 目标文件无 `閳/窶/馃/锟/�` 等典型 mojibake 残留。
+  - `evaluate.py` 中此前导致 `SyntaxError` 的断裂字符串已修复。
+- 模板完整性检查（通过）：
+  - `index.html` 的关键 `placeholder` 属性无断裂，关键 UI 文本（如 graph 渲染状态）可正常解析。
+
+### 行为结论
+
+- 本轮只修文本与模板完整性，不改变既有业务语义。
+- `workspace_id` 全链路保持生效，`index` 与 API 调用链可直接使用。
+
+---
+
+## 增量更新（2026-03-25，Rerank 可观测性重构：语义日志 + 单次查询 trace + evaluate_shared 分布统计）
+
+### 目标
+
+- 修正 rerank 日志语义，避免 entity/relation 被误记为 chunks。
+- 为 chunk rerank 增加可观测性：输出全量重排分数与最终保留分数。
+- 统一普通查询与 VLM 增强查询的 trace 语义：同一次检索+rerank 产出 trace；无图 fallback 默认不额外发起第二次检索（仅异常时降级）。
+- 在 `evaluate_shared` 对每个问题落盘 rerank 分布统计，并输出全局汇总，服务后续 `min_rerank_score` 研究。
+
+### 改动范围
+
+| 文件 | 改动 |
+|------|------|
+| `lightrag/lightrag/base.py` | `QueryParam` 新增 `rerank_score_scope: "top_k" \| "all"`（默认 `top_k`） |
+| `lightrag/lightrag/utils.py` | `apply_rerank_if_enabled` 新增 `item_label`；`process_chunks_unified` 增加 scope 分支、分数日志与结构化 `rerank_debug`；`convert_to_user_format` 透传 chunk `rerank_score` |
+| `lightrag/lightrag/operate.py` | `_rerank_kg_results` 传入 `item_label=entities/relations`；KG/naive 两条链路写入 `metadata.rerank_chunk_debug`；query cache key 纳入 `rerank_score_scope` |
+| `raganything/query.py` | `aquery` 增加 `return_trace`；普通/VLM 增强均支持单次检索返回 `{"answer","trace"}` |
+| `raganything/services/local_rag.py` | 新增 `query_with_trace`，保留 `query()` 返回字符串兼容 |
+| `evaluate_local/DocBench/evaluate_shared.py` | 生成阶段改用 `query_with_trace`；新增 `rerank_chunk_stats.jsonl` 与 `rerank_chunk_summary.json`；默认 `rerank_score_scope="all"`（仅评测脚本）；`no_resume` 自动清理旧输出文件；`resume` 支持仅回填缺失的 rerank 统计 |
+| `RAGAnything_LocalRAG_VLM_Refactor_2026-02-20.md` | 修正基线描述（L8 rerank 规则、VLM trace 链路、QueryParam 字段）并新增本节 |
+
+### 改动前后对照
+
+- 改动前：
+  - `apply_rerank_if_enabled` 固定日志为 chunks，entity/relation 日志语义错误。
+  - chunk 仅有过滤后计数日志，无全量分数与最终分数明细。
+  - `LocalRagService.query()` 与 `aquery_vlm_enhanced()` 默认丢弃 `raw_data`，`evaluate_shared` 无法稳定做每题 rerank 分布统计。
+- 改动后：
+  - entity/relation/chunk 三类 rerank 日志语义分离。
+  - chunk rerank 记录 `scores_all`、`scores_after_threshold`、`scores_final`，并写入 `metadata.rerank_chunk_debug`。
+  - 普通/VLM 增强均可单次检索返回 trace；`evaluate_shared` 直接消费 trace 生成每题统计与全局汇总。
+
+### 默认行为与开关
+
+- 全局默认行为保持兼容：
+  - `rerank_score_scope="top_k"`（线上默认不变）。
+- 评测脚本默认研究模式：
+  - `evaluate_shared` 的 `DOCBENCH_QUERY_PARAMS` 默认 `rerank_score_scope="all"`。
+- `query()` 兼容性：
+  - 原接口仍返回 `str`；
+  - 新增 `query_with_trace()` 承担 trace 输出，不破坏现有调用面。
+
+### 输出物
+
+- 日志：
+  - `Successfully reranked: X entities from Y original entities`
+  - `Successfully reranked: X relations from Y original relations`
+  - `Rerank scores (all reranked chunks): [...]`
+  - `Rerank scores (final kept chunks): [...]`
+- 结构化 trace：
+  - `raw_data.metadata.rerank_chunk_debug`
+- 评测输出：
+  - `docbench_shared_results/rerank_chunk_stats.jsonl`（每题）
+  - `docbench_shared_results/rerank_chunk_summary.json`（全局汇总）
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查（通过）：
+  - `python -m py_compile lightrag/lightrag/base.py lightrag/lightrag/utils.py lightrag/lightrag/operate.py`
+  - `python -m py_compile raganything/query.py raganything/services/local_rag.py evaluate_local/DocBench/evaluate_shared.py`
+- 逻辑级检查（通过）：
+  - 单测：`python -m pytest -q tests/test_rerank_observability.py` → `4 passed`
+  - 内联主链路检查：`LOCAL_RAG_TRACE_API_PRESENT`
+  - 内联统计检查：`EVAL_SHARED_RERANK_PAYLOAD_CHECK_PASSED`
+  - 内联路径检查：`QUERY_TRACE_PATH_PRESENT`
+- 边界/反例覆盖：
+  - 非法 `rerank_score_scope` 回退 `top_k`（单测覆盖）。
+  - `query()` 返回类型保持 `str`，`query_with_trace()` 返回结构化 trace（接口分离）。
+  - `resume` 模式下通过 `processed_rerank_keys` 避免重复写入；若答案已存在但 rerank 统计缺失，会仅回填 rerank 记录。
+
+### 兼容性说明
+
+- 本轮不改 `system_answers.jsonl` 字段结构；下游 evaluate 兼容保持不变。
+- trace 数据独立输出，不混入答案正文。
+
+---
+
+## 增量更新（2026-03-27，多模态 ingest 防卡死最小重构：固定大超时 + strict 双阶段 + 失败仅补跑）
+
+### 目标
+
+- 保持 shared workspace 并行 ingest 吞吐不变（不改串行）。
+- 避免多模态阶段在 `Using regex fallback for JSON parsing` 后长时间无进展。
+- 支持“本轮不中断，后续只补跑失败文档”。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `raganything/constants.py` | 新增多模态 guardrail 默认值：`DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS=600`、`DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS=3600`、`DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS=10`、`DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK=True`；新增 `DEFAULT_EVAL_RETRY_FAILED_ONLY=False` |
+| `raganything/services/local_rag.py` | `LocalRagSettings` 新增多模态超时/strict-fallback 配置（含 env 覆盖）；`build_vision_model_func` 对 ingest 调用引入 `asyncio.wait_for` 单 item 超时；strict 双阶段（`strict=true` 失败后自动走 `strict=false`）；失败继续抛异常；将多模态 guardrail 参数通过 `addon_params` 注入运行时 |
+| `raganything/processor.py` | 从 `self.lightrag.addon_params` 读取多模态超时参数；单 item 使用 `wait_for`；batch `gather` 增加 watchdog 超时；超时后取消 pending task 并做取消回收；增加 timeout/model/parse/other 分类统计日志；保持 `_finalize_multimodal_doc_status` 原子收尾 |
+| `evaluate_local/DocBench/evaluate_shared.py` | 新增失败清单加载/重写函数；新增 CLI：`--retry_failed_only`（默认 False）、`--clear_failures_on_success`（默认 True）与 `--no_clear_failures_on_success`；`retry_failed_only` 时仅 ingest 失败清单与区间交集；成功后可自动清理失败条目 |
+
+### 改动前后对照
+
+- 改动前：
+  - 多模态 item 可能无边界等待，batch 依赖裸 `gather`，单任务卡住会拖慢或阻塞整批推进。
+  - `evaluate_shared` 失败补跑依赖手工筛选，失败文件无法“按失败清单精准重放”。
+- 改动后：
+  - 多模态 ingest 增加 item/batch 两层边界（600s/3600s），并在 watchdog 超时后做任务取消回收，不再无限等待。
+  - strict JSON 采用双阶段：先 `strict=true`，失败自动降级 `strict=false`；两阶段都失败则抛错，由上层失败清单接管。
+  - `evaluate_shared` 支持 `--retry_failed_only` 仅补跑失败文档，且可在成功后清理失败条目。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查（通过）：
+  - `python -m py_compile raganything/constants.py raganything/services/local_rag.py raganything/processor.py evaluate_local/DocBench/evaluate_shared.py`
+- 逻辑级检查（通过）：
+  - 内联环境变量映射检查：`LocalRagSettings.from_env()` 可读取多模态新参数（item/batch/cancel/strict fallback）。
+  - 内联失败清单检查：`_rewrite_ingest_failures()` 与 `_load_ingest_failures()` 可读写并在空集合时删除文件。
+  - 输出标记：`MULTIMODAL_TIMEOUT_AND_FAILURE_RETRY_CHECK_PASSED`
+- 边界/反例：
+  - `retry_failed_only=True` 且无失败文件时会告警，不会误 ingest 全量。
+  - `clear_failures_on_success=True` 时仅清理已成功文档条目；`--no_clear_failures_on_success` 可保留历史失败记录。
+
+### 兼容性说明
+
+- 默认行为保持兼容：
+  - `--retry_failed_only` 默认 `False`，不改变现有 resume 扫描逻辑。
+  - 并发 ingest 仍保持原有并发模式，不降级为串行。
+- 本轮未改 `DEFAULT_TIMEOUT / DEFAULT_LLM_TIMEOUT` 语义，仅增加多模态专属 guardrail。
+
+---
+
+## 增量更新（2026-03-30，SurGE evaluate 并发参数收敛与去冗余）
+
+### 目标
+
+- 解决 `evaluate_surge.py` ingest 并发参数语义重叠问题，避免“两个旋钮控制同一件事”。
+- 保留高并发能力，但不修改全局 `constants.py`，仅影响 SurGE 评测进程。
+- 保持 query/survey 检索评测并发独立，避免与 ingest 并发混淆。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `evaluate_local/SurGE/evaluate_surge.py` | 将 ingest 并发收敛为单参数 `--ingest-concurrency`；该参数同时用于外层 ingest 任务并发和 `max_parallel_insert` 运行时覆盖；移除 `--ingest-max-parallel-insert`；补充参数 help 文案并保留 `--max-concurrency` 仅用于 query/survey 检索评测并发 |
+| `RAGAnything_LocalRAG_VLM_Refactor_2026-02-20.md` | 新增本节记录 |
+
+### 改动前后对照
+
+- 改动前：
+  - ingest 有两个并发参数：`ingest_concurrency` 与 `ingest_max_parallel_insert`，默认值都为 16，语义重叠。
+- 改动后：
+  - ingest 仅保留 `--ingest-concurrency` 一个入口，语义清晰：
+    - 外层 ingest `Semaphore` 并发
+    - LightRAG `max_parallel_insert` 覆盖值
+  - `--max-concurrency` 明确只用于 query/survey 检索评测并发。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查（通过）：
+  - `python -m py_compile evaluate_local/SurGE/evaluate_surge.py`
+- 逻辑级检查（通过）：
+  - 参数边界反例：`python evaluate_local/SurGE/evaluate_surge.py --ingest-concurrency 0` 正确 fail-fast（参数校验触发）。
+  - 参数集合一致性：内联检查 `build_parser()` 默认值为 `ingest_concurrency=16`、`max_concurrency=8`，且不再包含 `ingest_max_parallel_insert`。
+  - `--help` 输出检查：仅保留 `--ingest-concurrency` 与 `--max-concurrency` 两个并发入口。
+
+### 兼容性说明
+
+- 本次不改 `raganything/constants.py` 全局默认值（其他任务仍按原配置运行）。
+- SurGE 评测并发提速通过脚本内运行时覆盖完成，不影响主链路默认行为。
+
+---
+
+## 增量更新（2026-03-30，main -> neo4j-milvus 合并说明：冲突解决 + 高风险语义修复）
+
+### 目标
+
+- 在 `neo4j-milvus` 分支合入 `main`，不改当前 `main` 工作区。
+- 解决 3 个文本冲突，并修复自动合并未报错但有高风险的语义问题。
+- 保持改动最小，避免新增并行冗余逻辑。
+
+### 合并范围
+
+- 执行位置：隔离 worktree `E:\\RAG\\Data\\_tmp_neo4j_milvus_wt`
+- 合并方式：`git merge --no-ff --no-commit main`
+- 真实冲突文件（3 个）：
+  - `rag-anything/raganything/constants.py`
+  - `rag-anything/raganything/processor.py`
+  - `rag-anything/raganything/services/local_rag.py`
+
+### 冲突处理与决策
+
+- `raganything/constants.py`
+  - 保留两侧常量：`V2/V3`（synonym + multi-hop）与 `resilience/callback/eval`。
+  - 仅移除冲突标记，不改常量命名。
+- `raganything/processor.py`
+  - import 合并为并集：同时保留 `compute_entity_*` 与 `DEFAULT_MULTIMODAL_*`。
+  - 避免实体路径/多模态超时路径任一侧缺符号。
+- `raganything/services/local_rag.py`
+  - import 合并为并集：保留 `DEFAULT_QUERY_MODE/TOP_K/CHUNK_TOP_K/ENABLE_RERANK` + `workspace/resilience/callback` 常量。
+  - 去掉未使用的 `DEFAULT_SERIALIZE_INGEST_BY_DOC_ID`。
+
+### 高风险语义修复（自动合并未报冲突部分）
+
+- `lightrag/operate.py`
+  - `_merge_nodes_then_upsert`：修复实体 ID 二次拼接风险。若入参已是复合 ID，不再再次 `compute_entity_id`。
+  - `_merge_edges_then_upsert`：统一边补点时的实体键口径，`entity_chunks_storage` 与图节点统一使用 `entity_id`。
+  - 边补点新增 `added_entities.entity_id`，避免后续阶段只靠 `entity_name` 造成键空间混用。
+  - `merge_nodes_and_edges` Phase 3：`full_entities` 优先写入 `entity_id`，与删除链路使用口径一致。
+- `lightrag/lightrag.py`
+  - `aquery_data` 补齐 `rerank_score_scope` 透传，避免 query_data 路径回落默认值。
+  - `adelete_by_doc_id` 读取节点键时改为 `entity_id or id`，提升历史数据兼容性。
+  - 删除实体向量时增加候选 ID 集合（legacy hash + canonical 计算），降低混键场景残留概率。
+- `lightrag/base.py`
+  - `DeletionResult.status` 类型补齐 `not_allowed`，与实际返回值一致。
+
+### 改动前后对照
+
+- 改动前：
+  - 三个文件存在 merge 冲突，无法完成合并提交。
+  - 存在实体键二次拼接/混用风险，删除链路有漏删残留隐患。
+  - `aquery_data` 未透传 `rerank_score_scope`。
+- 改动后：
+  - 冲突已全部消除，三处冲突块按并集合并完成。
+  - 实体 ID 与 `full_entities/entity_chunks` 键口径统一，删除链路命中更稳定。
+  - `query_data` 与 `aquery_llm` 在 rerank score scope 口径对齐。
+
+### 本轮检查（按固定执行流程）
+
+- 冲突标记扫描（通过）：
+  - `rg -n \"^(<<<<<<<|=======|>>>>>>>)\" ...`（目标文件无残留）
+- 语法检查（通过）：
+  - `python -m py_compile rag-anything/raganything/constants.py rag-anything/raganything/processor.py rag-anything/raganything/services/local_rag.py`
+  - `python -m py_compile lightrag/lightrag/base.py lightrag/lightrag/operate.py lightrag/lightrag/lightrag.py`
+- 逻辑级检查（通过）：
+  - 内联守卫断言脚本输出：`MERGE_AND_SEMANTIC_GUARD_CHECK_PASSED`
+  - `pytest`：`python -m pytest -q tests/test_rerank_observability.py`（在 `lightrag/` 目录下执行）→ `4 passed`
+
+### 兼容性说明
+
+- 未新增环境变量与外部配置入口，默认行为保持兼容。
+- `full_entities` 本次写入策略与既有迁移逻辑口径一致（均以 `entity_id` 为主）。
+- 对历史混键数据，删除流程增加回退与候选删除策略，优先修复残留而非放大破坏面。

@@ -2,81 +2,127 @@
 # -*- coding: utf-8 -*-
 
 """
-RAG-Anything Local Multimodal Pipeline (Final Optimized Version)
-----------------------------------------------------------------
-Key Features:
-1. Native Rerank Integration via lightrag_kwargs (No monkey patching).
-2. Prompt Reordering (System instructions + context + aligned images).
-3. optimized Retrieval Parameters (chunk_top_k=30, top_k=15).
+Local RAGAnything example with optional resilience and callbacks.
 """
 
-import asyncio
 import argparse
+import asyncio
 import os
+from typing import Any
 
+from raganything.callbacks import ProcessingCallback
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
 
-# ==========================================
-# 1. 配置与初始化
-# ==========================================
 
-async def process_with_rag(service: LocalRagService, file_path: str, doc_id: str):
-    # 先入库，再逐题查询。
-    final_doc_id = await service.ingest(file_path, doc_id=doc_id)
+class DemoLoggingCallback(ProcessingCallback):
+    def on_parse_start(self, file_path: str, parser: str = "", **kwargs: Any) -> None:
+        print(f"[callback] parse_start: {file_path} parser={parser}")
+
+    def on_document_complete(
+        self,
+        file_path: str,
+        doc_id: str = "",
+        duration_seconds: float = 0.0,
+        **kwargs: Any,
+    ) -> None:
+        print(
+            f"[callback] document_complete: file={file_path} doc_id={doc_id} "
+            f"duration={duration_seconds:.2f}s"
+        )
+
+    def on_query_complete(
+        self,
+        query: str,
+        mode: str = "",
+        duration_seconds: float = 0.0,
+        result_length: int = 0,
+        **kwargs: Any,
+    ) -> None:
+        print(
+            f"[callback] query_complete: mode={mode} duration={duration_seconds:.2f}s "
+            f"result_length={result_length}"
+        )
+
+
+async def process_with_rag(
+    service: LocalRagService, file_path: str, workspace_id: str
+) -> None:
+    final_workspace_id = await service.ingest(
+        file_path, workspace_id=workspace_id
+    )
 
     queries = [
-        "According to the paper, what are the specific visual encoder and language model (LLM) backbones used in the PaddleOCR-VL-1.5 architecture, and why was the 0.9B parameter size chosen?",
-        "Based on the evaluation tables, how does PaddleOCR-VL-1.5 compare with GPT-4o and Qwen2-VL-7B on the OmniDocBench benchmark? Please specify the scores for text recognition and layout analysis.",
-        "Does PaddleOCR-VL-1.5 use a dynamic resolution strategy (like 'AnyRes') or a fixed-grid approach for high-resolution document images? Describe how it handles images with extreme aspect ratios.",
-        "The paper mentions a multi-stage training process. Can you list and describe the three specific training phases (e.g., Pre-training, SFT) and the primary objective of each phase?",
-        "Look at the model's performance on the Wild Table Warehouse (WTW) dataset. What specific metrics are used to measure the cell-level structure recognition, and what score did PaddleOCR-VL-1.5 achieve?",
-        "Based on the visual samples in the figures, what specific types of 'in-the-wild' distortions (e.g., curved text, reflection, rotation) is the model trained to handle, and what techniques are used to improve its robustness?",
-        "The paper introduces a specialized capability for 'Seal Recognition'. What are the unique challenges of parsing seals in documents, and how does the model represent the output of a detected seal (e.g., text content or coordinates)?",
-        "What is the total number of document images used in the SFT stage, and what percentage of this data is synthetic versus real-world collected data?",
-        "In the context of robust document parsing, how does the paper differentiate the performance and efficiency of PaddleOCR-VL-1.5 compared to the MinerU system?",
-        "Does the model support LaTeX output for complex mathematical formulas? If so, what dataset was utilized to fine-tune its performance on formula recognition?",
+        "What is the paper's main contribution?",
+        "Which baseline methods are compared and what are the core results?",
+        "What are the limitations discussed by the authors?",
     ]
 
     for i, query in enumerate(queries, 1):
-        service.logger.info(f"\n{'='*80}")
-        service.logger.info(f"Query {i}/{len(queries)}: {query}")
-        service.logger.info(f"{'='*80}")
+        service.logger.info("Query %d/%d: %s", i, len(queries), query)
+        result = await service.query(
+            final_workspace_id,
+            query,
+            mode="hybrid",
+            enable_rerank=True,
+            vlm_enhanced=True,
+        )
+        service.logger.info("Answer:\n%s\n", result)
 
-        query_param = {
-            "mode": "hybrid",
-            "enable_rerank": True,
-            "vlm_enhanced": True,
-        }
+    metrics_summary = service.get_metrics_summary()
+    if metrics_summary:
+        service.logger.info("\n%s", metrics_summary)
 
-        result = await service.query(final_doc_id, query, **query_param)
-        service.logger.info(f"\n✅ Answer:\n{result}\n")
-
-        # if "[" in result and "]" in result:
-        #      service.logger.info("✓ Reference detected")
-        # else:
-        #      service.logger.warning("⚠ No reference found")
+    events = service.get_callback_events(final_workspace_id)
+    if events:
+        service.logger.info(
+            "Callback event count for %s: %d", final_workspace_id, len(events)
+        )
 
 
-# ==========================================
-# 4. 入口
-# ==========================================
-
-def main():
-    parser = argparse.ArgumentParser(description="RAGAnything Local Pipeline")
-
-    parser.add_argument("--path", "-p", required=True, help="要入库的文件或文件夹路径")
-    parser.add_argument("--id", "-i", required=True, help="工作空间名称 (doc_id)")
-
+def main() -> None:
+    parser = argparse.ArgumentParser(description="RAGAnything local example")
+    parser.add_argument("--path", "-p", required=True, help="Input file or folder path")
+    parser.add_argument("--id", "-i", required=True, help="Workspace name (workspace_id)")
+    parser.add_argument(
+        "--enable_resilience",
+        action="store_true",
+        help="Enable service-level retry + circuit breaker for ingest/query",
+    )
+    parser.add_argument(
+        "--enable_metrics_callback",
+        action="store_true",
+        help="Enable built-in metrics callback and print summary",
+    )
+    parser.add_argument(
+        "--enable_callback_event_log",
+        action="store_true",
+        help="Enable callback event log collection in callback manager",
+    )
+    parser.add_argument(
+        "--register_demo_callback",
+        action="store_true",
+        help="Register a demo callback that prints parse/document/query events",
+    )
     args = parser.parse_args()
-    
+
     if not os.path.exists(args.path):
-        print(f"❌ Input not found: {args.path}")
+        print(f"Input not found: {args.path}")
         return
 
     settings = LocalRagSettings.from_env()
+    if args.enable_resilience:
+        settings.enable_resilience = True
+    if args.enable_metrics_callback:
+        settings.enable_metrics_callback = True
+    if args.enable_callback_event_log:
+        settings.enable_callback_event_log = True
+
     service = LocalRagService(settings)
+    if args.register_demo_callback:
+        service.register_callback(DemoLoggingCallback())
 
     asyncio.run(process_with_rag(service, args.path, args.id))
+
 
 if __name__ == "__main__":
     main()

@@ -21,7 +21,7 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 import numpy as np
 from lightrag.types import GPTKeywordExtractionFormat
@@ -30,6 +30,7 @@ from openai import AsyncOpenAI
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from raganything import RAGAnything, RAGAnythingConfig
+from raganything.callbacks import MetricsCallback, ProcessingCallback
 from raganything.chunking import get_chunking_func
 from raganything.constants import (
     DEFAULT_LOG_MAX_BYTES,
@@ -54,6 +55,10 @@ from raganything.constants import (
     DEFAULT_VLM_ENABLE_JSON_SCHEMA,
     DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD,
     DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE,
+    DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS,
+    DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS,
+    DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS,
+    DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK,
     DEFAULT_CHUNKING_STRATEGY,
     DEFAULT_CHUNK_TOKEN_SIZE,
     DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE,
@@ -65,12 +70,23 @@ from raganything.constants import (
     DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
     DEFAULT_MIN_RERANK_SCORE,
     DEFAULT_ENABLE_INLINE_CITATIONS,
-    DEFAULT_SERIALIZE_INGEST_BY_DOC_ID,
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
     DEFAULT_QUERY_MODE,
     DEFAULT_ENABLE_RERANK,
+    DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID,
+    DEFAULT_ENABLE_RESILIENCE,
+    DEFAULT_RESILIENCE_MAX_ATTEMPTS,
+    DEFAULT_INGEST_RETRY_BASE_DELAY,
+    DEFAULT_QUERY_RETRY_BASE_DELAY,
+    DEFAULT_RESILIENCE_MAX_DELAY,
+    DEFAULT_INGEST_BREAKER_FAILURE_THRESHOLD,
+    DEFAULT_QUERY_BREAKER_FAILURE_THRESHOLD,
+    DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS,
+    DEFAULT_ENABLE_METRICS_CALLBACK,
+    DEFAULT_ENABLE_CALLBACK_EVENT_LOG,
 )
+from raganything.resilience import CircuitBreaker, async_retry
 from raganything.query_message_repack import repack_query_messages
 
 # Inline citation toggle: read once at startup; env var ENABLE_INLINE_CITATIONS overrides constant
@@ -122,6 +138,12 @@ class LocalRagSettings:
     ingest_max_tokens: int = DEFAULT_INGEST_MAX_TOKENS
 
     vlm_enable_json_schema: bool = DEFAULT_VLM_ENABLE_JSON_SCHEMA
+    multimodal_item_timeout_seconds: float = DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS
+    multimodal_batch_watchdog_seconds: float = (
+        DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS
+    )
+    multimodal_cancel_grace_seconds: float = DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS
+    multimodal_enable_strict_fallback: bool = DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK
     image_token_estimate_method: str = DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD
     image_token_model_name_or_path: str = ""
     image_wrapper_tokens_per_image: int = DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE
@@ -129,10 +151,20 @@ class LocalRagSettings:
     chunking_strategy: str = DEFAULT_CHUNKING_STRATEGY
     chunk_token_size: int = DEFAULT_CHUNK_TOKEN_SIZE
     chunk_overlap_token_size: int = DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE
-    serialize_ingest_by_doc_id: bool = DEFAULT_SERIALIZE_INGEST_BY_DOC_ID
+    serialize_ingest_by_workspace_id: bool = DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID
     mineru_vllm_gpu_memory_utilization: float = (
         DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION
     )
+    enable_resilience: bool = DEFAULT_ENABLE_RESILIENCE
+    resilience_max_attempts: int = DEFAULT_RESILIENCE_MAX_ATTEMPTS
+    ingest_retry_base_delay: float = DEFAULT_INGEST_RETRY_BASE_DELAY
+    query_retry_base_delay: float = DEFAULT_QUERY_RETRY_BASE_DELAY
+    resilience_max_delay: float = DEFAULT_RESILIENCE_MAX_DELAY
+    ingest_breaker_failure_threshold: int = DEFAULT_INGEST_BREAKER_FAILURE_THRESHOLD
+    query_breaker_failure_threshold: int = DEFAULT_QUERY_BREAKER_FAILURE_THRESHOLD
+    breaker_reset_timeout_seconds: float = DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS
+    enable_metrics_callback: bool = DEFAULT_ENABLE_METRICS_CALLBACK
+    enable_callback_event_log: bool = DEFAULT_ENABLE_CALLBACK_EVENT_LOG
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -175,6 +207,29 @@ class LocalRagSettings:
                 "RAGANYTHING_VLM_ENABLE_JSON_SCHEMA", str(DEFAULT_VLM_ENABLE_JSON_SCHEMA)
             ).lower()
             in {"1", "true", "yes", "y", "on"},
+            multimodal_item_timeout_seconds=float(
+                os.getenv(
+                    "RAGANYTHING_MULTIMODAL_ITEM_TIMEOUT_SECONDS",
+                    str(DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS),
+                )
+            ),
+            multimodal_batch_watchdog_seconds=float(
+                os.getenv(
+                    "RAGANYTHING_MULTIMODAL_BATCH_WATCHDOG_SECONDS",
+                    str(DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS),
+                )
+            ),
+            multimodal_cancel_grace_seconds=float(
+                os.getenv(
+                    "RAGANYTHING_MULTIMODAL_CANCEL_GRACE_SECONDS",
+                    str(DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS),
+                )
+            ),
+            multimodal_enable_strict_fallback=os.getenv(
+                "RAGANYTHING_MULTIMODAL_ENABLE_STRICT_FALLBACK",
+                str(DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
             image_token_estimate_method=os.getenv(
                 "RAGANYTHING_IMAGE_TOKEN_ESTIMATE_METHOD",
                 DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD,
@@ -189,9 +244,9 @@ class LocalRagSettings:
             chunking_strategy=os.getenv("CHUNKING_STRATEGY", DEFAULT_CHUNKING_STRATEGY),
             chunk_token_size=int(os.getenv("CHUNK_SIZE", str(DEFAULT_CHUNK_TOKEN_SIZE))),
             chunk_overlap_token_size=int(os.getenv("CHUNK_OVERLAP_SIZE", str(DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE))),
-            serialize_ingest_by_doc_id=os.getenv(
-                "RAGANYTHING_SERIALIZE_INGEST_BY_DOC_ID",
-                str(DEFAULT_SERIALIZE_INGEST_BY_DOC_ID),
+            serialize_ingest_by_workspace_id=os.getenv(
+                "RAGANYTHING_SERIALIZE_INGEST_BY_WORKSPACE_ID",
+                str(DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
             mineru_vllm_gpu_memory_utilization=float(
@@ -200,6 +255,63 @@ class LocalRagSettings:
                     str(DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION),
                 )
             ),
+            enable_resilience=os.getenv(
+                "RAGANYTHING_ENABLE_RESILIENCE",
+                str(DEFAULT_ENABLE_RESILIENCE),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            resilience_max_attempts=int(
+                os.getenv(
+                    "RAGANYTHING_RESILIENCE_MAX_ATTEMPTS",
+                    str(DEFAULT_RESILIENCE_MAX_ATTEMPTS),
+                )
+            ),
+            ingest_retry_base_delay=float(
+                os.getenv(
+                    "RAGANYTHING_INGEST_RETRY_BASE_DELAY",
+                    str(DEFAULT_INGEST_RETRY_BASE_DELAY),
+                )
+            ),
+            query_retry_base_delay=float(
+                os.getenv(
+                    "RAGANYTHING_QUERY_RETRY_BASE_DELAY",
+                    str(DEFAULT_QUERY_RETRY_BASE_DELAY),
+                )
+            ),
+            resilience_max_delay=float(
+                os.getenv(
+                    "RAGANYTHING_RESILIENCE_MAX_DELAY",
+                    str(DEFAULT_RESILIENCE_MAX_DELAY),
+                )
+            ),
+            ingest_breaker_failure_threshold=int(
+                os.getenv(
+                    "RAGANYTHING_INGEST_BREAKER_FAILURE_THRESHOLD",
+                    str(DEFAULT_INGEST_BREAKER_FAILURE_THRESHOLD),
+                )
+            ),
+            query_breaker_failure_threshold=int(
+                os.getenv(
+                    "RAGANYTHING_QUERY_BREAKER_FAILURE_THRESHOLD",
+                    str(DEFAULT_QUERY_BREAKER_FAILURE_THRESHOLD),
+                )
+            ),
+            breaker_reset_timeout_seconds=float(
+                os.getenv(
+                    "RAGANYTHING_BREAKER_RESET_TIMEOUT_SECONDS",
+                    str(DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS),
+                )
+            ),
+            enable_metrics_callback=os.getenv(
+                "RAGANYTHING_ENABLE_METRICS_CALLBACK",
+                str(DEFAULT_ENABLE_METRICS_CALLBACK),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            enable_callback_event_log=os.getenv(
+                "RAGANYTHING_ENABLE_CALLBACK_EVENT_LOG",
+                str(DEFAULT_ENABLE_CALLBACK_EVENT_LOG),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
         )
 
 
@@ -250,16 +362,16 @@ def _model_cache_key(settings: LocalRagSettings) -> str:
     return f"{settings.embedding_model_path}|{settings.rerank_model_path}|{settings.device}"
 
 
-def _resolve_ingest_serialize_by_doc_id(
-    default_serialize_by_doc_id: bool,
-    serialize_by_doc_id: Optional[bool],
+def _resolve_ingest_serialize_by_workspace_id(
+    default_serialize_by_workspace_id: bool,
+    serialize_by_workspace_id: Optional[bool],
     chunking_strategy: Optional[str],
     default_chunking_strategy: str,
 ) -> tuple[bool, bool]:
     effective_serialize = (
-        default_serialize_by_doc_id
-        if serialize_by_doc_id is None
-        else bool(serialize_by_doc_id)
+        default_serialize_by_workspace_id
+        if serialize_by_workspace_id is None
+        else bool(serialize_by_workspace_id)
     )
     forced_to_serialize = (
         not effective_serialize
@@ -369,7 +481,7 @@ def _build_modal_analysis_response_format() -> dict[str, Any]:
         "type": "json_schema",
         "json_schema": {
             "name": "modal_analysis",
-            "strict": False,
+            "strict": True,
             "schema": {
                 "type": "object",
                 "properties": {
@@ -465,7 +577,8 @@ def build_llm_model_func(
         keyword_extraction = bool(kwargs.pop("keyword_extraction", False))
         is_streaming = bool(kwargs.pop("stream", False))
         cleaned_kwargs = _strip_internal_openai_kwargs(kwargs)
-        if _is_entity_extraction_call(system_prompt, prompt):
+        is_ingest_call = _is_entity_extraction_call(system_prompt, prompt)
+        if is_ingest_call:
             max_tokens = settings.ingest_max_tokens
         else:
             max_tokens = settings.query_max_tokens
@@ -539,6 +652,8 @@ def build_llm_model_func(
             return getattr(message, "content", "") or ""
         except Exception as exc:
             logger.error(f"LLM Error: {exc}")
+            if is_ingest_call:
+                raise
             return ""
 
     return llm_model_func
@@ -552,6 +667,45 @@ def build_vision_model_func(
 ):
     llm_fallback = build_llm_model_func(settings, client, logger, model_name)
     schema_stats = {"total": 0, "success": 0, "fallback": 0}
+    item_timeout = max(1.0, float(settings.multimodal_item_timeout_seconds))
+
+    async def _vision_once(
+        *,
+        messages_payload: list[dict[str, Any]],
+        request_kwargs: dict[str, Any],
+        task_type: str,
+        strict_mode: str,
+        attempt: int,
+    ):
+        try:
+            logger.info(
+                "Vision ingest request: task_type=%s strict_mode=%s timeout=%.1fs attempt=%d",
+                task_type,
+                strict_mode,
+                item_timeout,
+                attempt,
+            )
+            return await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model_name,
+                    messages=messages_payload,
+                    temperature=settings.temperature,
+                    max_tokens=settings.ingest_max_tokens,
+                    **request_kwargs,
+                ),
+                timeout=item_timeout,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Vision ingest request failed: task_type=%s strict_mode=%s timeout=%.1fs attempt=%d error_class=%s error=%s",
+                task_type,
+                strict_mode,
+                item_timeout,
+                attempt,
+                type(exc).__name__,
+                exc,
+            )
+            raise
 
     async def vision_model_func(
         prompt,
@@ -632,12 +786,12 @@ def build_vision_model_func(
                 )
 
             try:
-                response = await client.chat.completions.create(
-                    model=model_name,
-                    messages=msgs,
-                    temperature=settings.temperature,
-                    max_tokens=settings.ingest_max_tokens,
-                    **request_kwargs,
+                response = await _vision_once(
+                    messages_payload=msgs,
+                    request_kwargs=request_kwargs,
+                    task_type=task_type,
+                    strict_mode="strict=true" if "response_format" in request_kwargs else "none",
+                    attempt=1,
                 )
                 if use_schema:
                     schema_stats["success"] += 1
@@ -650,7 +804,11 @@ def build_vision_model_func(
                     )
                 return response.choices[0].message.content
             except Exception as exc:
-                if "response_format" in request_kwargs:
+                can_fallback = (
+                    "response_format" in request_kwargs
+                    and settings.multimodal_enable_strict_fallback
+                )
+                if can_fallback:
                     schema_stats["fallback"] += 1
                     logger.warning(
                         "Vision ingest json_schema call failed, retrying without schema: %s",
@@ -658,12 +816,12 @@ def build_vision_model_func(
                     )
                     request_kwargs.pop("response_format", None)
                     try:
-                        response = await client.chat.completions.create(
-                            model=model_name,
-                            messages=msgs,
-                            temperature=settings.temperature,
-                            max_tokens=settings.ingest_max_tokens,
-                            **request_kwargs,
+                        response = await _vision_once(
+                            messages_payload=msgs,
+                            request_kwargs=request_kwargs,
+                            task_type=task_type,
+                            strict_mode="strict=false",
+                            attempt=2,
                         )
                         success_rate = schema_stats["success"] / max(schema_stats["total"], 1)
                         fallback_rate = schema_stats["fallback"] / max(schema_stats["total"], 1)
@@ -678,19 +836,7 @@ def build_vision_model_func(
                         exc = retry_exc
 
                 logger.error("Vision LLM Error (Ingest): %s", exc)
-                fallback_seed = base64_image if base64_image else str(prompt)
-                fallback_id = hashlib.md5(fallback_seed.encode("utf-8")).hexdigest()[:8]
-                if prompt_has_json:
-                    fallback_payload = {
-                        "detailed_description": f"{task_type} description unavailable due to vision model error.",
-                        "entity_info": {
-                            "entity_name": f"{task_type}_{fallback_id}",
-                            "entity_type": task_type,
-                            "summary": f"{task_type} description unavailable due to vision model error.",
-                        },
-                    }
-                    return json.dumps(fallback_payload, ensure_ascii=False)
-                return f"{task_type} description unavailable due to vision model error."
+                raise
 
         return await llm_fallback(
             prompt,
@@ -744,7 +890,7 @@ def _maybe_enable_internvl2_prompts(settings: LocalRagSettings, logger: logging.
     except Exception as exc:
         logger.warning(f"Failed to enable InternVL2 prompt overrides: {exc}")
 
-def _safe_doc_id(name: str) -> str:
+def _safe_workspace_id(name: str) -> str:
     cleaned = "".join(ch for ch in name if ch.isalnum() or ch in ("-", "_"))
     if cleaned:
         return cleaned
@@ -823,9 +969,12 @@ class LocalRagService:
         self.vision_client = AsyncOpenAI(api_key=vision_key, base_url=vision_base)
         self._rag_instances: Dict[str, RAGAnything] = {}
         self._init_lock = asyncio.Lock()
-        # Per-doc-id locks: serialise ingest for the same workspace so that the
+        self._registered_callbacks: list[ProcessingCallback] = []
+        # Per-workspace-id locks: serialise ingest for the same workspace so that the
         # temporary chunking_func swap never races with a concurrent ingest.
         self._ingest_locks: Dict[str, asyncio.Lock] = {}
+        self._workspace_warmup_locks: Dict[str, asyncio.Lock] = {}
+        self._warmed_workspaces: set[str] = set()
 
         st_model, reranker_model = load_models(self.settings)
         self.embedding_func = build_embedding_func(self.settings, st_model)
@@ -841,6 +990,152 @@ class LocalRagService:
             self.vision_client,
             self.logger,
             vision_model,
+        )
+        self._safe_ingest_call, self._safe_query_call = self._build_resilience_wrappers()
+        if self.settings.enable_metrics_callback:
+            self.register_callback(MetricsCallback())
+
+    def _on_resilience_retry(
+        self,
+        op_name: str,
+        exc: BaseException,
+        attempt: int,
+        delay: float,
+    ) -> None:
+        self.logger.warning(
+            "Resilience retry (%s): attempt=%d delay=%.1fs reason=%s",
+            op_name,
+            attempt,
+            delay,
+            exc,
+        )
+
+    def _build_resilience_wrappers(
+        self,
+    ) -> tuple[
+        Callable[[Callable[[], Awaitable[Any]]], Awaitable[Any]],
+        Callable[[Callable[[], Awaitable[Any]]], Awaitable[Any]],
+    ]:
+        async def _plain_wrapper(func: Callable[[], Awaitable[Any]]) -> Any:
+            return await func()
+
+        if not self.settings.enable_resilience:
+            self.logger.info("Service resilience is disabled.")
+            return _plain_wrapper, _plain_wrapper
+
+        ingest_breaker = CircuitBreaker(
+            failure_threshold=max(1, self.settings.ingest_breaker_failure_threshold),
+            reset_timeout=max(0.0, self.settings.breaker_reset_timeout_seconds),
+            name="local_rag_ingest",
+        )
+        query_breaker = CircuitBreaker(
+            failure_threshold=max(1, self.settings.query_breaker_failure_threshold),
+            reset_timeout=max(0.0, self.settings.breaker_reset_timeout_seconds),
+            name="local_rag_query",
+        )
+
+        @ingest_breaker.async_call
+        @async_retry(
+            max_attempts=max(1, self.settings.resilience_max_attempts),
+            base_delay=max(0.0, self.settings.ingest_retry_base_delay),
+            max_delay=max(0.0, self.settings.resilience_max_delay),
+            on_retry=lambda exc, attempt, delay: self._on_resilience_retry(
+                "ingest", exc, attempt, delay
+            ),
+        )
+        async def _safe_ingest(func: Callable[[], Awaitable[Any]]) -> Any:
+            return await func()
+
+        @query_breaker.async_call
+        @async_retry(
+            max_attempts=max(1, self.settings.resilience_max_attempts),
+            base_delay=max(0.0, self.settings.query_retry_base_delay),
+            max_delay=max(0.0, self.settings.resilience_max_delay),
+            on_retry=lambda exc, attempt, delay: self._on_resilience_retry(
+                "query", exc, attempt, delay
+            ),
+        )
+        async def _safe_query(func: Callable[[], Awaitable[Any]]) -> Any:
+            return await func()
+
+        self.logger.info(
+            "Service resilience enabled: max_attempts=%d ingest_delay=%.1fs query_delay=%.1fs max_delay=%.1fs",
+            max(1, self.settings.resilience_max_attempts),
+            max(0.0, self.settings.ingest_retry_base_delay),
+            max(0.0, self.settings.query_retry_base_delay),
+            max(0.0, self.settings.resilience_max_delay),
+        )
+        return _safe_ingest, _safe_query
+
+    def _register_callbacks_to_rag(self, rag: RAGAnything) -> None:
+        for callback in self._registered_callbacks:
+            rag.callback_manager.register(callback)
+        if self.settings.enable_callback_event_log:
+            rag.callback_manager.enable_event_log(True)
+
+    def register_callback(self, callback: ProcessingCallback) -> None:
+        if not isinstance(callback, ProcessingCallback):
+            raise TypeError(
+                f"Expected ProcessingCallback instance, got {type(callback).__name__}"
+            )
+        if callback in self._registered_callbacks:
+            return
+        self._registered_callbacks.append(callback)
+        for rag in self._rag_instances.values():
+            rag.callback_manager.register(callback)
+            if self.settings.enable_callback_event_log:
+                rag.callback_manager.enable_event_log(True)
+
+    def unregister_callback(self, callback: ProcessingCallback) -> None:
+        if callback in self._registered_callbacks:
+            self._registered_callbacks.remove(callback)
+        for rag in self._rag_instances.values():
+            try:
+                rag.callback_manager.unregister(callback)
+            except ValueError:
+                pass
+
+    def get_metrics_summary(self) -> str:
+        lines: list[str] = []
+        for callback in self._registered_callbacks:
+            if isinstance(callback, MetricsCallback):
+                lines.append(callback.summary())
+        return "\n\n".join(lines)
+
+    def get_callback_events(self, workspace_id: str) -> list[dict[str, Any]]:
+        rag = self._rag_instances.get(workspace_id)
+        if rag is None:
+            return []
+        return [event.to_dict() for event in rag.callback_manager.event_log]
+
+    async def cleanup_workspace_instance(self, workspace_id: str) -> None:
+        rag = self._rag_instances.get(workspace_id)
+        if rag is not None:
+            await rag.finalize_storages()
+            self._rag_instances.pop(workspace_id, None)
+        self._warmed_workspaces.discard(workspace_id)
+        self._workspace_warmup_locks.pop(workspace_id, None)
+
+    def _apply_multimodal_guardrails_to_rag(self, rag: RAGAnything) -> None:
+        """
+        Inject multimodal guardrail settings into LightRAG addon_params without
+        overwriting existing upstream addon keys (e.g. language/entity_types).
+        """
+        lightrag_inst = getattr(rag, "lightrag", None)
+        if lightrag_inst is None:
+            return
+        addon_params = getattr(lightrag_inst, "addon_params", None)
+        if not isinstance(addon_params, dict):
+            addon_params = {}
+            lightrag_inst.addon_params = addon_params
+        addon_params["multimodal_item_timeout_seconds"] = float(
+            self.settings.multimodal_item_timeout_seconds
+        )
+        addon_params["multimodal_batch_watchdog_seconds"] = float(
+            self.settings.multimodal_batch_watchdog_seconds
+        )
+        addon_params["multimodal_cancel_grace_seconds"] = float(
+            self.settings.multimodal_cancel_grace_seconds
         )
 
     def _build_rag(self, working_dir: str) -> RAGAnything:
@@ -881,42 +1176,57 @@ class LocalRagService:
             },
         )
 
-    async def get_rag(self, doc_id: str) -> RAGAnything:
+    async def get_rag(self, workspace_id: str) -> RAGAnything:
         async with self._init_lock:
-            if doc_id in self._rag_instances:
-                return self._rag_instances[doc_id]
-            working_dir = str(Path(self.settings.working_dir_root) / doc_id)
+            if workspace_id in self._rag_instances:
+                return self._rag_instances[workspace_id]
+            working_dir = str(Path(self.settings.working_dir_root) / workspace_id)
             rag = self._build_rag(working_dir)
-            self._rag_instances[doc_id] = rag
+            self._register_callbacks_to_rag(rag)
+            self._rag_instances[workspace_id] = rag
             return rag
+
+    async def _ensure_workspace_warmed(self, workspace_id: str) -> None:
+        if workspace_id in self._warmed_workspaces:
+            return
+        if workspace_id not in self._workspace_warmup_locks:
+            self._workspace_warmup_locks[workspace_id] = asyncio.Lock()
+        async with self._workspace_warmup_locks[workspace_id]:
+            if workspace_id in self._warmed_workspaces:
+                return
+            rag = await self.get_rag(workspace_id)
+            await rag._ensure_lightrag_initialized()
+            self._apply_multimodal_guardrails_to_rag(rag)
+            self._warmed_workspaces.add(workspace_id)
+            self.logger.info("Workspace warmup complete: %s", workspace_id)
 
     async def ingest(
         self,
         file_path: str,
         output_dir: Optional[str] = None,
-        doc_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
         chunking_strategy: Optional[str] = None,
-        serialize_by_doc_id: Optional[bool] = None,
+        serialize_by_workspace_id: Optional[bool] = None,
     ) -> str:
         file_path_obj = Path(file_path)
         if not file_path_obj.exists():
             raise FileNotFoundError(f"Input not found: {file_path}")
 
-        doc_id = doc_id or _safe_doc_id(file_path_obj.stem)
-        rag = await self.get_rag(doc_id)
+        workspace_id = workspace_id or _safe_workspace_id(file_path_obj.stem)
+        rag = await self.get_rag(workspace_id)
         output_dir = output_dir or self.settings.output_dir
-        effective_serialize, forced_to_serialize = _resolve_ingest_serialize_by_doc_id(
-            default_serialize_by_doc_id=self.settings.serialize_ingest_by_doc_id,
-            serialize_by_doc_id=serialize_by_doc_id,
+        effective_serialize, forced_to_serialize = _resolve_ingest_serialize_by_workspace_id(
+            default_serialize_by_workspace_id=self.settings.serialize_ingest_by_workspace_id,
+            serialize_by_workspace_id=serialize_by_workspace_id,
             chunking_strategy=chunking_strategy,
             default_chunking_strategy=self.settings.chunking_strategy,
         )
         if forced_to_serialize:
             self.logger.warning(
-                "serialize_by_doc_id is forced to True because chunking_strategy "
-                "override requires temporary chunking_func swap (doc_id=%s, "
+                "serialize_by_workspace_id is forced to True because chunking_strategy "
+                "override requires temporary chunking_func swap (workspace_id=%s, "
                 "default=%s, override=%s).",
-                doc_id,
+                workspace_id,
                 self.settings.chunking_strategy,
                 chunking_strategy,
             )
@@ -948,40 +1258,79 @@ class LocalRagService:
                     if rag.lightrag is not None:
                         rag.lightrag.chunking_func = old_chunking_func
 
+        await self._ensure_workspace_warmed(workspace_id)
+
         if effective_serialize:
-            # Per-doc-id lock: serialise ingest for the same workspace so the
+            # Per-workspace-id lock: serialise ingest for the same workspace so the
             # temporary chunking_func swap never races with a concurrent ingest.
-            if doc_id not in self._ingest_locks:
-                self._ingest_locks[doc_id] = asyncio.Lock()
-            async with self._ingest_locks[doc_id]:
-                await _run_ingest()
+            if workspace_id not in self._ingest_locks:
+                self._ingest_locks[workspace_id] = asyncio.Lock()
+            async with self._ingest_locks[workspace_id]:
+                await self._safe_ingest_call(_run_ingest)
         else:
-            await _run_ingest()
+            await self._safe_ingest_call(_run_ingest)
 
-        return doc_id
+        return workspace_id
 
-    async def query(self, doc_id: str, query: str, **kwargs) -> str:
-        rag = await self.get_rag(doc_id)
-        kwargs.setdefault(
+    async def query(self, workspace_id: str, query: str, **kwargs) -> str:
+        rag = await self.get_rag(workspace_id)
+        normalized_kwargs = dict(kwargs)
+        normalized_kwargs.setdefault(
             "image_token_estimate_method",
             self.settings.image_token_estimate_method,
         )
-        kwargs.setdefault(
+        normalized_kwargs.setdefault(
             "image_token_model_name_or_path",
             self.settings.image_token_model_name_or_path,
         )
-        kwargs.setdefault(
+        normalized_kwargs.setdefault(
             "image_wrapper_tokens_per_image",
             self.settings.image_wrapper_tokens_per_image,
         )
-        kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
-            str(kwargs.get("image_token_estimate_method", ""))
+        normalized_kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
+            str(normalized_kwargs.get("image_token_estimate_method", ""))
         )
-        return await rag.aquery(query, **kwargs)
+        async def _run_query() -> str:
+            return await rag.aquery(query, **normalized_kwargs)
+
+        return await self._safe_query_call(_run_query)
+
+    async def query_with_trace(
+        self, workspace_id: str, query: str, **kwargs
+    ) -> dict[str, Any]:
+        rag = await self.get_rag(workspace_id)
+        normalized_kwargs = dict(kwargs)
+        normalized_kwargs.setdefault(
+            "image_token_estimate_method",
+            self.settings.image_token_estimate_method,
+        )
+        normalized_kwargs.setdefault(
+            "image_token_model_name_or_path",
+            self.settings.image_token_model_name_or_path,
+        )
+        normalized_kwargs.setdefault(
+            "image_wrapper_tokens_per_image",
+            self.settings.image_wrapper_tokens_per_image,
+        )
+        normalized_kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
+            str(normalized_kwargs.get("image_token_estimate_method", ""))
+        )
+        normalized_kwargs["return_trace"] = True
+
+        async def _run_query_with_trace() -> dict[str, Any]:
+            result = await rag.aquery(query, **normalized_kwargs)
+            if isinstance(result, dict):
+                return {
+                    "answer": str(result.get("answer", "")),
+                    "trace": result.get("trace", {}),
+                }
+            return {"answer": str(result), "trace": {}}
+
+        return await self._safe_query_call(_run_query_with_trace)
 
     async def stream_query(
         self,
-        doc_id: str,
+        workspace_id: str,
         query: str,
         mode: str = DEFAULT_QUERY_MODE,
         top_k: int = DEFAULT_TOP_K,
@@ -997,7 +1346,7 @@ class LocalRagService:
         """
         try:
             from lightrag import QueryParam
-            rag_instance = await self.get_rag(doc_id)
+            rag_instance = await self.get_rag(workspace_id)
             await rag_instance._ensure_lightrag_initialized()
             param = QueryParam(
                 mode=mode,
@@ -1037,7 +1386,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="RAG 后台管理工具")
     parser.add_argument("--path", "-p", required=True, help="要入库的文件或文件夹路径")
-    parser.add_argument("--id", "-i", required=True, help="工作空间名称 (doc_id)")
+    parser.add_argument("--id", "-i", required=True, help="工作空间名称 (workspace_id)")
     args = parser.parse_args()
     
     async def main():
@@ -1052,7 +1401,7 @@ if __name__ == "__main__":
         print(f"目标工作区: {settings.working_dir_root}/{workspace_name}")
 
         try:
-            await service.ingest(file_path=target_path, doc_id=workspace_name)
+            await service.ingest(file_path=target_path, workspace_id=workspace_name)
 
             print(f"\n 入库成功！")
             print(f"知识图谱已更新: {settings.working_dir_root}/{workspace_name}/graph_chunk_entity_relation.graphml")

@@ -21,6 +21,11 @@ from raganything.utils import (
 )
 import asyncio
 from lightrag.utils import compute_mdhash_id, compute_entity_id, compute_entity_vdb_id
+from raganything.constants import (
+    DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS,
+    DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS,
+    DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS,
+)
 
 
 class ProcessorMixin:
@@ -430,6 +435,16 @@ class ProcessorMixin:
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
+        callback_file = str(file_path)
+        callback_manager = getattr(self, "callback_manager", None)
+        parse_start_time = time.time()
+        if callback_manager is not None:
+            callback_manager.dispatch(
+                "on_parse_start",
+                file_path=callback_file,
+                parser=self.config.parser,
+            )
+
         # Generate cache key based on file and configuration
         cache_key = self._generate_cache_key(file_path, parse_method, **kwargs)
 
@@ -443,6 +458,15 @@ class ProcessorMixin:
             if display_stats:
                 self.logger.info(
                     f"* Total blocks in cached content_list: {len(content_list)}"
+                )
+            if callback_manager is not None:
+                duration = time.time() - parse_start_time
+                callback_manager.dispatch(
+                    "on_parse_complete",
+                    file_path=callback_file,
+                    content_blocks=len(content_list),
+                    doc_id=doc_id,
+                    duration_seconds=duration,
                 )
             return content_list, doc_id
 
@@ -548,11 +572,25 @@ class ProcessorMixin:
 
         except MineruExecutionError as e:
             self.logger.error(f"Mineru command failed: {e}")
+            if callback_manager is not None:
+                callback_manager.dispatch(
+                    "on_parse_error",
+                    file_path=callback_file,
+                    error=e,
+                    parser=self.config.parser,
+                )
             raise
         except Exception as e:
             self.logger.error(
                 f"Error during parsing with {self.config.parser} parser: {str(e)}"
             )
+            if callback_manager is not None:
+                callback_manager.dispatch(
+                    "on_parse_error",
+                    file_path=callback_file,
+                    error=e,
+                    parser=self.config.parser,
+                )
             raise e
 
         msg = f"Parsing {file_path} complete! Extracted {len(content_list)} content blocks"
@@ -586,6 +624,16 @@ class ProcessorMixin:
             for block_type, count in block_types.items():
                 self.logger.info(f"  - {block_type}: {count}")
 
+        if callback_manager is not None:
+            duration = time.time() - parse_start_time
+            callback_manager.dispatch(
+                "on_parse_complete",
+                file_path=callback_file,
+                content_blocks=len(content_list),
+                doc_id=doc_id,
+                duration_seconds=duration,
+            )
+
         return content_list, doc_id
 
     async def _process_multimodal_content(
@@ -610,6 +658,16 @@ class ProcessorMixin:
         if not multimodal_items:
             self.logger.debug("No multimodal content to process")
             return
+
+        callback_manager = getattr(self, "callback_manager", None)
+        mm_start_time = time.time()
+        if callback_manager is not None:
+            callback_manager.dispatch(
+                "on_multimodal_start",
+                file_path=file_path,
+                item_count=len(multimodal_items),
+                doc_id=doc_id,
+            )
 
         # Check multimodal processing status - handle LightRAG's early DocStatus.PROCESSED marking
         try:
@@ -660,15 +718,22 @@ class ProcessorMixin:
                 multimodal_items=multimodal_items, file_path=file_path, doc_id=doc_id
             )
 
-            # Mark multimodal content as processed and update final status
-            await self._mark_multimodal_processing_complete(doc_id)
-
             log_message = "Multimodal content processing complete"
             self.logger.info(log_message)
             if pipeline_status_lock and pipeline_status:
                 async with pipeline_status_lock:
                     pipeline_status["latest_message"] = log_message
                     pipeline_status["history_messages"].append(log_message)
+
+            if callback_manager is not None:
+                duration = time.time() - mm_start_time
+                callback_manager.dispatch(
+                    "on_multimodal_complete",
+                    file_path=file_path,
+                    processed_count=len(multimodal_items),
+                    duration_seconds=duration,
+                    doc_id=doc_id,
+                )
 
         except Exception as e:
             self.logger.error(f"Error in multimodal processing: {e}")
@@ -678,8 +743,7 @@ class ProcessorMixin:
                 multimodal_items, file_path, doc_id
             )
 
-            # Mark multimodal content as processed even after fallback
-            await self._mark_multimodal_processing_complete(doc_id)
+            # Fallback path finalizes doc_status inside individual processing.
 
     async def _process_multimodal_content_individual(
         self, multimodal_items: List[Dict[str, Any]], file_path: str, doc_id: str
@@ -760,46 +824,6 @@ class ProcessorMixin:
                 self.logger.debug("Exception details:", exc_info=True)
                 continue
 
-        # Update doc_status to include multimodal chunks in the standard chunks_list
-        if multimodal_chunk_ids:
-            try:
-                # Get current document status
-                current_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
-
-                if current_doc_status:
-                    existing_chunks_list = current_doc_status.get("chunks_list", [])
-                    existing_chunks_count = current_doc_status.get("chunks_count", 0)
-
-                    # Add multimodal chunks to the standard chunks_list
-                    updated_chunks_list = existing_chunks_list + multimodal_chunk_ids
-                    updated_chunks_count = existing_chunks_count + len(
-                        multimodal_chunk_ids
-                    )
-
-                    # Update document status with integrated chunk list
-                    await self.lightrag.doc_status.upsert(
-                        {
-                            doc_id: {
-                                **current_doc_status,  # Keep existing fields
-                                "chunks_list": updated_chunks_list,  # Integrated chunks list
-                                "chunks_count": updated_chunks_count,  # Updated total count
-                                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-                            }
-                        }
-                    )
-
-                    # Ensure doc_status update is persisted to disk
-                    await self.lightrag.doc_status.index_done_callback()
-
-                    self.logger.info(
-                        f"Updated doc_status with {len(multimodal_chunk_ids)} multimodal chunks integrated into chunks_list"
-                    )
-
-            except Exception as e:
-                self.logger.warning(
-                    f"Error updating doc_status with multimodal chunks: {e}"
-                )
-
         # Batch merge all multimodal content results (similar to text content processing)
         if all_chunk_results:
             from lightrag.operate import merge_nodes_and_edges
@@ -833,8 +857,7 @@ class ProcessorMixin:
 
         self.logger.info("Individual multimodal content processing complete")
 
-        # Mark multimodal content as processed
-        await self._mark_multimodal_processing_complete(doc_id)
+        await self._finalize_multimodal_doc_status(doc_id, multimodal_chunk_ids)
 
     async def _process_multimodal_content_batch_type_aware(
         self, multimodal_items: List[Dict[str, Any]], file_path: str, doc_id: str
@@ -851,6 +874,35 @@ class ProcessorMixin:
         if not multimodal_items:
             self.logger.debug("No multimodal content to process")
             return
+
+        addon_params = getattr(self.lightrag, "addon_params", {}) or {}
+        item_timeout_seconds = max(
+            1.0,
+            float(
+                addon_params.get(
+                    "multimodal_item_timeout_seconds",
+                    DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS,
+                )
+            ),
+        )
+        batch_watchdog_seconds = max(
+            item_timeout_seconds,
+            float(
+                addon_params.get(
+                    "multimodal_batch_watchdog_seconds",
+                    DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS,
+                )
+            ),
+        )
+        cancel_grace_seconds = max(
+            0.0,
+            float(
+                addon_params.get(
+                    "multimodal_cancel_grace_seconds",
+                    DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS,
+                )
+            ),
+        )
 
         # Get existing chunks count for proper order indexing
         try:
@@ -903,11 +955,14 @@ class ProcessorMixin:
                     (
                         description,
                         entity_info,
-                    ) = await processor.generate_description_only(
-                        modal_content=item,
-                        content_type=content_type,
-                        item_info=item_info,
-                        entity_name=None,  # Let LLM auto-generate
+                    ) = await asyncio.wait_for(
+                        processor.generate_description_only(
+                            modal_content=item,
+                            content_type=content_type,
+                            item_info=item_info,
+                            entity_name=None,  # Let LLM auto-generate
+                        ),
+                        timeout=item_timeout_seconds,
                     )
 
                     # Update progress (non-blocking)
@@ -960,16 +1015,99 @@ class ProcessorMixin:
             for i, item in enumerate(multimodal_items)
         ]
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=batch_watchdog_seconds,
+            )
+        except asyncio.TimeoutError:
+            self.logger.error(
+                "Multimodal batch watchdog timeout after %.1fs (doc_id=%s). Cancelling pending tasks.",
+                batch_watchdog_seconds,
+                doc_id,
+            )
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if cancel_grace_seconds > 0:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=cancel_grace_seconds,
+                    )
+                except Exception as cancel_exc:
+                    self.logger.warning(
+                        "Timed out while waiting cancelled multimodal tasks to exit (grace=%.1fs): %s",
+                        cancel_grace_seconds,
+                        cancel_exc,
+                    )
+            results = []
+            for task in tasks:
+                if not task.done():
+                    results.append(asyncio.TimeoutError("pending task not finished"))
+                    continue
+                if task.cancelled():
+                    results.append(asyncio.CancelledError("task cancelled by watchdog"))
+                    continue
+                try:
+                    results.append(task.result())
+                except BaseException as exc:
+                    results.append(exc)
 
         # Filter successful results
         multimodal_data_list = []
+        failure_stats = {
+            "timeout": 0,
+            "parse": 0,
+            "model": 0,
+            "cancelled": 0,
+            "other": 0,
+        }
         for result in results:
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 self.logger.error(f"Task failed: {result}")
+                if isinstance(result, asyncio.TimeoutError):
+                    failure_stats["timeout"] += 1
+                elif isinstance(result, asyncio.CancelledError):
+                    failure_stats["cancelled"] += 1
+                else:
+                    text = str(result).lower()
+                    if isinstance(result, (ValueError, json.JSONDecodeError)) or (
+                        "json" in text or "parse" in text
+                    ):
+                        failure_stats["parse"] += 1
+                    elif any(
+                        key in text
+                        for key in (
+                            "connection",
+                            "timeout",
+                            "rate limit",
+                            "api",
+                            "vllm",
+                            "openai",
+                        )
+                    ):
+                        failure_stats["model"] += 1
+                    else:
+                        failure_stats["other"] += 1
                 continue
-            if result is not None:
+            if isinstance(result, dict):
                 multimodal_data_list.append(result)
+            elif result is not None:
+                self.logger.error(
+                    "Unexpected multimodal task result type: %s",
+                    type(result).__name__,
+                )
+                failure_stats["other"] += 1
+
+        failed_count = len(results) - len(multimodal_data_list)
+        if failed_count > 0:
+            self.logger.warning(
+                "Multimodal batch partial failures: failed=%d/%d details=%s",
+                failed_count,
+                len(results),
+                failure_stats,
+            )
 
         if not multimodal_data_list:
             self.logger.warning("No valid multimodal descriptions generated")
@@ -1010,8 +1148,8 @@ class ProcessorMixin:
             enhanced_chunk_results, file_path, doc_id
         )
 
-        # Stage 7: Update doc_status with integrated chunks_list
-        await self._update_doc_status_with_chunks_type_aware(doc_id, chunk_ids)
+        # Stage 7: Finalize multimodal doc_status atomically
+        await self._finalize_multimodal_doc_status(doc_id, chunk_ids)
 
     def _convert_to_lightrag_chunks_type_aware(
         self, multimodal_data_list: List[Dict[str, Any]], file_path: str, doc_id: str
@@ -1277,21 +1415,19 @@ class ProcessorMixin:
                     "update_time": int(time.time()),
                 }
             else:
-                # Update existing document entry
-                existing_entity_names = set(
+                # Update existing document entry while preserving original metadata fields.
+                existing_entity_names = list(
                     current_doc_entities.get("entity_names", [])
                 )
-                new_entity_names = [
-                    entity_data["entity_name"]
-                    for entity_data in entities_to_store.values()
-                ]
-
-                # Add new multimodal entities to the list (avoid duplicates)
-                for entity_name in new_entity_names:
-                    existing_entity_names.add(entity_name)
-
+                seen_entity_names = set(existing_entity_names)
+                for entity_data in entities_to_store.values():
+                    entity_name = entity_data["entity_name"]
+                    if entity_name not in seen_entity_names:
+                        existing_entity_names.append(entity_name)
+                        seen_entity_names.add(entity_name)
                 doc_entities_data = {
-                    "entity_names": list(existing_entity_names),
+                    **current_doc_entities,
+                    "entity_names": existing_entity_names,
                     "count": len(existing_entity_names),
                     "update_time": int(time.time()),
                 }
@@ -1438,69 +1574,38 @@ class ProcessorMixin:
 
         await self.lightrag._insert_done()
 
-    async def _update_doc_status_with_chunks_type_aware(
-        self, doc_id: str, chunk_ids: List[str]
-    ):
-        """Update document status with multimodal chunks"""
-        try:
-            # Get current document status
-            current_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
-
-            if current_doc_status:
-                existing_chunks_list = current_doc_status.get("chunks_list", [])
-                existing_chunks_count = current_doc_status.get("chunks_count", 0)
-
-                # Add multimodal chunks to the standard chunks_list
-                updated_chunks_list = existing_chunks_list + chunk_ids
-                updated_chunks_count = existing_chunks_count + len(chunk_ids)
-
-                # Update document status with integrated chunk list
-                await self.lightrag.doc_status.upsert(
-                    {
-                        doc_id: {
-                            **current_doc_status,  # Keep existing fields
-                            "chunks_list": updated_chunks_list,  # Integrated chunks list
-                            "chunks_count": updated_chunks_count,  # Updated total count
-                            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-                        }
-                    }
-                )
-
-                # Ensure doc_status update is persisted to disk
-                await self.lightrag.doc_status.index_done_callback()
-
-                self.logger.info(
-                    f"Updated doc_status: added {len(chunk_ids)} multimodal chunks to standard chunks_list "
-                    f"(total chunks: {updated_chunks_count})"
-                )
-
-        except Exception as e:
-            self.logger.warning(
-                f"Error updating doc_status with multimodal chunks: {e}"
-            )
-
-    async def _mark_multimodal_processing_complete(self, doc_id: str):
-        """Mark multimodal content processing as complete in the document status."""
+    async def _finalize_multimodal_doc_status(
+        self, doc_id: str, new_chunk_ids: List[str]
+    ) -> None:
+        """Finalize multimodal doc_status with one atomic upsert."""
         try:
             current_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
-            if current_doc_status:
-                await self.lightrag.doc_status.upsert(
-                    {
-                        doc_id: {
-                            **current_doc_status,
-                            "multimodal_processed": True,
-                            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-                        }
-                    }
-                )
-                await self.lightrag.doc_status.index_done_callback()
-                self.logger.debug(
-                    f"Marked multimodal content processing as complete for document {doc_id}"
-                )
-        except Exception as e:
-            self.logger.warning(
-                f"Error marking multimodal processing as complete for document {doc_id}: {e}"
+            if not current_doc_status:
+                raise RuntimeError(f"Missing doc_status for document {doc_id}")
+
+            existing_chunks_list = current_doc_status.get("chunks_list", [])
+            merged_chunks_list = list(
+                dict.fromkeys([*existing_chunks_list, *new_chunk_ids])
             )
+            updated_doc_status = {
+                **current_doc_status,
+                "chunks_list": merged_chunks_list,
+                "chunks_count": len(merged_chunks_list),
+                "multimodal_processed": True,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+            }
+            await self.lightrag.doc_status.upsert({doc_id: updated_doc_status})
+            await self.lightrag.doc_status.index_done_callback()
+            self.logger.info(
+                "Finalized multimodal doc_status for %s: chunks=%d (added=%d)",
+                doc_id,
+                len(merged_chunks_list),
+                len(new_chunk_ids),
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to finalize multimodal doc_status for {doc_id}: {e}"
+            ) from e
 
     async def is_document_fully_processed(self, doc_id: str) -> bool:
         """
@@ -1603,70 +1708,115 @@ class ProcessorMixin:
             doc_id: Optional document ID, if not provided will be generated from content
             **kwargs: Additional parameters for parser (e.g., lang, device, start_page, end_page, formula, table, backend, source)
         """
-        # Ensure LightRAG is initialized
-        await self._ensure_lightrag_initialized()
+        callback_manager = getattr(self, "callback_manager", None)
+        doc_start_time = time.time()
+        stage = "parse"
 
-        # Use config defaults if not provided
-        if output_dir is None:
-            output_dir = self.config.parser_output_dir
-        if parse_method is None:
-            parse_method = self.config.parse_method
-        if display_stats is None:
-            display_stats = self.config.display_content_stats
+        try:
+            # Ensure LightRAG is initialized
+            await self._ensure_lightrag_initialized()
 
-        self.logger.info(f"Starting complete document processing: {file_path}")
+            # Use config defaults if not provided
+            if output_dir is None:
+                output_dir = self.config.parser_output_dir
+            if parse_method is None:
+                parse_method = self.config.parse_method
+            if display_stats is None:
+                display_stats = self.config.display_content_stats
 
-        # Step 1: Parse document
-        content_list, content_based_doc_id = await self.parse_document(
-            file_path, output_dir, parse_method, display_stats, **kwargs
-        )
+            self.logger.info(f"Starting complete document processing: {file_path}")
 
-        # Use provided doc_id or fall back to content-based doc_id
-        if doc_id is None:
-            doc_id = content_based_doc_id
-
-        # Step 2: Separate text and multimodal content
-        text_content, multimodal_items = separate_content(content_list)
-
-        # Step 2.5: Set content source for context extraction in multimodal processing
-        if hasattr(self, "set_content_source_for_context") and multimodal_items:
-            self.logger.info(
-                "Setting content source for context-aware multimodal processing..."
-            )
-            self.set_content_source_for_context(
-                content_list, self.config.content_format
+            # Step 1: Parse document
+            content_list, content_based_doc_id = await self.parse_document(
+                file_path, output_dir, parse_method, display_stats, **kwargs
             )
 
-        # Step 3: Insert pure text content with all parameters
-        if text_content.strip():
-            if file_name is None:
-                # Use full path or basename based on config
-                file_name = self._get_file_reference(file_path)
-            await insert_text_content(
-                self.lightrag,
-                input=text_content,
-                file_paths=file_name,
-                split_by_character=split_by_character,
-                split_by_character_only=split_by_character_only,
-                ids=doc_id,
-            )
-        else:
-            # Determine file reference even if no text content
-            if file_name is None:
-                file_name = self._get_file_reference(file_path)
+            # Use provided doc_id or fall back to content-based doc_id
+            if doc_id is None:
+                doc_id = content_based_doc_id
 
-        # Step 4: Process multimodal content (using specialized processors)
-        if multimodal_items:
-            await self._process_multimodal_content(multimodal_items, file_name, doc_id)
-        else:
-            # If no multimodal content, mark multimodal processing as complete
-            # This ensures the document status properly reflects completion of all processing
-            await self._mark_multimodal_processing_complete(doc_id)
-            self.logger.debug(
-                f"No multimodal content found in document {doc_id}, marked multimodal processing as complete"
-            )
+            # Step 2: Separate text and multimodal content
+            text_content, multimodal_items = separate_content(content_list)
+
+            # Step 2.5: Set content source for context extraction in multimodal processing
+            if hasattr(self, "set_content_source_for_context") and multimodal_items:
+                self.logger.info(
+                    "Setting content source for context-aware multimodal processing..."
+                )
+                self.set_content_source_for_context(
+                    content_list, self.config.content_format
+                )
+
+            # Step 3: Insert pure text content with all parameters
+            stage = "text_insert"
+            if text_content.strip():
+                if file_name is None:
+                    # Use full path or basename based on config
+                    file_name = self._get_file_reference(file_path)
+                if callback_manager is not None:
+                    callback_manager.dispatch(
+                        "on_text_insert_start",
+                        file_path=file_name,
+                        text_length=len(text_content),
+                        doc_id=doc_id,
+                    )
+                insert_start = time.time()
+                await insert_text_content(
+                    self.lightrag,
+                    input=text_content,
+                    file_paths=file_name,
+                    split_by_character=split_by_character,
+                    split_by_character_only=split_by_character_only,
+                    ids=doc_id,
+                )
+                if callback_manager is not None:
+                    insert_duration = time.time() - insert_start
+                    callback_manager.dispatch(
+                        "on_text_insert_complete",
+                        file_path=file_name,
+                        duration_seconds=insert_duration,
+                        doc_id=doc_id,
+                    )
+            else:
+                # Determine file reference even if no text content
+                if file_name is None:
+                    file_name = self._get_file_reference(file_path)
+
+            # Step 4: Process multimodal content (using specialized processors)
+            stage = "multimodal"
+            if multimodal_items:
+                await self._process_multimodal_content(
+                    multimodal_items, file_name, doc_id
+                )
+            else:
+                # If no multimodal content, mark multimodal processing as complete
+                # This ensures the document status properly reflects completion of all processing
+                await self._finalize_multimodal_doc_status(doc_id, [])
+                self.logger.debug(
+                    f"No multimodal content found in document {doc_id}, "
+                    "marked multimodal processing as complete",
+                )
+
+        except Exception as exc:
+            if callback_manager is not None:
+                callback_manager.dispatch(
+                    "on_document_error",
+                    file_path=str(file_path),
+                    doc_id=doc_id,
+                    stage=stage,
+                    error=exc,
+                )
+            raise
 
         self.logger.info(f"Document {file_path} processing complete!")
+        if callback_manager is not None:
+            duration = time.time() - doc_start_time
+            callback_manager.dispatch(
+                "on_document_complete",
+                file_path=str(file_path),
+                doc_id=doc_id,
+                duration_seconds=duration,
+            )
 
     async def process_document_complete_lightrag_api(
         self,
@@ -1993,7 +2143,7 @@ class ProcessorMixin:
         else:
             # If no multimodal content, mark multimodal processing as complete
             # This ensures the document status properly reflects completion of all processing
-            await self._mark_multimodal_processing_complete(doc_id)
+            await self._finalize_multimodal_doc_status(doc_id, [])
             self.logger.debug(
                 f"No multimodal content found in document {doc_id}, marked multimodal processing as complete"
             )
