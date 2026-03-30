@@ -13,6 +13,7 @@ import re
 import sys
 import time
 import traceback
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ DEFAULT_SURVEYS = "subset_surveys.json"
 DEFAULT_CHUNKS = "subset_chunks.jsonl"
 DEFAULT_CORPUS = "subset_corpus.json"
 DEFAULT_WORKSPACE = "surge_subset_shared"
+SURGE_NEVER_SPLIT_DELIMITER = "__SURGE_NEVER_SPLIT__"
 
 PER_QUERY_FILE = RETRIEVAL_DIR / "retrieval_per_query.jsonl"
 SUMMARY_FILE = RETRIEVAL_DIR / "retrieval_summary.json"
@@ -349,8 +351,10 @@ def build_chunk_row_lookup(rows: Any) -> dict[str, dict[str, Any]]:
     return by_chunk_id
 
 
-def iter_batches(values: list[str], batch_size: int) -> list[list[str]]:
-    return [values[i : i + batch_size] for i in range(0, len(values), batch_size)]
+def iter_batches(values: list[Any], batch_size: int):
+    size = max(1, int(batch_size))
+    for i in range(0, len(values), size):
+        yield values[i : i + size]
 
 
 def parse_chunk_store_row_id(row: Any) -> str | None:
@@ -365,6 +369,16 @@ def parse_chunk_store_row_id(row: Any) -> str | None:
         or ""
     ).strip()
     return rid or None
+
+
+def resolve_safe_split_delimiter(texts: list[str]) -> str:
+    preferred = SURGE_NEVER_SPLIT_DELIMITER
+    if all(preferred not in text for text in texts):
+        return preferred
+    while True:
+        candidate = f"{preferred}_{uuid.uuid4().hex}"
+        if all(candidate not in text for text in texts):
+            return candidate
 
 
 async def fetch_existing_chunk_ids(store: Any, expected_ids: list[str], batch_size: int = 2000) -> set[str]:
@@ -412,6 +426,7 @@ async def inspect_workspace_index_state(rag: Any, target_docs: list[str]) -> dic
     status_not_processed_set: set[str] = set()
     missing_chunk_set: set[str] = set()
     missing_vdb_set: set[str] = set()
+    multi_chunk_set: set[str] = set()
     chunk_ids_by_doc: dict[str, list[str]] = {}
 
     for doc_id, row in zip(target_docs, status_rows):
@@ -427,6 +442,8 @@ async def inspect_workspace_index_state(rag: Any, target_docs: list[str]) -> dic
             missing_chunk_set.add(doc_id)
             missing_vdb_set.add(doc_id)
             continue
+        if len(chunk_ids) != 1:
+            multi_chunk_set.add(doc_id)
         chunk_ids_by_doc[doc_id] = chunk_ids
 
     all_expected_chunk_ids = sorted({cid for ids in chunk_ids_by_doc.values() for cid in ids})
@@ -449,6 +466,7 @@ async def inspect_workspace_index_state(rag: Any, target_docs: list[str]) -> dic
         "status_not_processed_set": status_not_processed_set,
         "missing_chunk_set": missing_chunk_set,
         "missing_vdb_set": missing_vdb_set,
+        "multi_chunk_set": multi_chunk_set,
     }
 
 
@@ -713,10 +731,12 @@ async def ensure_workspace_index(
     chunks_by_doc: dict[str, dict[str, Any]],
     retries: int,
     ingest_concurrency: int,
+    ingest_batch_size: int,
 ) -> dict[str, Any]:
     rag = await service.get_rag(workspace_id)
     await ensure_rag_runtime_ready(rag, workspace_id)
     ingest_workers = max(1, int(ingest_concurrency))
+    batch_size = max(1, int(ingest_batch_size))
     apply_ingest_parallel_override(rag, ingest_workers)
     target_docs = sorted(chunks_by_doc.keys(), key=lambda x: (0, int(x)) if x.isdigit() else (1, x))
     target = set(target_docs)
@@ -727,18 +747,21 @@ async def ensure_workspace_index(
     missing_before_status_set = set(before_state["status_not_processed_set"])
     missing_before_chunk_set = set(before_state["missing_chunk_set"])
     missing_before_vdb_set = set(before_state["missing_vdb_set"])
+    missing_before_multi_chunk_set = set(before_state["multi_chunk_set"])
     to_ingest = sorted(
         missing_before_full_set
         | missing_before_doc_status_set
         | missing_before_status_set
         | missing_before_chunk_set
-        | missing_before_vdb_set,
+        | missing_before_vdb_set
+        | missing_before_multi_chunk_set,
         key=sort_key,
     )
     logger.info(
         (
             "Workspace %s missing full_docs: %d/%d, missing doc_status: %d/%d, "
-            "status not processed: %d/%d, missing text_chunks: %d/%d, missing vdb_chunks: %d/%d"
+            "status not processed: %d/%d, missing text_chunks: %d/%d, missing vdb_chunks: %d/%d, "
+            "chunk_count_not_one: %d/%d"
         ),
         workspace_id,
         len(missing_before_full_set),
@@ -751,6 +774,8 @@ async def ensure_workspace_index(
         len(target),
         len(missing_before_vdb_set),
         len(target),
+        len(missing_before_multi_chunk_set),
+        len(target),
     )
     failures: list[dict[str, Any]] = []
     ingested = 0
@@ -758,7 +783,10 @@ async def ensure_workspace_index(
     stale_cleanup_failed = 0
     ingest_done = 0
     ingest_total = len(to_ingest)
-    ingest_state_lock = asyncio.Lock()
+    ingest_batch_failure_count = 0
+    ingest_batch_fallback_doc_count = 0
+    ingest_batch_count = 0
+    next_progress_log = 100
     with open(INGEST_FAILURES, "w", encoding="utf-8") as _:
         pass
 
@@ -770,6 +798,18 @@ async def ensure_workspace_index(
         }
         failures.append(failure)
         append_jsonl_line(INGEST_FAILURES, failure)
+
+    def mark_ingest_progress(step: int = 1) -> None:
+        nonlocal ingest_done, next_progress_log
+        ingest_done += step
+        should_log = False
+        while ingest_done >= next_progress_log:
+            should_log = True
+            next_progress_log += 100
+        if should_log or ingest_done == ingest_total:
+            logger.info("Ingest progress: %d/%d", ingest_done, ingest_total)
+            gc.collect()
+            clear_cuda_cache()
 
     stale_docs = sorted((set(to_ingest) - missing_before_full_set), key=sort_key)
     for doc_id in stale_docs:
@@ -784,60 +824,90 @@ async def ensure_workspace_index(
             stale_cleanup_failed += 1
             record_failure(doc_id, f"stale cleanup failed: {exc}")
 
-    async def ingest_one(doc_id: str) -> None:
-        nonlocal ingested, ingest_done
+    async def ainsert_records(records: list[dict[str, str]]) -> None:
+        if not records:
+            return
+        split_delimiter = resolve_safe_split_delimiter([row["text"] for row in records])
+        input_payload: str | list[str] = [row["text"] for row in records]
+        ids_payload: str | list[str] = [row["doc_id"] for row in records]
+        files_payload: str | list[str] = [row["file_path"] for row in records]
+        if len(records) == 1:
+            input_payload = records[0]["text"]
+            ids_payload = records[0]["doc_id"]
+            files_payload = records[0]["file_path"]
+        await rag.lightrag.ainsert(
+            input=input_payload,
+            ids=ids_payload,
+            file_paths=files_payload,
+            split_by_character=split_delimiter,
+            split_by_character_only=True,
+        )
+
+    async def process_batch(batch_index: int, batch_records: list[dict[str, str]]) -> None:
+        nonlocal ingested, ingest_batch_failure_count, ingest_batch_fallback_doc_count
+        if not batch_records:
+            return
+        try:
+            await with_retries(
+                lambda records=batch_records: ainsert_records(records),
+                label=f"ingest batch {batch_index} (docs={len(batch_records)})",
+                retries=retries,
+            )
+            ingested += len(batch_records)
+            mark_ingest_progress(step=len(batch_records))
+        except Exception as batch_exc:
+            ingest_batch_failure_count += 1
+            ingest_batch_fallback_doc_count += len(batch_records)
+            logger.warning(
+                "Batch ingest failed at %d (size=%d), fallback to per-doc: %s",
+                batch_index,
+                len(batch_records),
+                batch_exc,
+            )
+            for record in batch_records:
+                doc_id = record["doc_id"]
+                try:
+                    await with_retries(
+                        lambda rec=record: ainsert_records([rec]),
+                        label=f"ingest doc_id={doc_id} (batch fallback)",
+                        retries=retries,
+                    )
+                    ingested += 1
+                except Exception as exc:
+                    record_failure(doc_id, f"ingest failed: {exc}")
+                finally:
+                    mark_ingest_progress()
+
+    pending_batch: list[dict[str, str]] = []
+    for doc_id in to_ingest:
         row = chunks_by_doc.get(doc_id)
         text = str((row or {}).get("text") or (row or {}).get("abstract") or "").strip()
         if not row or not text:
-            async with ingest_state_lock:
-                record_failure(doc_id, "missing row or empty text")
-                ingest_done += 1
-                if ingest_done % 100 == 0 or ingest_done == ingest_total:
-                    logger.info("Ingest progress: %d/%d", ingest_done, ingest_total)
-            return
-
-        content_list = [{"type": "text", "text": text, "page_idx": 0}]
-        file_path = build_virtual_file_path(doc_id, row)
-        try:
-            await with_retries(
-                lambda: rag.insert_content_list(
-                    content_list=content_list,
-                    file_path=file_path,
-                    doc_id=doc_id,
-                    display_stats=False,
-                ),
-                label=f"ingest doc_id={doc_id}",
-                retries=retries,
-            )
-            async with ingest_state_lock:
-                ingested += 1
-        except Exception as exc:
-            async with ingest_state_lock:
-                record_failure(doc_id, f"ingest failed: {exc}")
-        finally:
-            async with ingest_state_lock:
-                ingest_done += 1
-                if ingest_done % 100 == 0 or ingest_done == ingest_total:
-                    logger.info("Ingest progress: %d/%d", ingest_done, ingest_total)
-                    gc.collect()
-                    clear_cuda_cache()
-
-    if ingest_total > 0:
-        sem = asyncio.Semaphore(min(ingest_workers, ingest_total))
-
-        async def ingest_guarded(doc_id: str) -> None:
-            async with sem:
-                await ingest_one(doc_id)
-
-        await asyncio.gather(
-            *[asyncio.create_task(ingest_guarded(doc_id)) for doc_id in to_ingest]
+            record_failure(doc_id, "missing row or empty text")
+            mark_ingest_progress()
+            continue
+        pending_batch.append(
+            {
+                "doc_id": doc_id,
+                "text": text,
+                "file_path": build_virtual_file_path(doc_id, row),
+            }
         )
+        if len(pending_batch) >= batch_size:
+            ingest_batch_count += 1
+            await process_batch(ingest_batch_count, pending_batch)
+            pending_batch = []
+
+    if pending_batch:
+        ingest_batch_count += 1
+        await process_batch(ingest_batch_count, pending_batch)
     after_state = await inspect_workspace_index_state(rag, target_docs)
     missing_after_full_set = set(after_state["missing_full_set"])
     missing_after_doc_status = sorted(list(after_state["missing_doc_status_set"]), key=sort_key)
     missing_after_status = sorted(list(after_state["status_not_processed_set"]), key=sort_key)
     missing_after_chunks = sorted(list(after_state["missing_chunk_set"]), key=sort_key)
     missing_after_vdb = sorted(list(after_state["missing_vdb_set"]), key=sort_key)
+    missing_after_multi_chunks = sorted(list(after_state["multi_chunk_set"]), key=sort_key)
     summary = {
         "workspace_id": workspace_id,
         "target_doc_count": len(target),
@@ -846,27 +916,38 @@ async def ensure_workspace_index(
         "missing_before_status_not_processed_count": len(missing_before_status_set),
         "missing_before_chunk_doc_count": len(missing_before_chunk_set),
         "missing_before_vdb_doc_count": len(missing_before_vdb_set),
+        "missing_before_multi_chunk_doc_count": len(missing_before_multi_chunk_set),
         "stale_doc_count": len(stale_docs),
         "stale_cleanup_success_count": stale_cleanup_ok,
         "stale_cleanup_failure_count": stale_cleanup_failed,
         "ingest_attempt_count": len(to_ingest),
         "ingested_now_count": ingested,
         "ingest_concurrency": ingest_workers,
-        "ingest_effective_max_parallel_insert": ingest_workers,
+        "ingest_effective_max_parallel_insert": min(ingest_workers, batch_size),
+        "ingest_batch_size": batch_size,
+        "ingest_batch_count": ingest_batch_count,
+        "ingest_batch_failure_count": ingest_batch_failure_count,
+        "ingest_batch_fallback_doc_count": ingest_batch_fallback_doc_count,
+        "ingest_split_by_character_only": True,
+        "ingest_split_delimiter_preferred": SURGE_NEVER_SPLIT_DELIMITER,
+        "ingest_split_delimiter_strategy": "dynamic_safe_per_call",
         "ingest_failure_count": len(failures),
         "missing_after_full_doc_count": len(missing_after_full_set),
         "missing_after_doc_status_count": len(missing_after_doc_status),
         "missing_after_status_not_processed_count": len(missing_after_status),
         "missing_after_chunk_doc_count": len(missing_after_chunks),
         "missing_after_vdb_doc_count": len(missing_after_vdb),
+        "missing_after_multi_chunk_doc_count": len(missing_after_multi_chunks),
         "missing_before_full_doc_sample": sorted(list(missing_before_full_set), key=sort_key)[:20],
         "missing_before_doc_status_sample": sorted(list(missing_before_doc_status_set), key=sort_key)[:20],
         "missing_before_status_not_processed_sample": sorted(list(missing_before_status_set), key=sort_key)[:20],
+        "missing_before_multi_chunk_doc_sample": sorted(list(missing_before_multi_chunk_set), key=sort_key)[:20],
         "missing_after_full_doc_sample": sorted(list(missing_after_full_set), key=sort_key)[:20],
         "missing_after_doc_status_sample": missing_after_doc_status[:20],
         "missing_after_status_not_processed_sample": missing_after_status[:20],
         "missing_after_chunk_doc_sample": missing_after_chunks[:20],
         "missing_after_vdb_doc_sample": missing_after_vdb[:20],
+        "missing_after_multi_chunk_doc_sample": missing_after_multi_chunks[:20],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     save_json(INGEST_MANIFEST, summary)
@@ -891,6 +972,7 @@ def collect_ingest_blockers(summary: dict[str, Any]) -> dict[str, str]:
         "missing_after_status_not_processed_count",
         "missing_after_chunk_doc_count",
         "missing_after_vdb_doc_count",
+        "missing_after_multi_chunk_doc_count",
     ]
     blockers: dict[str, str] = {}
     for key in blocker_keys:
@@ -1071,6 +1153,7 @@ async def run_retrieval(args: argparse.Namespace) -> int:
         chunks_by_doc,
         args.max_retries,
         args.ingest_concurrency,
+        args.ingest_batch_size,
     )
     sync_master_logging_handlers()
     blockers = collect_ingest_blockers(ingest_summary)
@@ -1237,6 +1320,7 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
         chunks_by_doc,
         args.max_retries,
         args.ingest_concurrency,
+        args.ingest_batch_size,
     )
     sync_master_logging_handlers()
     blockers = collect_ingest_blockers(ingest_summary)
@@ -1514,6 +1598,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError(
             f"--ingest-concurrency must be > 0, got {args.ingest_concurrency}"
         )
+    if args.ingest_batch_size <= 0:
+        raise ValueError(
+            f"--ingest-batch-size must be > 0, got {args.ingest_batch_size}"
+        )
     if args.max_retries < 0:
         raise ValueError(f"--max-retries must be >= 0, got {args.max_retries}")
 
@@ -1543,7 +1631,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--ingest-concurrency",
         type=int,
         default=16,
-        help="Ingest parallelism for this run (also applied to LightRAG max_parallel_insert).",
+        help="Ingest doc-level parallelism for this run (applied to LightRAG max_parallel_insert).",
+    )
+    p.add_argument(
+        "--ingest-batch-size",
+        type=int,
+        default=128,
+        help="Number of docs per batched ainsert call during ingest.",
     )
     p.add_argument(
         "--max-concurrency",

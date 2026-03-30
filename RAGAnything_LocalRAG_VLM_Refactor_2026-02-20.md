@@ -1846,3 +1846,46 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 
 - 本次不改 `raganything/constants.py` 全局默认值（其他任务仍按原配置运行）。
 - SurGE 评测并发提速通过脚本内运行时覆盖完成，不影响主链路默认行为。
+
+---
+
+## 增量更新（2026-03-30，SurGE ingest 批量化：减少单文档循环开销）
+
+### 目标
+
+- 避免 `evaluate_surge.py` 在 ingest 阶段“每个 doc 一次 `insert_content_list`”带来的高频调度开销与日志噪声。
+- 保持评测口径不变（仍按论文 `doc_id` 检查完整性与计算召回）。
+- 在不改主链路默认常量的前提下，为 SurGE 纯文本 chunk 场景提升吞吐。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `evaluate_local/SurGE/evaluate_surge.py` | `ensure_workspace_index` 改为 batched `lightrag.ainsert`；新增 `--ingest-batch-size`（默认 `128`）；失败批次自动回退到逐 doc 重试并记录失败清单；保留并强化 ingest 完整性闸门与论文级校验 |
+
+### 改动前后对照
+
+- 改动前：
+  - 每个 doc 独立调用 `insert_content_list`，外层协程并发高但调用粒度过细。
+  - ingest 开销中包含大量重复启动/收尾与状态写入噪声。
+- 改动后：
+  - 每批 docs 使用一次 `ainsert(input=[...], ids=[...], file_paths=[...])`。
+  - `--ingest-concurrency` 继续用于运行时覆盖 `max_parallel_insert`。
+  - 新增 `--ingest-batch-size` 控制每次提交的 doc 数。
+  - 批次失败自动降级为逐 doc 回退，确保失败可定位到 `doc_id`。
+  - `split_by_character_only=True` 并按批次动态选择安全分隔符，避免分隔符碰撞导致误切分。
+  - ingest 完整性新增“每文档 chunk 数必须为 1”校验；若 `chunks_list` 非 1 条则阻断评测。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查（通过）：
+  - `python -m py_compile evaluate_local/SurGE/evaluate_surge.py`
+- 参数与边界检查（通过）：
+  - `python evaluate_local/SurGE/evaluate_surge.py --help` 显示新增 `--ingest-batch-size`。
+  - 反例：`--ingest-batch-size 0` 正确 fail-fast（参数校验触发）。
+
+### 兼容性说明
+
+- 不改变 query-level / survey-level 指标口径与输出结构。
+- 仍以论文级 `doc_id` 做 ingest 完整性检查（`full_docs/doc_status/text_chunks/vdb_chunks`），并额外校验 `chunks_list` 长度必须为 1。
+- 不修改 `constants.py` 全局默认值，仅影响 `evaluate_surge.py` 的运行参数与 ingest 实现。
