@@ -3709,11 +3709,14 @@ class LightRAG:
                     pipeline_status["history_messages"].append(completion_msg)
                     logger.info(completion_msg)
 
-    async def adelete_by_entity(self, entity_name: str) -> DeletionResult:
+    async def adelete_by_entity(
+        self, entity_name: str, entity_type: str = ""
+    ) -> DeletionResult:
         """Asynchronously delete an entity and all its relationships.
 
         Args:
-            entity_name: Name of the entity to delete.
+            entity_name: Plain name of the entity to delete.
+            entity_type: Entity type.  Required when entity disambiguation is enabled.
 
         Returns:
             DeletionResult: An object containing the outcome of the deletion process.
@@ -3725,19 +3728,21 @@ class LightRAG:
             self.entities_vdb,
             self.relationships_vdb,
             entity_name,
+            entity_type,
         )
 
-    def delete_by_entity(self, entity_name: str) -> DeletionResult:
+    def delete_by_entity(self, entity_name: str, entity_type: str = "") -> DeletionResult:
         """Synchronously delete an entity and all its relationships.
 
         Args:
-            entity_name: Name of the entity to delete.
+            entity_name: Plain name of the entity to delete.
+            entity_type: Entity type.  Required when entity disambiguation is enabled.
 
         Returns:
             DeletionResult: An object containing the outcome of the deletion process.
         """
         loop = always_get_an_event_loop()
-        return loop.run_until_complete(self.adelete_by_entity(entity_name))
+        return loop.run_until_complete(self.adelete_by_entity(entity_name, entity_type))
 
     async def adelete_by_relation(
         self, source_entity: str, target_entity: str

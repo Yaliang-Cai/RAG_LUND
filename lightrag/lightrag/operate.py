@@ -2571,7 +2571,13 @@ async def _merge_nodes_then_upsert(
 
     # 11. Update both graph and vector db
     _disambig = global_config.get("enable_entity_disambiguation", True)
-    composite_id = compute_entity_id(entity_name, entity_type, _disambig)
+    # entity_name is already the correct graph node key:
+    #   - disambiguation ON:  entity_name = "name|type"  (composite key, set by caller)
+    #   - disambiguation OFF: entity_name = "name"
+    # Do NOT call compute_entity_id again — that would produce "name|type|type".
+    composite_id = entity_name
+    # Recover the plain human-readable name for content/storage fields.
+    plain_name = nodes_data[0].get("entity_name", entity_name) if nodes_data else entity_name
     node_data = dict(
         entity_id=composite_id,
         entity_type=entity_type,
@@ -2585,14 +2591,14 @@ async def _merge_nodes_then_upsert(
         composite_id,
         node_data=node_data,
     )
-    node_data["entity_name"] = entity_name
+    node_data["entity_name"] = plain_name
     if entity_vdb is not None:
-        entity_vdb_id = compute_entity_vdb_id(entity_name, entity_type, _disambig)
-        entity_content = f"{entity_name}\n{description}"
+        entity_vdb_id = compute_entity_vdb_id(plain_name, entity_type, _disambig)
+        entity_content = f"{plain_name}\n{description}"
         data_for_vdb = {
             entity_vdb_id: {
                 "entity_id": composite_id,
-                "entity_name": entity_name,
+                "entity_name": plain_name,
                 "entity_type": entity_type,
                 "content": entity_content,
                 "source_id": source_id,

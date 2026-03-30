@@ -5,7 +5,7 @@ from typing import Any, final
 import numpy as np
 
 from lightrag.base import BaseVectorStorage
-from lightrag.utils import logger
+from lightrag.utils import logger, compute_entity_vdb_id
 import pipmaster as pm
 
 if not pm.is_installed("chromadb"):
@@ -204,15 +204,18 @@ class ChromaVectorDBStorage(BaseVectorStorage):
         # ChromaDB handles persistence automatically
         pass
 
-    async def delete_entity(self, entity_name: str) -> None:
-        """Delete an entity by its ID.
+    async def delete_entity(self, entity_name: str, entity_type: str = "") -> None:
+        """Delete an entity by its name.
 
         Args:
-            entity_name: The ID of the entity to delete
+            entity_name: Plain name of the entity to delete.
+            entity_type: Entity type.  Required when entity disambiguation is enabled.
         """
         try:
-            logger.info(f"Deleting entity with ID {entity_name} from {self.namespace}")
-            self._collection.delete(ids=[entity_name])
+            _disambig = self.global_config.get("enable_entity_disambiguation", True)
+            entity_id = compute_entity_vdb_id(entity_name, entity_type, _disambig)
+            logger.info(f"Deleting entity with ID {entity_id} from {self.namespace}")
+            self._collection.delete(ids=[entity_id])
         except Exception as e:
             logger.error(f"Error during entity deletion: {str(e)}")
             raise

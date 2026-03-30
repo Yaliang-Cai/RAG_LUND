@@ -408,6 +408,14 @@ class DeleteDocRequest(BaseModel):
 
 class DeleteEntityRequest(BaseModel):
     entity_name: str = Field(..., description="The name of the entity to delete.")
+    entity_type: str = Field(
+        "",
+        description=(
+            "The type of the entity (e.g. 'PERSON', 'ORGANIZATION'). "
+            "Required when entity disambiguation is enabled so the correct "
+            "composite graph/VDB key (name|type) can be resolved."
+        ),
+    )
 
     @field_validator("entity_name", mode="after")
     @classmethod
@@ -2838,7 +2846,9 @@ def create_document_routes(
             HTTPException: If the entity is not found (404) or an error occurs (500).
         """
         try:
-            result = await rag.adelete_by_entity(entity_name=request.entity_name)
+            result = await rag.adelete_by_entity(
+                entity_name=request.entity_name, entity_type=request.entity_type
+            )
             if result.status == "not_found":
                 raise HTTPException(status_code=404, detail=result.message)
             if result.status == "fail":

@@ -12,7 +12,7 @@ import pipmaster as pm
 from ..base import BaseVectorStorage
 from ..exceptions import DataMigrationError
 from ..kg.shared_storage import get_data_init_lock
-from ..utils import compute_mdhash_id, logger
+from ..utils import compute_mdhash_id, compute_entity_vdb_id, logger
 
 if not pm.is_installed("qdrant-client"):
     pm.install("qdrant-client")
@@ -624,15 +624,16 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                 f"[{self.workspace}] Error while deleting vectors from {self.namespace}: {e}"
             )
 
-    async def delete_entity(self, entity_name: str) -> None:
+    async def delete_entity(self, entity_name: str, entity_type: str = "") -> None:
         """Delete an entity by name
 
         Args:
-            entity_name: Name of the entity to delete
+            entity_name: Plain name of the entity to delete.
+            entity_type: Entity type.  Required when entity disambiguation is enabled.
         """
         try:
-            # Compute entity ID from name (same as Milvus)
-            entity_id = compute_mdhash_id(entity_name, prefix=ENTITY_PREFIX)
+            _disambig = self.global_config.get("enable_entity_disambiguation", True)
+            entity_id = compute_entity_vdb_id(entity_name, entity_type, _disambig)
             logger.debug(
                 f"[{self.workspace}] Attempting to delete entity {entity_name} with ID {entity_id}"
             )

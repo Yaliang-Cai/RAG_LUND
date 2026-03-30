@@ -333,8 +333,13 @@ class BaseVectorStorage(StorageNameSpace, ABC):
         """
 
     @abstractmethod
-    async def delete_entity(self, entity_name: str) -> None:
+    async def delete_entity(self, entity_name: str, entity_type: str = "") -> None:
         """Delete a single entity by its name.
+
+        Args:
+            entity_name: The plain (non-composite) name of the entity.
+            entity_type: The entity type.  Required when entity disambiguation is
+                enabled so the correct composite VDB key (name|type) can be located.
 
         Importance notes for in-memory storage:
         1. Changes will be persisted to disk during the next index_done_callback

@@ -16,7 +16,7 @@ from ..base import (
     DocStatus,
     DocStatusStorage,
 )
-from ..utils import logger, compute_mdhash_id
+from ..utils import logger, compute_mdhash_id, compute_entity_vdb_id
 from ..types import KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphEdge
 from ..constants import GRAPH_FIELD_SEP
 from ..kg.shared_storage import get_data_init_lock
@@ -2305,14 +2305,16 @@ class MongoVectorDBStorage(BaseVectorStorage):
                 f"[{self.workspace}] Error while deleting vectors from {self.namespace}: {str(e)}"
             )
 
-    async def delete_entity(self, entity_name: str) -> None:
+    async def delete_entity(self, entity_name: str, entity_type: str = "") -> None:
         """Delete an entity by its name
 
         Args:
-            entity_name: Name of the entity to delete
+            entity_name: Plain name of the entity to delete.
+            entity_type: Entity type.  Required when entity disambiguation is enabled.
         """
         try:
-            entity_id = compute_mdhash_id(entity_name, prefix="ent-")
+            _disambig = self.global_config.get("enable_entity_disambiguation", True)
+            entity_id = compute_entity_vdb_id(entity_name, entity_type, _disambig)
             logger.debug(
                 f"[{self.workspace}] Attempting to delete entity {entity_name} with ID {entity_id}"
             )

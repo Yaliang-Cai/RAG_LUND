@@ -6,7 +6,7 @@ import json
 import numpy as np
 from dataclasses import dataclass
 
-from lightrag.utils import logger, compute_mdhash_id
+from lightrag.utils import logger, compute_mdhash_id, compute_entity_vdb_id
 from lightrag.base import BaseVectorStorage
 
 from .shared_storage import (
@@ -259,14 +259,15 @@ class FaissVectorDBStorage(BaseVectorStorage):
             f"[{self.workspace}] Successfully deleted {len(to_remove)} vectors from {self.namespace}"
         )
 
-    async def delete_entity(self, entity_name: str) -> None:
+    async def delete_entity(self, entity_name: str, entity_type: str = "") -> None:
         """
         Importance notes:
         1. Changes will be persisted to disk during the next index_done_callback
         2. Only one process should updating the storage at a time before index_done_callback,
            KG-storage-log should be used to avoid data corruption
         """
-        entity_id = compute_mdhash_id(entity_name, prefix="ent-")
+        _disambig = self.global_config.get("enable_entity_disambiguation", True)
+        entity_id = compute_entity_vdb_id(entity_name, entity_type, _disambig)
         logger.debug(
             f"[{self.workspace}] Attempting to delete entity {entity_name} with ID {entity_id}"
         )

@@ -59,6 +59,7 @@ async def adelete_by_entity(
     entities_vdb,
     relationships_vdb,
     entity_name: str,
+    entity_type: str = "",
     entity_chunks_storage=None,
     relation_chunks_storage=None,
 ) -> DeletionResult:
@@ -70,36 +71,41 @@ async def adelete_by_entity(
         chunk_entity_relation_graph: Graph storage instance
         entities_vdb: Vector database storage for entities
         relationships_vdb: Vector database storage for relationships
-        entity_name: Name of the entity to delete
+        entity_name: Plain (non-composite) name of the entity to delete
+        entity_type: Entity type.  Must be provided when entity disambiguation is
+            enabled so the correct composite graph key (name|type) is used.
         entity_chunks_storage: Optional KV storage for tracking chunks that reference this entity
         relation_chunks_storage: Optional KV storage for tracking chunks that reference relations
     """
+    # When disambiguation is ON, graph nodes are keyed by "name|type".
+    _disambig = entities_vdb.global_config.get("enable_entity_disambiguation", True)
+    node_key = compute_entity_id(entity_name, entity_type, _disambig)
     # Use keyed lock for entity to ensure atomic graph and vector db operations
     workspace = entities_vdb.global_config.get("workspace", "")
     namespace = f"{workspace}:GraphDB" if workspace else "GraphDB"
     async with get_storage_keyed_lock(
-        [entity_name], namespace=namespace, enable_logging=False
+        [node_key], namespace=namespace, enable_logging=False
     ):
         try:
             # Check if the entity exists
-            if not await chunk_entity_relation_graph.has_node(entity_name):
-                logger.warning(f"Entity '{entity_name}' not found.")
+            if not await chunk_entity_relation_graph.has_node(node_key):
+                logger.warning(f"Entity '{node_key}' not found.")
                 return DeletionResult(
                     status="not_found",
                     doc_id=entity_name,
-                    message=f"Entity '{entity_name}' not found.",
+                    message=f"Entity '{node_key}' not found.",
                     status_code=404,
                 )
             # Retrieve related relationships before deleting the node
-            edges = await chunk_entity_relation_graph.get_node_edges(entity_name)
+            edges = await chunk_entity_relation_graph.get_node_edges(node_key)
             related_relations_count = len(edges) if edges else 0
 
             # Clean up chunk tracking storages before deletion
             if entity_chunks_storage is not None:
                 # Delete entity's entry from entity_chunks_storage
-                await entity_chunks_storage.delete([entity_name])
+                await entity_chunks_storage.delete([node_key])
                 logger.info(
-                    f"Entity Delete: removed chunk tracking for `{entity_name}`"
+                    f"Entity Delete: removed chunk tracking for `{node_key}`"
                 )
 
             if relation_chunks_storage is not None and edges:
@@ -121,11 +127,11 @@ async def adelete_by_entity(
                         f"Entity Delete: removed chunk tracking for {len(relation_keys_to_delete)} relations"
                     )
 
-            await entities_vdb.delete_entity(entity_name)
-            await relationships_vdb.delete_entity_relation(entity_name)
-            await chunk_entity_relation_graph.delete_node(entity_name)
+            await entities_vdb.delete_entity(entity_name, entity_type)
+            await relationships_vdb.delete_entity_relation(node_key)
+            await chunk_entity_relation_graph.delete_node(node_key)
 
-            message = f"Entity Delete: remove '{entity_name}' and its {related_relations_count} relations"
+            message = f"Entity Delete: remove '{node_key}' and its {related_relations_count} relations"
             logger.info(message)
             await _persist_graph_updates(
                 entities_vdb=entities_vdb,

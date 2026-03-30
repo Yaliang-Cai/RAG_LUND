@@ -1569,16 +1569,16 @@ class MilvusVectorDBStorage(BaseVectorStorage):
         # Milvus handles persistence automatically
         pass
 
-    async def delete_entity(self, entity_name: str) -> None:
+    async def delete_entity(self, entity_name: str, entity_type: str = "") -> None:
         """Delete an entity from the vector database
 
         Args:
-            entity_name: The name of the entity to delete
+            entity_name: Plain name of the entity to delete.
+            entity_type: Entity type.  Required when entity disambiguation is enabled.
         """
         try:
-            # Compute entity VDB ID — must match how IDs were generated at insert time.
-            # compute_entity_vdb_id handles the disambiguation composite key (name|type).
-            entity_id = compute_entity_vdb_id(entity_name)
+            _disambig = self.global_config.get("enable_entity_disambiguation", True)
+            entity_id = compute_entity_vdb_id(entity_name, entity_type, _disambig)
             logger.debug(
                 f"[{self.workspace}] Attempting to delete entity {entity_name} with ID {entity_id}"
             )
