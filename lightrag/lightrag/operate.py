@@ -238,6 +238,9 @@ _CONTENT_WINDOWS_PATH_RE = _re.compile(r"(?<!\w)[A-Za-z]:[\\/][^\s\"'`<>|]+")
 _CONTENT_POSIX_PATH_RE = _re.compile(r"(?<!\w)/(?:[^\s\"'`<>|]+)")
 _CONTENT_REL_PATH_RE = _re.compile(r"(?<!\w)(?:\.{1,2}|~)[\\/][^\s\"'`<>|]+")
 _IMAGE_PATH_LINE_RE = _re.compile(r"(?im)^\s*image path\s*:\s*(.+?)\s*$")
+# Match full URL spans inside free text so path regexes won't capture URL internals
+# such as "//github.com/microsoft/unilm".
+_URL_IN_TEXT_RE = _re.compile(r"\b[a-zA-Z][a-zA-Z0-9+\-.]*://[^\s\"'`<>|]+")
 _QUERY_IMAGE_PATH_RE = _re.compile(
     r"Image Path:\s*([^\r\n]*?\.(?:jpg|jpeg|png|gif|bmp|webp|tiff|tif))",
     _re.IGNORECASE,
@@ -360,6 +363,10 @@ def _extract_path_like_strings_from_text(source_text: str) -> set[str]:
         normalized = str(source_text)
 
     candidates: set[str] = set()
+    # Exclude complete URL spans before path-pattern scanning. This prevents
+    # URL-only tokens from becoming path fragments (e.g., "unilm" from
+    # https://github.com/microsoft/unilm).
+    masked_for_path_scan = _URL_IN_TEXT_RE.sub(" ", normalized)
 
     # Prioritize explicit "Image Path: ..." lines from chunk templates.
     for match in _IMAGE_PATH_LINE_RE.finditer(normalized):
@@ -376,7 +383,7 @@ def _extract_path_like_strings_from_text(source_text: str) -> set[str]:
         _CONTENT_POSIX_PATH_RE,
         _CONTENT_REL_PATH_RE,
     ):
-        for match in pattern.finditer(normalized):
+        for match in pattern.finditer(masked_for_path_scan):
             raw = match.group(0).strip().strip("\"'`")
             if not raw or _URL_SCHEME_RE.match(raw):
                 continue

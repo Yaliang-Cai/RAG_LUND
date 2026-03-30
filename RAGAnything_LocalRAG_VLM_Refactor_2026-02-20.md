@@ -1805,3 +1805,44 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
   - `--retry_failed_only` 默认 `False`，不改变现有 resume 扫描逻辑。
   - 并发 ingest 仍保持原有并发模式，不降级为串行。
 - 本轮未改 `DEFAULT_TIMEOUT / DEFAULT_LLM_TIMEOUT` 语义，仅增加多模态专属 guardrail。
+
+---
+
+## 增量更新（2026-03-30，SurGE evaluate 并发参数收敛与去冗余）
+
+### 目标
+
+- 解决 `evaluate_surge.py` ingest 并发参数语义重叠问题，避免“两个旋钮控制同一件事”。
+- 保留高并发能力，但不修改全局 `constants.py`，仅影响 SurGE 评测进程。
+- 保持 query/survey 检索评测并发独立，避免与 ingest 并发混淆。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `evaluate_local/SurGE/evaluate_surge.py` | 将 ingest 并发收敛为单参数 `--ingest-concurrency`；该参数同时用于外层 ingest 任务并发和 `max_parallel_insert` 运行时覆盖；移除 `--ingest-max-parallel-insert`；补充参数 help 文案并保留 `--max-concurrency` 仅用于 query/survey 检索评测并发 |
+| `RAGAnything_LocalRAG_VLM_Refactor_2026-02-20.md` | 新增本节记录 |
+
+### 改动前后对照
+
+- 改动前：
+  - ingest 有两个并发参数：`ingest_concurrency` 与 `ingest_max_parallel_insert`，默认值都为 16，语义重叠。
+- 改动后：
+  - ingest 仅保留 `--ingest-concurrency` 一个入口，语义清晰：
+    - 外层 ingest `Semaphore` 并发
+    - LightRAG `max_parallel_insert` 覆盖值
+  - `--max-concurrency` 明确只用于 query/survey 检索评测并发。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查（通过）：
+  - `python -m py_compile evaluate_local/SurGE/evaluate_surge.py`
+- 逻辑级检查（通过）：
+  - 参数边界反例：`python evaluate_local/SurGE/evaluate_surge.py --ingest-concurrency 0` 正确 fail-fast（参数校验触发）。
+  - 参数集合一致性：内联检查 `build_parser()` 默认值为 `ingest_concurrency=16`、`max_concurrency=8`，且不再包含 `ingest_max_parallel_insert`。
+  - `--help` 输出检查：仅保留 `--ingest-concurrency` 与 `--max-concurrency` 两个并发入口。
+
+### 兼容性说明
+
+- 本次不改 `raganything/constants.py` 全局默认值（其他任务仍按原配置运行）。
+- SurGE 评测并发提速通过脚本内运行时覆盖完成，不影响主链路默认行为。

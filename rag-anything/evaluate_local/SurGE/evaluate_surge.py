@@ -465,6 +465,21 @@ async def ensure_rag_runtime_ready(rag: Any, workspace_id: str) -> None:
         )
 
 
+def apply_ingest_parallel_override(rag: Any, max_parallel_insert: int) -> None:
+    """Override ingestion pipeline parallelism for this evaluate process only."""
+    target = max(1, int(max_parallel_insert))
+    kwargs = getattr(rag, "lightrag_kwargs", None)
+    if isinstance(kwargs, dict):
+        kwargs["max_parallel_insert"] = target
+    runtime = getattr(rag, "lightrag", None)
+    if runtime is not None:
+        setattr(runtime, "max_parallel_insert", target)
+    logger.info(
+        "Applied evaluate-only ingest override: max_parallel_insert=%d",
+        target,
+    )
+
+
 async def with_retries(coro_factory, label: str, retries: int) -> Any:
     retries = max(0, retries)
     last: Exception | None = None
@@ -692,9 +707,17 @@ def extract_rerank_payload(retrieval: dict[str, Any], query_params: dict[str, An
     }
 
 
-async def ensure_workspace_index(service: LocalRagService, workspace_id: str, chunks_by_doc: dict[str, dict[str, Any]], retries: int) -> dict[str, Any]:
+async def ensure_workspace_index(
+    service: LocalRagService,
+    workspace_id: str,
+    chunks_by_doc: dict[str, dict[str, Any]],
+    retries: int,
+    ingest_concurrency: int,
+) -> dict[str, Any]:
     rag = await service.get_rag(workspace_id)
     await ensure_rag_runtime_ready(rag, workspace_id)
+    ingest_workers = max(1, int(ingest_concurrency))
+    apply_ingest_parallel_override(rag, ingest_workers)
     target_docs = sorted(chunks_by_doc.keys(), key=lambda x: (0, int(x)) if x.isdigit() else (1, x))
     target = set(target_docs)
     sort_key = lambda x: (0, int(x)) if x.isdigit() else (1, x)
@@ -733,6 +756,9 @@ async def ensure_workspace_index(service: LocalRagService, workspace_id: str, ch
     ingested = 0
     stale_cleanup_ok = 0
     stale_cleanup_failed = 0
+    ingest_done = 0
+    ingest_total = len(to_ingest)
+    ingest_state_lock = asyncio.Lock()
     with open(INGEST_FAILURES, "w", encoding="utf-8") as _:
         pass
 
@@ -758,12 +784,18 @@ async def ensure_workspace_index(service: LocalRagService, workspace_id: str, ch
             stale_cleanup_failed += 1
             record_failure(doc_id, f"stale cleanup failed: {exc}")
 
-    for idx, doc_id in enumerate(to_ingest, start=1):
+    async def ingest_one(doc_id: str) -> None:
+        nonlocal ingested, ingest_done
         row = chunks_by_doc.get(doc_id)
         text = str((row or {}).get("text") or (row or {}).get("abstract") or "").strip()
         if not row or not text:
-            record_failure(doc_id, "missing row or empty text")
-            continue
+            async with ingest_state_lock:
+                record_failure(doc_id, "missing row or empty text")
+                ingest_done += 1
+                if ingest_done % 100 == 0 or ingest_done == ingest_total:
+                    logger.info("Ingest progress: %d/%d", ingest_done, ingest_total)
+            return
+
         content_list = [{"type": "text", "text": text, "page_idx": 0}]
         file_path = build_virtual_file_path(doc_id, row)
         try:
@@ -777,13 +809,29 @@ async def ensure_workspace_index(service: LocalRagService, workspace_id: str, ch
                 label=f"ingest doc_id={doc_id}",
                 retries=retries,
             )
-            ingested += 1
+            async with ingest_state_lock:
+                ingested += 1
         except Exception as exc:
-            record_failure(doc_id, f"ingest failed: {exc}")
-        if idx % 100 == 0:
-            logger.info("Ingest progress: %d/%d", idx, len(to_ingest))
-            gc.collect()
-            clear_cuda_cache()
+            async with ingest_state_lock:
+                record_failure(doc_id, f"ingest failed: {exc}")
+        finally:
+            async with ingest_state_lock:
+                ingest_done += 1
+                if ingest_done % 100 == 0 or ingest_done == ingest_total:
+                    logger.info("Ingest progress: %d/%d", ingest_done, ingest_total)
+                    gc.collect()
+                    clear_cuda_cache()
+
+    if ingest_total > 0:
+        sem = asyncio.Semaphore(min(ingest_workers, ingest_total))
+
+        async def ingest_guarded(doc_id: str) -> None:
+            async with sem:
+                await ingest_one(doc_id)
+
+        await asyncio.gather(
+            *[asyncio.create_task(ingest_guarded(doc_id)) for doc_id in to_ingest]
+        )
     after_state = await inspect_workspace_index_state(rag, target_docs)
     missing_after_full_set = set(after_state["missing_full_set"])
     missing_after_doc_status = sorted(list(after_state["missing_doc_status_set"]), key=sort_key)
@@ -803,6 +851,8 @@ async def ensure_workspace_index(service: LocalRagService, workspace_id: str, ch
         "stale_cleanup_failure_count": stale_cleanup_failed,
         "ingest_attempt_count": len(to_ingest),
         "ingested_now_count": ingested,
+        "ingest_concurrency": ingest_workers,
+        "ingest_effective_max_parallel_insert": ingest_workers,
         "ingest_failure_count": len(failures),
         "missing_after_full_doc_count": len(missing_after_full_set),
         "missing_after_doc_status_count": len(missing_after_doc_status),
@@ -1015,7 +1065,13 @@ async def run_retrieval(args: argparse.Namespace) -> int:
     abstract_idx = load_abstract_index(subset / args.corpus_file)
     settings = settings_for_surge()
     service = LocalRagService(settings)
-    ingest_summary = await ensure_workspace_index(service, args.workspace_id, chunks_by_doc, args.max_retries)
+    ingest_summary = await ensure_workspace_index(
+        service,
+        args.workspace_id,
+        chunks_by_doc,
+        args.max_retries,
+        args.ingest_concurrency,
+    )
     sync_master_logging_handlers()
     blockers = collect_ingest_blockers(ingest_summary)
     if blockers:
@@ -1175,7 +1231,13 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
     abstract_idx = load_abstract_index(subset / args.corpus_file)
     settings = settings_for_surge()
     service = LocalRagService(settings)
-    ingest_summary = await ensure_workspace_index(service, args.workspace_id, chunks_by_doc, args.max_retries)
+    ingest_summary = await ensure_workspace_index(
+        service,
+        args.workspace_id,
+        chunks_by_doc,
+        args.max_retries,
+        args.ingest_concurrency,
+    )
     sync_master_logging_handlers()
     blockers = collect_ingest_blockers(ingest_summary)
     if blockers:
@@ -1448,6 +1510,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError(
             f"--max-concurrency must be > 0, got {args.max_concurrency}"
         )
+    if args.ingest_concurrency <= 0:
+        raise ValueError(
+            f"--ingest-concurrency must be > 0, got {args.ingest_concurrency}"
+        )
     if args.max_retries < 0:
         raise ValueError(f"--max-retries must be >= 0, got {args.max_retries}")
 
@@ -1473,7 +1539,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--k-list", default="5,10,20,30,50")
     p.add_argument("--survey-k-list", default="50,100,200,500")
     p.add_argument("--enable-rerank", type=as_bool, default=True)
-    p.add_argument("--max-concurrency", type=int, default=8)
+    p.add_argument(
+        "--ingest-concurrency",
+        type=int,
+        default=16,
+        help="Ingest parallelism for this run (also applied to LightRAG max_parallel_insert).",
+    )
+    p.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=8,
+        help="Evaluation query concurrency (query-level / survey-retrieval).",
+    )
     p.add_argument("--max-retries", type=int, default=0)
     p.add_argument("--limit", type=int, default=0, help="0 means all queries/surveys")
     return p
