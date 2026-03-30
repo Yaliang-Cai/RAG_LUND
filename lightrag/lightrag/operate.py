@@ -240,6 +240,9 @@ _CONTENT_WINDOWS_PATH_RE = _re.compile(r"(?<!\w)[A-Za-z]:[\\/][^\s\"'`<>|]+")
 _CONTENT_POSIX_PATH_RE = _re.compile(r"(?<!\w)/(?:[^\s\"'`<>|]+)")
 _CONTENT_REL_PATH_RE = _re.compile(r"(?<!\w)(?:\.{1,2}|~)[\\/][^\s\"'`<>|]+")
 _IMAGE_PATH_LINE_RE = _re.compile(r"(?im)^\s*image path\s*:\s*(.+?)\s*$")
+# Match full URL spans inside free text so path regexes won't capture URL internals
+# such as "//github.com/microsoft/unilm".
+_URL_IN_TEXT_RE = _re.compile(r"\b[a-zA-Z][a-zA-Z0-9+\-.]*://[^\s\"'`<>|]+")
 _QUERY_IMAGE_PATH_RE = _re.compile(
     r"Image Path:\s*([^\r\n]*?\.(?:jpg|jpeg|png|gif|bmp|webp|tiff|tif))",
     _re.IGNORECASE,
@@ -362,6 +365,10 @@ def _extract_path_like_strings_from_text(source_text: str) -> set[str]:
         normalized = str(source_text)
 
     candidates: set[str] = set()
+    # Exclude complete URL spans before path-pattern scanning. This prevents
+    # URL-only tokens from becoming path fragments (e.g., "unilm" from
+    # https://github.com/microsoft/unilm).
+    masked_for_path_scan = _URL_IN_TEXT_RE.sub(" ", normalized)
 
     # Prioritize explicit "Image Path: ..." lines from chunk templates.
     for match in _IMAGE_PATH_LINE_RE.finditer(normalized):
@@ -378,7 +385,7 @@ def _extract_path_like_strings_from_text(source_text: str) -> set[str]:
         _CONTENT_POSIX_PATH_RE,
         _CONTENT_REL_PATH_RE,
     ):
-        for match in pattern.finditer(normalized):
+        for match in pattern.finditer(masked_for_path_scan):
             raw = match.group(0).strip().strip("\"'`")
             if not raw or _URL_SCHEME_RE.match(raw):
                 continue
@@ -2571,13 +2578,18 @@ async def _merge_nodes_then_upsert(
 
     # 11. Update both graph and vector db
     _disambig = global_config.get("enable_entity_disambiguation", True)
+    # Recover plain human-readable name from the first node record.
+    canonical_entity_name = entity_name
+    if nodes_data:
+        first_entity_name = nodes_data[0].get("entity_name")
+        if isinstance(first_entity_name, str) and first_entity_name:
+            canonical_entity_name = first_entity_name
+
     # entity_name is already the correct graph node key:
-    #   - disambiguation ON:  entity_name = "name|type"  (composite key, set by caller)
+    #   - disambiguation ON:  entity_name = "name|type"  (composite, set by caller)
     #   - disambiguation OFF: entity_name = "name"
     # Do NOT call compute_entity_id again — that would produce "name|type|type".
     composite_id = entity_name
-    # Recover the plain human-readable name for content/storage fields.
-    plain_name = nodes_data[0].get("entity_name", entity_name) if nodes_data else entity_name
     node_data = dict(
         entity_id=composite_id,
         entity_type=entity_type,
@@ -2591,14 +2603,16 @@ async def _merge_nodes_then_upsert(
         composite_id,
         node_data=node_data,
     )
-    node_data["entity_name"] = plain_name
+    node_data["entity_name"] = canonical_entity_name
     if entity_vdb is not None:
-        entity_vdb_id = compute_entity_vdb_id(plain_name, entity_type, _disambig)
-        entity_content = f"{plain_name}\n{description}"
+        entity_vdb_id = compute_entity_vdb_id(
+            canonical_entity_name, entity_type, _disambig
+        )
+        entity_content = f"{canonical_entity_name}\n{description}"
         data_for_vdb = {
             entity_vdb_id: {
                 "entity_id": composite_id,
-                "entity_name": plain_name,
+                "entity_name": canonical_entity_name,
                 "entity_type": entity_type,
                 "content": entity_content,
                 "source_id": source_id,
@@ -2608,7 +2622,7 @@ async def _merge_nodes_then_upsert(
         await safe_vdb_operation_with_exception(
             operation=lambda payload=data_for_vdb: entity_vdb.upsert(payload),
             operation_name="entity_upsert",
-            entity_name=entity_name,
+            entity_name=canonical_entity_name,
             max_retries=3,
             retry_delay=0.1,
         )
@@ -2912,25 +2926,38 @@ async def _merge_edges_then_upsert(
         logger.debug(status_message)
 
     # 11. Update both graph and vector db
+    _disambig = global_config.get("enable_entity_disambiguation", True)
     for need_insert_id in [src_id, tgt_id]:
         # Optimization: Use get_node instead of has_node + get_node
         existing_node = await knowledge_graph_inst.get_node(need_insert_id)
 
         if existing_node is None:
             # Node doesn't exist - create new node
-            _disambig = global_config.get("enable_entity_disambiguation", True)
-            _edge_composite_id = compute_entity_id(need_insert_id, "UNKNOWN", _disambig)
+            edge_entity_name = need_insert_id
+            edge_entity_type = "UNKNOWN"
+            if _disambig and "|" in need_insert_id:
+                parsed_name, parsed_type = need_insert_id.rsplit("|", 1)
+                if parsed_name and parsed_type:
+                    edge_entity_name = parsed_name
+                    edge_entity_type = parsed_type
+
+            if _disambig and need_insert_id != edge_entity_name:
+                edge_entity_id = need_insert_id
+            else:
+                edge_entity_id = compute_entity_id(
+                    edge_entity_name, edge_entity_type, _disambig
+                )
             node_created_at = int(time.time())
             node_data = {
-                "entity_id": _edge_composite_id,
+                "entity_id": edge_entity_id,
                 "source_id": source_id,
                 "description": description,
-                "entity_type": "UNKNOWN",
+                "entity_type": edge_entity_type,
                 "file_path": file_path,
                 "created_at": node_created_at,
                 "truncate": "",
             }
-            await knowledge_graph_inst.upsert_node(_edge_composite_id, node_data=node_data)
+            await knowledge_graph_inst.upsert_node(edge_entity_id, node_data=node_data)
 
             # Update entity_chunks_storage for the newly created entity
             if entity_chunks_storage is not None:
@@ -2938,7 +2965,7 @@ async def _merge_edges_then_upsert(
                 if chunk_ids:
                     await entity_chunks_storage.upsert(
                         {
-                            need_insert_id: {
+                            edge_entity_id: {
                                 "chunk_ids": chunk_ids,
                                 "count": len(chunk_ids),
                             }
@@ -2946,22 +2973,24 @@ async def _merge_edges_then_upsert(
                     )
 
             if entity_vdb is not None:
-                entity_vdb_id = compute_entity_vdb_id(need_insert_id, "UNKNOWN", _disambig)
-                entity_content = f"{need_insert_id}\n{description}"
+                entity_vdb_id = compute_entity_vdb_id(
+                    edge_entity_name, edge_entity_type, _disambig
+                )
+                entity_content = f"{edge_entity_name}\n{description}"
                 vdb_data = {
                     entity_vdb_id: {
                         "content": entity_content,
-                        "entity_id": _edge_composite_id,
-                        "entity_name": need_insert_id,
+                        "entity_id": edge_entity_id,
+                        "entity_name": edge_entity_name,
                         "source_id": source_id,
-                        "entity_type": "UNKNOWN",
+                        "entity_type": edge_entity_type,
                         "file_path": file_path,
                     }
                 }
                 await safe_vdb_operation_with_exception(
                     operation=lambda payload=vdb_data: entity_vdb.upsert(payload),
                     operation_name="added_entity_upsert",
-                    entity_name=need_insert_id,
+                    entity_name=edge_entity_name,
                     max_retries=3,
                     retry_delay=0.1,
                 )
@@ -2969,8 +2998,9 @@ async def _merge_edges_then_upsert(
             # Track entities added during edge processing
             if added_entities is not None:
                 entity_data = {
-                    "entity_name": need_insert_id,
-                    "entity_type": "UNKNOWN",
+                    "entity_id": edge_entity_id,
+                    "entity_name": edge_entity_name,
+                    "entity_type": edge_entity_type,
                     "description": description,
                     "source_id": source_id,
                     "file_path": file_path,
@@ -2980,11 +3010,12 @@ async def _merge_edges_then_upsert(
         else:
             # Node exists - update its source_ids by merging with new source_ids
             updated = False  # Track if any update occurred
+            existing_entity_id = existing_node.get("entity_id", need_insert_id)
 
             # 1. Get existing full source_ids from entity_chunks_storage
             existing_full_source_ids = []
             if entity_chunks_storage is not None:
-                stored_chunks = await entity_chunks_storage.get_by_id(need_insert_id)
+                stored_chunks = await entity_chunks_storage.get_by_id(existing_entity_id)
                 if stored_chunks and isinstance(stored_chunks, dict):
                     existing_full_source_ids = [
                         chunk_id
@@ -3015,7 +3046,7 @@ async def _merge_edges_then_upsert(
                 updated = True
                 await entity_chunks_storage.upsert(
                     {
-                        need_insert_id: {
+                        existing_entity_id: {
                             "chunk_ids": merged_full_source_ids,
                             "count": len(merged_full_source_ids),
                         }
@@ -3031,7 +3062,7 @@ async def _merge_edges_then_upsert(
                 merged_full_source_ids,
                 max_source_limit,
                 limit_method,
-                identifier=f"`{need_insert_id}`",
+                identifier=f"`{existing_entity_id}`",
             )
 
             # 5. Update graph database and vector database with limited source_ids (conditional)
@@ -3044,25 +3075,36 @@ async def _merge_edges_then_upsert(
                     "source_id": limited_source_id_str,
                 }
                 await knowledge_graph_inst.upsert_node(
-                    need_insert_id, node_data=updated_node_data
+                    existing_entity_id, node_data=updated_node_data
                 )
 
                 # Update vector database
                 if entity_vdb is not None:
-                    _disambig = global_config.get("enable_entity_disambiguation", True)
-                    _exist_type = existing_node.get("entity_type", "UNKNOWN")
-                    entity_vdb_id = compute_entity_vdb_id(need_insert_id, _exist_type, _disambig)
-                    _exist_composite = compute_entity_id(need_insert_id, _exist_type, _disambig)
+                    exist_entity_type = existing_node.get("entity_type", "UNKNOWN")
+                    exist_entity_name = existing_node.get(
+                        "entity_name", existing_entity_id
+                    )
+                    if (
+                        _disambig
+                        and exist_entity_name == existing_entity_id
+                        and "|" in existing_entity_id
+                    ):
+                        parsed_name, _ = existing_entity_id.rsplit("|", 1)
+                        if parsed_name:
+                            exist_entity_name = parsed_name
+                    entity_vdb_id = compute_entity_vdb_id(
+                        exist_entity_name, exist_entity_type, _disambig
+                    )
                     entity_content = (
-                        f"{need_insert_id}\n{existing_node.get('description', '')}"
+                        f"{exist_entity_name}\n{existing_node.get('description', '')}"
                     )
                     vdb_data = {
                         entity_vdb_id: {
                             "content": entity_content,
-                            "entity_id": _exist_composite,
-                            "entity_name": need_insert_id,
+                            "entity_id": existing_entity_id,
+                            "entity_name": exist_entity_name,
                             "source_id": limited_source_id_str,
-                            "entity_type": _exist_type,
+                            "entity_type": exist_entity_type,
                             "file_path": existing_node.get(
                                 "file_path", "unknown_source"
                             ),
@@ -3071,14 +3113,16 @@ async def _merge_edges_then_upsert(
                     await safe_vdb_operation_with_exception(
                         operation=lambda payload=vdb_data: entity_vdb.upsert(payload),
                         operation_name="existing_entity_update",
-                        entity_name=need_insert_id,
+                        entity_name=exist_entity_name,
                         max_retries=3,
                         retry_delay=0.1,
                     )
 
             # 6. Log once at the end if any update occurred
             if updated:
-                status_message = f"Chunks appended from relation: `{need_insert_id}`"
+                status_message = (
+                    f"Chunks appended from relation: `{existing_entity_id}`"
+                )
                 logger.info(status_message)
                 if pipeline_status is not None and pipeline_status_lock is not None:
                     async with pipeline_status_lock:
@@ -3487,13 +3531,23 @@ async def merge_nodes_and_edges(
 
             # Add original processed entities
             for entity_data in processed_entities:
-                if entity_data and entity_data.get("entity_name"):
-                    final_entity_names.add(entity_data["entity_name"])
+                if not entity_data:
+                    continue
+                entity_id = entity_data.get("entity_id") or entity_data.get(
+                    "entity_name"
+                )
+                if entity_id:
+                    final_entity_names.add(entity_id)
 
             # Add entities that were added during relationship processing
             for added_entity in all_added_entities:
-                if added_entity and added_entity.get("entity_name"):
-                    final_entity_names.add(added_entity["entity_name"])
+                if not added_entity:
+                    continue
+                entity_id = added_entity.get("entity_id") or added_entity.get(
+                    "entity_name"
+                )
+                if entity_id:
+                    final_entity_names.add(entity_id)
 
             # Collect all relation pairs
             final_relation_pairs = set()
@@ -3935,6 +3989,7 @@ async def kg_query(
         query_param.response_type,
         query_param.top_k,
         query_param.chunk_top_k,
+        query_param.rerank_score_scope,
         query_param.max_entity_tokens,
         query_param.max_relation_tokens,
         query_param.max_total_tokens,
@@ -3970,6 +4025,7 @@ async def kg_query(
                 "response_type": query_param.response_type,
                 "top_k": query_param.top_k,
                 "chunk_top_k": query_param.chunk_top_k,
+                "rerank_score_scope": query_param.rerank_score_scope,
                 "max_entity_tokens": query_param.max_entity_tokens,
                 "max_relation_tokens": query_param.max_relation_tokens,
                 "max_total_tokens": query_param.max_total_tokens,
@@ -4742,6 +4798,29 @@ async def _build_context_str(
     Build the final LLM context string with token processing.
     This includes dynamic token calculation and final chunk truncation.
     """
+    def _empty_rerank_chunk_debug() -> dict[str, Any]:
+        raw_scope = str(getattr(query_param, "rerank_score_scope", "top_k") or "top_k")
+        scope = raw_scope.strip().lower()
+        if scope not in {"top_k", "all"}:
+            scope = "top_k"
+        try:
+            min_rerank_score = float(global_config.get("min_rerank_score", 0.5))
+        except (TypeError, ValueError):
+            min_rerank_score = 0.5
+        return {
+            "enabled": bool(query_param.enable_rerank and query),
+            "scope": scope,
+            "min_rerank_score": min_rerank_score,
+            "scores_all": [],
+            "scores_after_threshold": [],
+            "scores_final": [],
+            "count_input": 0,
+            "count_after_rerank": 0,
+            "count_after_threshold": 0,
+            "count_after_chunk_top_k": 0,
+            "count_final": 0,
+        }
+
     tokenizer = global_config.get("tokenizer")
     if not tokenizer:
         logger.error("Missing tokenizer, cannot build LLM context")
@@ -4755,6 +4834,8 @@ async def _build_context_str(
         )
         empty_raw_data["status"] = "failure"
         empty_raw_data["message"] = "Missing tokenizer, cannot build LLM context."
+        metadata = empty_raw_data.setdefault("metadata", {})
+        metadata["rerank_chunk_debug"] = _empty_rerank_chunk_debug()
         return "", empty_raw_data
 
     # Get token limits
@@ -4830,6 +4911,7 @@ async def _build_context_str(
         )
         available_chunk_tokens = 0
 
+    rerank_chunk_debug: dict[str, Any] = _empty_rerank_chunk_debug()
     if not enable_image_budget:
         # Official-style fallback path
         truncated_chunks = await process_chunks_unified(
@@ -4839,6 +4921,7 @@ async def _build_context_str(
             global_config=global_config,
             source_type=query_param.mode,
             chunk_token_limit=available_chunk_tokens,
+            rerank_debug=rerank_chunk_debug,
         )
         image_tokens = 0
         image_count = 0
@@ -4850,6 +4933,7 @@ async def _build_context_str(
             global_config=global_config,
             source_type=query_param.mode,
             chunk_token_limit=2**31 - 1,
+            rerank_debug=rerank_chunk_debug,
         )
 
         image_cap = int(getattr(query_param, "multimodal_top_k", 0) or 0)
@@ -4960,6 +5044,8 @@ async def _build_context_str(
         )
         empty_raw_data["status"] = "failure"
         empty_raw_data["message"] = "Query returned empty dataset."
+        metadata = empty_raw_data.setdefault("metadata", {})
+        metadata["rerank_chunk_debug"] = rerank_chunk_debug
         return "", empty_raw_data
 
     # output chunks tracking infomations
@@ -5000,6 +5086,8 @@ async def _build_context_str(
         entity_id_to_original,
         relation_id_to_original,
     )
+    metadata = final_data.setdefault("metadata", {})
+    metadata["rerank_chunk_debug"] = rerank_chunk_debug
     logger.debug(
         f"[_build_context_str] Final data after conversion: {len(final_data.get('entities', []))} entities, {len(final_data.get('relationships', []))} relationships, {len(final_data.get('chunks', []))} chunks"
     )
@@ -5030,6 +5118,7 @@ async def _rerank_kg_results(
             global_config,
             enable_rerank=True,
             top_n=len(final_entities),
+            item_label="entities",
         )
         search_result["final_entities"] = reranked
 
@@ -5045,6 +5134,7 @@ async def _rerank_kg_results(
             global_config,
             enable_rerank=True,
             top_n=len(final_relations),
+            item_label="relations",
         )
         search_result["final_relations"] = reranked
 
@@ -6033,6 +6123,7 @@ async def naive_query(
         )
         available_chunk_tokens = 0
 
+    rerank_chunk_debug: dict[str, Any] = {}
     if not enable_image_budget:
         # Official-style fallback path
         processed_chunks = await process_chunks_unified(
@@ -6042,6 +6133,7 @@ async def naive_query(
             global_config=global_config,
             source_type="vector",
             chunk_token_limit=available_chunk_tokens,
+            rerank_debug=rerank_chunk_debug,
         )
         image_tokens = 0
         image_count = 0
@@ -6053,6 +6145,7 @@ async def naive_query(
             global_config=global_config,
             source_type="vector",
             chunk_token_limit=2**31 - 1,
+            rerank_debug=rerank_chunk_debug,
         )
 
         image_cap = int(getattr(query_param, "multimodal_top_k", 0) or 0)
@@ -6147,6 +6240,7 @@ async def naive_query(
         "total_chunks_found": len(chunks),
         "final_chunks_count": len(processed_chunks_with_ref_ids),
     }
+    raw_data["metadata"]["rerank_chunk_debug"] = rerank_chunk_debug
 
     # Build chunks_context from processed chunks with reference IDs
     chunks_context = []
@@ -6198,6 +6292,7 @@ async def naive_query(
         query_param.response_type,
         query_param.top_k,
         query_param.chunk_top_k,
+        query_param.rerank_score_scope,
         query_param.max_entity_tokens,
         query_param.max_relation_tokens,
         query_param.max_total_tokens,
@@ -6229,6 +6324,7 @@ async def naive_query(
                 "response_type": query_param.response_type,
                 "top_k": query_param.top_k,
                 "chunk_top_k": query_param.chunk_top_k,
+                "rerank_score_scope": query_param.rerank_score_scope,
                 "max_entity_tokens": query_param.max_entity_tokens,
                 "max_relation_tokens": query_param.max_relation_tokens,
                 "max_total_tokens": query_param.max_total_tokens,

@@ -5,24 +5,25 @@
 RAG-Anything Local Multimodal Pipeline (Final Optimized Version)
 ----------------------------------------------------------------
 Key Features:
-1. Native Rerank Integration via lightrag_kwargs (No monkey patching).
-2. Prompt Reordering (System instructions + context + aligned images).
-3. optimized Retrieval Parameters (chunk_top_k=30, top_k=15).
+1. Native rerank integration via lightrag kwargs (no monkey patching).
+2. Prompt reordering (system instructions + context + aligned images).
+3. Tuned retrieval parameters (chunk_top_k=60, top_k=15).
 """
 
-import asyncio
 import argparse
+import asyncio
 import os
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
 
-# ==========================================
-# 1. 配置与初始化
-# ==========================================
 
-async def process_with_rag(service: LocalRagService, file_path: str, doc_id: str):
-    # 先入库，再逐题查询。
-    final_doc_id = await service.ingest(file_path, doc_id=doc_id)
+async def process_with_rag(
+    service: LocalRagService,
+    file_path: str,
+    workspace_id: str,
+) -> None:
+    # Ingest first, then run the query set on the same workspace.
+    final_workspace_id = await service.ingest(file_path, workspace_id=workspace_id)
 
     queries = [
         "According to the paper, what are the specific visual encoder and language model (LLM) backbones used in the PaddleOCR-VL-1.5 architecture, and why was the 0.9B parameter size chosen?",
@@ -38,11 +39,11 @@ async def process_with_rag(service: LocalRagService, file_path: str, doc_id: str
     ]
 
     for i, query in enumerate(queries, 1):
-        service.logger.info(f"\n{'='*80}")
+        service.logger.info(f"\n{'=' * 80}")
         service.logger.info(f"Query {i}/{len(queries)}: {query}")
-        service.logger.info(f"{'='*80}")
+        service.logger.info(f"{'=' * 80}")
 
-        # 这里是示例参数（便于演示），不影响 local_rag 的通用能力。
+        # Example query options for this demo script.
         query_param = {
             "mode": "hybrid",
             "top_k": 15,
@@ -51,35 +52,29 @@ async def process_with_rag(service: LocalRagService, file_path: str, doc_id: str
             "vlm_enhanced": True,
         }
 
-        result = await service.query(final_doc_id, query, **query_param)
-        service.logger.info(f"\n✅ Answer:\n{result}\n")
+        result = await service.query(final_workspace_id, query, **query_param)
+        service.logger.info(f"\nAnswer:\n{result}\n")
 
         if "[" in result and "]" in result:
-            service.logger.info("✓ Reference detected")
+            service.logger.info("Reference detected")
         else:
-            service.logger.warning("⚠ No reference found")
+            service.logger.warning("No reference found")
 
 
-# ==========================================
-# 4. 入口
-# ==========================================
-
-def main():
-    parser = argparse.ArgumentParser(description="RAGAnything Local Pipeline")
-
-    parser.add_argument("--path", "-p", required=True, help="要入库的文件或文件夹路径")
-    parser.add_argument("--id", "-i", required=True, help="工作空间名称 (doc_id)")
-
+def main() -> None:
+    parser = argparse.ArgumentParser(description="RAGAnything local pipeline demo")
+    parser.add_argument("--path", "-p", required=True, help="Input file or folder path")
+    parser.add_argument("--id", "-i", required=True, help="Workspace name (workspace_id)")
     args = parser.parse_args()
-    
+
     if not os.path.exists(args.path):
-        print(f"❌ Input not found: {args.path}")
+        print(f"Input not found: {args.path}")
         return
 
     settings = LocalRagSettings.from_env()
     service = LocalRagService(settings)
-
     asyncio.run(process_with_rag(service, args.path, args.id))
+
 
 if __name__ == "__main__":
     main()
