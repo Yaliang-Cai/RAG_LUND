@@ -996,14 +996,13 @@ class MilvusVectorDBStorage(BaseVectorStorage):
                         uri = config.get("milvus", "uri", fallback=None)
 
                     # Default to local milvus-lite if no URI specified
-                    # For milvus-lite: use data directory (not .db file path)
+                    # For milvus-lite: pymilvus requires .db file path (not directory)
                     if not uri:
-                        milvus_data_dir = os.path.join(
-                            self.global_config["working_dir"], "milvus_data"
+                        # Use a .db file as the milvus-lite data store
+                        # milvus-lite will manage collections within this database
+                        uri = os.path.join(
+                            self.global_config["working_dir"], "milvus.db"
                         )
-                        # Ensure directory exists
-                        os.makedirs(milvus_data_dir, exist_ok=True)
-                        uri = milvus_data_dir
                         logger.info(
                             f"[{self.workspace}] Using milvus-lite with local storage at {uri}"
                         )
