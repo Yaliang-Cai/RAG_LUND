@@ -34,19 +34,20 @@ class MilvusVectorDBStorage(BaseVectorStorage):
         # Get vector dimension from embedding_func
         dimension = self.embedding_func.embedding_dim
 
-        # milvus-lite does not support nullable or default_value on fields.
-        # In lite mode, only define the base fields and rely on enable_dynamic_field
-        # for optional metadata (entity_name, file_path, src_id, etc.)
+        # milvus-lite does not support nullable=True on FieldSchema.
+        # Use plain NOT NULL VARCHAR for all modes; upsert will fill "" when absent.
         is_lite = self._is_milvus_lite()
 
-        def nullable_varchar(name, max_length):
-            """Create a nullable VARCHAR field (only for full Milvus, not lite)"""
-            return FieldSchema(
-                name=name,
-                dtype=DataType.VARCHAR,
-                max_length=max_length,
-                nullable=True,
-            )
+        def varchar_field(name, max_length):
+            """Create a VARCHAR field: nullable for full Milvus, NOT NULL for lite."""
+            kwargs = {
+                "name": name,
+                "dtype": DataType.VARCHAR,
+                "max_length": max_length,
+            }
+            if not is_lite:
+                kwargs["nullable"] = True
+            return FieldSchema(**kwargs)
 
         # Base fields (common to all collections)
         base_fields = [
@@ -59,30 +60,30 @@ class MilvusVectorDBStorage(BaseVectorStorage):
 
         # Determine specific fields based on namespace
         if self.namespace.endswith("entities"):
-            specific_fields = [] if is_lite else [
-                nullable_varchar("entity_name", 512),
-                nullable_varchar("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
+            specific_fields = [
+                varchar_field("entity_name", 512),
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG entities vector storage"
 
         elif self.namespace.endswith("relationships"):
-            specific_fields = [] if is_lite else [
-                nullable_varchar("src_id", 512),
-                nullable_varchar("tgt_id", 512),
-                nullable_varchar("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
+            specific_fields = [
+                varchar_field("src_id", 512),
+                varchar_field("tgt_id", 512),
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG relationships vector storage"
 
         elif self.namespace.endswith("chunks"):
-            specific_fields = [] if is_lite else [
-                nullable_varchar("full_doc_id", 64),
-                nullable_varchar("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
+            specific_fields = [
+                varchar_field("full_doc_id", 64),
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG chunks vector storage"
 
         else:
-            specific_fields = [] if is_lite else [
-                nullable_varchar("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
+            specific_fields = [
+                varchar_field("file_path", DEFAULT_MAX_FILE_PATH_LENGTH),
             ]
             description = "LightRAG generic vector storage"
 
@@ -1053,14 +1054,23 @@ class MilvusVectorDBStorage(BaseVectorStorage):
 
         current_time = int(time.time())
 
-        list_data: list[dict[str, Any]] = [
-            {
+        # In milvus-lite mode fields are NOT NULL, so fill missing meta_fields with ""
+        # In full Milvus mode fields are nullable, so missing fields can be omitted
+        _lite = self._is_milvus_lite()
+
+        def _row(k, v):
+            row = {
                 "id": k,
                 "created_at": current_time,
                 **{k1: v1 for k1, v1 in v.items() if k1 in self.meta_fields},
             }
-            for k, v in data.items()
-        ]
+            if _lite:
+                for field in self.meta_fields - {"created_at", "content", "source_id"}:
+                    if field not in row:
+                        row[field] = ""
+            return row
+
+        list_data: list[dict[str, Any]] = [_row(k, v) for k, v in data.items()]
         contents = [v["content"] for v in data.values()]
         batches = [
             contents[i : i + self._max_batch_size]
