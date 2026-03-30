@@ -990,32 +990,51 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             try:
                 # Create MilvusClient if not already created
                 if self._client is None:
-                    self._client = MilvusClient(
-                        uri=os.environ.get(
-                            "MILVUS_URI",
-                            config.get(
-                                "milvus",
-                                "uri",
-                                fallback=os.path.join(
-                                    self.global_config["working_dir"], "milvus_lite.db"
-                                ),
-                            ),
-                        ),
-                        user=os.environ.get(
+                    # Get URI from environment or config
+                    uri = os.environ.get("MILVUS_URI")
+                    if not uri:
+                        uri = config.get("milvus", "uri", fallback=None)
+
+                    # Default to local milvus-lite if no URI specified
+                    if not uri:
+                        uri = os.path.join(
+                            self.global_config["working_dir"], "milvus.db"
+                        )
+                        logger.info(
+                            f"[{self.workspace}] Using milvus-lite with local storage at {uri}"
+                        )
+
+                    # For milvus-lite, don't pass user/password/token credentials
+                    # Only use them if connecting to a remote HTTP server
+                    client_kwargs = {"uri": uri}
+
+                    # Only add credentials if URI looks like an HTTP endpoint
+                    if uri.startswith("http"):
+                        user = os.environ.get(
                             "MILVUS_USER", config.get("milvus", "user", fallback=None)
-                        ),
-                        password=os.environ.get(
+                        )
+                        password = os.environ.get(
                             "MILVUS_PASSWORD",
                             config.get("milvus", "password", fallback=None),
-                        ),
-                        token=os.environ.get(
+                        )
+                        token = os.environ.get(
                             "MILVUS_TOKEN", config.get("milvus", "token", fallback=None)
-                        ),
-                        db_name=os.environ.get(
-                            "MILVUS_DB_NAME",
-                            config.get("milvus", "db_name", fallback=None),
-                        ),
+                        )
+                        if user:
+                            client_kwargs["user"] = user
+                        if password:
+                            client_kwargs["password"] = password
+                        if token:
+                            client_kwargs["token"] = token
+
+                    db_name = os.environ.get(
+                        "MILVUS_DB_NAME",
+                        config.get("milvus", "db_name", fallback=None),
                     )
+                    if db_name:
+                        client_kwargs["db_name"] = db_name
+
+                    self._client = MilvusClient(**client_kwargs)
                     logger.debug(
                         f"[{self.workspace}] MilvusClient created successfully"
                     )
