@@ -14,13 +14,6 @@ try:
 except ImportError:
     raise ImportError("pymilvus package required. Install with: pip install pymilvus>=2.6.2")
 
-# Check if milvus-lite is available for local development
-try:
-    import milvus_lite  # type: ignore
-    HAS_MILVUS_LITE = True
-except ImportError:
-    HAS_MILVUS_LITE = False
-
 config = configparser.ConfigParser()
 config.read("config.ini", "utf-8")
 
@@ -997,35 +990,17 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             try:
                 # Create MilvusClient if not already created
                 if self._client is None:
-                    # Get URI from environment or config
-                    uri = os.environ.get("MILVUS_URI")
-                    if not uri:
-                        uri = config.get("milvus", "uri", fallback=None)
-
-                    # If no URI specified, use milvus-lite or default HTTP URI
-                    if not uri:
-                        if HAS_MILVUS_LITE:
-                            # Use milvus-lite for local embedded storage
-                            db_path = os.path.join(
-                                self.global_config["working_dir"], "milvus.db"
-                            )
-                            uri = db_path
-                            logger.info(
-                                f"[{self.workspace}] Using milvus-lite with local storage at {db_path}"
-                            )
-                        else:
-                            # Fall back to local HTTP server
-                            uri = "http://localhost:19530"
-                            logger.warning(
-                                f"[{self.workspace}] No MILVUS_URI configured. "
-                                f"Using default local Milvus at {uri}. "
-                                f"Make sure a Milvus server is running at this address, "
-                                f"or set MILVUS_URI environment variable, "
-                                f"or install milvus-lite: pip install milvus-lite"
-                            )
-
                     self._client = MilvusClient(
-                        uri=uri,
+                        uri=os.environ.get(
+                            "MILVUS_URI",
+                            config.get(
+                                "milvus",
+                                "uri",
+                                fallback=os.path.join(
+                                    self.global_config["working_dir"], "milvus_lite.db"
+                                ),
+                            ),
+                        ),
                         user=os.environ.get(
                             "MILVUS_USER", config.get("milvus", "user", fallback=None)
                         ),
