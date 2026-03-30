@@ -348,6 +348,32 @@ def _build_threshold_retention(scores: list[float]) -> list[dict[str, Any]]:
     return retention
 
 
+def _build_macro_score_distribution(records: list[dict[str, Any]], key: str) -> dict[str, Any]:
+    metric_names = ("count", "min", "max", "mean", "std", "p10", "p25", "p50", "p75", "p90")
+    buckets: dict[str, list[float]] = {name: [] for name in metric_names}
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        dist = record.get("distribution", {})
+        if not isinstance(dist, dict):
+            continue
+        group = dist.get(key, {})
+        if not isinstance(group, dict):
+            continue
+        for name in metric_names:
+            value = group.get(name)
+            if isinstance(value, (int, float)):
+                buckets[name].append(float(value))
+
+    out: dict[str, Any] = {}
+    out["avg_count"] = round(sum(buckets["count"]) / len(buckets["count"]), 6) if buckets["count"] else 0.0
+    for name in metric_names[1:]:
+        values = buckets[name]
+        out[name] = round(sum(values) / len(values), 6) if values else None
+    return out
+
+
 def _extract_rerank_chunk_payload(
     trace: dict[str, Any],
     *,
@@ -399,15 +425,15 @@ def _extract_rerank_chunk_payload(
             "after_threshold": _safe_count(count_after_threshold, len(scores_after_threshold)),
             "final": _safe_count(count_final, len(scores_final)),
         },
-        "scores": {
-            "all": scores_all,
-            "after_threshold": scores_after_threshold,
-            "final": scores_final,
-        },
         "distribution": {
             "all": _build_score_distribution(scores_all),
             "after_threshold": _build_score_distribution(scores_after_threshold),
             "final": _build_score_distribution(scores_final),
+        },
+        "scores": {
+            "all": scores_all,
+            "after_threshold": scores_after_threshold,
+            "final": scores_final,
         },
         "threshold_retention": _build_threshold_retention(scores_all),
     }
@@ -504,6 +530,11 @@ def _refresh_rerank_chunk_summary() -> None:
             "all": _build_score_distribution(all_scores_all),
             "after_threshold": _build_score_distribution(all_scores_after_threshold),
             "final": _build_score_distribution(all_scores_final),
+        },
+        "macro_distribution_over_questions": {
+            "all": _build_macro_score_distribution(records, "all"),
+            "after_threshold": _build_macro_score_distribution(records, "after_threshold"),
+            "final": _build_macro_score_distribution(records, "final"),
         },
         "by_type_distribution": by_type_distribution,
         "threshold_retention_overall": threshold_retention_overall,
@@ -1075,15 +1106,13 @@ async def generate_answers_shared(
                 "doc_id": doc_name,
                 "qa_idx": qa_idx,
                 "question": question,
-                "type": qa_item["type"],
-                "workspace_id": shared_workspace_id,
-                "query_mode": query_params.get("mode", ""),
                 "rerank_scope": rerank_stats["rerank_scope"],
                 "min_rerank_score": rerank_stats["min_rerank_score"],
                 "counts": rerank_stats["counts"],
-                "scores": rerank_stats["scores"],
                 "distribution": rerank_stats["distribution"],
+                "scores": rerank_stats["scores"],
                 "threshold_retention": rerank_stats["threshold_retention"],
+                "type": qa_item["type"],
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
             }
             async with progress_lock:

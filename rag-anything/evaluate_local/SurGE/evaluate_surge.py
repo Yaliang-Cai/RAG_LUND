@@ -40,7 +40,6 @@ SUMMARY_FILE = RETRIEVAL_DIR / "retrieval_summary.json"
 RERANK_STATS_FILE = RETRIEVAL_DIR / "rerank_chunk_stats.jsonl"
 RERANK_SUMMARY_FILE = RETRIEVAL_DIR / "rerank_chunk_summary.json"
 WARNINGS_FILE = RETRIEVAL_DIR / "mapping_warnings.jsonl"
-RUN_MANIFEST = RETRIEVAL_DIR / "run_manifest.json"
 INGEST_MANIFEST = RETRIEVAL_DIR / "shared_ingest_manifest.json"
 INGEST_FAILURES = RETRIEVAL_DIR / "shared_ingest_failures.jsonl"
 SURVEY_STATUS = SURVEY_DIR / "survey_mode_status.json"
@@ -49,7 +48,6 @@ SURVEY_SUMMARY_FILE = SURVEY_DIR / "survey_retrieval_summary.json"
 SURVEY_RERANK_STATS_FILE = SURVEY_DIR / "survey_rerank_chunk_stats.jsonl"
 SURVEY_RERANK_SUMMARY_FILE = SURVEY_DIR / "survey_rerank_chunk_summary.json"
 SURVEY_WARNINGS_FILE = SURVEY_DIR / "survey_mapping_warnings.jsonl"
-SURVEY_RUN_MANIFEST = SURVEY_DIR / "survey_run_manifest.json"
 
 INT_RE = re.compile(r"^-?\d+$")
 MASTER_LOG: Path | None = None
@@ -491,14 +489,165 @@ def clear_cuda_cache() -> None:
         pass
 
 
+def score_percentile(sorted_scores: list[float], q: float) -> float | None:
+    if not sorted_scores:
+        return None
+    if q <= 0:
+        return sorted_scores[0]
+    if q >= 1:
+        return sorted_scores[-1]
+    position = (len(sorted_scores) - 1) * q
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return sorted_scores[lower]
+    weight = position - lower
+    return sorted_scores[lower] * (1 - weight) + sorted_scores[upper] * weight
+
+
 def score_distribution(scores: list[float]) -> dict[str, Any]:
     if not scores:
-        return {"count": 0, "min": None, "max": None, "mean": None, "std": None}
+        return {
+            "count": 0,
+            "min": None,
+            "max": None,
+            "mean": None,
+            "std": None,
+            "p10": None,
+            "p25": None,
+            "p50": None,
+            "p75": None,
+            "p90": None,
+        }
     s = sorted(scores)
     n = len(s)
     mean = sum(s) / n
     std = math.sqrt(sum((x - mean) ** 2 for x in s) / n)
-    return {"count": n, "min": round(s[0], 6), "max": round(s[-1], 6), "mean": round(mean, 6), "std": round(std, 6)}
+    return {
+        "count": n,
+        "min": round(s[0], 6),
+        "max": round(s[-1], 6),
+        "mean": round(mean, 6),
+        "std": round(std, 6),
+        "p10": round(score_percentile(s, 0.10), 6),
+        "p25": round(score_percentile(s, 0.25), 6),
+        "p50": round(score_percentile(s, 0.50), 6),
+        "p75": round(score_percentile(s, 0.75), 6),
+        "p90": round(score_percentile(s, 0.90), 6),
+    }
+
+
+def build_threshold_retention(scores: list[float]) -> list[dict[str, Any]]:
+    thresholds = [round(step * 0.05, 2) for step in range(21)]
+    total = len(scores)
+    retention: list[dict[str, Any]] = []
+    for threshold in thresholds:
+        kept = sum(1 for score in scores if score >= threshold)
+        ratio = (kept / total) if total else 0.0
+        retention.append(
+            {
+                "threshold": threshold,
+                "kept": kept,
+                "ratio": round(ratio, 6),
+            }
+        )
+    return retention
+
+
+def summarize_threshold_retention(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    bucket: dict[float, dict[str, float]] = {}
+    for row in rows:
+        for item in row.get("threshold_retention", []) if isinstance(row, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                threshold = round(float(item.get("threshold")), 2)
+            except (TypeError, ValueError):
+                continue
+            b = bucket.setdefault(threshold, {"kept_sum": 0.0, "ratio_sum": 0.0, "count": 0.0})
+            try:
+                kept = float(item.get("kept", 0))
+            except (TypeError, ValueError):
+                kept = 0.0
+            try:
+                ratio = float(item.get("ratio", 0.0))
+            except (TypeError, ValueError):
+                ratio = 0.0
+            b["kept_sum"] += kept
+            b["ratio_sum"] += ratio
+            b["count"] += 1.0
+
+    out: list[dict[str, Any]] = []
+    for threshold in sorted(bucket):
+        b = bucket[threshold]
+        if b["count"] <= 0:
+            continue
+        out.append(
+            {
+                "threshold": threshold,
+                "avg_kept": round(b["kept_sum"] / b["count"], 6),
+                "avg_ratio": round(b["ratio_sum"] / b["count"], 6),
+            }
+        )
+    return out
+
+
+def summarize_macro_distribution(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def _mean_or_none(values: list[float]) -> float | None:
+        return round(sum(values) / len(values), 6) if values else None
+
+    metric_keys = ("count", "min", "max", "mean", "std", "p10", "p25", "p50", "p75", "p90")
+    groups = {"all": {}, "after_threshold": {}, "final": {}}
+    for metric in metric_keys:
+        groups["all"][metric] = []
+        groups["after_threshold"][metric] = []
+        groups["final"][metric] = []
+
+    for row in rows:
+        dist = row.get("distribution", {}) if isinstance(row, dict) else {}
+        if not isinstance(dist, dict):
+            continue
+        for scope in ("all", "after_threshold", "final"):
+            scope_dist = dist.get(scope, {})
+            if not isinstance(scope_dist, dict):
+                continue
+            for metric in metric_keys:
+                value = scope_dist.get(metric)
+                if isinstance(value, (int, float)):
+                    groups[scope][metric].append(float(value))
+
+    out: dict[str, Any] = {}
+    for scope in ("all", "after_threshold", "final"):
+        out[scope] = {
+            "avg_count": _mean_or_none(groups[scope]["count"]),
+            "min": _mean_or_none(groups[scope]["min"]),
+            "max": _mean_or_none(groups[scope]["max"]),
+            "mean": _mean_or_none(groups[scope]["mean"]),
+            "std": _mean_or_none(groups[scope]["std"]),
+            "p10": _mean_or_none(groups[scope]["p10"]),
+            "p25": _mean_or_none(groups[scope]["p25"]),
+            "p50": _mean_or_none(groups[scope]["p50"]),
+            "p75": _mean_or_none(groups[scope]["p75"]),
+            "p90": _mean_or_none(groups[scope]["p90"]),
+        }
+    return out
+
+
+def count_rows_with_rerank_trace(rows: list[dict[str, Any]]) -> int:
+    count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        counts = row.get("counts", {})
+        if not isinstance(counts, dict):
+            continue
+        all_count = parse_non_negative_int(counts.get("all")) or 0
+        final_count = parse_non_negative_int(counts.get("final")) or 0
+        if all_count > 0 or final_count > 0:
+            count += 1
+    return count
 
 
 def extract_rerank_payload(retrieval: dict[str, Any], query_params: dict[str, Any]) -> dict[str, Any]:
@@ -529,31 +678,17 @@ def extract_rerank_payload(retrieval: dict[str, Any], query_params: dict[str, An
         "after_threshold": thr_count if thr_count is not None else len(scores_thr),
         "final": final_count if final_count is not None else len(scores_final),
     }
-    denom = counts["input"] if counts["input"] > 0 else None
-    retention = {
-        "all_over_input": round(counts["all"] / denom, 6) if denom else None,
-        "after_threshold_over_input": round(counts["after_threshold"] / denom, 6) if denom else None,
-        "final_over_input": round(counts["final"] / denom, 6) if denom else None,
-        "final_over_after_threshold": (
-            round(counts["final"] / counts["after_threshold"], 6)
-            if counts["after_threshold"] > 0
-            else None
-        ),
-    }
     return {
-        "rerank_scope": str(dbg.get("scope", query_params.get("rerank_score_scope", "top_k"))),
+        "rerank_scope": str(dbg.get("scope", query_params.get("rerank_score_scope", "all"))),
         "min_rerank_score": dbg.get("min_rerank_score"),
         "counts": counts,
-        "retention": retention,
-        "scores_all": scores_all,
-        "scores_after_threshold": scores_thr,
-        "scores_final": scores_final,
-        "scores": {"all": scores_all, "after_threshold": scores_thr, "final": scores_final},
         "distribution": {
             "all": score_distribution(scores_all),
             "after_threshold": score_distribution(scores_thr),
             "final": score_distribution(scores_final),
         },
+        "scores": {"all": scores_all, "after_threshold": scores_thr, "final": scores_final},
+        "threshold_retention": build_threshold_retention(scores_all),
     }
 
 
@@ -819,7 +954,6 @@ def to_bool(v: Any) -> bool:
 
 def has_matching_survey_retrieval(
     summary: dict[str, Any],
-    manifest: dict[str, Any],
     args: argparse.Namespace,
     ks: list[int],
     expected_survey_count: int | None = None,
@@ -829,8 +963,6 @@ def has_matching_survey_retrieval(
     summary_checks = {
         "mode": "survey",
         "survey_stage": "retrieval",
-        "workspace_id": str(args.workspace_id),
-        "query_mode": str(args.query_mode),
     }
     for key, value in summary_checks.items():
         if str(summary.get(key)) != value:
@@ -839,14 +971,10 @@ def has_matching_survey_retrieval(
         return False
     if parse_int(summary.get("chunk_top_k")) != expected_chunk_top_k:
         return False
-    if to_bool(summary.get("enable_rerank")) != bool(args.enable_rerank):
-        return False
     if list(summary.get("k_list") or []) != ks:
         return False
 
-    manifest_checks = {
-        "mode": "survey",
-        "survey_stage": "retrieval",
+    summary_checks_extra = {
         "workspace_id": str(args.workspace_id),
         "data_root": str(Path(args.data_root)),
         "subset_dir": str(expected_subset),
@@ -854,10 +982,10 @@ def has_matching_survey_retrieval(
         "chunks_file": str(expected_subset / args.chunks_file),
         "corpus_file": str(expected_subset / args.corpus_file),
     }
-    for key, value in manifest_checks.items():
-        if str(manifest.get(key)) != value:
+    for key, value in summary_checks_extra.items():
+        if str(summary.get(key)) != value:
             return False
-    params = manifest.get("effective_query_params", {})
+    params = summary.get("effective_query_params", {})
     if not isinstance(params, dict):
         return False
     if str(params.get("mode")) != str(args.query_mode):
@@ -903,7 +1031,7 @@ async def run_retrieval(args: argparse.Namespace) -> int:
         "top_k": args.top_k,
         "chunk_top_k": chunk_top_k,
         "enable_rerank": args.enable_rerank,
-        "rerank_score_scope": "top_k",
+        "rerank_score_scope": "all",
     }
     sem = asyncio.Semaphore(max(1, args.max_concurrency))
     done = 0
@@ -948,7 +1076,6 @@ async def run_retrieval(args: argparse.Namespace) -> int:
             "query_id": qid,
             "question": q,
             "category": item.get("category"),
-            "cite_extract_rate": item.get("cite_extract_rate"),
             "gt_count": len(gt),
             "retrieved_count": len(retrieved),
             "gt_doc_ids": sorted(gt),
@@ -962,14 +1089,16 @@ async def run_retrieval(args: argparse.Namespace) -> int:
         rerank_row = {
             "query_id": qid,
             "question": q,
+            "rerank_scope": rerank.get("rerank_scope"),
+            "min_rerank_score": rerank.get("min_rerank_score"),
+            "counts": rerank.get("counts", {}),
+            "distribution": rerank.get("distribution", {}),
+            "scores": rerank.get("scores", {}),
+            "threshold_retention": rerank.get("threshold_retention", []),
             "category": item.get("category"),
-            "workspace_id": args.workspace_id,
-            "query_mode": args.query_mode,
             "top_k": args.top_k,
             "chunk_top_k": chunk_top_k,
-            "enable_rerank": args.enable_rerank,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            **rerank,
         }
         async with lock:
             done += 1
@@ -992,11 +1121,8 @@ async def run_retrieval(args: argparse.Namespace) -> int:
     save_json(SUMMARY_FILE, {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "mode": "retrieval",
-        "workspace_id": args.workspace_id,
-        "query_mode": args.query_mode,
         "top_k": args.top_k,
         "chunk_top_k": chunk_top_k,
-        "enable_rerank": args.enable_rerank,
         "k_list": ks,
         "query_count": len(per_rows),
         "success_count": sum(1 for r in per_rows if r.get("error") is None),
@@ -1004,6 +1130,17 @@ async def run_retrieval(args: argparse.Namespace) -> int:
         "mapping_warning_count": len(warnings),
         "non_empty_retrieval_count": sum(1 for r in per_rows if int(r.get("retrieved_count", 0)) > 0),
         "avg_recall_at_k": avg,
+        "workspace_id": args.workspace_id,
+        "data_root": str(data_root),
+        "subset_dir": str(subset),
+        "queries_file": str(subset / args.queries_file),
+        "chunks_file": str(subset / args.chunks_file),
+        "corpus_file": str(subset / args.corpus_file),
+        "effective_query_params": query_params | {
+            "max_concurrency": args.max_concurrency,
+            "max_retries": args.max_retries,
+            "k_list": ks,
+        },
         "ingest_summary": ingest_summary,
         "chunks_source_stats": chunk_stats,
     })
@@ -1012,31 +1149,14 @@ async def run_retrieval(args: argparse.Namespace) -> int:
     fin_scores = [s for r in rerank_rows for s in r.get("scores", {}).get("final", []) if isinstance(s, (int, float))]
     save_json(RERANK_SUMMARY_FILE, {
         "total_queries": len(rerank_rows),
+        "questions_with_rerank_trace": count_rows_with_rerank_trace(rerank_rows),
         "overall_distribution": {
             "all": score_distribution([float(x) for x in all_scores]),
             "after_threshold": score_distribution([float(x) for x in thr_scores]),
             "final": score_distribution([float(x) for x in fin_scores]),
         },
-    })
-    save_json(RUN_MANIFEST, {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "mode": "retrieval",
-        "data_root": str(data_root),
-        "subset_dir": str(subset),
-        "queries_file": str(subset / args.queries_file),
-        "chunks_file": str(subset / args.chunks_file),
-        "corpus_file": str(subset / args.corpus_file),
-        "workspace_id": args.workspace_id,
-        "effective_query_params": query_params | {"max_concurrency": args.max_concurrency, "max_retries": args.max_retries, "k_list": ks},
-        "result_files": {
-            "per_query": str(PER_QUERY_FILE),
-            "summary": str(SUMMARY_FILE),
-            "rerank_stats": str(RERANK_STATS_FILE),
-            "rerank_summary": str(RERANK_SUMMARY_FILE),
-            "mapping_warnings": str(WARNINGS_FILE),
-            "ingest_manifest": str(INGEST_MANIFEST),
-            "ingest_failures": str(INGEST_FAILURES),
-        },
+        "macro_distribution_over_queries": summarize_macro_distribution(rerank_rows),
+        "threshold_retention_overall": summarize_threshold_retention(rerank_rows),
     })
     logger.info("Retrieval complete: %s", SUMMARY_FILE)
     gc.collect()
@@ -1072,7 +1192,7 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
         "top_k": args.top_k,
         "chunk_top_k": chunk_top_k,
         "enable_rerank": args.enable_rerank,
-        "rerank_score_scope": "top_k",
+        "rerank_score_scope": "all",
     }
 
     sem = asyncio.Semaphore(max(1, args.max_concurrency))
@@ -1138,13 +1258,15 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
         rerank_row = {
             "survey_id": survey_id,
             "survey_title": survey_title,
-            "workspace_id": args.workspace_id,
-            "query_mode": args.query_mode,
+            "rerank_scope": rerank.get("rerank_scope"),
+            "min_rerank_score": rerank.get("min_rerank_score"),
+            "counts": rerank.get("counts", {}),
+            "distribution": rerank.get("distribution", {}),
+            "scores": rerank.get("scores", {}),
+            "threshold_retention": rerank.get("threshold_retention", []),
             "top_k": args.top_k,
             "chunk_top_k": chunk_top_k,
-            "enable_rerank": args.enable_rerank,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            **rerank,
         }
         async with lock:
             done += 1
@@ -1175,11 +1297,8 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "mode": "survey",
         "survey_stage": "retrieval",
-        "workspace_id": args.workspace_id,
-        "query_mode": args.query_mode,
         "top_k": args.top_k,
         "chunk_top_k": chunk_top_k,
-        "enable_rerank": args.enable_rerank,
         "k_list": survey_ks,
         "survey_count": len(per_rows),
         "success_count": sum(1 for r in per_rows if r.get("error") is None),
@@ -1188,6 +1307,17 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
         "non_empty_retrieval_count": sum(1 for r in per_rows if int(r.get("retrieved_count", 0)) > 0),
         "macro_recall_at_k": macro,
         "micro_recall_at_k": micro,
+        "workspace_id": args.workspace_id,
+        "data_root": str(data_root),
+        "subset_dir": str(subset),
+        "surveys_file": str(subset / args.surveys_file),
+        "chunks_file": str(subset / args.chunks_file),
+        "corpus_file": str(subset / args.corpus_file),
+        "effective_query_params": query_params | {
+            "max_concurrency": args.max_concurrency,
+            "max_retries": args.max_retries,
+            "k_list": survey_ks,
+        },
         "ingest_summary": ingest_summary,
         "chunks_source_stats": chunk_stats,
     })
@@ -1197,37 +1327,14 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
     fin_scores = [s for r in rerank_rows for s in r.get("scores", {}).get("final", []) if isinstance(s, (int, float))]
     save_json(SURVEY_RERANK_SUMMARY_FILE, {
         "total_surveys": len(rerank_rows),
+        "questions_with_rerank_trace": count_rows_with_rerank_trace(rerank_rows),
         "overall_distribution": {
             "all": score_distribution([float(x) for x in all_scores]),
             "after_threshold": score_distribution([float(x) for x in thr_scores]),
             "final": score_distribution([float(x) for x in fin_scores]),
         },
-    })
-
-    save_json(SURVEY_RUN_MANIFEST, {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "mode": "survey",
-        "survey_stage": "retrieval",
-        "data_root": str(data_root),
-        "subset_dir": str(subset),
-        "surveys_file": str(subset / args.surveys_file),
-        "chunks_file": str(subset / args.chunks_file),
-        "corpus_file": str(subset / args.corpus_file),
-        "workspace_id": args.workspace_id,
-        "effective_query_params": query_params | {
-            "max_concurrency": args.max_concurrency,
-            "max_retries": args.max_retries,
-            "k_list": survey_ks,
-        },
-        "result_files": {
-            "per_survey": str(SURVEY_PER_FILE),
-            "summary": str(SURVEY_SUMMARY_FILE),
-            "rerank_stats": str(SURVEY_RERANK_STATS_FILE),
-            "rerank_summary": str(SURVEY_RERANK_SUMMARY_FILE),
-            "mapping_warnings": str(SURVEY_WARNINGS_FILE),
-            "ingest_manifest": str(INGEST_MANIFEST),
-            "ingest_failures": str(INGEST_FAILURES),
-        },
+        "macro_distribution_over_surveys": summarize_macro_distribution(rerank_rows),
+        "threshold_retention_overall": summarize_threshold_retention(rerank_rows),
     })
     logger.info("Survey retrieval complete: %s", SURVEY_SUMMARY_FILE)
     gc.collect()
@@ -1246,15 +1353,12 @@ async def run_survey_generate_placeholder(args: argparse.Namespace) -> int:
         SURVEY_SUMMARY_FILE.exists()
         and SURVEY_PER_FILE.exists()
         and SURVEY_RERANK_STATS_FILE.exists()
-        and SURVEY_RUN_MANIFEST.exists()
     ):
         try:
             summary = json.loads(SURVEY_SUMMARY_FILE.read_text(encoding="utf-8"))
-            manifest = json.loads(SURVEY_RUN_MANIFEST.read_text(encoding="utf-8"))
-            if isinstance(summary, dict) and isinstance(manifest, dict):
+            if isinstance(summary, dict):
                 need_retrieval = not has_matching_survey_retrieval(
                     summary=summary,
-                    manifest=manifest,
                     args=args,
                     ks=survey_ks,
                     expected_survey_count=expected_survey_count,
@@ -1366,8 +1470,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--top-k", type=int, default=40)
     p.add_argument("--chunk-top-k", type=int, default=0, help="<=0 means auto use max(k-list)")
-    p.add_argument("--k-list", default="20,30,100,200,500,1000")
-    p.add_argument("--survey-k-list", default="50,100,200,500,1000")
+    p.add_argument("--k-list", default="5,10,20,30,50")
+    p.add_argument("--survey-k-list", default="50,100,200,500")
     p.add_argument("--enable-rerank", type=as_bool, default=True)
     p.add_argument("--max-concurrency", type=int, default=8)
     p.add_argument("--max-retries", type=int, default=0)
