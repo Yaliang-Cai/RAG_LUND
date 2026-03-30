@@ -71,10 +71,7 @@ STORAGE_ENV_REQUIREMENTS: dict[str, list[str]] = {
     ],
     # Vector Storage Implementations
     "NanoVectorDBStorage": [],
-    "MilvusVectorDBStorage": [
-        "MILVUS_URI",
-        "MILVUS_DB_NAME",
-    ],
+    "MilvusVectorDBStorage": [],
     # "ChromaVectorDBStorage": [],
     "PGVectorStorage": ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DATABASE"],
     "FaissVectorDBStorage": [],

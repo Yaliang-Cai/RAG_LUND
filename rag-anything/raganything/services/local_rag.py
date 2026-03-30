@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
+
 import numpy as np
 from lightrag.types import GPTKeywordExtractionFormat
 from lightrag.utils import EmbeddingFunc, Tokenizer
@@ -1036,7 +1038,9 @@ class LocalRagService:
 
 
 if __name__ == "__main__":
-    
+    # 加载 .env 文件中的环境变量
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="RAG 后台管理工具")
     parser.add_argument("--path", "-p", required=True, help="要入库的文件或文件夹路径")
     parser.add_argument("--id", "-i", required=True, help="工作空间名称 (doc_id)")
