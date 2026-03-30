@@ -653,8 +653,6 @@ passage_node_weight: float = 0.05      # 第 219 行
 | 文件 | 说明 |
 |------|------|
 | `lightrag/lightrag/api/config.py` | `DefaultRAGStorageConfig` 保持原始默认值不变（NetworkX + NanoVectorDB） |
-| `lightrag/lightrag/kg/nano_vector_db_impl.py` | `delete_entity` 中的 `compute_mdhash_id` 逻辑自动兼容 composite ID |
-| `lightrag/lightrag/kg/faiss_impl.py` | 同上 |
 
 ---
 
@@ -739,3 +737,92 @@ passage_node_weight: float = 0.05      # 第 219 行
 4. **Recognition Memory 缺失**：HippoRAG2 最核心的创新，当前无法在不引入专门 fact 存储的情况下实现。
 
 5. **V2 topk 受 VDB 接口限制**：当前 VDB `query()` 接口限制 topk，无法做到 HippoRAG2 的 top-2047 批量矩阵乘法。
+
+---
+
+## 八、2026-03-30 补丁记录
+
+### 远端同步
+
+从 `origin/neo4j-milvus` 拉取了 21 个新 commit（`30e5043..69394db`），主要内容：
+- SurGE 评估流水线增强（surge 评估模式、并发 ingest 优化）
+- rerank 可观察性改进（`rerank_score_scope` 参数）
+- 服务级弹性（resilience / callbacks / single-flight init）
+- `DeletionResult.status` 增加 `"not_allowed"` 枚举值
+
+合并过程只产生 **1 个冲突**（`operate.py: _merge_nodes_then_upsert`），双方独立修复了同一个 bug（见下文 Bug 1），解法如下：
+- 保留远端的防御性 `isinstance` 检查（提取 `canonical_entity_name`）
+- 保留本地的 `composite_id = entity_name` 直接赋值（避免远端条件分支的残余 edge case）
+
+---
+
+### Bug 1 — 实体图节点 ID 重复拼接 `entity_type`
+
+**现象**：消歧模式开启时，图中节点 ID 为 `entity_name|entity_type|entity_type`（`|type` 重复）。
+
+**根因**：`merge_nodes_and_edges` 在消歧路径下以 `compute_entity_id(name, type, True)` = `name|type` 作为 `all_nodes` 的 key，并将该 composite key 作为 `entity_name` 传入 `_merge_nodes_then_upsert`。函数内部又调用了一次 `compute_entity_id(entity_name, entity_type, _disambig)`，导致追加两次 `|type`。
+
+**修复**（`operate.py: _merge_nodes_then_upsert` 第 2580 行附近）：
+```python
+# 从 nodes_data[0] 取回真正的 plain name
+canonical_entity_name = entity_name
+if nodes_data:
+    first = nodes_data[0].get("entity_name")
+    if isinstance(first, str) and first:
+        canonical_entity_name = first
+
+# entity_name 已经是正确的图节点 key，不再重复调用 compute_entity_id
+composite_id = entity_name
+```
+所有内容/VDB 字段改用 `canonical_entity_name`（plain name），VDB hash 改为 `compute_entity_vdb_id(canonical_entity_name, entity_type, _disambig)`。
+
+---
+
+### Bug 2 — `delete_entity()` 无法定位消歧模式下的向量
+
+**现象**：消歧模式开启时，`delete_entity(entity_name)` 计算的 VDB hash 为 `hash(name)`，而插入时存储的 hash 为 `hash(name|type)`，导致删除静默失败。图节点同样找不到（graph key 是 `name|type`，但只传了 `name`）。
+
+**修复范围**（完整调用链）：
+
+| 层 | 文件 | 变更 |
+|----|------|------|
+| 抽象接口 | `base.py` | `delete_entity(entity_name, entity_type="")` |
+| 编排层 | `utils_graph.py:adelete_by_entity` | 新增 `entity_type=""` 参数；`node_key = compute_entity_id(name, type, _disambig)`；所有图操作改用 `node_key` |
+| LightRAG 入口 | `lightrag.py` | `adelete_by_entity` / `delete_by_entity` 透传 `entity_type` |
+| API | `document_routes.py:DeleteEntityRequest` | 新增可选 `entity_type: str = ""` 字段 |
+| VDB 实现（6 个） | `milvus_impl`, `nano_vector_db_impl`, `faiss_impl`, `qdrant_impl`, `mongo_impl`, `chroma_impl` | 接受 `entity_type`，改用 `compute_entity_vdb_id(name, type, _disambig)` |
+| Postgres 特殊处理 | `postgres_impl` | 消歧模式下 `WHERE entity_name=$2 AND entity_type=$3`，防止跨类型误删 |
+
+向后兼容：`entity_type=""` 默认值 → 消歧关闭时行为与旧版完全一致。
+
+---
+
+### 设计收口 — `_is_milvus_lite()` 副作用缓存（问题 2）
+
+**原设计缺陷**：`_milvus_uri` 字段在 `_create_milvus_client()` 中作为副作用设置，`_is_milvus_lite()` 依赖该字段，导致隐式时序依赖——未经 `initialize()` 直接调用 `_is_milvus_lite()` 会静默返回 `False`（`getattr` fallback 掩盖了错误）。
+
+**产生原因**：`_get_milvus_connection_kwargs()` 命名为"构建 kwargs"，开发者认为在判断模式时调用它语义不清晰，于是引入 URI 缓存。但该函数实质上是纯函数（只读 env/config，幂等），完全可以多次调用。
+
+**修复**（`milvus_impl.py`）：
+```python
+# 之前
+def _is_milvus_lite(self) -> bool:
+    uri = getattr(self, "_milvus_uri", None)
+    if uri is None:
+        return False
+    return not self._uri_is_remote(uri)
+
+# 之后
+def _is_milvus_lite(self) -> bool:
+    uri = self._get_milvus_connection_kwargs(include_db_name=False)["uri"]
+    return not self._uri_is_remote(uri)
+```
+同时删除 `__post_init__` 中的 `self._milvus_uri: Optional[str] = None` 字段声明，以及 `_create_milvus_client()` 中的赋值行。
+
+---
+
+### 问题 3（已确认，不修改）— URI fallback `milvus.db` vs `milvus_lite.db`
+
+远端和本地均使用 `milvus.db` 作为 fallback 文件名，与上游 `milvus_lite.db` 不同。这是 commit `4595513` 中有意做出的命名决策（更中性，不暴露实现细节），不是 bug。
+
+**迁移注意**：旧安装如有 `milvus_lite.db` 文件，需手动重命名为 `milvus.db`（或通过 `MILVUS_URI` 环境变量显式指定路径）。
