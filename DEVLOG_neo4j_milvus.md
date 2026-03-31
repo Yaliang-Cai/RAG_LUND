@@ -33,7 +33,7 @@ NEO4J_PASSWORD=changeme
 NEO4J_DATABASE=neo4j
 
 # 向量数据库：Milvus Lite（本地单文件，无需启动服务）
-MILVUS_URI=./milvus_lite.db
+MILVUS_URI=./milvus.db
 MILVUS_DB_NAME=lightrag
 
 # 以下两行对 LocalRagService 无效（见下方说明），可删除
@@ -51,7 +51,7 @@ MILVUS_DB_NAME=lightrag
 | `LocalRagService` / `RAGAnything` | ❌ | `local_rag.py` 的 `lightrag_kwargs` 显式传参 |
 | 直接 `LightRAG(...)` | ❌ | 构造函数参数 |
 
-`LightRAG.__post_init__`（`lightrag.py:495-507`）不读取这两个变量，只做连接参数校验。
+`LightRAG.__post_init__` 不读取这两个变量，只做连接参数校验。
 
 #### LocalRagService 的后端激活方式
 
@@ -68,9 +68,7 @@ lightrag_kwargs={
 
 连接凭证（`NEO4J_URI` 等）仍从 `.env` 读取，由 LightRAG 内部的 `check_storage_env_vars()` 校验。
 
-LightRAG 读取连接变量的代码位置：
-- `lightrag/lightrag/kg/__init__.py` 第 56 行（Neo4j 必需：`NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`）
-- `lightrag/lightrag/kg/__init__.py` 第 75 行（Milvus 必需：`MILVUS_URI`）
+LightRAG 读取连接变量的代码位置：`lightrag/lightrag/kg/__init__.py`（Neo4j 必需：`NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`；Milvus 必需：`MILVUS_URI`）。
 
 ---
 
@@ -80,7 +78,7 @@ LightRAG 读取连接变量的代码位置：
 
 **A. LightRAG 实例初始化参数（影响 Indexing 和 Retrieval）**
 
-在 `lightrag/lightrag/lightrag.py` 的 `LightRAG` dataclass（第 163-185 行）：
+在 `lightrag/lightrag/lightrag.py` 的 `LightRAG` dataclass：
 
 | 开关 | 默认值 | 作用阶段 | 说明 |
 |------|--------|---------|------|
@@ -90,9 +88,9 @@ LightRAG 读取连接变量的代码位置：
 | `synonymy_topk` | `100` | Indexing | V2：KNN 候选数量 |
 | `synonymy_min_entity_len` | `2` | Indexing | V2：最短实体名（字符数） |
 
-**启用 V2 的方法（仅改 lightrag.py 这一处）：**
+**启用 V2 的方法：**
 ```python
-# lightrag/lightrag/lightrag.py 第 173 行
+# lightrag/lightrag/lightrag.py — LightRAG dataclass
 enable_synonym_linking: bool = field(default=True)  # False → True
 ```
 
@@ -105,7 +103,7 @@ rag = LightRAG(enable_synonym_linking=True, synonymy_threshold=0.8)
 
 **B. QueryParam 参数（影响单次查询）**
 
-在 `lightrag/lightrag/base.py` 的 `QueryParam` dataclass（第 207-219 行）：
+在 `lightrag/lightrag/base.py` 的 `QueryParam` dataclass：
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -327,7 +325,7 @@ def compute_entity_id(entity_name, entity_type="", enable_disambiguation=True):
 
 #### 集成点
 
-**`lightrag/lightrag/lightrag.py` 第 2026-2034 行**（`ainsert` 方法内）：
+**`lightrag/lightrag/lightrag.py`**（`ainsert` 方法内）：
 
 ```python
 # 在 merge_nodes_and_edges() 完成后执行
@@ -368,7 +366,7 @@ if self.enable_synonym_linking:
 **步骤 1：构建 Seed 权重（双信号）**
 
 ```python
-# operate.py: _ppr_rank_chunks() 函数（第 5178 行起）
+# operate.py: _ppr_rank_chunks()
 
 # 信号 1：entity seed weights
 # 来源：entity VDB 分数 + relation VDB 分数（取最大）
@@ -433,7 +431,7 @@ def personalized_pagerank(G, seed_weights, damping=0.5, top_k=50):
 **步骤 4：PPR Chunks 合并（最高优先级）**
 
 ```python
-# operate.py: _merge_all_chunks()（第 4582 行）
+# operate.py: _merge_all_chunks()
 def _merge_all_chunks(vector_chunks, entity_chunks, relation_chunks, ppr_chunks=None):
     if ppr_chunks:
         # V3 路径：PPR chunks 优先，vector chunks 作为补充（去重）
@@ -472,7 +470,7 @@ PPR 可以理解为一个随机游走者：
 **Neo4j 的优化**：覆写了基类的 `get_subgraph_for_ppr()` 方法，用单条 Cypher 替代 BFS 循环：
 
 ```cypher
-# lightrag/lightrag/kg/neo4j_impl.py（V3 子图提取，第 ~290 行）
+# lightrag/lightrag/kg/neo4j_impl.py: get_subgraph_for_ppr()
 MATCH path = (seed)-[*1..{max_depth}]-(neighbor)
 WHERE seed.entity_id IN $seed_ids
 RETURN DISTINCT neighbor.entity_id, properties(neighbor),
@@ -483,7 +481,7 @@ RETURN DISTINCT neighbor.entity_id, properties(neighbor),
 
 移除 `pipmaster` 逻辑，同 Neo4j。
 
-Milvus Lite 以 `MILVUS_URI=./milvus_lite.db` 单文件方式运行，无需启动服务，适合离线部署。
+Milvus Lite 以 `MILVUS_URI=./milvus.db` 单文件方式运行，无需启动服务，适合离线部署。
 
 ---
 
@@ -508,12 +506,12 @@ Milvus Lite 以 `MILVUS_URI=./milvus_lite.db` 单文件方式运行，无需启�
 
 ### V1：Entity Disambiguation — 实体消歧
 
-**开关位置**：`lightrag/lightrag/lightrag.py` 第 170 行
+**开关位置**：`lightrag/lightrag/lightrag.py`（`LightRAG` dataclass）
 ```python
 enable_entity_disambiguation: bool = field(default=True)
 ```
 
-**新增工厂函数**：`lightrag/lightrag/utils.py` 第 560-578 行
+**新增工厂函数**：`lightrag/lightrag/utils.py`
 
 ```python
 def compute_entity_id(entity_name, entity_type="", enable_disambiguation=True):
@@ -530,27 +528,29 @@ def compute_entity_vdb_id(entity_name, entity_type="", enable_disambiguation=Tru
 
 `lightrag/lightrag/operate.py`：
 
-| 函数 | 行号 | 变更 |
-|------|------|------|
-| `_update_entity_storage` | ~1825 | VDB ID + 图节点 ID 改用 composite |
-| `_rebuild_single_relationship` | ~2225 | 新建端点节点使用 composite ID |
-| `_merge_nodes_then_upsert` | ~2573 | 核心：图节点 ID 和 VDB ID 均改用 composite |
-| `_merge_edges_then_upsert`（新建） | ~2915 | edge 端点不存在时创建的节点使用 composite |
-| `_merge_edges_then_upsert`（更新） | ~3047 | 已有节点更新 VDB 时使用 composite |
-| `merge_nodes_and_edges`（分组守卫） | ~3200 | 关键守卫：见下方 |
-| `merge_nodes_and_edges`（edge remap） | ~3338 | 用 name→composite 映射重写 edge key |
+| 函数 | 变更 |
+|------|------|
+| `_update_entity_storage` | VDB ID + 图节点 ID 改用 composite |
+| `_rebuild_single_relationship` | 新建端点节点使用 composite ID |
+| `_merge_nodes_then_upsert` | 核心：图节点 ID 和 VDB ID 均改用 composite |
+| `_merge_edges_then_upsert`（新建） | edge 端点不存在时创建的节点使用 composite |
+| `_merge_edges_then_upsert`（更新） | 已有节点更新 VDB 时使用 composite |
+| `merge_nodes_and_edges`（分组守卫） | 关键守卫：见下方 |
+| `merge_nodes_and_edges`（edge remap） | 用 name→composite 映射重写 edge key |
 
 **分组守卫**（消融实验关键保证）：
 
 ```python
-# operate.py 第 ~3200 行
+# operate.py: merge_nodes_and_edges()
 _disambig = global_config.get("enable_entity_disambiguation", True)
 for maybe_nodes, maybe_edges in chunk_results:
     if _disambig:
         # V1 路径：按 composite key (name|type) 分组
         for entity_name, entities in maybe_nodes.items():
             for entity in entities:
-                group_key = compute_entity_id(entity_name, entity.type, _disambig)
+                group_key = compute_entity_id(
+                    entity_name, entity.get("entity_type", ""), _disambig
+                )
                 all_nodes[group_key].append(entity)
     else:
         # 原版路径：批量 extend（物理路径与 main 100% 一致）
@@ -562,26 +562,26 @@ for maybe_nodes, maybe_edges in chunk_results:
 
 `lightrag/lightrag/lightrag.py`：2 处（`ainsert_custom_kg`, `adelete_by_doc_ids`）
 
-`rag-anything/raganything/modalprocessors.py`：1 处（`_process_single_entity` 第 558 行）
+`rag-anything/raganything/modalprocessors.py`：1 处（`_process_single_entity`）
 
-`rag-anything/raganything/processor.py`：2 处（multimodal entity VDB ID 第 1198 行，knowledge graph upsert 第 1221 行）
+`rag-anything/raganything/processor.py`：2 处（multimodal entity VDB ID，knowledge graph upsert）
 
 ---
 
 ### V2：Synonym Linking — 同义词链接（HippoRAG2 对齐版）
 
-**开关位置**：`lightrag/lightrag/lightrag.py` 第 173-182 行
+**开关位置**：`lightrag/lightrag/lightrag.py`（`LightRAG` dataclass）
 
 ```python
-enable_synonym_linking: bool = field(default=False)   # 第 173 行
-synonymy_threshold: float = field(default=0.8)         # 第 176 行
-synonymy_topk: int = field(default=100)                # 第 179 行
-synonymy_min_entity_len: int = field(default=2)        # 第 182 行
+enable_synonym_linking: bool = field(default=False)
+synonymy_threshold: float = field(default=0.8)
+synonymy_topk: int = field(default=100)
+synonymy_min_entity_len: int = field(default=2)
 ```
 
-**核心文件**：`lightrag/lightrag/synonym_linking.py`（152 行）
+**核心文件**：`lightrag/lightrag/synonym_linking.py`
 
-**集成点**：`lightrag/lightrag/lightrag.py` 第 2026-2034 行（`ainsert` 方法末段）
+**集成点**：`lightrag/lightrag/lightrag.py`（`ainsert` 方法末段，`merge_nodes_and_edges` 完成后）
 
 **主要变化（相比旧版）**：
 - 旧版：`entities_vdb.query(description_text, top_k=10)` → 重新编码文本，近似 ANN
@@ -594,26 +594,26 @@ synonymy_min_entity_len: int = field(default=2)        # 第 182 行
 
 ### V3：PPR Multi-hop Reasoning — 多跳推理（HippoRAG2 对齐版）
 
-**开关位置**：`lightrag/lightrag/base.py` 第 207-219 行（`QueryParam`）
+**开关位置**：`lightrag/lightrag/base.py`（`QueryParam` dataclass）
 
 ```python
-enable_multi_hop: bool = False          # 第 207 行
-multi_hop_depth: int = 2                # 第 210 行
-ppr_damping: float = 0.5               # 第 213 行
-ppr_top_k: int = 50                    # 第 216 行
-passage_node_weight: float = 0.05      # 第 219 行
+enable_multi_hop: bool = False
+multi_hop_depth: int = 2
+ppr_damping: float = 0.5
+ppr_top_k: int = 50
+passage_node_weight: float = 0.05
 ```
 
-**核心文件**：`lightrag/lightrag/ppr.py`（161 行）
+**核心文件**：`lightrag/lightrag/ppr.py`
 
 **集成点**：
 
-| 位置 | 行号 | 说明 |
-|------|------|------|
-| `operate.py: _perform_kg_search()` | ~4374 | V3 入口：调用 `_ppr_rank_chunks()` |
-| `operate.py: _ppr_rank_chunks()` | 5178 | 核心：构建异构图 + 双信号 seed + 运行 PPR |
-| `operate.py: _merge_all_chunks()` | 4582 | PPR chunks 最高优先级合并 |
-| `operate.py: kg_query()` | ~5118 | 将 `ppr_chunks` 传入 `_merge_all_chunks()` |
+| 位置 | 说明 |
+|------|------|
+| `operate.py: _perform_kg_search()` | V3 入口：调用 `_ppr_rank_chunks()` |
+| `operate.py: _ppr_rank_chunks()` | 核心：构建异构图 + 双信号 seed + 运行 PPR |
+| `operate.py: _merge_all_chunks()` | PPR chunks 最高优先级合并 |
+| `operate.py: kg_query()` | 将 `ppr_chunks` 传入 `_merge_all_chunks()` |
 
 **主要变化（相比旧版）**：
 - 旧版：entity-only 图，单信号 seed，PPR 结果用于扩展 entity 候选，集成在 `_get_node_data()`
@@ -623,30 +623,37 @@ passage_node_weight: float = 0.05      # 第 219 行
 
 ## 四、文件变更总览
 
-### 修改的文件（9 个）
+### 修改的文件
 
-| 文件 | 增 / 删 | 涉及版本 | 说明 |
-|------|---------|----------|------|
-| `lightrag/lightrag/utils.py` | +22 / +1 注释 | V1 | 工厂函数 `compute_entity_id`, `compute_entity_vdb_id` |
-| `lightrag/lightrag/base.py` | +62 | V3 | `get_subgraph_for_ppr` 默认实现 + QueryParam 扩展（5 个 V3 字段） |
-| `lightrag/lightrag/lightrag.py` | +33 | V0/V1/V2 | Feature Toggles（5 个字段）+ synonym linking 集成 |
-| `lightrag/lightrag/operate.py` | +270 / -57 | V1/V3 | 实体 ID 替换 + 分组守卫 + edge remap + `_ppr_rank_chunks()` + `_merge_all_chunks()` 扩展 |
-| `lightrag/lightrag/utils_graph.py` | +35 / -10 | V1 | 图操作工具函数 entity ID 更新 |
-| `lightrag/lightrag/kg/neo4j_impl.py` | +71 / -5 | V0/V3 | pipmaster 移除 + PPR 子图 Cypher 优化 |
-| `lightrag/lightrag/kg/milvus_impl.py` | +8 / -5 | V0 | pipmaster 移除 |
-| `rag-anything/raganything/modalprocessors.py` | +21 / -10 | V1 | 多模态处理器 entity ID 更新 |
-| `rag-anything/raganything/processor.py` | +16 / -5 | V1 | 处理器 entity ID 更新 |
-| `rag-anything/raganything/raganything.py` | +2 / -1 | V0 | `load_dotenv` 改用 `find_dotenv(usecwd=True)`，修复从子目录运行时找不到 `.env` 的问题 |
-| `rag-anything/raganything/services/local_rag.py` | +2 | V0 | `_build_rag()` 的 `lightrag_kwargs` 中显式指定 `graph_storage`/`vector_storage` |
+| 文件 | 涉及版本 | 说明 |
+|------|----------|------|
+| `lightrag/lightrag/utils.py` | V1 | 工厂函数 `compute_entity_id`, `compute_entity_vdb_id` |
+| `lightrag/lightrag/base.py` | V1/V3 | `delete_entity` 签名加 `entity_type`；`get_subgraph_for_ppr` 默认实现；`QueryParam` 扩展（V3 字段） |
+| `lightrag/lightrag/lightrag.py` | V0/V1/V2 | Feature Toggles + synonym linking 集成；`adelete_by_entity`/`delete_by_entity` 透传 `entity_type` |
+| `lightrag/lightrag/operate.py` | V1/V3 | 实体 ID 替换 + 分组守卫 + edge remap + `_ppr_rank_chunks()` + `_merge_all_chunks()` 扩展；`_merge_nodes_then_upsert` composite key 修复 |
+| `lightrag/lightrag/utils_graph.py` | V1 | 图操作工具函数 entity ID 更新；`adelete_by_entity` 加 `entity_type` / `node_key` 逻辑 |
+| `lightrag/lightrag/kg/neo4j_impl.py` | V0/V3 | pipmaster 移除 + PPR 子图 Cypher 优化 |
+| `lightrag/lightrag/kg/milvus_impl.py` | V0/V1/patch | pipmaster 移除；`delete_entity` 加 `entity_type`；`_is_milvus_lite` 重构（去除 `_milvus_uri` 副作用缓存） |
+| `lightrag/lightrag/kg/nano_vector_db_impl.py` | V1/patch | `delete_entity` 加 `entity_type`，改用 `compute_entity_vdb_id` |
+| `lightrag/lightrag/kg/faiss_impl.py` | V1/patch | `delete_entity` 加 `entity_type`，改用 `compute_entity_vdb_id` |
+| `lightrag/lightrag/kg/qdrant_impl.py` | V1/patch | `delete_entity` 加 `entity_type`，改用 `compute_entity_vdb_id` |
+| `lightrag/lightrag/kg/postgres_impl.py` | V1/patch | `delete_entity` 加 `entity_type`；消歧模式下加 `AND entity_type=$3` 防跨类型误删 |
+| `lightrag/lightrag/kg/mongo_impl.py` | V1/patch | `delete_entity` 加 `entity_type`，改用 `compute_entity_vdb_id` |
+| `lightrag/lightrag/kg/deprecated/chroma_impl.py` | V1/patch | `delete_entity` 加 `entity_type`，改用 `compute_entity_vdb_id` |
+| `lightrag/lightrag/api/routers/document_routes.py` | V1/patch | `DeleteEntityRequest` 加可选 `entity_type` 字段 |
+| `rag-anything/raganything/modalprocessors.py` | V1 | 多模态处理器 entity ID 更新 |
+| `rag-anything/raganything/processor.py` | V1 | 处理器 entity ID 更新 |
+| `rag-anything/raganything/raganything.py` | V0 | `load_dotenv` 改用 `find_dotenv(usecwd=True)`，修复子目录运行时找不到 `.env` 的问题 |
+| `rag-anything/raganything/services/local_rag.py` | V0 | `_build_rag()` 的 `lightrag_kwargs` 中显式指定 `graph_storage`/`vector_storage` |
 
-### 新增文件（3 个）
+### 新增文件
 
-| 文件 | 行数 | 版本 | 说明 |
-|------|------|------|------|
-| `lightrag/lightrag/synonym_linking.py` | 152 | V2 | 同义词边构建（HippoRAG2 对齐版） |
-| `lightrag/lightrag/ppr.py` | 161 | V3 | PPR 计算（异构图 + 双信号，HippoRAG2 对齐版） |
-| `.env` | 14 | V0 | 环境变量配置（Neo4j + Milvus + 存储后端选择） |
-| `rag-anything/raganything/constants.py`（新增字段） | +8 | V2 | V2 默认参数（DEFAULT_ENABLE_SYNONYM_LINKING 等） |
+| 文件 | 版本 | 说明 |
+|------|------|------|
+| `lightrag/lightrag/synonym_linking.py` | V2 | 同义词边构建（HippoRAG2 对齐版） |
+| `lightrag/lightrag/ppr.py` | V3 | PPR 计算（异构图 + 双信号，HippoRAG2 对齐版） |
+| `.env` | V0 | 环境变量配置（Neo4j + Milvus + 存储后端选择） |
+| `rag-anything/raganything/constants.py`（新增字段） | V2 | V2 默认参数（DEFAULT_ENABLE_SYNONYM_LINKING 等） |
 
 ### 未修改的文件（确认）
 
