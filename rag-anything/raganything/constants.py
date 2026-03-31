@@ -21,6 +21,7 @@ _PKG_ROOT = _Path(__file__).resolve().parent.parent / "rag-anything"
 # =============================================================================
 DEFAULT_OUTPUT_DIR = str(_PKG_ROOT / "output")
 DEFAULT_WORKING_DIR_ROOT = str(_PKG_ROOT / "rag_workspace")
+DEFAULT_UPLOADS_DIR = str(_PKG_ROOT / "uploads")
 DEFAULT_LOG_DIR = str(_PKG_ROOT / "logs")
 
 # =============================================================================

@@ -21,6 +21,7 @@ from raganything.constants import (
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
     DEFAULT_SUPPORTED_FILE_EXTENSIONS,
+    DEFAULT_UPLOADS_DIR,
     DEFAULT_QUERY_MODE,
     DEFAULT_ENABLE_RERANK,
     DEFAULT_VLM_ENHANCED,
@@ -59,7 +60,7 @@ SUPPORTED_EXTENSIONS: Set[str] = {
 }
 
 # 三层存储目录
-UPLOADS_DIR = Path(os.getenv("RAGANYTHING_UPLOADS_DIR", "./uploads")).resolve()
+UPLOADS_DIR = Path(os.getenv("RAGANYTHING_UPLOADS_DIR", DEFAULT_UPLOADS_DIR)).resolve()
 
 app = FastAPI(title="RAGAnything Local Service")
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")

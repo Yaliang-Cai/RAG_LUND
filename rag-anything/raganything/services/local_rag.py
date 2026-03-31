@@ -18,6 +18,7 @@ import logging
 import logging.config
 import os
 import argparse
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -87,6 +88,8 @@ from raganything.constants import (
     DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS,
     DEFAULT_ENABLE_METRICS_CALLBACK,
     DEFAULT_ENABLE_CALLBACK_EVENT_LOG,
+    DEFAULT_UPLOADS_DIR,
+    DEFAULT_SUPPORTED_FILE_EXTENSIONS,
 )
 from raganything.resilience import CircuitBreaker, async_retry
 from raganything.query_message_repack import repack_query_messages
@@ -1402,16 +1405,41 @@ if __name__ == "__main__":
 
         target_path = args.path
         workspace_name = args.id
-        
+
         print(f"开始处理: {target_path}")
         print(f"目标工作区: {settings.working_dir_root}/{workspace_name}")
 
+        # output_dir 与 Web UI 保持一致：output/{workspace_id}/
+        workspace_output = str(Path(settings.output_dir) / workspace_name)
+
+        # 将源文件复制到 uploads/{workspace_id}/，使 /uploads 端点可见
+        uploads_dir = Path(os.getenv("RAGANYTHING_UPLOADS_DIR", DEFAULT_UPLOADS_DIR))
+        upload_workspace_dir = uploads_dir / workspace_name
+        upload_workspace_dir.mkdir(parents=True, exist_ok=True)
+        supported_exts = {ext.strip().lower() for ext in DEFAULT_SUPPORTED_FILE_EXTENSIONS.split(",")}
+        target_path_obj = Path(target_path)
+        if target_path_obj.is_file():
+            files_to_register = [target_path_obj]
+        else:
+            files_to_register = [
+                p for p in target_path_obj.rglob("*")
+                if p.is_file() and p.suffix.lower() in supported_exts
+            ]
+        for src in files_to_register:
+            dest = upload_workspace_dir / src.name
+            if not dest.exists():
+                shutil.copy2(str(src), str(dest))
+
         try:
-            await service.ingest(file_path=target_path, workspace_id=workspace_name)
+            await service.ingest(
+                file_path=target_path,
+                workspace_id=workspace_name,
+                output_dir=workspace_output,
+            )
 
             print(f"\n 入库成功！")
             print(f"知识图谱已更新: {settings.working_dir_root}/{workspace_name}/graph_chunk_entity_relation.graphml")
-            print(f"Markdown 已生成: {settings.output_dir}/{workspace_name}/")
+            print(f"Markdown 已生成: {workspace_output}/")
 
         except Exception as e:
             print(f"\n 发生错误: {e}")
