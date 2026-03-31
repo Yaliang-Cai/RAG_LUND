@@ -1178,6 +1178,7 @@ class MilvusVectorDBStorage(BaseVectorStorage):
         return (
             "no vector index" in error_message
             or "please create index firstly" in error_message
+            or "no index found" in error_message
         )
 
     def _repair_missing_vector_index(self):
