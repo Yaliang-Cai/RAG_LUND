@@ -125,6 +125,7 @@ class LocalRagSettings:
 
     working_dir_root: str = DEFAULT_WORKING_DIR_ROOT
     output_dir: str = DEFAULT_OUTPUT_DIR
+    uploads_dir: str = DEFAULT_UPLOADS_DIR
     log_dir: str = DEFAULT_LOG_DIR
 
     vllm_api_base: str = DEFAULT_VLLM_API_BASE
@@ -199,6 +200,7 @@ class LocalRagSettings:
             device=os.getenv("RAGANYTHING_DEVICE", DEFAULT_DEVICE),
             working_dir_root=os.getenv("RAGANYTHING_WORKDIR_ROOT", DEFAULT_WORKING_DIR_ROOT),
             output_dir=os.getenv("RAGANYTHING_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
+            uploads_dir=os.getenv("RAGANYTHING_UPLOADS_DIR", DEFAULT_UPLOADS_DIR),
             embedding_dim=int(os.getenv("RAGANYTHING_EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM))),
             max_token_size=int(os.getenv("RAGANYTHING_MAX_TOKEN_SIZE", str(DEFAULT_MAX_TOKEN_SIZE))),
             temperature=float(os.getenv("RAGANYTHING_TEMPERATURE", str(DEFAULT_TEMPERATURE))),
@@ -1257,7 +1259,11 @@ class LocalRagService:
                         parse_method="auto",
                     )
                 else:
-                    await rag.process_folder_complete(str(file_path_obj), recursive=False)
+                    await rag.process_folder_complete(
+                        str(file_path_obj),
+                        output_dir=output_dir,
+                        recursive=False,
+                    )
             finally:
                 if old_chunking_func is not None:
                     # Restore both the kwargs and the live instance (if now initialized)
@@ -1413,16 +1419,17 @@ if __name__ == "__main__":
         workspace_output = str(Path(settings.output_dir) / workspace_name)
 
         # 将源文件复制到 uploads/{workspace_id}/，使 /uploads 端点可见
-        uploads_dir = Path(os.getenv("RAGANYTHING_UPLOADS_DIR", DEFAULT_UPLOADS_DIR))
-        upload_workspace_dir = uploads_dir / workspace_name
+        # 使用 settings.uploads_dir 保证与服务器读取的路径一致
+        upload_workspace_dir = Path(settings.uploads_dir) / workspace_name
         upload_workspace_dir.mkdir(parents=True, exist_ok=True)
         supported_exts = {ext.strip().lower() for ext in DEFAULT_SUPPORTED_FILE_EXTENSIONS.split(",")}
         target_path_obj = Path(target_path)
         if target_path_obj.is_file():
             files_to_register = [target_path_obj]
         else:
+            # 只注册顶层文件（与 process_folder_complete recursive=False 保持一致）
             files_to_register = [
-                p for p in target_path_obj.rglob("*")
+                p for p in target_path_obj.glob("*")
                 if p.is_file() and p.suffix.lower() in supported_exts
             ]
         for src in files_to_register:
