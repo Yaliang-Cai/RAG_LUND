@@ -1145,7 +1145,7 @@ class LocalRagService:
             self.settings.multimodal_cancel_grace_seconds
         )
 
-    def _build_rag(self, working_dir: str) -> RAGAnything:
+    def _build_rag(self, working_dir: str, workspace_id: str) -> RAGAnything:
         config = RAGAnythingConfig(
             working_dir=working_dir,
             enable_image_processing=True,
@@ -1159,6 +1159,10 @@ class LocalRagService:
             vision_model_func=self.vision_model_func,
             embedding_func=self.embedding_func,
             lightrag_kwargs={
+                # workspace 使 Neo4j 和 Qdrant 按工作空间隔离数据；
+                # 不传则 LightRAG 默认读 WORKSPACE 环境变量，空字符串时
+                # Neo4JStorage 回退为 "base"，导致所有工作空间共用同一标签。
+                "workspace": workspace_id,
                 "rerank_model_func": self.rerank_func,
                 "tokenizer": self.lightrag_tokenizer,
                 "chunk_token_size": self.settings.chunk_token_size,
@@ -1190,7 +1194,7 @@ class LocalRagService:
             if workspace_id in self._rag_instances:
                 return self._rag_instances[workspace_id]
             working_dir = str(Path(self.settings.working_dir_root) / workspace_id)
-            rag = self._build_rag(working_dir)
+            rag = self._build_rag(working_dir, workspace_id)
             self._register_callbacks_to_rag(rag)
             self._rag_instances[workspace_id] = rag
             return rag
