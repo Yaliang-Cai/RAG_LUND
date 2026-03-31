@@ -18,10 +18,12 @@ import logging
 import logging.config
 import os
 import argparse
+import ipaddress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
+from urllib.parse import urlparse
 
 import numpy as np
 from lightrag.types import GPTKeywordExtractionFormat
@@ -870,6 +872,52 @@ def _resolve_vision_endpoint(settings: LocalRagSettings) -> tuple[str, str, str]
     return vision_base, vision_key, vision_model
 
 
+def _is_loopback_host(host: str) -> bool:
+    normalized = (host or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _collect_loopback_hosts_from_base_urls(*base_urls: str) -> list[str]:
+    hosts: set[str] = set()
+    for base_url in base_urls:
+        try:
+            parsed = urlparse((base_url or "").strip())
+        except Exception:
+            continue
+        host = (parsed.hostname or "").strip()
+        if _is_loopback_host(host):
+            hosts.update({"localhost", "127.0.0.1", "::1"})
+    return sorted(hosts)
+
+
+def _merge_no_proxy_env_hosts(hosts: list[str]) -> bool:
+    if not hosts:
+        return False
+    changed = False
+    for env_key in ("NO_PROXY", "no_proxy"):
+        raw = os.getenv(env_key, "")
+        parts = [token.strip() for token in raw.split(",") if token.strip()]
+        normalized = {token.lower() for token in parts}
+        appended = False
+        for host in hosts:
+            if host.lower() in normalized:
+                continue
+            parts.append(host)
+            normalized.add(host.lower())
+            appended = True
+        if appended:
+            os.environ[env_key] = ",".join(parts)
+            changed = True
+    return changed
+
+
 def _maybe_enable_internvl2_prompts(settings: LocalRagSettings, logger: logging.Logger) -> None:
     # 命中 InternVL2 模型名时启用对应 prompt 覆盖。
     text_model = (settings.llm_model_name or "").lower()
@@ -943,6 +991,16 @@ class LocalRagService:
 
         text_base, text_key, text_model = _resolve_text_endpoint(self.settings)
         vision_base, vision_key, vision_model = _resolve_vision_endpoint(self.settings)
+        local_proxy_bypass_hosts = _collect_loopback_hosts_from_base_urls(
+            text_base, vision_base
+        )
+        if local_proxy_bypass_hosts:
+            env_changed = _merge_no_proxy_env_hosts(local_proxy_bypass_hosts)
+            self.logger.info(
+                "Loopback LLM endpoint detected; %s NO_PROXY hosts: %s",
+                "updated" if env_changed else "using existing",
+                ",".join(local_proxy_bypass_hosts),
+            )
         self.logger.info(
             "Model endpoints resolved: text_model=%s, vision_model=%s",
             text_model,

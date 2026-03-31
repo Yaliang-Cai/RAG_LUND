@@ -1889,3 +1889,41 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 - 不改变 query-level / survey-level 指标口径与输出结构。
 - 仍以论文级 `doc_id` 做 ingest 完整性检查（`full_docs/doc_status/text_chunks/vdb_chunks`），并额外校验 `chunks_list` 长度必须为 1。
 - 不修改 `constants.py` 全局默认值，仅影响 `evaluate_surge.py` 的运行参数与 ingest 实现。
+
+---
+
+## 增量更新（2026-03-31，LocalRAG 本地 endpoint 自动绕过环境代理）
+
+### 目标
+
+- 修复本地 vLLM（`localhost/127.0.0.1/::1`）在代理环境下误走 `HTTP_PROXY/HTTPS_PROXY` 的问题。
+- 将修复放在 `local_rag` 核心层，一次改动覆盖 `evaluate_shared`、`evaluate_surge`、`evaluate_surge_fast`。
+- 不引入冗余参数，不改评测脚本口径。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `raganything/services/local_rag.py` | 新增 loopback host 判定与 `NO_PROXY/no_proxy` 合并函数；在 `LocalRagService.__init__` 中解析 text/vision `base_url`，若为本地 endpoint 则自动确保 `localhost,127.0.0.1,::1` 加入 `NO_PROXY/no_proxy`，并输出单条清晰日志 |
+
+### 改动前后对照
+
+- 改动前：
+  - 即使 `base_url=http://localhost:8001/v1`，若运行环境存在 `HTTP_PROXY/HTTPS_PROXY` 且缺少 `NO_PROXY`，请求仍可能进入代理路径，导致连接稳定性下降。
+- 改动后：
+  - 检测到本地 endpoint 时自动补齐 `NO_PROXY/no_proxy` 本机回环地址，优先直连本地 vLLM。
+  - 非本地 endpoint 行为保持不变。
+
+### 本轮检查（按固定执行流程）
+
+- 语法检查（通过）：
+  - `python -m py_compile raganything/services/local_rag.py`
+- 逻辑级检查（通过，内联断言）：
+  - loopback 判定：`localhost/127.0.0.1/::1` 为真，`192.168.1.2` 为假。
+  - base_url 解析：本地 URL 返回回环 host 集合，远端 URL 不触发。
+  - `NO_PROXY/no_proxy` 合并：首次补齐返回 changed，二次执行幂等不重复追加。
+
+### 兼容性说明
+
+- 本次不改 `evaluate_shared/evaluate_surge/evaluate_surge_fast` 业务逻辑与指标计算。
+- 仅调整核心客户端初始化阶段的网络路由行为，目标是提升本地 vLLM 链路稳定性。
