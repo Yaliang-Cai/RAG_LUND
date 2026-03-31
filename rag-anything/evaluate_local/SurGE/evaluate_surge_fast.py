@@ -814,6 +814,11 @@ async def ensure_workspace_index(
     llm_model_max_async: int,
 ) -> dict[str, Any]:
     rag = await service.get_rag(workspace_id)
+    # Ensure llm_model_max_async is applied before first LightRAG initialization,
+    # so the internal LLM worker queue is created with the requested concurrency.
+    kwargs = getattr(rag, "lightrag_kwargs", None)
+    if isinstance(kwargs, dict):
+        kwargs["llm_model_max_async"] = max(1, int(llm_model_max_async))
     await ensure_rag_runtime_ready(rag, workspace_id)
     apply_llm_model_max_async_override(rag, llm_model_max_async)
     batch_workers = max(1, int(batch_doc_concurrency))
@@ -1220,7 +1225,7 @@ async def run_retrieval(args: argparse.Namespace) -> int:
     data_root = Path(args.data_root)
     subset = data_root / args.subset_dir
     chunks_by_doc, chunk_stats = load_chunks(subset / args.chunks_file)
-    source_records, chunk_source_map, _ = prepare_source_records(chunks_by_doc)
+    source_records, chunk_source_map, source_map_stats = prepare_source_records(chunks_by_doc)
     persist_chunk_source_map(chunk_source_map, source_map_stats)
     queries = load_queries(subset / args.queries_file, args.limit)
     settings = settings_for_surge()
@@ -1388,7 +1393,7 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
     data_root = Path(args.data_root)
     subset = data_root / args.subset_dir
     chunks_by_doc, chunk_stats = load_chunks(subset / args.chunks_file)
-    source_records, chunk_source_map, _ = prepare_source_records(chunks_by_doc)
+    source_records, chunk_source_map, source_map_stats = prepare_source_records(chunks_by_doc)
     persist_chunk_source_map(chunk_source_map, source_map_stats)
     surveys = load_surveys(subset / args.surveys_file, args.limit)
     settings = settings_for_surge()
