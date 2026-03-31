@@ -1181,7 +1181,7 @@ class LocalRagService:
                 # BGE-reranker-v2-m3 相关 chunk 典型得分 >0.5，不相关 <0.3
                 "min_rerank_score": DEFAULT_MIN_RERANK_SCORE,
                 "graph_storage": "Neo4JStorage",
-                "vector_storage": "MilvusVectorDBStorage",
+                "vector_storage": "QdrantVectorDBStorage",
             },
         )
 
