@@ -25,47 +25,53 @@ class ProfileSpec:
 
 
 PROFILE_SPECS: dict[str, ProfileSpec] = {
-    "db_only": ProfileSpec(
-        key="db_only",
-        description="DB-only (V1=off,V2=off,V3=off)",
+    "non_v0": ProfileSpec(
+        key="non_v0",
+        description="non_v0 baseline (DB switched to neo4j+qdrant, V1=off,V2=off,V3=off)",
         enable_entity_disambiguation=False,
         enable_synonym_linking=False,
         enable_multi_hop=False,
     ),
-    "db_v1": ProfileSpec(
-        key="db_v1",
-        description="DB+V1 (V1=on,V2=off,V3=off)",
+    "v0": ProfileSpec(
+        key="v0",
+        description="V0 (V1=off,V2=off,V3=off)",
+        enable_entity_disambiguation=False,
+        enable_synonym_linking=False,
+        enable_multi_hop=False,
+    ),
+    "v0_v1": ProfileSpec(
+        key="v0_v1",
+        description="V0+V1 (V1=on,V2=off,V3=off)",
         enable_entity_disambiguation=True,
         enable_synonym_linking=False,
         enable_multi_hop=False,
     ),
-    "db_v1_v2": ProfileSpec(
-        key="db_v1_v2",
-        description="DB+V1+V2 (V1=on,V2=on,V3=off)",
+    "v0_v1_v2": ProfileSpec(
+        key="v0_v1_v2",
+        description="V0+V1+V2 (V1=on,V2=on,V3=off)",
         enable_entity_disambiguation=True,
         enable_synonym_linking=True,
         enable_multi_hop=False,
     ),
-    "db_v1_v2_v3": ProfileSpec(
-        key="db_v1_v2_v3",
-        description="DB+V1+V2+V3 query-only on DB+V1+V2 index",
+    "v0_v1_v2_v3": ProfileSpec(
+        key="v0_v1_v2_v3",
+        description="V0+V1+V2+V3 query-only on V0+V1+V2 index",
         enable_entity_disambiguation=True,
         enable_synonym_linking=True,
         enable_multi_hop=True,
-        reuse_index_from="db_v1_v2",
+        reuse_index_from="v0_v1_v2",
     ),
 }
 
 
 PROFILE_ALIASES: dict[str, str] = {
-    "non_v0": "db_only",
-    "v0": "db_only",
-    "v0_v1": "db_v1",
-    "v0_v1_v2": "db_v1_v2",
-    "v0_v1_v2_v3": "db_v1_v2_v3",
-    "db+v1": "db_v1",
-    "db+v1+v2": "db_v1_v2",
-    "db+v1+v2+v3": "db_v1_v2_v3",
+    "db_only": "non_v0",
+    "db_v1": "v0_v1",
+    "db_v1_v2": "v0_v1_v2",
+    "db_v1_v2_v3": "v0_v1_v2_v3",
+    "db+v1": "v0_v1",
+    "db+v1+v2": "v0_v1_v2",
+    "db+v1+v2+v3": "v0_v1_v2_v3",
 }
 
 
@@ -101,9 +107,9 @@ def _resolve_profiles(raw_profiles: list[str] | None, include_v3: bool) -> list[
             if resolved not in keys:
                 keys.append(resolved)
     else:
-        keys = ["db_only", "db_v1", "db_v1_v2"]
+        keys = ["non_v0", "v0", "v0_v1", "v0_v1_v2"]
         if include_v3:
-            keys.append("db_v1_v2_v3")
+            keys.append("v0_v1_v2_v3")
     return [PROFILE_SPECS[key] for key in keys]
 
 
@@ -354,7 +360,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Profiles to run. Supports keys/aliases: "
-            "db_only db_v1 db_v1_v2 db_v1_v2_v3 non_v0 v0 v0_v1 v0_v1_v2 v0_v1_v2_v3"
+            "non_v0 v0 v0_v1 v0_v1_v2 v0_v1_v2_v3 db_only db_v1 db_v1_v2 db_v1_v2_v3"
         ),
     )
     parser.add_argument(
@@ -369,6 +375,11 @@ def parse_args() -> argparse.Namespace:
         help="Which evaluator pipelines to run.",
     )
     parser.add_argument("--run-id", type=str, default="", help="Run id folder name.")
+    parser.add_argument(
+        "--allow-reuse-run-id",
+        action="store_true",
+        help="Allow writing into an existing run-id directory. Default: fail-fast to avoid overwrite/mixing.",
+    )
     parser.add_argument(
         "--runs-root",
         type=str,
@@ -444,6 +455,11 @@ def main() -> int:
     run_id = str(args.run_id or "").strip() or _default_run_id()
     runs_root = (project_root / args.runs_root).resolve()
     run_root = (runs_root / run_id).resolve()
+    if run_root.exists() and any(run_root.iterdir()) and not bool(args.allow_reuse_run_id):
+        raise RuntimeError(
+            f"run-id already exists and is not empty: {run_root}. "
+            "Use a new --run-id (recommended) or pass --allow-reuse-run-id explicitly."
+        )
     run_root.mkdir(parents=True, exist_ok=True)
     progress_file = run_root / "progress.jsonl"
     latest_file = run_root / "progress_latest.json"
