@@ -940,7 +940,8 @@ async def acreate_entity(
         try:
             # Check if entity already exists
             _etype = entity_data.get("entity_type", "UNKNOWN")
-            _composite = compute_entity_id(entity_name, _etype, True)
+            _disambig = entities_vdb.global_config.get("enable_entity_disambiguation", True)
+            _composite = compute_entity_id(entity_name, _etype, _disambig)
             existing_node = await chunk_entity_relation_graph.has_node(_composite)
             if existing_node:
                 raise ValueError(f"Entity '{entity_name}' already exists")
@@ -964,9 +965,9 @@ async def acreate_entity(
             entity_type = node_data.get("entity_type", "")
             content = entity_name + "\n" + description
 
-            # Calculate entity ID — use composite key for disambiguation
-            composite_id = compute_entity_id(entity_name, entity_type, True)
-            entity_id = compute_entity_vdb_id(entity_name, entity_type, True)
+            # Calculate entity ID — consistent with ingestion pipeline
+            composite_id = compute_entity_id(entity_name, entity_type, _disambig)
+            entity_id = compute_entity_vdb_id(entity_name, entity_type, _disambig)
 
             # Prepare data for vector database update
             entity_data_for_vdb = {

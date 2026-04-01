@@ -14,7 +14,21 @@ import re
 from typing import Any
 
 from lightrag.base import BaseVectorStorage, BaseGraphStorage
-from lightrag.utils import logger, compute_mdhash_id
+from lightrag.utils import logger, compute_entity_vdb_id
+
+
+def _graph_id_to_vdb_id(graph_id: str, enable_disambiguation: bool) -> str:
+    """Convert a graph node ID to its corresponding VDB hash ID.
+
+    Graph node IDs are composite (``"name|type"``) when disambiguation is on,
+    or plain names when off.  This function reverses the split so we always
+    call the canonical factory ``compute_entity_vdb_id``.
+    """
+    if enable_disambiguation and "|" in graph_id:
+        name, etype = graph_id.rsplit("|", 1)
+    else:
+        name, etype = graph_id, ""
+    return compute_entity_vdb_id(name, etype, enable_disambiguation)
 
 
 async def build_synonym_edges(
@@ -24,6 +38,7 @@ async def build_synonym_edges(
     synonymy_threshold: float = 0.8,
     synonymy_topk: int = 100,
     min_entity_len: int = 2,
+    enable_entity_disambiguation: bool = True,
 ) -> int:
     """Create SYNONYM edges between semantically similar entities.
 
@@ -31,16 +46,23 @@ async def build_synonym_edges(
     pre-computed embedding vector via ``get_vectors_by_ids()``, then queries the
     VDB with that vector directly — no text re-encoding.
 
+    Fully orthogonal to V1 (entity disambiguation) — works correctly whether
+    ``enable_entity_disambiguation`` is True or False.
+
     Args:
         entities_vdb: Vector DB containing entity embeddings.
         knowledge_graph_inst: Graph storage for reading/writing edges.
         new_entity_ids: If given, only process these entities (incremental mode).
-            Each ID is a composite graph-node ID (e.g. ``"苹果|COMPANY"``).
+            Each ID is a graph-node ID (composite ``"name|type"`` when
+            disambiguation is on, plain name when off).
         synonymy_threshold: Minimum cosine similarity to create a SYNONYM edge.
         synonymy_topk: How many KNN neighbours to check per entity.
         min_entity_len: Minimum alphanumeric/CJK character count in entity name.
             Entities with fewer characters are skipped (aligned with HippoRAG2's
             ``>2 alphanumeric chars`` filter).
+        enable_entity_disambiguation: Mirror of the V1 global toggle. Controls
+            how graph-node IDs are mapped to VDB hash IDs. Must match the value
+            used during ingestion.
 
     Returns:
         Number of SYNONYM edges created.
@@ -57,8 +79,13 @@ async def build_synonym_edges(
     if not target_ids:
         return 0
 
-    # Batch-fetch pre-computed embeddings for all target entities
-    entity_vdb_ids = [compute_mdhash_id(eid, prefix="ent-") for eid in target_ids]
+    # Batch-fetch pre-computed embeddings for all target entities.
+    # Use the canonical factory to convert graph-node IDs → VDB hash IDs so that
+    # composite ("name|type") and plain ("name") IDs are both handled correctly
+    # regardless of the enable_entity_disambiguation setting.
+    entity_vdb_ids = [
+        _graph_id_to_vdb_id(eid, enable_entity_disambiguation) for eid in target_ids
+    ]
     embeddings = await entities_vdb.get_vectors_by_ids(entity_vdb_ids)
 
     created = 0

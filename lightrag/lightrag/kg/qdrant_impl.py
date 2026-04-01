@@ -135,6 +135,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         vectors_config: models.VectorParams,
         hnsw_config: models.HnswConfigDiff,
         model_suffix: str,
+        quantization_config=None,
+        index_relation_fields: bool = False,
     ):
         """
         Setup Qdrant collection with migration support from legacy collections.
@@ -178,6 +180,15 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                     is_tenant=True,
                 ),
             )
+            if index_relation_fields:
+                for field in ("src_id", "tgt_id"):
+                    client.create_payload_index(
+                        collection_name=collection_name,
+                        field_name=field,
+                        field_schema=models.KeywordIndexParams(
+                            type=models.KeywordIndexType.KEYWORD,
+                        ),
+                    )
             new_workspace_count = client.count(
                 collection_name=collection_name,
                 count_filter=workspace_count_filter,
@@ -217,7 +228,10 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                         )
 
             client.create_collection(
-                collection_name, vectors_config=vectors_config, hnsw_config=hnsw_config
+                collection_name,
+                vectors_config=vectors_config,
+                hnsw_config=hnsw_config,
+                quantization_config=quantization_config,
             )
             logger.info(f"Qdrant: Collection '{collection_name}' created successfully")
             if not legacy_collection:
@@ -234,6 +248,15 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                 is_tenant=True,
             ),
         )
+        if index_relation_fields:
+            for field in ("src_id", "tgt_id"):
+                client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name=field,
+                    field_schema=models.KeywordIndexParams(
+                        type=models.KeywordIndexType.KEYWORD,
+                    ),
+                )
 
         # Case 2: Legacy collection exist
         if legacy_collection:
@@ -462,6 +485,50 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         self._max_batch_size = self.global_config["embedding_batch_num"]
         self._initialized = False
 
+        # --- Tuning options from environment variables ---
+        # Distance metric
+        _dist_map = {
+            "COSINE": models.Distance.COSINE,
+            "DOT": models.Distance.DOT,
+            "EUCLID": models.Distance.EUCLID,
+            "MANHATTAN": models.Distance.MANHATTAN,
+        }
+        self._distance = _dist_map.get(
+            os.environ.get("QDRANT_DISTANCE", "COSINE").upper(),
+            models.Distance.COSINE,
+        )
+
+        # HNSW build parameters
+        self._hnsw_m = int(os.environ.get("QDRANT_HNSW_M", "0"))
+        _ef_env = os.environ.get("QDRANT_HNSW_EF_CONSTRUCT")
+        self._hnsw_ef_construct = int(_ef_env) if _ef_env else None
+        self._hnsw_on_disk = os.environ.get("QDRANT_HNSW_ON_DISK", "false").lower() == "true"
+
+        # Query-time HNSW ef (accuracy vs speed)
+        _sef_env = os.environ.get("QDRANT_SEARCH_EF")
+        self._search_ef = int(_sef_env) if _sef_env else None
+
+        # Quantization
+        _quant = os.environ.get("QDRANT_QUANTIZATION", "none").lower()
+        if _quant == "scalar":
+            self._quantization_config = models.ScalarQuantization(
+                scalar=models.ScalarQuantizationConfig(type=models.ScalarType.INT8)
+            )
+        elif _quant == "binary":
+            self._quantization_config = models.BinaryQuantization(
+                binary=models.BinaryQuantizationConfig()
+            )
+        else:
+            self._quantization_config = None
+
+        # gRPC transport
+        self._prefer_grpc = os.environ.get("QDRANT_PREFER_GRPC", "false").lower() == "true"
+
+        # Build keyword indexes on src_id / tgt_id for faster relation deletion
+        self._index_relation_fields = (
+            os.environ.get("QDRANT_INDEX_RELATION_FIELDS", "false").lower() == "true"
+        )
+
     async def initialize(self):
         """Initialize Qdrant collection"""
         async with get_data_init_lock():
@@ -479,6 +546,7 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                             "QDRANT_API_KEY",
                             config.get("qdrant", "apikey", fallback=None),
                         ),
+                        prefer_grpc=self._prefer_grpc,
                     )
                     logger.debug(
                         f"[{self.workspace}] QdrantClient created successfully"
@@ -493,13 +561,17 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                     workspace=self.effective_workspace,
                     vectors_config=models.VectorParams(
                         size=self.embedding_func.embedding_dim,
-                        distance=models.Distance.COSINE,
+                        distance=self._distance,
                     ),
                     hnsw_config=models.HnswConfigDiff(
                         payload_m=16,
-                        m=0,
+                        m=self._hnsw_m,
+                        ef_construct=self._hnsw_ef_construct,
+                        on_disk=self._hnsw_on_disk or None,
                     ),
                     model_suffix=self.model_suffix,
+                    quantization_config=self._quantization_config,
+                    index_relation_fields=self._index_relation_fields,
                 )
 
                 # Removed duplicate max batch size initialization
@@ -580,6 +652,9 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             query_filter=models.Filter(
                 must=[workspace_filter_condition(self.effective_workspace)]
             ),
+            search_params=models.SearchParams(hnsw_ef=self._search_ef)
+            if self._search_ef
+            else None,
         ).points
 
         return [
