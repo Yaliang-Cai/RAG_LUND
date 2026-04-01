@@ -13,8 +13,8 @@ from pathlib import Path as _Path
 
 # Data root: constants.py lives at raganything/constants.py
 # .parent.parent → RAG_LUND/rag-anything/
-# / "rag-anything" → RAG_LUND/rag-anything/rag-anything/  (matches web-server CWD behaviour)
-_PKG_ROOT = _Path(__file__).resolve().parent.parent / "rag-anything"
+# / "rag_data" → RAG_LUND/rag-anything/rag_data/
+_PKG_ROOT = _Path(__file__).resolve().parent.parent / "rag_data"
 
 # =============================================================================
 # Directory defaults
