@@ -668,7 +668,7 @@ class LightRAG:
             namespace=NameSpace.VECTOR_STORE_ENTITIES,
             workspace=self.workspace,
             embedding_func=self.embedding_func,
-            meta_fields={"entity_name", "source_id", "content", "file_path"},
+            meta_fields={"entity_name", "entity_id", "source_id", "content", "file_path"},
         )
         self.relationships_vdb: BaseVectorStorage = self.vector_db_storage_cls(  # type: ignore
             namespace=NameSpace.VECTOR_STORE_RELATIONSHIPS,
@@ -2062,6 +2062,7 @@ class LightRAG:
                                         synonymy_threshold=self.synonymy_threshold,
                                         synonymy_topk=self.synonymy_topk,
                                         min_entity_len=self.synonymy_min_entity_len,
+                                        enable_entity_disambiguation=self.enable_entity_disambiguation,
                                     )
 
                                 # Record processing end time

@@ -911,9 +911,39 @@ async def delete_workspace(
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
 ):
+    import asyncio as _asyncio
     _validate_workspace_id(workspace_id)
+
+    # Step 1: Drop all storages (Neo4j, Qdrant, KV) before touching the filesystem
+    drop_errors = []
+    try:
+        rag = await service.get_rag(workspace_id)
+        await rag._ensure_lightrag_initialized()
+        lg = rag.lightrag
+        if lg is not None:
+            storages = [s for s in [
+                lg.text_chunks, lg.full_docs, lg.full_entities, lg.full_relations,
+                lg.entity_chunks, lg.relation_chunks,
+                lg.entities_vdb, lg.relationships_vdb, lg.chunks_vdb,
+                lg.chunk_entity_relation_graph, lg.doc_status,
+            ] if s is not None]
+            results = await _asyncio.gather(*[s.drop() for s in storages], return_exceptions=True)
+            for storage, result in zip(storages, results):
+                if isinstance(result, Exception):
+                    drop_errors.append(f"{storage.__class__.__name__}: {result}")
+                    logger.warning("[%s] Storage drop error: %s: %s", workspace_id, storage.__class__.__name__, result)
+    except Exception as e:
+        drop_errors.append(f"storage_init: {e}")
+        logger.warning("[%s] Could not initialize storages for drop: %s", workspace_id, e)
+
+    # Step 2: Remove cached rag instance and warmup state
+    if hasattr(service, "_rag_instances"):
+        service._rag_instances.pop(workspace_id, None)
+    if hasattr(service, "_warmed_workspaces"):
+        service._warmed_workspaces.discard(workspace_id)
+
+    # Step 3: Delete filesystem directories
     deleted = []
-    # 三层目录删除
     dirs_to_delete = [
         ("uploads", UPLOADS_DIR / workspace_id),
         ("output", Path(service.settings.output_dir).resolve() / workspace_id),
@@ -923,10 +953,8 @@ async def delete_workspace(
         if d.exists() and d.is_dir():
             shutil.rmtree(str(d), ignore_errors=True)
             deleted.append(name)
-    # 清除缓存的 rag 实例
-    if hasattr(service, "_rag_instances") and workspace_id in service._rag_instances:
-        del service._rag_instances[workspace_id]
-    return {"status": "ok", "deleted": deleted}
+
+    return {"status": "ok", "deleted": deleted, "drop_errors": drop_errors}
 
 
 @app.get("/workspace/{workspace_id}/stats")
