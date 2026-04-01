@@ -175,10 +175,19 @@ class QueryMixin:
                 "stream",
                 "response_type",
                 "top_k",
+                "chunk_top_k",
+                "enable_rerank",
+                "rerank_score_scope",
                 "max_tokens",
                 "temperature",
-                # "only_need_context",
-                # "only_need_prompt",
+                "user_prompt",
+                "history_turns",
+                "include_references",
+                "enable_multi_hop",
+                "multi_hop_depth",
+                "ppr_damping",
+                "ppr_top_k",
+                "passage_node_weight",
             ]
         }
         cache_data.update(relevant_kwargs)

@@ -11,6 +11,7 @@ then evaluate generated answers.
 import os
 import sys
 import json
+import hashlib
 import re
 import asyncio
 import logging
@@ -27,7 +28,10 @@ from evaluate_local.ablation_flags import (
     AblationFlags,
     add_ablation_arguments,
     apply_ablation_flags_to_settings,
+    build_index_profile,
+    ensure_workspace_index_profile,
     validate_ablation_flags,
+    validate_workspace_env_isolation,
 )
 
 # Keep MinerU memory usage aligned with evaluate.py
@@ -40,10 +44,17 @@ from raganything.services.local_rag import LocalRagService, LocalRagSettings
 from raganything.constants import DEFAULT_EVAL_RETRY_FAILED_ONLY
 
 
-SCRIPT_DIR = Path("/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/DocBench")
-DATA_ROOT = Path("/data/y50056788/Yaliang/datasets_for_eval/data_for_DocBench")
+DEFAULT_SCRIPT_DIR = "/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/DocBench"
+DEFAULT_DATA_ROOT = "/data/y50056788/Yaliang/datasets_for_eval/data_for_DocBench"
+DEFAULT_OUTPUT_DIR_NAME = "docbench_shared_results"
 
-OUTPUT_DIR = SCRIPT_DIR / "docbench_shared_results"
+SCRIPT_DIR = Path(os.getenv("DOCBENCH_SHARED_SCRIPT_DIR", DEFAULT_SCRIPT_DIR))
+DATA_ROOT = Path(os.getenv("DOCBENCH_SHARED_DATA_ROOT", DEFAULT_DATA_ROOT))
+_output_dir_override = str(os.getenv("DOCBENCH_SHARED_OUTPUT_DIR", "")).strip()
+if _output_dir_override:
+    OUTPUT_DIR = Path(_output_dir_override)
+else:
+    OUTPUT_DIR = SCRIPT_DIR / DEFAULT_OUTPUT_DIR_NAME
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORKING_DIR_ROOT = OUTPUT_DIR / "rag_workspaces"
 WORKING_DIR_ROOT.mkdir(parents=True, exist_ok=True)
@@ -76,6 +87,7 @@ DOCBENCH_QUERY_PARAMS = {
     "mode": "hybrid",
     "top_k": 40,
     "chunk_top_k": 20,
+    "enable_rerank": True,
     "rerank_score_scope": "all",
     "vlm_enhanced": True,
     "multimodal_top_k": 5,
@@ -270,6 +282,79 @@ def _build_query_params(
     return params
 
 
+def _build_experiment_signature(
+    *,
+    shared_workspace_id: str,
+    profile_name: str,
+    eval_prompt_filename: str,
+    one_sentence: bool,
+    start_id: int,
+    end_id: int,
+    ablation_flags: AblationFlags,
+    query_params: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "shared_workspace_id": str(shared_workspace_id),
+        "setup": {
+            "profile_name": str(profile_name),
+            "eval_prompt_filename": str(eval_prompt_filename),
+            "one_sentence": bool(one_sentence),
+        },
+        "ablation_flags": ablation_flags.to_dict(),
+        "query_params": dict(query_params),
+        "range": {
+            "start_id": int(start_id),
+            "end_id": int(end_id),
+        },
+    }
+
+
+def _build_experiment_id(
+    *,
+    shared_workspace_id: str,
+    profile_name: str,
+    eval_prompt_filename: str,
+    one_sentence: bool,
+    start_id: int,
+    end_id: int,
+    ablation_flags: AblationFlags,
+    query_params: dict[str, Any],
+) -> str:
+    signature = _build_experiment_signature(
+        shared_workspace_id=shared_workspace_id,
+        profile_name=profile_name,
+        eval_prompt_filename=eval_prompt_filename,
+        one_sentence=one_sentence,
+        start_id=start_id,
+        end_id=end_id,
+        ablation_flags=ablation_flags,
+        query_params=query_params,
+    )
+    canonical = json.dumps(
+        signature,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"docbench_shared_{digest}"
+
+
+def _record_matches_experiment(payload: Any, experiment_id: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("experiment_id", "")).strip() == experiment_id
+
+
+def _answer_record_key(payload: dict[str, Any]) -> str:
+    doc_id = str(payload.get("doc_id", "")).strip()
+    qa_idx = payload.get("qa_idx")
+    if qa_idx is not None:
+        return f"{doc_id}::{qa_idx}"
+    question = str(payload.get("question", "")).strip()
+    return f"{doc_id}::{question}"
+
+
 def _append_jsonl_record(file_obj: TextIO, payload: dict[str, Any]) -> None:
     file_obj.write(json.dumps(payload, ensure_ascii=False) + "\n")
     file_obj.flush()
@@ -398,17 +483,42 @@ def _extract_rerank_chunk_payload(
     rerank_debug = metadata.get("rerank_chunk_debug")
     if not isinstance(rerank_debug, dict):
         rerank_debug = {}
+    has_rerank_debug = bool(rerank_debug)
 
     scores_all = _to_float_scores(rerank_debug.get("scores_all"))
     scores_after_threshold = _to_float_scores(rerank_debug.get("scores_after_threshold"))
     scores_final = _to_float_scores(rerank_debug.get("scores_final"))
 
+    selected_chunk_count = 0
+    selected_missing_rerank_score = 0
     if not scores_final:
         data_section = trace.get("data") if isinstance(trace, dict) else {}
         chunks = data_section.get("chunks", []) if isinstance(data_section, dict) else []
         if isinstance(chunks, list):
+            selected_chunk_count = len([chunk for chunk in chunks if isinstance(chunk, dict)])
+            selected_missing_rerank_score = len(
+                [
+                    chunk
+                    for chunk in chunks
+                    if isinstance(chunk, dict)
+                    and not isinstance(chunk.get("rerank_score"), (int, float))
+                ]
+            )
             scores_final = _to_float_scores(
                 [chunk.get("rerank_score") for chunk in chunks if isinstance(chunk, dict)]
+            )
+    else:
+        data_section = trace.get("data") if isinstance(trace, dict) else {}
+        chunks = data_section.get("chunks", []) if isinstance(data_section, dict) else []
+        if isinstance(chunks, list):
+            selected_chunk_count = len([chunk for chunk in chunks if isinstance(chunk, dict)])
+            selected_missing_rerank_score = len(
+                [
+                    chunk
+                    for chunk in chunks
+                    if isinstance(chunk, dict)
+                    and not isinstance(chunk.get("rerank_score"), (int, float))
+                ]
             )
 
     if not scores_all and scores_final:
@@ -449,16 +559,40 @@ def _extract_rerank_chunk_payload(
             "final": scores_final,
         },
         "threshold_retention": _build_threshold_retention(scores_all),
+        "has_rerank_debug": has_rerank_debug,
+        "selected_chunk_count": selected_chunk_count,
+        "selected_missing_rerank_score": selected_missing_rerank_score,
     }
 
 
-def _refresh_rerank_chunk_summary() -> None:
+def _refresh_rerank_chunk_summary(*, experiment_id: str | None = None) -> None:
     if not RERANK_CHUNK_STATS_FILE.exists():
         logger.info("Rerank stats file not found, skip summary: %s", RERANK_CHUNK_STATS_FILE)
         return
 
+    records: list[dict[str, Any]] = []
+    ignored_records = 0
     with open(RERANK_CHUNK_STATS_FILE, "r", encoding="utf-8") as f:
-        records = [json.loads(line) for line in f if line.strip()]
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(item, dict):
+                continue
+            if experiment_id is not None and not _record_matches_experiment(item, experiment_id):
+                ignored_records += 1
+                continue
+            records.append(item)
+
+    if ignored_records:
+        logger.info(
+            "Rerank summary: ignored %d records from other experiments.",
+            ignored_records,
+        )
 
     all_scores_all: list[float] = []
     all_scores_after_threshold: list[float] = []
@@ -557,6 +691,37 @@ def _refresh_rerank_chunk_summary() -> None:
     logger.info("Rerank chunk summary saved: %s", RERANK_CHUNK_SUMMARY_FILE)
 
 
+def _assert_rerank_contract(
+    *,
+    rerank_stats: dict[str, Any],
+    query_params: dict[str, Any],
+    doc_id: str,
+    qa_idx: int,
+) -> None:
+    if not bool(query_params.get("enable_rerank", True)):
+        return
+    violations: list[str] = []
+    if str(rerank_stats.get("rerank_scope", "")).strip().lower() != "all":
+        violations.append(
+            f"rerank_scope={rerank_stats.get('rerank_scope')!r} (expected 'all')"
+        )
+    selected_chunk_count = int(rerank_stats.get("selected_chunk_count", 0) or 0)
+    selected_missing_rerank_score = int(
+        rerank_stats.get("selected_missing_rerank_score", 0) or 0
+    )
+    if selected_chunk_count > 0 and selected_missing_rerank_score > 0:
+        violations.append(
+            "selected chunks missing rerank_score "
+            f"({selected_missing_rerank_score}/{selected_chunk_count})"
+        )
+    if violations:
+        detail = "; ".join(violations)
+        raise RuntimeError(
+            "Strict rerank contract violated for evaluate_shared: "
+            f"doc_id={doc_id}, qa_idx={qa_idx}. {detail}"
+        )
+
+
 def _find_doc_files(folder_path: Path) -> tuple[Path | None, Path | None]:
     pdf_file = None
     qa_file = None
@@ -639,17 +804,61 @@ def _load_ingest_manifest() -> dict[str, Any]:
     payload = _load_json(INGEST_MANIFEST_FILE)
     if isinstance(payload, dict):
         return payload
-    return {"shared_workspace_id": "", "ingested_doc_ids": []}
+    return {
+        "shared_workspace_id": "",
+        "ingested_doc_ids": [],
+        "ablation_group": "",
+        "ablation_flags": None,
+        "index_profile": None,
+    }
 
 
-def _save_ingest_manifest(shared_workspace_id: str, ingested_doc_ids: set[str]) -> None:
+def _save_ingest_manifest(
+    shared_workspace_id: str,
+    ingested_doc_ids: set[str],
+    ablation_flags: AblationFlags,
+) -> None:
     _save_json(
         INGEST_MANIFEST_FILE,
         {
             "shared_workspace_id": shared_workspace_id,
             "ingested_doc_ids": sorted(ingested_doc_ids, key=lambda x: int(x)),
+            "ablation_group": ablation_flags.ablation_group(),
+            "ablation_flags": ablation_flags.to_dict(),
+            "index_profile": ablation_flags.to_index_profile(),
         },
     )
+
+
+def _resolve_manifest_ingested_doc_ids(
+    manifest: dict[str, Any],
+    *,
+    shared_workspace_id: str,
+    ablation_flags: AblationFlags,
+) -> set[str]:
+    ingested_doc_ids = set(str(x) for x in manifest.get("ingested_doc_ids", []))
+    manifest_workspace_id = str(manifest.get("shared_workspace_id") or "")
+    if manifest_workspace_id != shared_workspace_id and ingested_doc_ids:
+        logger.warning(
+            "Manifest shared_workspace_id mismatch (%s != %s). Reset ingest manifest.",
+            manifest_workspace_id,
+            shared_workspace_id,
+        )
+        return set()
+    if manifest_workspace_id == shared_workspace_id and ingested_doc_ids:
+        existing_flags = AblationFlags.from_mapping(manifest.get("ablation_flags"))
+        if existing_flags is None:
+            raise RuntimeError(
+                "Existing shared ingest manifest lacks ablation_flags metadata. "
+                "To guarantee strict ablation isolation, use a new shared_workspace_id or clear this workspace and manifest."
+            )
+        if not existing_flags.is_index_compatible_with(ablation_flags):
+            raise RuntimeError(
+                "Shared workspace index profile mismatch detected: "
+                f"existing={existing_flags.to_index_profile()} current={ablation_flags.to_index_profile()}. "
+                "Use an independent shared_workspace_id for each DB/V1/V2 group."
+            )
+    return ingested_doc_ids
 
 
 def _load_ingest_failures() -> dict[str, dict[str, Any]]:
@@ -771,10 +980,25 @@ def _save_generation_config(
     start_id: int,
     end_id: int,
     query_params: dict[str, Any],
+    ablation_flags: AblationFlags,
+    experiment_id: str,
+    index_profile: dict[str, Any],
 ) -> None:
+    experiment_signature = _build_experiment_signature(
+        shared_workspace_id=shared_workspace_id,
+        profile_name=profile_name,
+        eval_prompt_filename=eval_prompt_filename,
+        one_sentence=one_sentence,
+        start_id=start_id,
+        end_id=end_id,
+        ablation_flags=ablation_flags,
+        query_params=query_params,
+    )
     _save_json(
         GENERATION_CONFIG_FILE,
         {
+            "experiment_id": experiment_id,
+            "experiment_signature": experiment_signature,
             "profile_name": profile_name,
             "eval_prompt_filename": eval_prompt_filename,
             "one_sentence": bool(one_sentence),
@@ -783,6 +1007,9 @@ def _save_generation_config(
             "shared_workspace_id": shared_workspace_id,
             "start_id": int(start_id),
             "end_id": int(end_id),
+            "ablation_group": ablation_flags.ablation_group(),
+            "ablation_flags": ablation_flags.to_dict(),
+            "index_profile": dict(index_profile),
             "effective_query_params": dict(query_params),
         },
     )
@@ -802,13 +1029,22 @@ async def generate_answers_shared(
     retry_failed_only: bool,
     clear_failures_on_success: bool,
     ablation_flags: AblationFlags,
+    query_params: dict[str, Any],
+    experiment_id: str,
+    allow_legacy_index_profile_adoption: bool,
 ) -> None:
     max_async_ingest = _normalize_max_async(max_async_ingest, default=4)
     max_async_generate = _normalize_max_async(max_async_generate, default=1)
     ingest_flush_every = DEFAULT_INGEST_FLUSH_EVERY
-    query_params = _build_query_params(
-        one_sentence=one_sentence,
+    settings = _build_shared_settings(
         ablation_flags=ablation_flags,
+    )
+    current_index_profile = build_index_profile(ablation_flags, settings=settings)
+    ensured_index_profile = ensure_workspace_index_profile(
+        working_dir_root=settings.working_dir_root,
+        workspace_id=shared_workspace_id,
+        index_profile=current_index_profile,
+        allow_legacy_adoption=allow_legacy_index_profile_adoption,
     )
     _save_generation_config(
         profile_name=profile_name,
@@ -820,11 +1056,11 @@ async def generate_answers_shared(
         start_id=start_id,
         end_id=end_id,
         query_params=query_params,
+        ablation_flags=ablation_flags,
+        experiment_id=experiment_id,
+        index_profile=ensured_index_profile,
     )
 
-    settings = _build_shared_settings(
-        ablation_flags=ablation_flags,
-    )
     service = LocalRagService(settings)
     _refresh_master_logging()
 
@@ -842,24 +1078,53 @@ async def generate_answers_shared(
 
     processed_keys: set[str] = set()
     if resume and SYSTEM_ANSWERS_FILE.exists():
+        ignored_answer_records = 0
         with open(SYSTEM_ANSWERS_FILE, "r", encoding="utf-8") as f:
             for line in f:
+                line = line.strip()
+                if not line:
+                    continue
                 item = json.loads(line)
-                key = f"{item['doc_id']}_{item['question']}"
+                if not _record_matches_experiment(item, experiment_id):
+                    ignored_answer_records += 1
+                    continue
+                key = _answer_record_key(item)
                 processed_keys.add(key)
-        logger.info("Resume: %d answers already generated.", len(processed_keys))
+        logger.info(
+            "Resume: %d answers already generated for experiment_id=%s.",
+            len(processed_keys),
+            experiment_id,
+        )
+        if ignored_answer_records:
+            logger.info(
+                "Resume: ignored %d answer records from other experiments.",
+                ignored_answer_records,
+            )
 
     processed_rerank_keys: set[str] = set()
     if resume and RERANK_CHUNK_STATS_FILE.exists():
+        ignored_rerank_records = 0
         with open(RERANK_CHUNK_STATS_FILE, "r", encoding="utf-8") as f:
             for line in f:
+                line = line.strip()
+                if not line:
+                    continue
                 item = json.loads(line)
-                key = f"{item.get('doc_id', '')}_{item.get('question', '')}"
+                if not _record_matches_experiment(item, experiment_id):
+                    ignored_rerank_records += 1
+                    continue
+                key = _answer_record_key(item)
                 processed_rerank_keys.add(key)
         logger.info(
-            "Resume: %d rerank stat records already generated.",
+            "Resume: %d rerank stat records already generated for experiment_id=%s.",
             len(processed_rerank_keys),
+            experiment_id,
         )
+        if ignored_rerank_records:
+            logger.info(
+                "Resume: ignored %d rerank stat records from other experiments.",
+                ignored_rerank_records,
+            )
 
     existing_failures = _load_ingest_failures() if (resume or retry_failed_only) else {}
     if existing_failures:
@@ -870,28 +1135,23 @@ async def generate_answers_shared(
             INGEST_FAILURES_FILE,
         )
 
-    manifest = (
-        _load_ingest_manifest()
-        if resume
-        else {"shared_workspace_id": "", "ingested_doc_ids": []}
+    manifest = _load_ingest_manifest()
+    ingested_doc_ids = _resolve_manifest_ingested_doc_ids(
+        manifest,
+        shared_workspace_id=shared_workspace_id,
+        ablation_flags=ablation_flags,
     )
-    ingested_doc_ids = set(str(x) for x in manifest.get("ingested_doc_ids", []))
-    if manifest.get("shared_workspace_id") != shared_workspace_id and ingested_doc_ids:
-        logger.warning(
-            "Manifest shared_workspace_id mismatch (%s != %s). Reset ingest manifest.",
-            manifest.get("shared_workspace_id"),
-            shared_workspace_id,
-        )
-        ingested_doc_ids = set()
 
     failed_ingest_docs: dict[str, dict[str, Any]] = dict(existing_failures)
     resolved_failure_docs: set[str] = set()
     logger.info("Shared workspace_id: %s", shared_workspace_id)
+    logger.info("Experiment ID: %s", experiment_id)
     logger.info("Generate range: %d-%d", start_id, end_id - 1)
     logger.info("Max async ingest: %d", max_async_ingest)
     logger.info("Ingest flush every: %d (0 = disabled)", ingest_flush_every)
     logger.info("Retry failed only: %s", retry_failed_only)
     logger.info("Clear failures on success: %s", clear_failures_on_success)
+    logger.info("Workspace index profile: %s", ensured_index_profile)
 
     # Phase 1: build/update shared storage
     ingest_jobs: list[tuple[str, Path]] = []
@@ -917,8 +1177,8 @@ async def generate_answers_shared(
                     failed_ingest_docs.pop(doc_name, None)
                     resolved_failure_docs.add(doc_name)
                 continue
-        elif resume and doc_name in ingested_doc_ids:
-            logger.info("[%s] Shared ingest already done, skip", doc_name)
+        elif doc_name in ingested_doc_ids:
+            logger.info("[%s] Shared ingest already done (manifest), skip", doc_name)
             continue
         ingest_jobs.append((doc_name, pdf_file))
 
@@ -986,7 +1246,7 @@ async def generate_answers_shared(
 
         if success_count > 0:
             ingested_since_flush += success_count
-            _save_ingest_manifest(shared_workspace_id, ingested_doc_ids)
+            _save_ingest_manifest(shared_workspace_id, ingested_doc_ids, ablation_flags)
 
         if batch_errors:
             logger.warning(
@@ -1051,10 +1311,15 @@ async def generate_answers_shared(
 
         doc_pending = 0
         for qa_idx, qa_item in enumerate(qa_list):
-            key = f"{doc_name}_{qa_item['question']}"
+            key = _answer_record_key(
+                {"doc_id": doc_name, "qa_idx": qa_idx, "question": qa_item["question"]}
+            )
+            legacy_key = _answer_record_key(
+                {"doc_id": doc_name, "question": qa_item["question"]}
+            )
             write_answer = True
-            if resume and key in processed_keys:
-                if key in processed_rerank_keys:
+            if resume and (key in processed_keys or legacy_key in processed_keys):
+                if key in processed_rerank_keys or legacy_key in processed_rerank_keys:
                     continue
                 write_answer = False
             pending_questions.append(
@@ -1114,7 +1379,9 @@ async def generate_answers_shared(
             result = None
             if write_answer:
                 result = {
+                    "experiment_id": experiment_id,
                     "doc_id": doc_name,
+                    "qa_idx": qa_idx,
                     "question": question,
                     "sys_ans": answer,
                     "ref_ans": qa_item["answer"],
@@ -1125,7 +1392,14 @@ async def generate_answers_shared(
                 trace if isinstance(trace, dict) else {},
                 query_params=query_params,
             )
+            _assert_rerank_contract(
+                rerank_stats=rerank_stats,
+                query_params=query_params,
+                doc_id=doc_name,
+                qa_idx=qa_idx,
+            )
             rerank_payload = {
+                "experiment_id": experiment_id,
                 "doc_id": doc_name,
                 "qa_idx": qa_idx,
                 "question": question,
@@ -1169,10 +1443,17 @@ async def generate_answers_shared(
                             _append_jsonl_record(f_out, payload)
                             written_answers_batch += 1
                         if rerank_payload is not None:
-                            rerank_key = (
-                                f"{rerank_payload.get('doc_id', '')}_{rerank_payload.get('question', '')}"
+                            rerank_key = _answer_record_key(rerank_payload)
+                            legacy_rerank_key = _answer_record_key(
+                                {
+                                    "doc_id": rerank_payload.get("doc_id"),
+                                    "question": rerank_payload.get("question"),
+                                }
                             )
-                            if rerank_key not in processed_rerank_keys:
+                            if (
+                                rerank_key not in processed_rerank_keys
+                                and legacy_rerank_key not in processed_rerank_keys
+                            ):
                                 _append_jsonl_record(f_rerank, rerank_payload)
                                 processed_rerank_keys.add(rerank_key)
                                 persisted_rerank += 1
@@ -1202,7 +1483,7 @@ async def generate_answers_shared(
     gc.collect()
     _clear_cuda_cache()
     logger.info("Shared generate complete. Output: %s", SYSTEM_ANSWERS_FILE)
-    _refresh_rerank_chunk_summary()
+    _refresh_rerank_chunk_summary(experiment_id=experiment_id)
     if failed_ingest_docs:
         logger.info(
             "Shared ingest failures recorded: %d (file: %s)",
@@ -1211,7 +1492,13 @@ async def generate_answers_shared(
         )
 
 
-async def evaluate_answers(*, resume: bool, max_async_judge: int, eval_prompt_filename: str) -> None:
+async def evaluate_answers(
+    *,
+    resume: bool,
+    max_async_judge: int,
+    eval_prompt_filename: str,
+    experiment_id: str,
+) -> None:
     if not SYSTEM_ANSWERS_FILE.exists():
         logger.error("Input file not found: %s", SYSTEM_ANSWERS_FILE)
         return
@@ -1222,21 +1509,59 @@ async def evaluate_answers(*, resume: bool, max_async_judge: int, eval_prompt_fi
         logger.error("%s", exc)
         return
 
+    if not resume and EVAL_RESULTS_FILE.exists():
+        EVAL_RESULTS_FILE.unlink()
+
     with open(SYSTEM_ANSWERS_FILE, "r", encoding="utf-8") as f:
-        answers = [json.loads(line) for line in f]
+        all_answers = [json.loads(line) for line in f]
+
+    answers = [item for item in all_answers if _record_matches_experiment(item, experiment_id)]
+    ignored_answer_records = len(all_answers) - len(answers)
+    if ignored_answer_records:
+        logger.info(
+            "Evaluate: ignored %d answer records from other experiments.",
+            ignored_answer_records,
+        )
+    if not answers:
+        logger.warning(
+            "No answers found for experiment_id=%s in %s",
+            experiment_id,
+            SYSTEM_ANSWERS_FILE,
+        )
+        return
 
     evaluated_keys = set()
     if resume and EVAL_RESULTS_FILE.exists():
+        ignored_eval_records = 0
         with open(EVAL_RESULTS_FILE, "r", encoding="utf-8") as f:
             for line in f:
+                line = line.strip()
+                if not line:
+                    continue
                 data = json.loads(line)
-                evaluated_keys.add(f"{data['doc_id']}_{data['question']}")
+                if not _record_matches_experiment(data, experiment_id):
+                    ignored_eval_records += 1
+                    continue
+                evaluated_keys.add(_answer_record_key(data))
+        logger.info(
+            "Resume: %d eval records already exist for experiment_id=%s.",
+            len(evaluated_keys),
+            experiment_id,
+        )
+        if ignored_eval_records:
+            logger.info(
+                "Resume: ignored %d eval records from other experiments.",
+                ignored_eval_records,
+            )
 
     pending = []
     skipped = 0
     for i, item in enumerate(answers, 1):
-        key = f"{item['doc_id']}_{item['question']}"
-        if resume and key in evaluated_keys:
+        key = _answer_record_key(item)
+        legacy_key = _answer_record_key(
+            {"doc_id": item.get("doc_id"), "question": item.get("question")}
+        )
+        if resume and (key in evaluated_keys or legacy_key in evaluated_keys):
             skipped += 1
             continue
         pending.append((i, item))
@@ -1246,12 +1571,13 @@ async def evaluate_answers(*, resume: bool, max_async_judge: int, eval_prompt_fi
         return
 
     logger.info(
-        "Evaluating %d/%d answers using %s (max_async_judge=%d, prompt=%s)",
+        "Evaluating %d/%d answers using %s (max_async_judge=%d, prompt=%s, experiment_id=%s)",
         len(pending),
         len(answers),
         JUDGE_MODEL_NAME,
         max_async_judge,
         eval_prompt_filename,
+        experiment_id,
     )
     if skipped:
         logger.info("Skipped %d already-evaluated answers.", skipped)
@@ -1263,7 +1589,8 @@ async def evaluate_answers(*, resume: bool, max_async_judge: int, eval_prompt_fi
     done_count = 0
     total_pending = len(pending)
 
-    with open(EVAL_RESULTS_FILE, "a", encoding="utf-8") as f_out:
+    write_mode = "a" if resume else "w"
+    with open(EVAL_RESULTS_FILE, write_mode, encoding="utf-8") as f_out:
 
         async def _eval_one(index: int, item: dict[str, Any]) -> None:
             nonlocal done_count
@@ -1290,7 +1617,12 @@ async def evaluate_answers(*, resume: bool, max_async_judge: int, eval_prompt_fi
                     eval_result = f"[ERROR: {exc}]"
                     score = 0
 
-            payload = {**item, "eval": eval_result, "score": score}
+            payload = {
+                **item,
+                "experiment_id": experiment_id,
+                "eval": eval_result,
+                "score": score,
+            }
             async with write_lock:
                 _append_jsonl_record(f_out, payload)
             async with progress_lock:
@@ -1320,13 +1652,32 @@ def _map_type_group(qtype: Any) -> str | None:
     return TYPE_GROUP_MAPPING.get(normalized)
 
 
-def calculate_statistics() -> None:
+def calculate_statistics(*, experiment_id: str) -> None:
     if not EVAL_RESULTS_FILE.exists():
         logger.error("Result file not found: %s", EVAL_RESULTS_FILE)
         return
 
     with open(EVAL_RESULTS_FILE, "r", encoding="utf-8") as f:
-        results = [json.loads(line) for line in f]
+        all_results = [json.loads(line) for line in f]
+
+    tagged_results = [
+        item
+        for item in all_results
+        if isinstance(item, dict) and "experiment_id" in item
+    ]
+    if tagged_results:
+        results = [item for item in tagged_results if _record_matches_experiment(item, experiment_id)]
+        ignored_results = len(all_results) - len(results)
+        if ignored_results:
+            logger.info(
+                "Stats: ignored %d eval records from other experiments.",
+                ignored_results,
+            )
+    else:
+        results = all_results
+        logger.warning(
+            "Stats input has no experiment_id metadata. Using all eval records (legacy mode)."
+        )
 
     total = len(results)
     correct = sum(1 for r in results if r.get("score", 0) == 1)
@@ -1376,7 +1727,7 @@ def calculate_statistics() -> None:
     }
     _save_json(STATS_FILE, stats_payload)
     logger.info("Shared stats saved: %s", STATS_FILE)
-    _refresh_rerank_chunk_summary()
+    _refresh_rerank_chunk_summary(experiment_id=experiment_id)
 
 
 async def main() -> None:
@@ -1412,6 +1763,14 @@ async def main() -> None:
     parser.add_argument("--max_async_judge", type=int, default=4)
     add_ablation_arguments(parser)
     parser.add_argument(
+        "--allow_legacy_index_profile_adoption",
+        action="store_true",
+        help=(
+            "Allow adopting the current index profile when an existing workspace has "
+            "artifacts but no .ablation_index_profile.json."
+        ),
+    )
+    parser.add_argument(
         "--retry_failed_only",
         action="store_true",
         default=DEFAULT_EVAL_RETRY_FAILED_ONLY,
@@ -1432,6 +1791,7 @@ async def main() -> None:
     )
     args = parser.parse_args()
     ablation_flags = validate_ablation_flags(args, naming_style="underscore")
+    validate_workspace_env_isolation(workspace_id=args.shared_workspace_id)
 
     _ensure_master_log_handler()
 
@@ -1439,11 +1799,26 @@ async def main() -> None:
         args.raganything_eval_setup
     )
     resume = not args.no_resume
+    query_params = _build_query_params(
+        one_sentence=one_sentence,
+        ablation_flags=ablation_flags,
+    )
+    experiment_id = _build_experiment_id(
+        shared_workspace_id=args.shared_workspace_id,
+        profile_name=profile_name,
+        eval_prompt_filename=eval_prompt_filename,
+        one_sentence=one_sentence,
+        start_id=args.start_id,
+        end_id=args.end_id,
+        ablation_flags=ablation_flags,
+        query_params=query_params,
+    )
 
     logger.info(
         "Mode=%s Range=%d-%d Resume=%s SharedWorkspaceID=%s Profile=%s OneSentence=%s "
         "EvalPrompt=%s MaxAsyncIngest=%d MaxAsyncGen=%d MaxAsyncJudge=%d "
-        "IngestFlushEvery=%d RetryFailedOnly=%s ClearFailuresOnSuccess=%s",
+        "IngestFlushEvery=%d RetryFailedOnly=%s ClearFailuresOnSuccess=%s "
+        "AllowLegacyIndexProfileAdoption=%s ExperimentID=%s",
         args.mode,
         args.start_id,
         args.end_id - 1,
@@ -1458,6 +1833,8 @@ async def main() -> None:
         DEFAULT_INGEST_FLUSH_EVERY,
         args.retry_failed_only,
         args.clear_failures_on_success,
+        args.allow_legacy_index_profile_adoption,
+        experiment_id,
     )
 
     if args.mode == "generate":
@@ -1474,15 +1851,19 @@ async def main() -> None:
             retry_failed_only=args.retry_failed_only,
             clear_failures_on_success=args.clear_failures_on_success,
             ablation_flags=ablation_flags,
+            query_params=query_params,
+            experiment_id=experiment_id,
+            allow_legacy_index_profile_adoption=args.allow_legacy_index_profile_adoption,
         )
     elif args.mode == "evaluate":
         await evaluate_answers(
             resume=resume,
             max_async_judge=args.max_async_judge,
             eval_prompt_filename=eval_prompt_filename,
+            experiment_id=experiment_id,
         )
     else:
-        calculate_statistics()
+        calculate_statistics(experiment_id=experiment_id)
 
 
 if __name__ == "__main__":

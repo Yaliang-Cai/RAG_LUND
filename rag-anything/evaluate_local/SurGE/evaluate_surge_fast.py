@@ -29,16 +29,24 @@ from evaluate_local.ablation_flags import (
     AblationFlags,
     add_ablation_arguments,
     apply_ablation_flags_to_settings,
+    build_index_profile,
+    ensure_workspace_index_profile,
     as_bool,
     validate_ablation_flags,
+    validate_workspace_env_isolation,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-RETRIEVAL_DIR = SCRIPT_DIR / "retrieval_results_fast"
-SURVEY_DIR = SCRIPT_DIR / "survey_results_fast"
-LOG_DIR = SCRIPT_DIR / "logs"
-RAG_STORAGE_DIR = SCRIPT_DIR / "rag_storage"
-RAG_OUTPUT_DIR = SCRIPT_DIR / "rag_outputs"
+_output_dir_override = str(os.getenv("SURGE_FAST_OUTPUT_DIR", "")).strip()
+if _output_dir_override:
+    OUTPUT_ROOT_DIR = Path(_output_dir_override)
+else:
+    OUTPUT_ROOT_DIR = SCRIPT_DIR
+RETRIEVAL_DIR = OUTPUT_ROOT_DIR / "retrieval_results_fast"
+SURVEY_DIR = OUTPUT_ROOT_DIR / "survey_results_fast"
+LOG_DIR = OUTPUT_ROOT_DIR / "logs"
+RAG_STORAGE_DIR = OUTPUT_ROOT_DIR / "rag_storage"
+RAG_OUTPUT_DIR = OUTPUT_ROOT_DIR / "rag_outputs"
 
 DEFAULT_DATA_ROOT = "/data/y50056788/Yaliang/datasets_for_eval/data_for_SurGE"
 DEFAULT_SUBSET_DIR = "subset_output"
@@ -241,10 +249,12 @@ def build_query_params(args: argparse.Namespace, *, chunk_top_k: int) -> dict[st
         "mode": args.query_mode,
         "top_k": args.top_k,
         "chunk_top_k": chunk_top_k,
-        "enable_rerank": args.enable_rerank,
+        "enable_rerank": True,
         "rerank_score_scope": "all",
     }
     query_params.update(get_ablation_flags(args).to_query_kwargs())
+    query_params["enable_rerank"] = True
+    query_params["rerank_score_scope"] = "all"
     return query_params
 
 
@@ -831,6 +841,7 @@ async def ensure_workspace_index(
     service: LocalRagService,
     workspace_id: str,
     source_records: dict[str, dict[str, Any]],
+    ablation_flags: AblationFlags,
     retries: int,
     ingest_batch_size: int,
     batch_doc_concurrency: int,
@@ -1008,6 +1019,9 @@ async def ensure_workspace_index(
     expected_chunk_total = sum(int(batch["expected_chunk_count"]) for batch in batches)
     summary = {
         "workspace_id": workspace_id,
+        "ablation_group": ablation_flags.ablation_group(),
+        "ablation_flags": ablation_flags.to_dict(),
+        "index_profile": ablation_flags.to_index_profile(),
         "ingest_mode": "virtual_batch",
         # compatibility: keep evaluate_surge field semantics (doc-level = source_doc)
         "target_doc_count": len(source_records),
@@ -1328,13 +1342,14 @@ def summarize_final_cut_reason(
 def to_bool(v: Any) -> bool:
     if isinstance(v, bool):
         return v
+    if isinstance(v, (int, float)):
+        numeric = float(v)
+        if numeric in (0.0, 1.0):
+            return bool(int(numeric))
+        raise ValueError(f"invalid bool numeric value: {v!r}")
     if isinstance(v, str):
-        t = v.strip().lower()
-        if t in {"1", "true", "yes", "y", "on"}:
-            return True
-        if t in {"0", "false", "no", "n", "off"}:
-            return False
-    return bool(v)
+        return as_bool(v)
+    raise ValueError(f"invalid bool value: {v!r}")
 
 
 def has_matching_survey_retrieval(
@@ -1343,6 +1358,7 @@ def has_matching_survey_retrieval(
     ks: list[int],
     expected_survey_count: int | None = None,
 ) -> bool:
+    expected_flags = get_ablation_flags(args)
     expected_chunk_top_k = resolve_chunk_top_k(args.chunk_top_k, ks)
     expected_subset = Path(args.data_root) / args.subset_dir
     summary_checks = {
@@ -1379,13 +1395,24 @@ def has_matching_survey_retrieval(
         return False
     if parse_int(params.get("chunk_top_k")) != expected_chunk_top_k:
         return False
-    if to_bool(params.get("enable_rerank")) != bool(args.enable_rerank):
+    try:
+        enable_rerank = to_bool(params.get("enable_rerank"))
+    except Exception:
+        return False
+    if enable_rerank != bool(args.enable_rerank):
+        return False
+    if str(params.get("rerank_score_scope", "all")) != "all":
+        return False
+    stored_flags = AblationFlags.from_mapping(params.get("ablation_flags"))
+    if stored_flags is None or stored_flags != expected_flags:
         return False
     if list(params.get("k_list") or []) != ks:
         return False
     if expected_survey_count is not None:
         if parse_int(summary.get("survey_count")) != expected_survey_count:
             return False
+    if parse_int(summary.get("failed_count")) != 0:
+        return False
     return True
 
 
@@ -1395,6 +1422,7 @@ def has_matching_query_retrieval(
     ks: list[int],
     expected_query_count: int | None = None,
 ) -> bool:
+    expected_flags = get_ablation_flags(args)
     expected_chunk_top_k = resolve_chunk_top_k(args.chunk_top_k, ks)
     expected_subset = Path(args.data_root) / args.subset_dir
     if str(summary.get("mode")) != "retrieval":
@@ -1427,13 +1455,24 @@ def has_matching_query_retrieval(
         return False
     if parse_int(params.get("chunk_top_k")) != expected_chunk_top_k:
         return False
-    if to_bool(params.get("enable_rerank")) != bool(args.enable_rerank):
+    try:
+        enable_rerank = to_bool(params.get("enable_rerank"))
+    except Exception:
+        return False
+    if enable_rerank != bool(args.enable_rerank):
+        return False
+    if str(params.get("rerank_score_scope", "all")) != "all":
+        return False
+    stored_flags = AblationFlags.from_mapping(params.get("ablation_flags"))
+    if stored_flags is None or stored_flags != expected_flags:
         return False
     if list(params.get("k_list") or []) != ks:
         return False
     if expected_query_count is not None:
         if parse_int(summary.get("query_count")) != expected_query_count:
             return False
+    if parse_int(summary.get("failed_count")) != 0:
+        return False
     return True
 
 
@@ -1478,12 +1517,21 @@ async def run_retrieval(args: argparse.Namespace) -> int:
     source_records, chunk_source_map, source_map_stats = prepare_source_records(chunks_by_doc)
     persist_chunk_source_map(chunk_source_map, source_map_stats)
     queries = load_queries(subset / args.queries_file, args.limit)
+    ablation_flags = get_ablation_flags(args)
     settings = settings_for_surge(args)
+    current_index_profile = build_index_profile(ablation_flags, settings=settings)
+    ensured_index_profile = ensure_workspace_index_profile(
+        working_dir_root=settings.working_dir_root,
+        workspace_id=args.workspace_id,
+        index_profile=current_index_profile,
+        allow_legacy_adoption=bool(args.allow_legacy_index_profile_adoption),
+    )
     service = LocalRagService(settings)
     ingest_summary = await ensure_workspace_index(
         service,
         args.workspace_id,
         source_records,
+        ablation_flags,
         args.max_retries,
         args.ingest_batch_size,
         args.batch_doc_concurrency,
@@ -1598,6 +1646,9 @@ async def run_retrieval(args: argparse.Namespace) -> int:
         "chunks_file": str(subset / args.chunks_file),
         "corpus_file": str(subset / args.corpus_file),
         "effective_query_params": query_params | {
+            "ablation_group": ablation_flags.ablation_group(),
+            "ablation_flags": ablation_flags.to_dict(),
+            "index_profile": ensured_index_profile,
             "max_concurrency": args.max_concurrency,
             "max_retries": args.max_retries,
             "k_list": ks,
@@ -1635,12 +1686,21 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
     source_records, chunk_source_map, source_map_stats = prepare_source_records(chunks_by_doc)
     persist_chunk_source_map(chunk_source_map, source_map_stats)
     surveys = load_surveys(subset / args.surveys_file, args.limit)
+    ablation_flags = get_ablation_flags(args)
     settings = settings_for_surge(args)
+    current_index_profile = build_index_profile(ablation_flags, settings=settings)
+    ensured_index_profile = ensure_workspace_index_profile(
+        working_dir_root=settings.working_dir_root,
+        workspace_id=args.workspace_id,
+        index_profile=current_index_profile,
+        allow_legacy_adoption=bool(args.allow_legacy_index_profile_adoption),
+    )
     service = LocalRagService(settings)
     ingest_summary = await ensure_workspace_index(
         service,
         args.workspace_id,
         source_records,
+        ablation_flags,
         args.max_retries,
         args.ingest_batch_size,
         args.batch_doc_concurrency,
@@ -1846,6 +1906,9 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
         "chunks_file": str(subset / args.chunks_file),
         "corpus_file": str(subset / args.corpus_file),
         "effective_query_params": query_params | {
+            "ablation_group": ablation_flags.ablation_group(),
+            "ablation_flags": ablation_flags.to_dict(),
+            "index_profile": ensured_index_profile,
             "max_concurrency": args.max_concurrency,
             "max_retries": args.max_retries,
             "k_list": survey_ks,
@@ -1989,6 +2052,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError(
             f"--chunk-top-k must be > 0 or 0(disabled), got {args.chunk_top_k}"
         )
+    if not bool(args.enable_rerank):
+        raise ValueError(
+            "--enable-rerank must be true for evaluation; selected chunks must be reranked."
+        )
     if args.max_concurrency <= 0:
         raise ValueError(
             f"--max-concurrency must be > 0, got {args.max_concurrency}"
@@ -2008,6 +2075,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.max_retries < 0:
         raise ValueError(f"--max-retries must be >= 0, got {args.max_retries}")
     args.ablation_flags = validate_ablation_flags(args, naming_style="hyphen")
+    validate_workspace_env_isolation(workspace_id=args.workspace_id)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2068,6 +2136,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--max-retries", type=int, default=0)
     p.add_argument("--limit", type=int, default=0, help="0 means all queries/surveys")
+    p.add_argument(
+        "--allow-legacy-index-profile-adoption",
+        type=as_bool,
+        default=False,
+        help=(
+            "When true, allow adopting current V1/V2 index profile for an existing "
+            "workspace without profile metadata. Keep false for strict ablation isolation."
+        ),
+    )
     add_ablation_arguments(p)
     return p
 
