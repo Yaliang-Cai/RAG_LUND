@@ -2055,3 +2055,50 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 
 - 本次仅做开关链路收敛，不改评测指标定义、不改输出结构。
 - 保留历史下划线参数别名；推荐继续使用连字符参数名。
+
+---
+
+## 增量更新（2026-04-01，V0/V1/V2/V3 消融严格性收口：索引签名隔离 + 查询签名匹配）
+
+### 目标
+
+- 对齐四组消融执行规则，避免 workspace 误复用导致组间污染。
+- 明确“V1/V2 影响建库、V3 仅查询侧”语义，并在评测脚本里落地强约束。
+- 保证 `evaluate_surge_fast` 与 `evaluate_shared` 在 `resume/no_resume` 下都能严格执行，不靠人工记忆规避混淆。
+
+### 本次结构化改动
+
+| 文件 | 改动 |
+|------|------|
+| `rag-anything/evaluate_local/ablation_flags.py` | 增加 `to_dict()/from_mapping()/to_index_profile()/ablation_group()/is_index_compatible_with()`，统一表达“索引签名（V1/V2）与查询签名（含V3）” |
+| `rag-anything/evaluate_local/SurGE/evaluate_surge_fast.py` | 新增已有索引兼容性校验函数；当 workspace 已有索引时强制校验 manifest 的 `ablation_flags` 与当前 V1/V2 一致，不一致直接失败；`has_matching_*` 增加 `ablation_flags` 严格匹配，V3 改变会触发重跑查询结果 |
+| `rag-anything/evaluate_local/DocBench/evaluate_shared.py` | manifest 保存并校验 `ablation_flags/index_profile`；当共享 workspace 已有索引且 V1/V2 不一致时直接失败；将 ingest 跳过条件从 `resume` 解绑（按 manifest 决定），支持在同一 V1+V2 库上仅切换 V3 做 query-only |
+
+### 执行语义（与消融分组对齐）
+
+- DB-only / DB+V1 / DB+V1+V2：
+  - 若复用同一 workspace 且 V1/V2 变化，脚本会报错阻止污染，要求新 workspace 或重建。
+- DB+V1+V2+V3：
+  - V1/V2 不变、仅 V3 变化时，索引签名兼容，允许直接复用第3组库做查询侧实验（无需重建）。
+
+### 本轮检查（按固定执行流程）
+
+1. 语法检查（通过）
+- `python -m py_compile rag-anything/evaluate_local/ablation_flags.py rag-anything/evaluate_local/SurGE/evaluate_surge_fast.py rag-anything/evaluate_local/DocBench/evaluate_shared.py`
+
+2. 逻辑级检查（通过，内联断言）
+- 输出：`ABLATION_STRICTNESS_LOGIC_CHECKS_PASSED`
+- 覆盖：
+  - 四组分组判定（V0/V1/V2/V3）；
+  - V3-only 变化 `index_profile` 兼容、V1/V2 变化不兼容；
+  - `evaluate_surge_fast` 结果匹配逻辑对 `ablation_flags` 严格检查；
+  - `evaluate_shared` manifest 兼容性：workspace 不同重置、V1/V2 不一致报错、V3-only 允许复用。
+
+3. CLI 检查（通过）
+- `python rag-anything/evaluate_local/SurGE/evaluate_surge_fast.py --help`
+- `python rag-anything/evaluate_local/DocBench/evaluate_shared.py --help`
+
+### 兼容性说明
+
+- 新增约束是“防混淆保护”，不会改变同组实验的正常行为。
+- 旧 manifest 若缺少 `ablation_flags` 元数据，在“已有索引且需要严格隔离”场景下会提示重建/换 workspace，避免历史状态带来不可追溯混合。
