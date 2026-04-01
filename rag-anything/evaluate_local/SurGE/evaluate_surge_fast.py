@@ -783,11 +783,14 @@ def extract_rerank_payload(retrieval: dict[str, Any], query_params: dict[str, An
     input_count = parse_non_negative_int(dbg.get("count_input"))
     all_count = parse_non_negative_int(dbg.get("count_after_rerank"))
     thr_count = parse_non_negative_int(dbg.get("count_after_threshold"))
+    top_k_count = parse_non_negative_int(dbg.get("count_after_chunk_top_k"))
     final_count = parse_non_negative_int(dbg.get("count_final"))
+    chunk_ids = extract_chunk_ids_by_stage(retrieval)
     counts = {
         "input": input_count if input_count is not None else len(scores_all),
         "all": all_count if all_count is not None else len(scores_all),
         "after_threshold": thr_count if thr_count is not None else len(scores_thr),
+        "after_chunk_top_k": top_k_count if top_k_count is not None else len(chunk_ids.get("after_threshold", [])),
         "final": final_count if final_count is not None else len(scores_final),
     }
     return {
@@ -800,6 +803,7 @@ def extract_rerank_payload(retrieval: dict[str, Any], query_params: dict[str, An
             "final": score_distribution(scores_final),
         },
         "scores": {"all": scores_all, "after_threshold": scores_thr, "final": scores_final},
+        "chunk_ids": chunk_ids,
         "threshold_retention": build_threshold_retention(scores_all),
     }
 
@@ -1059,6 +1063,10 @@ def recall_at_k(gt: set[int], retrieved: list[int], ks: list[int]) -> dict[str, 
     return out
 
 
+def hit_at_k(gt: set[int], retrieved: list[int], ks: list[int]) -> dict[str, int]:
+    return {str(k): len(gt & set(retrieved[:k])) for k in ks}
+
+
 def collect_ingest_blockers(summary: dict[str, Any]) -> dict[str, str]:
     blocker_keys = [
         "ingest_failure_count",
@@ -1087,7 +1095,83 @@ def collect_ingest_blockers(summary: dict[str, Any]) -> dict[str, str]:
 def resolve_chunk_top_k(raw_chunk_top_k: int, ks: list[int]) -> int:
     if raw_chunk_top_k > 0:
         return raw_chunk_top_k
-    return max(ks)
+    return 0
+
+
+def _normalize_chunk_ids(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        cid = str(item or "").strip()
+        if cid:
+            out.append(cid)
+    return out
+
+
+def extract_chunk_ids_by_stage(retrieval: dict[str, Any]) -> dict[str, list[str]]:
+    md = retrieval.get("metadata", {}) if isinstance(retrieval, dict) else {}
+    if not isinstance(md, dict):
+        md = {}
+    dbg = md.get("rerank_chunk_debug", {})
+    if not isinstance(dbg, dict):
+        dbg = {}
+
+    final_from_data: list[str] = []
+    chunks = retrieval.get("data", {}).get("chunks", []) if isinstance(retrieval, dict) else []
+    if isinstance(chunks, list):
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            cid = str(chunk.get("chunk_id") or "").strip()
+            if cid:
+                final_from_data.append(cid)
+
+    chunk_ids_all = _normalize_chunk_ids(dbg.get("chunk_ids_all"))
+    chunk_ids_threshold = _normalize_chunk_ids(dbg.get("chunk_ids_after_threshold"))
+    chunk_ids_final = _normalize_chunk_ids(dbg.get("chunk_ids_final"))
+    if not chunk_ids_final:
+        chunk_ids_final = final_from_data
+    if not chunk_ids_threshold and chunk_ids_final:
+        chunk_ids_threshold = list(chunk_ids_final)
+    if not chunk_ids_all and chunk_ids_threshold:
+        chunk_ids_all = list(chunk_ids_threshold)
+
+    return {
+        "all": chunk_ids_all,
+        "after_threshold": chunk_ids_threshold,
+        "final": chunk_ids_final,
+    }
+
+
+def map_chunk_ids_to_doc_ids(
+    chunk_source_map: dict[str, dict[str, Any]],
+    chunk_ids: list[str],
+    record_key: str,
+    record_id: Any,
+    stage: str,
+) -> tuple[list[int], list[dict[str, Any]]]:
+    warns: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    retrieved: list[int] = []
+
+    for raw_cid in chunk_ids:
+        cid = str(raw_cid or "").strip()
+        if not cid:
+            warns.append({record_key: record_id, "stage": stage, "chunk_id": cid, "reason": "missing chunk_id"})
+            continue
+        mapped = chunk_source_map.get(cid)
+        if not isinstance(mapped, dict):
+            warns.append({record_key: record_id, "stage": stage, "chunk_id": cid, "reason": "chunk_id not in source map"})
+            continue
+        doc_id = parse_int(mapped.get("source_doc_id"))
+        if doc_id is None:
+            warns.append({record_key: record_id, "stage": stage, "chunk_id": cid, "reason": "invalid source_doc_id in map"})
+            continue
+        if doc_id not in seen:
+            seen.add(doc_id)
+            retrieved.append(doc_id)
+    return retrieved, warns
 
 
 async def map_chunks_to_doc_ids(
@@ -1099,45 +1183,41 @@ async def map_chunks_to_doc_ids(
     chunks = retrieval.get("data", {}).get("chunks", []) if isinstance(retrieval, dict) else []
     if not isinstance(chunks, list):
         chunks = []
-    warns: list[dict[str, Any]] = []
-    seen: set[int] = set()
-    retrieved: list[int] = []
-
+    chunk_ids: list[str] = []
     for c in chunks:
-        if not isinstance(c, dict):
-            continue
-        cid = str(c.get("chunk_id", "")).strip()
-        if not cid:
-            warns.append({record_key: record_id, "chunk_id": cid, "reason": "missing chunk_id"})
-            continue
-        mapped = chunk_source_map.get(cid)
-        if not isinstance(mapped, dict):
-            warns.append({record_key: record_id, "chunk_id": cid, "reason": "chunk_id not in source map"})
-            continue
-        doc_id = parse_int(mapped.get("source_doc_id"))
-        if doc_id is None:
-            warns.append({record_key: record_id, "chunk_id": cid, "reason": "invalid source_doc_id in map"})
-            continue
-        if doc_id not in seen:
-            seen.add(doc_id)
-            retrieved.append(doc_id)
-    return retrieved, warns
+        if isinstance(c, dict):
+            chunk_ids.append(str(c.get("chunk_id") or "").strip())
+    return map_chunk_ids_to_doc_ids(
+        chunk_source_map=chunk_source_map,
+        chunk_ids=chunk_ids,
+        record_key=record_key,
+        record_id=record_id,
+        stage="final",
+    )
 
 
-def compute_macro_recall(rows: list[dict[str, Any]], ks: list[int]) -> dict[str, float | None]:
+def compute_macro_recall(
+    rows: list[dict[str, Any]],
+    ks: list[int],
+    recall_key: str = "recall_at_k",
+) -> dict[str, float | None]:
     macro: dict[str, float | None] = {}
     for k in ks:
         key = str(k)
         vals = [
-            float(r.get("recall_at_k", {}).get(key))
+            float(r.get(recall_key, {}).get(key))
             for r in rows
-            if isinstance(r.get("recall_at_k", {}).get(key), (int, float))
+            if isinstance(r.get(recall_key, {}).get(key), (int, float))
         ]
         macro[key] = round(sum(vals) / len(vals), 6) if vals else None
     return macro
 
 
-def compute_micro_recall(rows: list[dict[str, Any]], ks: list[int]) -> dict[str, float | None]:
+def compute_micro_recall(
+    rows: list[dict[str, Any]],
+    ks: list[int],
+    hit_key: str = "hit_at_k",
+) -> dict[str, float | None]:
     denom = sum(int(r.get("gt_count", 0)) for r in rows if int(r.get("gt_count", 0)) > 0)
     micro: dict[str, float | None] = {}
     for k in ks:
@@ -1146,12 +1226,84 @@ def compute_micro_recall(rows: list[dict[str, Any]], ks: list[int]) -> dict[str,
             micro[key] = None
             continue
         hits = sum(
-            int(r.get("hit_at_k", {}).get(key, 0))
+            int(r.get(hit_key, {}).get(key, 0))
             for r in rows
-            if isinstance(r.get("hit_at_k", {}).get(key), int)
+            if isinstance(r.get(hit_key, {}).get(key), int)
         )
         micro[key] = round(hits / denom, 6)
     return micro
+
+
+def compute_scope_macro_micro_recall(
+    rows: list[dict[str, Any]],
+    ks: list[int],
+    recall_scopes_key: str,
+    hit_scopes_key: str,
+) -> tuple[dict[str, dict[str, float | None]], dict[str, dict[str, float | None]]]:
+    scopes = ("all", "threshold", "final")
+    macro: dict[str, dict[str, float | None]] = {}
+    micro: dict[str, dict[str, float | None]] = {}
+    for scope in scopes:
+        scoped_rows: list[dict[str, Any]] = []
+        for row in rows:
+            scoped_recall = (row.get(recall_scopes_key, {}) or {}).get(scope, {})
+            scoped_hit = (row.get(hit_scopes_key, {}) or {}).get(scope, {})
+            scoped_rows.append(
+                {
+                    "gt_count": row.get("gt_count", 0),
+                    "recall_at_k": scoped_recall if isinstance(scoped_recall, dict) else {},
+                    "hit_at_k": scoped_hit if isinstance(scoped_hit, dict) else {},
+                }
+            )
+        macro[scope] = compute_macro_recall(scoped_rows, ks, recall_key="recall_at_k")
+        micro[scope] = compute_micro_recall(scoped_rows, ks, hit_key="hit_at_k")
+    return macro, micro
+
+
+def summarize_final_cut_reason(
+    rerank_rows: list[dict[str, Any]],
+    *,
+    chunk_top_k: int,
+) -> dict[str, Any]:
+    drop_threshold = 0
+    drop_chunk_top_k = 0
+    drop_final = 0
+    for row in rerank_rows:
+        counts = row.get("counts", {}) if isinstance(row, dict) else {}
+        if not isinstance(counts, dict):
+            counts = {}
+        c_all = parse_non_negative_int(counts.get("all")) or 0
+        c_thr = parse_non_negative_int(counts.get("after_threshold"))
+        c_thr = c_all if c_thr is None else c_thr
+        c_after_top_k = parse_non_negative_int(counts.get("after_chunk_top_k"))
+        c_after_top_k = c_thr if c_after_top_k is None else c_after_top_k
+        c_final = parse_non_negative_int(counts.get("final"))
+        c_final = c_after_top_k if c_final is None else c_final
+        drop_threshold += max(0, c_all - c_thr)
+        drop_chunk_top_k += max(0, c_thr - c_after_top_k)
+        drop_final += max(0, c_after_top_k - c_final)
+
+    reasons: list[str] = []
+    if drop_threshold > 0:
+        reasons.append("min_rerank_score")
+    if drop_chunk_top_k > 0:
+        reasons.append("chunk_top_k")
+    if drop_final > 0:
+        reasons.append("token_or_context_budget")
+    if not reasons:
+        reasons.append("none")
+    if chunk_top_k == 0 and "chunk_top_k" in reasons:
+        reasons = [r for r in reasons if r != "chunk_top_k"] or ["none"]
+
+    return {
+        "final_cut_reason": "+".join(reasons),
+        "final_cut_breakdown": {
+            "dropped_by_threshold": drop_threshold,
+            "dropped_by_chunk_top_k": drop_chunk_top_k,
+            "dropped_after_top_k_to_final": drop_final,
+            "chunk_top_k_limit_enabled": chunk_top_k > 0,
+        },
+    }
 
 
 def to_bool(v: Any) -> bool:
@@ -1218,6 +1370,85 @@ def has_matching_survey_retrieval(
     return True
 
 
+def has_matching_query_retrieval(
+    summary: dict[str, Any],
+    args: argparse.Namespace,
+    ks: list[int],
+    expected_query_count: int | None = None,
+) -> bool:
+    expected_chunk_top_k = resolve_chunk_top_k(args.chunk_top_k, ks)
+    expected_subset = Path(args.data_root) / args.subset_dir
+    if str(summary.get("mode")) != "retrieval":
+        return False
+    if parse_int(summary.get("top_k")) != args.top_k:
+        return False
+    if parse_int(summary.get("chunk_top_k")) != expected_chunk_top_k:
+        return False
+    if list(summary.get("k_list") or []) != ks:
+        return False
+
+    summary_checks_extra = {
+        "workspace_id": str(args.workspace_id),
+        "data_root": str(Path(args.data_root)),
+        "subset_dir": str(expected_subset),
+        "queries_file": str(expected_subset / args.queries_file),
+        "chunks_file": str(expected_subset / args.chunks_file),
+        "corpus_file": str(expected_subset / args.corpus_file),
+    }
+    for key, value in summary_checks_extra.items():
+        if str(summary.get(key)) != value:
+            return False
+
+    params = summary.get("effective_query_params", {})
+    if not isinstance(params, dict):
+        return False
+    if str(params.get("mode")) != str(args.query_mode):
+        return False
+    if parse_int(params.get("top_k")) != args.top_k:
+        return False
+    if parse_int(params.get("chunk_top_k")) != expected_chunk_top_k:
+        return False
+    if to_bool(params.get("enable_rerank")) != bool(args.enable_rerank):
+        return False
+    if list(params.get("k_list") or []) != ks:
+        return False
+    if expected_query_count is not None:
+        if parse_int(summary.get("query_count")) != expected_query_count:
+            return False
+    return True
+
+
+async def ensure_query_retrieval_for_survey(args: argparse.Namespace) -> None:
+    ks = parse_k_list(args.k_list)
+    data_root = Path(args.data_root)
+    subset = data_root / args.subset_dir
+    expected_query_count = len(load_queries(subset / args.queries_file, args.limit))
+
+    need_retrieval = True
+    if SUMMARY_FILE.exists() and PER_QUERY_FILE.exists() and RERANK_STATS_FILE.exists():
+        try:
+            summary = json.loads(SUMMARY_FILE.read_text(encoding="utf-8"))
+            if isinstance(summary, dict):
+                need_retrieval = not has_matching_query_retrieval(
+                    summary=summary,
+                    args=args,
+                    ks=ks,
+                    expected_query_count=expected_query_count,
+                )
+        except Exception:
+            need_retrieval = True
+
+    if need_retrieval:
+        logger.info(
+            "Survey mode requires query-level retrieval results; auto-running retrieval mode."
+        )
+        await run_retrieval(args)
+    else:
+        logger.info(
+            "Query-level retrieval results exist and match current parameters; skip auto-retrieval."
+        )
+
+
 async def run_retrieval(args: argparse.Namespace) -> int:
     ks = parse_k_list(args.k_list)
     chunk_top_k = resolve_chunk_top_k(args.chunk_top_k, ks)
@@ -1280,6 +1511,7 @@ async def run_retrieval(args: argparse.Namespace) -> int:
                     top_k=args.top_k,
                     chunk_top_k=chunk_top_k,
                     enable_rerank=args.enable_rerank,
+                    rerank_score_scope="all",
                 )
                 retrieval = await with_retries(lambda: rag.lightrag.aquery_data(q, param=param), label=f"query {qid}", retries=args.max_retries)
                 retrieved, warns = await map_chunks_to_doc_ids(
@@ -1440,7 +1672,13 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
         warns = []
         error = None
         retrieved: list[int] = []
+        retrieved_by_scope: dict[str, list[int]] = {
+            "all": [],
+            "threshold": [],
+            "final": [],
+        }
         retrieval = {}
+        rerank: dict[str, Any] = {}
 
         async with sem:
             try:
@@ -1451,18 +1689,54 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
                     top_k=args.top_k,
                     chunk_top_k=chunk_top_k,
                     enable_rerank=args.enable_rerank,
+                    rerank_score_scope="all",
                 )
                 retrieval = await with_retries(
                     lambda: rag.lightrag.aquery_data(survey_title, param=param),
                     label=f"survey {survey_id}",
                     retries=args.max_retries,
                 )
-                retrieved, warns = await map_chunks_to_doc_ids(
+                rerank = extract_rerank_payload(retrieval, query_params)
+                chunk_ids = rerank.get("chunk_ids", {}) if isinstance(rerank, dict) else {}
+                if not isinstance(chunk_ids, dict):
+                    chunk_ids = {}
+
+                all_chunk_ids = chunk_ids.get("all", [])
+                thr_chunk_ids = chunk_ids.get("after_threshold", [])
+                fin_chunk_ids = chunk_ids.get("final", [])
+                if not isinstance(all_chunk_ids, list):
+                    all_chunk_ids = []
+                if not isinstance(thr_chunk_ids, list):
+                    thr_chunk_ids = []
+                if not isinstance(fin_chunk_ids, list):
+                    fin_chunk_ids = []
+
+                all_docs, all_warns = map_chunk_ids_to_doc_ids(
                     chunk_source_map=chunk_source_map,
-                    retrieval=retrieval,
+                    chunk_ids=all_chunk_ids,
                     record_key="survey_id",
                     record_id=survey_id,
+                    stage="all",
                 )
+                thr_docs, thr_warns = map_chunk_ids_to_doc_ids(
+                    chunk_source_map=chunk_source_map,
+                    chunk_ids=thr_chunk_ids,
+                    record_key="survey_id",
+                    record_id=survey_id,
+                    stage="threshold",
+                )
+                fin_docs, fin_warns = map_chunk_ids_to_doc_ids(
+                    chunk_source_map=chunk_source_map,
+                    chunk_ids=fin_chunk_ids,
+                    record_key="survey_id",
+                    record_id=survey_id,
+                    stage="final",
+                )
+                warns = all_warns + thr_warns + fin_warns
+                retrieved_by_scope["all"] = all_docs
+                retrieved_by_scope["threshold"] = thr_docs
+                retrieved_by_scope["final"] = fin_docs
+                retrieved = list(fin_docs)
             except Exception as exc:
                 error = {
                     "survey_id": survey_id,
@@ -1472,19 +1746,40 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
                     ).strip(),
                 }
 
+        hit_final = hit_at_k(gt, retrieved_by_scope["final"], survey_ks)
+        recall_final = recall_at_k(gt, retrieved_by_scope["final"], survey_ks)
+        hit_by_scope = {
+            "all": hit_at_k(gt, retrieved_by_scope["all"], survey_ks),
+            "threshold": hit_at_k(gt, retrieved_by_scope["threshold"], survey_ks),
+            "final": hit_final,
+        }
+        recall_by_scope = {
+            "all": recall_at_k(gt, retrieved_by_scope["all"], survey_ks),
+            "threshold": recall_at_k(gt, retrieved_by_scope["threshold"], survey_ks),
+            "final": recall_final,
+        }
         row = {
             "survey_id": survey_id,
             "survey_title": survey_title,
             "gt_count": len(gt),
             "retrieved_count": len(retrieved),
+            "retrieved_count_by_scope": {
+                "all": len(retrieved_by_scope["all"]),
+                "threshold": len(retrieved_by_scope["threshold"]),
+                "final": len(retrieved_by_scope["final"]),
+            },
             "gt_doc_ids": sorted(gt),
             "retrieved_doc_ids": retrieved,
-            "hit_at_k": {str(k): len(gt & set(retrieved[:k])) for k in survey_ks},
-            "recall_at_k": recall_at_k(gt, retrieved, survey_ks),
+            "retrieved_doc_ids_by_scope": retrieved_by_scope,
+            "hit_at_k": hit_final,
+            "recall_at_k": recall_final,
+            "hit_at_k_by_scope": hit_by_scope,
+            "recall_at_k_by_scope": recall_by_scope,
             "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
             "error": error,
         }
-        rerank = extract_rerank_payload(retrieval, query_params)
+        if not rerank:
+            rerank = extract_rerank_payload(retrieval, query_params)
         rerank_row = {
             "survey_id": survey_id,
             "survey_title": survey_title,
@@ -1493,6 +1788,7 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
             "counts": rerank.get("counts", {}),
             "distribution": rerank.get("distribution", {}),
             "scores": rerank.get("scores", {}),
+            "chunk_ids": rerank.get("chunk_ids", {}),
             "threshold_retention": rerank.get("threshold_retention", []),
             "top_k": args.top_k,
             "chunk_top_k": chunk_top_k,
@@ -1522,6 +1818,13 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
 
     macro = compute_macro_recall(per_rows, survey_ks)
     micro = compute_micro_recall(per_rows, survey_ks)
+    macro_by_scope, micro_by_scope = compute_scope_macro_micro_recall(
+        per_rows,
+        survey_ks,
+        recall_scopes_key="recall_at_k_by_scope",
+        hit_scopes_key="hit_at_k_by_scope",
+    )
+    cut_summary = summarize_final_cut_reason(rerank_rows, chunk_top_k=chunk_top_k)
 
     save_json(SURVEY_SUMMARY_FILE, {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1537,6 +1840,10 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
         "non_empty_retrieval_count": sum(1 for r in per_rows if int(r.get("retrieved_count", 0)) > 0),
         "macro_recall_at_k": macro,
         "micro_recall_at_k": micro,
+        "macro_recall_at_k_by_scope": macro_by_scope,
+        "micro_recall_at_k_by_scope": micro_by_scope,
+        "final_cut_reason": cut_summary.get("final_cut_reason"),
+        "final_cut_breakdown": cut_summary.get("final_cut_breakdown", {}),
         "workspace_id": args.workspace_id,
         "data_root": str(data_root),
         "subset_dir": str(subset),
@@ -1616,6 +1923,7 @@ async def run_survey_generate_placeholder(args: argparse.Namespace) -> int:
 
 
 async def run_survey(args: argparse.Namespace) -> int:
+    await ensure_query_retrieval_for_survey(args)
     if args.survey_stage == "retrieval":
         return await run_survey_retrieval(args)
     if args.survey_stage == "generate":
@@ -1684,7 +1992,7 @@ def validate_args(args: argparse.Namespace) -> None:
         pass
     elif args.chunk_top_k < 0:
         raise ValueError(
-            f"--chunk-top-k must be > 0 or 0(auto), got {args.chunk_top_k}"
+            f"--chunk-top-k must be > 0 or 0(disabled), got {args.chunk_top_k}"
         )
     if args.max_concurrency <= 0:
         raise ValueError(
@@ -1723,15 +2031,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="hybrid",
     )
     p.add_argument("--top-k", type=int, default=40)
-    p.add_argument("--chunk-top-k", type=int, default=0, help="<=0 means auto use max(k-list)")
+    p.add_argument(
+        "--chunk-top-k",
+        type=int,
+        default=0,
+        help="0 disables chunk_top_k truncation; >0 keeps only top-k chunks before final token budgeting.",
+    )
     p.add_argument("--k-list", default="5,10,20,30,50")
     p.add_argument("--survey-k-list", default="50,100,200,500")
     p.add_argument("--enable-rerank", type=as_bool, default=True)
     p.add_argument(
         "--batch-doc-concurrency",
         type=int,
-        default=1,
-        help="Concurrent virtual batch-doc ingest workers (default 1 for stability).",
+        default=2,
+        help="Concurrent virtual batch-doc ingest workers (default 2).",
     )
     p.add_argument(
         "--ingest-concurrency",
@@ -1742,13 +2055,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--ingest-batch-size",
         type=int,
-        default=128,
+        default=384,
         help="Number of source chunks packed into one virtual batch-doc.",
     )
     p.add_argument(
         "--llm-model-max-async",
         type=int,
-        default=32,
+        default=48,
         help="Evaluate-fast override for LLM extraction worker concurrency during ingest.",
     )
     p.add_argument(

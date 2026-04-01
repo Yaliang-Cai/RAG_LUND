@@ -2739,6 +2739,10 @@ async def process_chunks_unified(
                     "scores_all": [],
                     "scores_after_threshold": [],
                     "scores_final": [],
+                    "chunk_ids_all": [],
+                    "chunk_ids_after_threshold": [],
+                    "chunk_ids_after_chunk_top_k": [],
+                    "chunk_ids_final": [],
                     "count_input": 0,
                     "count_after_rerank": 0,
                     "count_after_threshold": 0,
@@ -2776,8 +2780,23 @@ async def process_chunks_unified(
                 continue
         return scores
 
+    def _extract_chunk_ids(items: list[dict]) -> list[str]:
+        chunk_ids: list[str] = []
+        for item in items:
+            chunk_id = item.get("chunk_id") or item.get("id")
+            if chunk_id is None:
+                continue
+            chunk_id_str = str(chunk_id).strip()
+            if chunk_id_str:
+                chunk_ids.append(chunk_id_str)
+        return chunk_ids
+
     scores_all: list[float] = []
     scores_after_threshold: list[float] = []
+    chunk_ids_all: list[str] = []
+    chunk_ids_after_threshold: list[str] = []
+    chunk_ids_after_chunk_top_k: list[str] = []
+    chunk_ids_final: list[str] = []
     count_after_rerank = len(unique_chunks)
     count_after_threshold = len(unique_chunks)
     count_after_chunk_top_k = len(unique_chunks)
@@ -2801,7 +2820,10 @@ async def process_chunks_unified(
         )
         count_after_rerank = len(unique_chunks)
         scores_all = _extract_scores(unique_chunks)
+        chunk_ids_all = _extract_chunk_ids(unique_chunks)
         logger.info("Rerank scores (all reranked chunks): %s", scores_all)
+    else:
+        chunk_ids_all = _extract_chunk_ids(unique_chunks)
 
     # 2. Filter by minimum rerank score if reranking is enabled
     if rerank_enabled and unique_chunks:
@@ -2825,6 +2847,7 @@ async def process_chunks_unified(
             filtered_count = original_count - len(unique_chunks)
             count_after_threshold = len(unique_chunks)
             scores_after_threshold = _extract_scores(unique_chunks)
+            chunk_ids_after_threshold = _extract_chunk_ids(unique_chunks)
 
             if filtered_count > 0:
                 logger.info(
@@ -2841,6 +2864,10 @@ async def process_chunks_unified(
                             "scores_all": scores_all,
                             "scores_after_threshold": scores_after_threshold,
                             "scores_final": [],
+                            "chunk_ids_all": chunk_ids_all,
+                            "chunk_ids_after_threshold": chunk_ids_after_threshold,
+                            "chunk_ids_after_chunk_top_k": [],
+                            "chunk_ids_final": [],
                             "count_input": origin_count,
                             "count_after_rerank": count_after_rerank,
                             "count_after_threshold": 0,
@@ -2853,6 +2880,9 @@ async def process_chunks_unified(
         else:
             count_after_threshold = len(unique_chunks)
             scores_after_threshold = _extract_scores(unique_chunks)
+            chunk_ids_after_threshold = _extract_chunk_ids(unique_chunks)
+    elif unique_chunks:
+        chunk_ids_after_threshold = _extract_chunk_ids(unique_chunks)
 
     # 3. Apply chunk_top_k limiting in strict rerank order.
     if query_param.chunk_top_k is not None and query_param.chunk_top_k > 0:
@@ -2862,6 +2892,7 @@ async def process_chunks_unified(
             f"Kept chunk_top-k: {len(unique_chunks)} chunks (deduplicated original: {origin_count})"
         )
     count_after_chunk_top_k = len(unique_chunks)
+    chunk_ids_after_chunk_top_k = _extract_chunk_ids(unique_chunks)
 
     multimodal_top_k = getattr(query_param, "multimodal_top_k", None)
     if multimodal_top_k is not None and unique_chunks:
@@ -2908,6 +2939,7 @@ async def process_chunks_unified(
         final_chunks.append(chunk_with_id)
 
     scores_final = _extract_scores(final_chunks)
+    chunk_ids_final = _extract_chunk_ids(final_chunks)
     if rerank_enabled:
         logger.info("Rerank scores (final kept chunks): %s", scores_final)
 
@@ -2921,6 +2953,10 @@ async def process_chunks_unified(
                 "scores_all": scores_all,
                 "scores_after_threshold": scores_after_threshold,
                 "scores_final": scores_final,
+                "chunk_ids_all": chunk_ids_all,
+                "chunk_ids_after_threshold": chunk_ids_after_threshold,
+                "chunk_ids_after_chunk_top_k": chunk_ids_after_chunk_top_k,
+                "chunk_ids_final": chunk_ids_final,
                 "count_input": origin_count,
                 "count_after_rerank": count_after_rerank,
                 "count_after_threshold": count_after_threshold,
