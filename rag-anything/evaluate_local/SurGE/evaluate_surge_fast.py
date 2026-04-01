@@ -25,6 +25,14 @@ _local_lightrag_root = _projects_root / "lightrag"
 if _local_lightrag_root.exists():
     sys.path.insert(0, str(_local_lightrag_root))
 
+from evaluate_local.ablation_flags import (
+    AblationFlags,
+    add_ablation_arguments,
+    apply_ablation_flags_to_settings,
+    as_bool,
+    validate_ablation_flags,
+)
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 RETRIEVAL_DIR = SCRIPT_DIR / "retrieval_results_fast"
 SURVEY_DIR = SCRIPT_DIR / "survey_results_fast"
@@ -79,15 +87,13 @@ def import_rag_dependencies():
         ) from exc
 
 
-def as_bool(v: str | bool) -> bool:
-    if isinstance(v, bool):
-        return v
-    t = str(v).strip().lower()
-    if t in {"1", "true", "yes", "y", "on"}:
-        return True
-    if t in {"0", "false", "no", "n", "off"}:
-        return False
-    raise argparse.ArgumentTypeError(f"invalid bool: {v}")
+def get_ablation_flags(args: argparse.Namespace) -> AblationFlags:
+    flags = getattr(args, "ablation_flags", None)
+    if isinstance(flags, AblationFlags):
+        return flags
+    flags = AblationFlags.from_namespace(args)
+    args.ablation_flags = flags
+    return flags
 
 
 def parse_k_list(raw: str) -> list[int]:
@@ -226,14 +232,20 @@ def settings_for_surge(args: argparse.Namespace) -> LocalRagSettings:
     s.working_dir_root = str(RAG_STORAGE_DIR)
     s.output_dir = str(RAG_OUTPUT_DIR)
     s.log_dir = str(LOG_DIR)
-    s.enable_entity_disambiguation = bool(args.enable_entity_disambiguation)
-    s.enable_synonym_linking = bool(args.enable_synonym_linking)
-    s.enable_multi_hop = bool(args.enable_multi_hop)
-    s.multi_hop_depth = int(args.multi_hop_depth)
-    s.ppr_damping = float(args.ppr_damping)
-    s.ppr_top_k = int(args.ppr_top_k)
-    s.passage_node_weight = float(args.passage_node_weight)
+    apply_ablation_flags_to_settings(s, get_ablation_flags(args))
     return s
+
+
+def build_query_params(args: argparse.Namespace, *, chunk_top_k: int) -> dict[str, Any]:
+    query_params = {
+        "mode": args.query_mode,
+        "top_k": args.top_k,
+        "chunk_top_k": chunk_top_k,
+        "enable_rerank": args.enable_rerank,
+        "rerank_score_scope": "all",
+    }
+    query_params.update(get_ablation_flags(args).to_query_kwargs())
+    return query_params
 
 
 def load_chunks(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
@@ -1487,18 +1499,7 @@ async def run_retrieval(args: argparse.Namespace) -> int:
         )
     rag = await service.get_rag(args.workspace_id)
     await ensure_rag_runtime_ready(rag, args.workspace_id)
-    query_params = {
-        "mode": args.query_mode,
-        "top_k": args.top_k,
-        "chunk_top_k": chunk_top_k,
-        "enable_rerank": args.enable_rerank,
-        "rerank_score_scope": "all",
-        "enable_multi_hop": args.enable_multi_hop,
-        "multi_hop_depth": args.multi_hop_depth,
-        "ppr_damping": args.ppr_damping,
-        "ppr_top_k": args.ppr_top_k,
-        "passage_node_weight": args.passage_node_weight,
-    }
+    query_params = build_query_params(args, chunk_top_k=chunk_top_k)
     sem = asyncio.Semaphore(max(1, args.max_concurrency))
     done = 0
     lock = asyncio.Lock()
@@ -1518,18 +1519,7 @@ async def run_retrieval(args: argparse.Namespace) -> int:
             try:
                 if not q:
                     raise ValueError("empty prefix_titles_query")
-                param = QueryParam(
-                    mode=args.query_mode,
-                    top_k=args.top_k,
-                    chunk_top_k=chunk_top_k,
-                    enable_rerank=args.enable_rerank,
-                    rerank_score_scope="all",
-                    enable_multi_hop=args.enable_multi_hop,
-                    multi_hop_depth=args.multi_hop_depth,
-                    ppr_damping=args.ppr_damping,
-                    ppr_top_k=args.ppr_top_k,
-                    passage_node_weight=args.passage_node_weight,
-                )
+                param = QueryParam(**query_params)
                 retrieval = await with_retries(lambda: rag.lightrag.aquery_data(q, param=param), label=f"query {qid}", retries=args.max_retries)
                 retrieved, warns = await map_chunks_to_doc_ids(
                     chunk_source_map=chunk_source_map,
@@ -1667,18 +1657,7 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
 
     rag = await service.get_rag(args.workspace_id)
     await ensure_rag_runtime_ready(rag, args.workspace_id)
-    query_params = {
-        "mode": args.query_mode,
-        "top_k": args.top_k,
-        "chunk_top_k": chunk_top_k,
-        "enable_rerank": args.enable_rerank,
-        "rerank_score_scope": "all",
-        "enable_multi_hop": args.enable_multi_hop,
-        "multi_hop_depth": args.multi_hop_depth,
-        "ppr_damping": args.ppr_damping,
-        "ppr_top_k": args.ppr_top_k,
-        "passage_node_weight": args.passage_node_weight,
-    }
+    query_params = build_query_params(args, chunk_top_k=chunk_top_k)
 
     sem = asyncio.Semaphore(max(1, args.max_concurrency))
     done = 0
@@ -1706,18 +1685,7 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
             try:
                 if not survey_title:
                     raise ValueError("empty survey_title")
-                param = QueryParam(
-                    mode=args.query_mode,
-                    top_k=args.top_k,
-                    chunk_top_k=chunk_top_k,
-                    enable_rerank=args.enable_rerank,
-                    rerank_score_scope="all",
-                    enable_multi_hop=args.enable_multi_hop,
-                    multi_hop_depth=args.multi_hop_depth,
-                    ppr_damping=args.ppr_damping,
-                    ppr_top_k=args.ppr_top_k,
-                    passage_node_weight=args.passage_node_weight,
-                )
+                param = QueryParam(**query_params)
                 retrieval = await with_retries(
                     lambda: rag.lightrag.aquery_data(survey_title, param=param),
                     label=f"survey {survey_id}",
@@ -2039,16 +2007,7 @@ def validate_args(args: argparse.Namespace) -> None:
         )
     if args.max_retries < 0:
         raise ValueError(f"--max-retries must be >= 0, got {args.max_retries}")
-    if args.multi_hop_depth <= 0:
-        raise ValueError(f"--multi-hop-depth must be > 0, got {args.multi_hop_depth}")
-    if args.ppr_top_k <= 0:
-        raise ValueError(f"--ppr-top-k must be > 0, got {args.ppr_top_k}")
-    if not (0.0 < args.ppr_damping < 1.0):
-        raise ValueError(f"--ppr-damping must be in (0,1), got {args.ppr_damping}")
-    if args.passage_node_weight < 0:
-        raise ValueError(
-            f"--passage-node-weight must be >= 0, got {args.passage_node_weight}"
-        )
+    args.ablation_flags = validate_ablation_flags(args, naming_style="hyphen")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2109,13 +2068,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--max-retries", type=int, default=0)
     p.add_argument("--limit", type=int, default=0, help="0 means all queries/surveys")
-    p.add_argument("--enable-entity-disambiguation", type=as_bool, default=True)
-    p.add_argument("--enable-synonym-linking", type=as_bool, default=False)
-    p.add_argument("--enable-multi-hop", type=as_bool, default=False)
-    p.add_argument("--multi-hop-depth", type=int, default=2)
-    p.add_argument("--ppr-damping", type=float, default=0.5)
-    p.add_argument("--ppr-top-k", type=int, default=50)
-    p.add_argument("--passage-node-weight", type=float, default=0.05)
+    add_ablation_arguments(p)
     return p
 
 

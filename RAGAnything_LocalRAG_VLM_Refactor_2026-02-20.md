@@ -2003,3 +2003,55 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 
 - 本次不改 `evaluate_shared/evaluate_surge/evaluate_surge_fast` 业务逻辑与指标计算。
 - 仅调整核心客户端初始化阶段的网络路由行为，目标是提升本地 vLLM 链路稳定性。
+
+---
+
+## 增量更新（2026-04-01，评测脚本开关链路去重复收敛，仅保留 evaluate_surge_fast + evaluate_shared）
+
+### 目标
+
+- 按“先复用、禁止平行新增冗余逻辑”的原则，收敛 `V1/V2/V3` 开关处理链路。
+- 避免 `evaluate_surge_fast` 与 `evaluate_shared` 各自维护解析/校验/注入逻辑导致漂移。
+- 明确本轮不改 `evaluate_surge.py`（按当前需求仅保留 fast + shared）。
+
+### 变更文件
+
+| 文件 | 改动 |
+|------|------|
+| `rag-anything/evaluate_local/ablation_flags.py` | 新增共享模块：统一 bool 解析、参数注册（含 `--xxx` 与 `--xxx_yyy` 兼容别名）、边界校验、`LocalRagSettings` 注入、V3 query kwargs 生成 |
+| `rag-anything/evaluate_local/SurGE/evaluate_surge_fast.py` | 移除本地重复的 V1/V2/V3 解析/校验/赋值；改为复用共享模块；`query_params` 与 `QueryParam(**query_params)`统一同源，避免配置字典与实际执行参数分叉 |
+| `rag-anything/evaluate_local/DocBench/evaluate_shared.py` | 解析与校验改为共享模块；将分散的 7 个开关参数收敛为单一 `AblationFlags` 对象在函数间传递，减少重复与漏传风险 |
+
+### 改动前后对照
+
+- 改动前：
+  - 两份评测脚本分别维护相同开关逻辑（解析、校验、settings 注入、query 注入），存在重复与漂移风险。
+  - `evaluate_shared` 采用手工字符串转 bool，多处重复代码。
+- 改动后：
+  - 开关处理收敛到一处，参数入口、边界校验、settings/query 注入口径统一。
+  - `evaluate_shared` 与 `evaluate_surge_fast` 保持同一套开关契约。
+  - 兼容保留下划线历史参数写法，避免已有脚本失效。
+
+### 本轮检查（按固定执行流程）
+
+1. 语法检查（通过）
+- `python -m py_compile rag-anything/evaluate_local/ablation_flags.py rag-anything/evaluate_local/SurGE/evaluate_surge_fast.py rag-anything/evaluate_local/DocBench/evaluate_shared.py`
+
+2. 逻辑级检查（通过，内联断言）
+- 共享模块主链路：解析 -> 校验 -> settings 注入 -> query kwargs 一致性通过。
+- 边界/反例：
+  - `multi_hop_depth<=0`、`ppr_top_k<=0`、`ppr_damping∉(0,1)`、`passage_node_weight<0` 均正确拒绝。
+  - 非法 bool（如 `maybe`）正确报错。
+- 脚本链路一致性：
+  - `evaluate_surge_fast`：`build_parser + validate_args + build_query_params` 输出与开关一致。
+  - `evaluate_shared`：`_build_query_params` 与 `_build_shared_settings` 均由同一 `AblationFlags` 驱动。
+
+3. CLI 行为检查（通过）
+- `python rag-anything/evaluate_local/SurGE/evaluate_surge_fast.py --help`
+- `python rag-anything/evaluate_local/DocBench/evaluate_shared.py --help`
+- 两者均展示 hyphen + underscore 双参数别名，兼容历史调用。
+
+### 兼容性说明
+
+- 本次仅做开关链路收敛，不改评测指标定义、不改输出结构。
+- 保留历史下划线参数别名；推荐继续使用连字符参数名。
