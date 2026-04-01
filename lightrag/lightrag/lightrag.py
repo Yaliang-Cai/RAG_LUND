@@ -100,6 +100,8 @@ from lightrag.utils import (
     EmbeddingFunc,
     always_get_an_event_loop,
     compute_mdhash_id,
+    compute_entity_id,
+    compute_entity_vdb_id,
     lazy_external_import,
     priority_limit_async_func_call,
     get_content_summary,
@@ -183,6 +185,24 @@ class LightRAG:
     # ---
     log_level: int | None = field(default=None)
     log_file_path: str | None = field(default=None)
+
+    # Feature Toggles (V1/V2/V3)
+    # ---
+
+    enable_entity_disambiguation: bool = field(default=True)
+    """V1 base toggle: use composite key (name|type) as entity ID to resolve homonym ambiguity. V2/V3 depend on this."""
+
+    enable_synonym_linking: bool = field(default=False)
+    """V2 orthogonal toggle: build SYNONYM edges during ingestion. Independent of enable_multi_hop."""
+
+    synonymy_threshold: float = field(default=0.8)
+    """Cosine similarity threshold for synonym detection (aligned with HippoRAG2 default)."""
+
+    synonymy_topk: int = field(default=100)
+    """Number of KNN neighbors to check for synonym candidates (aligned with HippoRAG2 max 100/entity)."""
+
+    synonymy_min_entity_len: int = field(default=2)
+    """Minimum alphanumeric/CJK character count in entity name for synonym detection."""
 
     # Query parameters
     # ---
@@ -648,7 +668,7 @@ class LightRAG:
             namespace=NameSpace.VECTOR_STORE_ENTITIES,
             workspace=self.workspace,
             embedding_func=self.embedding_func,
-            meta_fields={"entity_name", "source_id", "content", "file_path"},
+            meta_fields={"entity_name", "entity_id", "source_id", "content", "file_path"},
         )
         self.relationships_vdb: BaseVectorStorage = self.vector_db_storage_cls(  # type: ignore
             namespace=NameSpace.VECTOR_STORE_RELATIONSHIPS,
@@ -723,8 +743,16 @@ class LightRAG:
                 self.doc_status,
             ):
                 if storage:
-                    # logger.debug(f"Initializing storage: {storage}")
-                    await storage.initialize()
+                    storage_name = storage.__class__.__name__
+                    try:
+                        # logger.debug(f"Initializing storage: {storage}")
+                        await storage.initialize()
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to initialize {storage_name}: {e}",
+                            exc_info=True
+                        )
+                        raise
 
             self._storages_status = StoragesStatus.INITIALIZED
             logger.debug("All storage types initialized")
@@ -2024,6 +2052,19 @@ class LightRAG:
                                     file_path=file_path,
                                 )
 
+                                # V2: Synonym linking (ingestion-only, orthogonal to V3)
+                                if self.enable_synonym_linking:
+                                    from lightrag.synonym_linking import build_synonym_edges
+                                    await build_synonym_edges(
+                                        entities_vdb=self.entities_vdb,
+                                        knowledge_graph_inst=self.chunk_entity_relation_graph,
+                                        new_entity_ids=None,  # process all entities in this batch
+                                        synonymy_threshold=self.synonymy_threshold,
+                                        synonymy_topk=self.synonymy_topk,
+                                        min_entity_len=self.synonymy_min_entity_len,
+                                        enable_entity_disambiguation=self.enable_entity_disambiguation,
+                                    )
+
                                 # Record processing end time
                                 processing_end_time = int(time.time())
 
@@ -2290,13 +2331,28 @@ class LightRAG:
 
             # Insert entities into knowledge graph
             all_entities_data: list[dict[str, str]] = []
+            _disambig = self.enable_entity_disambiguation
+            plain_name_to_entity_id: dict[str, str] = {}
             for entity_data in custom_kg.get("entities", []):
                 entity_name = entity_data["entity_name"]
                 entity_type = entity_data.get("entity_type", "UNKNOWN")
+                entity_id = compute_entity_id(entity_name, entity_type, _disambig)
                 description = entity_data.get("description", "No description provided")
                 source_chunk_id = entity_data.get("source_id", "UNKNOWN")
                 source_id = chunk_to_source_map.get(source_chunk_id, "UNKNOWN")
                 file_path = entity_data.get("file_path", "custom_kg")
+
+                previous_entity_id = plain_name_to_entity_id.get(entity_name)
+                if previous_entity_id and previous_entity_id != entity_id:
+                    logger.warning(
+                        "Custom KG contains ambiguous entity_name '%s' mapped to multiple entity_id values "
+                        "('%s', '%s'). Relationship records with plain-name endpoints will use the first mapping.",
+                        entity_name,
+                        previous_entity_id,
+                        entity_id,
+                    )
+                else:
+                    plain_name_to_entity_id[entity_name] = entity_id
 
                 # Log if source_id is UNKNOWN
                 if source_id == "UNKNOWN":
@@ -2306,7 +2362,7 @@ class LightRAG:
 
                 # Prepare node data
                 node_data: dict[str, str] = {
-                    "entity_id": entity_name,
+                    "entity_id": entity_id,
                     "entity_type": entity_type,
                     "description": description,
                     "source_id": source_id,
@@ -2315,7 +2371,7 @@ class LightRAG:
                 }
                 # Insert node data into the knowledge graph
                 await self.chunk_entity_relation_graph.upsert_node(
-                    entity_name, node_data=node_data
+                    entity_id, node_data=node_data
                 )
                 node_data["entity_name"] = entity_name
                 all_entities_data.append(node_data)
@@ -2324,8 +2380,20 @@ class LightRAG:
             # Insert relationships into knowledge graph
             all_relationships_data: list[dict[str, str]] = []
             for relationship_data in custom_kg.get("relationships", []):
-                src_id = relationship_data["src_id"]
-                tgt_id = relationship_data["tgt_id"]
+                src_name = relationship_data["src_id"]
+                tgt_name = relationship_data["tgt_id"]
+                src_id = plain_name_to_entity_id.get(
+                    src_name,
+                    compute_entity_id(
+                        src_name, relationship_data.get("src_type", "UNKNOWN"), _disambig
+                    ),
+                )
+                tgt_id = plain_name_to_entity_id.get(
+                    tgt_name,
+                    compute_entity_id(
+                        tgt_name, relationship_data.get("tgt_type", "UNKNOWN"), _disambig
+                    ),
+                )
                 description = relationship_data["description"]
                 keywords = relationship_data["keywords"]
                 weight = relationship_data.get("weight", 1.0)
@@ -2336,7 +2404,7 @@ class LightRAG:
                 # Log if source_id is UNKNOWN
                 if source_id == "UNKNOWN":
                     logger.warning(
-                        f"Relationship from '{src_id}' to '{tgt_id}' has an UNKNOWN source_id. Please check the source mapping."
+                        f"Relationship from '{src_name}' to '{tgt_name}' has an UNKNOWN source_id. Please check the source mapping."
                     )
 
                 # Check if nodes exist in the knowledge graph
@@ -2385,8 +2453,9 @@ class LightRAG:
 
             # Insert entities into vector storage with consistent format
             data_for_vdb = {
-                compute_mdhash_id(dp["entity_name"], prefix="ent-"): {
+                compute_entity_vdb_id(dp["entity_name"], dp["entity_type"], _disambig): {
                     "content": dp["entity_name"] + "\n" + dp["description"],
+                    "entity_id": dp["entity_id"],
                     "entity_name": dp["entity_name"],
                     "source_id": dp["source_id"],
                     "description": dp["description"],
@@ -2609,26 +2678,13 @@ class LightRAG:
         """
         global_config = asdict(self)
 
-        # Create a copy of param to avoid modifying the original
-        data_param = QueryParam(
-            mode=param.mode,
+        # Create a copy of param to avoid modifying the original while preserving
+        # all current/future QueryParam fields (including V3 knobs).
+        data_param = replace(
+            param,
             only_need_context=True,  # Skip LLM generation, only get context and data
             only_need_prompt=False,
-            response_type=param.response_type,
             stream=False,  # Data retrieval doesn't need streaming
-            top_k=param.top_k,
-            chunk_top_k=param.chunk_top_k,
-            max_entity_tokens=param.max_entity_tokens,
-            max_relation_tokens=param.max_relation_tokens,
-            max_total_tokens=param.max_total_tokens,
-            hl_keywords=param.hl_keywords,
-            ll_keywords=param.ll_keywords,
-            conversation_history=param.conversation_history,
-            history_turns=param.history_turns,
-            model_func=param.model_func,
-            user_prompt=param.user_prompt,
-            enable_rerank=param.enable_rerank,
-            rerank_score_scope=param.rerank_score_scope,
         )
 
         query_result = None
@@ -3426,10 +3482,26 @@ class LightRAG:
 
             try:
                 # Process entities
+                entity_vdb_delete_candidates: dict[str, tuple[str, str]] = {}
                 for node_data in affected_nodes:
-                    node_label = node_data.get("entity_id")
+                    node_label = node_data.get("entity_id") or node_data.get("id")
                     if not node_label:
                         continue
+                    candidate_name = node_data.get("entity_name") or node_label
+                    candidate_type = node_data.get("entity_type", "")
+                    if (
+                        candidate_name == node_label
+                        and "|" in node_label
+                        and not candidate_type
+                    ):
+                        parsed_name, parsed_type = node_label.rsplit("|", 1)
+                        if parsed_name and parsed_type:
+                            candidate_name = parsed_name
+                            candidate_type = parsed_type
+                    entity_vdb_delete_candidates[node_label] = (
+                        candidate_name,
+                        candidate_type,
+                    )
 
                     existing_sources: list[str] = []
                     graph_sources: list[str] = []
@@ -3736,11 +3808,21 @@ class LightRAG:
                     )
 
                     # Delete from vector vdb
-                    entity_vdb_ids = [
-                        compute_mdhash_id(entity, prefix="ent-")
-                        for entity in entities_to_delete
-                    ]
-                    await self.entities_vdb.delete(entity_vdb_ids)
+                    # Keep both legacy hash(key) and canonical (name,type)-derived IDs
+                    # to avoid leaving stale vectors when historical keys are mixed.
+                    _disambig = getattr(self, "enable_entity_disambiguation", True)
+                    entity_vdb_ids: set[str] = set()
+                    for entity_id in entities_to_delete:
+                        entity_vdb_ids.add(compute_mdhash_id(entity_id, prefix="ent-"))
+                        candidate = entity_vdb_delete_candidates.get(entity_id)
+                        if candidate:
+                            candidate_name, candidate_type = candidate
+                            entity_vdb_ids.add(
+                                compute_entity_vdb_id(
+                                    candidate_name, candidate_type, _disambig
+                                )
+                            )
+                    await self.entities_vdb.delete(list(entity_vdb_ids))
 
                     # Delete from entity_chunks storage
                     if self.entity_chunks:
@@ -3954,11 +4036,14 @@ class LightRAG:
                     pipeline_status["history_messages"].append(completion_msg)
                     logger.info(completion_msg)
 
-    async def adelete_by_entity(self, entity_name: str) -> DeletionResult:
+    async def adelete_by_entity(
+        self, entity_name: str, entity_type: str = ""
+    ) -> DeletionResult:
         """Asynchronously delete an entity and all its relationships.
 
         Args:
-            entity_name: Name of the entity to delete.
+            entity_name: Plain name of the entity to delete.
+            entity_type: Entity type.  Required when entity disambiguation is enabled.
 
         Returns:
             DeletionResult: An object containing the outcome of the deletion process.
@@ -3970,19 +4055,21 @@ class LightRAG:
             self.entities_vdb,
             self.relationships_vdb,
             entity_name,
+            entity_type,
         )
 
-    def delete_by_entity(self, entity_name: str) -> DeletionResult:
+    def delete_by_entity(self, entity_name: str, entity_type: str = "") -> DeletionResult:
         """Synchronously delete an entity and all its relationships.
 
         Args:
-            entity_name: Name of the entity to delete.
+            entity_name: Plain name of the entity to delete.
+            entity_type: Entity type.  Required when entity disambiguation is enabled.
 
         Returns:
             DeletionResult: An object containing the outcome of the deletion process.
         """
         loop = always_get_an_event_loop()
-        return loop.run_until_complete(self.adelete_by_entity(entity_name))
+        return loop.run_until_complete(self.adelete_by_entity(entity_name, entity_type))
 
     async def adelete_by_relation(
         self, source_entity: str, target_entity: str

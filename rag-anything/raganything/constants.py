@@ -13,14 +13,15 @@ from pathlib import Path as _Path
 
 # Data root: constants.py lives at raganything/constants.py
 # .parent.parent → RAG_LUND/rag-anything/
-# / "rag-anything" → RAG_LUND/rag-anything/rag-anything/  (matches web-server CWD behaviour)
-_PKG_ROOT = _Path(__file__).resolve().parent.parent / "rag-anything"
+# / "rag_data" → RAG_LUND/rag-anything/rag_data/
+_PKG_ROOT = _Path(__file__).resolve().parent.parent / "rag_data"
 
 # =============================================================================
 # Directory defaults
 # =============================================================================
 DEFAULT_OUTPUT_DIR = str(_PKG_ROOT / "output")
 DEFAULT_WORKING_DIR_ROOT = str(_PKG_ROOT / "rag_workspace")
+DEFAULT_UPLOADS_DIR = str(_PKG_ROOT / "uploads")
 DEFAULT_LOG_DIR = str(_PKG_ROOT / "logs")
 
 # =============================================================================
@@ -205,6 +206,21 @@ DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE = 2
 DEFAULT_ENABLE_INLINE_CITATIONS = True
 
 # =============================================================================
+# V2: Synonym Linking (neo4j-milvus branch)
+# =============================================================================
+DEFAULT_ENABLE_SYNONYM_LINKING = False          # Enable/disable V2
+DEFAULT_SYNONYMY_THRESHOLD = 0.8                # cosine similarity threshold for synonyms
+DEFAULT_SYNONYMY_TOPK = 100                     # KNN top-K for synonym detection
+DEFAULT_SYNONYMY_MIN_ENTITY_LEN = 2             # Min entity name length (filter short entities)
+
+# =============================================================================
+# V3: PPR Multi-hop Reasoning (neo4j-milvus branch)
+# =============================================================================
+DEFAULT_ENABLE_MULTI_HOP = False                # Enable/disable V3 PPR multi-hop in queries
+DEFAULT_MULTI_HOP_DEPTH = 2                     # PPR graph search depth
+DEFAULT_PPR_DAMPING = 0.5                       # PPR damping factor (alpha)
+DEFAULT_PPR_TOP_K = 50                          # Number of chunks returned by PPR
+DEFAULT_PASSAGE_NODE_WEIGHT = 0.05              # HippoRAG2 param: DPR chunk score scaling in PPR seed
 # Resilience & callback (service-level optional controls)
 # =============================================================================
 # 是否在 LocalRagService 层启用重试与熔断机制。

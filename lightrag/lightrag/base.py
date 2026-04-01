@@ -209,6 +209,22 @@ class QueryParam:
     - False: fallback to official-style available_chunk_tokens token truncation.
     """
 
+    # V3: PPR Multi-hop Reasoning (orthogonal to V2 synonym linking)
+    enable_multi_hop: bool = False
+    """Enable PPR multi-hop reasoning in retrieval. Independent of enable_synonym_linking."""
+
+    multi_hop_depth: int = 2
+    """Max depth for subgraph extraction around seed entities."""
+
+    ppr_damping: float = 0.5
+    """PPR damping factor (alpha). Lower = more spread, higher = stay near seeds."""
+
+    ppr_top_k: int = 50
+    """Number of top PPR-ranked chunk nodes to include in final results."""
+
+    passage_node_weight: float = 0.05
+    """HippoRAG2 parameter: scaling factor for DPR chunk scores in PPR seed weights."""
+
 
 @dataclass
 class StorageNameSpace(ABC):
@@ -323,8 +339,13 @@ class BaseVectorStorage(StorageNameSpace, ABC):
         """
 
     @abstractmethod
-    async def delete_entity(self, entity_name: str) -> None:
+    async def delete_entity(self, entity_name: str, entity_type: str = "") -> None:
         """Delete a single entity by its name.
+
+        Args:
+            entity_name: The plain (non-composite) name of the entity.
+            entity_type: The entity type.  Required when entity disambiguation is
+                enabled so the correct composite VDB key (name|type) can be located.
 
         Importance notes for in-memory storage:
         1. Changes will be persisted to disk during the next index_done_callback
@@ -702,6 +723,55 @@ class BaseGraphStorage(StorageNameSpace, ABC):
             indicating whether the graph was truncated due to max_nodes limit
         """
 
+    async def get_subgraph_for_ppr(
+        self, seed_node_ids: list[str], max_depth: int = 3
+    ) -> tuple[list[dict], list[dict]]:
+        """Get a subgraph centred on seed nodes for PPR computation.
+
+        Default implementation uses existing graph traversal.
+        Override in backends (e.g. Neo4j) for optimised Cypher queries.
+
+        Returns:
+            (nodes, edges) where each node is a dict with at least ``entity_id``,
+            and each edge is a dict with ``src``, ``tgt``, and optional ``weight``.
+        """
+        visited_nodes: dict[str, dict] = {}
+        visited_edges: list[dict] = {}.__class__([])  # just a list
+        edge_set: set[tuple[str, str]] = set()
+
+        frontier = list(seed_node_ids)
+        for _ in range(max_depth):
+            next_frontier: list[str] = []
+            for nid in frontier:
+                if nid in visited_nodes:
+                    continue
+                node = await self.get_node(nid)
+                if node is None:
+                    continue
+                visited_nodes[nid] = {**node, "entity_id": nid}
+
+                edges = await self.get_node_edges(nid)
+                if not edges:
+                    continue
+                for src, tgt in edges:
+                    edge_key = tuple(sorted((src, tgt)))
+                    if edge_key in edge_set:
+                        continue
+                    edge_set.add(edge_key)
+                    edge_data = await self.get_edge(src, tgt)
+                    visited_edges.append({
+                        "src": src,
+                        "tgt": tgt,
+                        "weight": float(edge_data.get("weight", 1.0)) if edge_data else 1.0,
+                    })
+                    if src not in visited_nodes:
+                        next_frontier.append(src)
+                    if tgt not in visited_nodes:
+                        next_frontier.append(tgt)
+            frontier = next_frontier
+
+        return list(visited_nodes.values()), visited_edges
+
     @abstractmethod
     async def get_all_nodes(self) -> list[dict]:
         """Get all nodes in the graph.
@@ -876,7 +946,7 @@ class StoragesStatus(str, Enum):
 class DeletionResult:
     """Represents the result of a deletion operation."""
 
-    status: Literal["success", "not_found", "fail"]
+    status: Literal["success", "not_found", "not_allowed", "fail"]
     doc_id: str
     message: str
     status_code: int = 200

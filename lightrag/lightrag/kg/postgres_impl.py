@@ -34,7 +34,7 @@ from ..base import (
 )
 from ..exceptions import DataMigrationError
 from ..namespace import NameSpace, is_namespace
-from ..utils import logger
+from ..utils import logger, compute_entity_vdb_id
 from ..kg.shared_storage import get_data_init_lock
 
 import pipmaster as pm
@@ -3044,20 +3044,19 @@ class PGVectorStorage(BaseVectorStorage):
                 f"[{self.workspace}] Error while deleting vectors from {self.namespace}: {e}"
             )
 
-    async def delete_entity(self, entity_name: str) -> None:
+    async def delete_entity(self, entity_name: str, entity_type: str = "") -> None:
         """Delete an entity by its name from the vector storage.
 
         Args:
-            entity_name: The name of the entity to delete
+            entity_name: Plain name of the entity to delete.
+            entity_type: Entity type.  When entity disambiguation is enabled and
+                entity_type is provided, the DELETE is narrowed to that specific type
+                so that same-named entities of different types are not affected.
         """
         try:
-            # Construct SQL to delete the entity using dynamic table name
-            delete_sql = f"""DELETE FROM {self.table_name}
-                            WHERE workspace=$1 AND entity_name=$2"""
-
-            await self.db.execute(
-                delete_sql, {"workspace": self.workspace, "entity_name": entity_name}
-            )
+            _disambig = self.global_config.get("enable_entity_disambiguation", True)
+            entity_id = compute_entity_vdb_id(entity_name, entity_type, _disambig)
+            await self.delete([entity_id])
             logger.debug(
                 f"[{self.workspace}] Successfully deleted entity {entity_name}"
             )

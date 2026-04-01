@@ -408,6 +408,14 @@ class DeleteDocRequest(BaseModel):
 
 class DeleteEntityRequest(BaseModel):
     entity_name: str = Field(..., description="The name of the entity to delete.")
+    entity_type: str = Field(
+        "",
+        description=(
+            "The type of the entity (e.g. 'PERSON', 'ORGANIZATION'). "
+            "Required when entity disambiguation is enabled so the correct "
+            "composite graph/VDB key (name|type) can be resolved."
+        ),
+    )
 
     @field_validator("entity_name", mode="after")
     @classmethod
@@ -2367,6 +2375,7 @@ def create_document_routes(
         try:
             # Use drop method to clear all data
             drop_tasks = []
+            active_storages = []
             storages = [
                 rag.text_chunks,
                 rag.full_docs,
@@ -2390,6 +2399,7 @@ def create_document_routes(
             for storage in storages:
                 if storage is not None:
                     drop_tasks.append(storage.drop())
+                    active_storages.append(storage)
 
             # Wait for all drop tasks to complete
             drop_results = await asyncio.gather(*drop_tasks, return_exceptions=True)
@@ -2399,16 +2409,25 @@ def create_document_routes(
             storage_success_count = 0
             storage_error_count = 0
 
-            for i, result in enumerate(drop_results):
-                storage_name = storages[i].__class__.__name__
+            for storage, result in zip(active_storages, drop_results):
+                storage_name = storage.__class__.__name__
                 if isinstance(result, Exception):
                     error_msg = f"Error dropping {storage_name}: {str(result)}"
                     errors.append(error_msg)
                     logger.error(error_msg)
                     storage_error_count += 1
+                elif (
+                    isinstance(result, dict)
+                    and str(result.get("status", "")).lower() not in ("", "success")
+                ):
+                    detail = result.get("message", "unknown error")
+                    error_msg = f"Error dropping {storage_name}: {detail}"
+                    errors.append(error_msg)
+                    logger.error(error_msg)
+                    storage_error_count += 1
                 else:
-                    namespace = storages[i].namespace
-                    workspace = storages[i].workspace
+                    namespace = getattr(storage, "namespace", "unknown")
+                    workspace = getattr(storage, "workspace", "unknown")
                     logger.info(
                         f"Successfully dropped {storage_name}: {workspace}/{namespace}"
                     )
@@ -2838,7 +2857,9 @@ def create_document_routes(
             HTTPException: If the entity is not found (404) or an error occurs (500).
         """
         try:
-            result = await rag.adelete_by_entity(entity_name=request.entity_name)
+            result = await rag.adelete_by_entity(
+                entity_name=request.entity_name, entity_type=request.entity_type
+            )
             if result.status == "not_found":
                 raise HTTPException(status_code=404, detail=result.message)
             if result.status == "fail":

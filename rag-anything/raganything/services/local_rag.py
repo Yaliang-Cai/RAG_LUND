@@ -19,11 +19,14 @@ import logging.config
 import os
 import argparse
 import ipaddress
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import urlparse
+
+from dotenv import load_dotenv
 
 import numpy as np
 from lightrag.types import GPTKeywordExtractionFormat
@@ -72,6 +75,10 @@ from raganything.constants import (
     DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
     DEFAULT_MIN_RERANK_SCORE,
     DEFAULT_ENABLE_INLINE_CITATIONS,
+    DEFAULT_TOP_K,
+    DEFAULT_CHUNK_TOP_K,
+    DEFAULT_QUERY_MODE,
+    DEFAULT_ENABLE_RERANK,
     DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID,
     DEFAULT_ENABLE_RESILIENCE,
     DEFAULT_RESILIENCE_MAX_ATTEMPTS,
@@ -83,6 +90,8 @@ from raganything.constants import (
     DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS,
     DEFAULT_ENABLE_METRICS_CALLBACK,
     DEFAULT_ENABLE_CALLBACK_EVENT_LOG,
+    DEFAULT_UPLOADS_DIR,
+    DEFAULT_SUPPORTED_FILE_EXTENSIONS,
 )
 from raganything.resilience import CircuitBreaker, async_retry
 from raganything.query_message_repack import repack_query_messages
@@ -118,6 +127,7 @@ class LocalRagSettings:
 
     working_dir_root: str = DEFAULT_WORKING_DIR_ROOT
     output_dir: str = DEFAULT_OUTPUT_DIR
+    uploads_dir: str = DEFAULT_UPLOADS_DIR
     log_dir: str = DEFAULT_LOG_DIR
 
     vllm_api_base: str = DEFAULT_VLLM_API_BASE
@@ -192,6 +202,7 @@ class LocalRagSettings:
             device=os.getenv("RAGANYTHING_DEVICE", DEFAULT_DEVICE),
             working_dir_root=os.getenv("RAGANYTHING_WORKDIR_ROOT", DEFAULT_WORKING_DIR_ROOT),
             output_dir=os.getenv("RAGANYTHING_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
+            uploads_dir=os.getenv("RAGANYTHING_UPLOADS_DIR", DEFAULT_UPLOADS_DIR),
             embedding_dim=int(os.getenv("RAGANYTHING_EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM))),
             max_token_size=int(os.getenv("RAGANYTHING_MAX_TOKEN_SIZE", str(DEFAULT_MAX_TOKEN_SIZE))),
             temperature=float(os.getenv("RAGANYTHING_TEMPERATURE", str(DEFAULT_TEMPERATURE))),
@@ -1192,7 +1203,7 @@ class LocalRagService:
             self.settings.multimodal_cancel_grace_seconds
         )
 
-    def _build_rag(self, working_dir: str) -> RAGAnything:
+    def _build_rag(self, working_dir: str, workspace_id: str) -> RAGAnything:
         config = RAGAnythingConfig(
             working_dir=working_dir,
             enable_image_processing=True,
@@ -1206,6 +1217,10 @@ class LocalRagService:
             vision_model_func=self.vision_model_func,
             embedding_func=self.embedding_func,
             lightrag_kwargs={
+                # workspace 使 Neo4j 和 Qdrant 按工作空间隔离数据；
+                # 不传则 LightRAG 默认读 WORKSPACE 环境变量，空字符串时
+                # Neo4JStorage 回退为 "base"，导致所有工作空间共用同一标签。
+                "workspace": workspace_id,
                 "rerank_model_func": self.rerank_func,
                 "tokenizer": self.lightrag_tokenizer,
                 "chunk_token_size": self.settings.chunk_token_size,
@@ -1227,6 +1242,8 @@ class LocalRagService:
                 # rerank 后保留 chunk 的最低分数（LightRAG 默认 0.0 = 不过滤）
                 # BGE-reranker-v2-m3 相关 chunk 典型得分 >0.5，不相关 <0.3
                 "min_rerank_score": DEFAULT_MIN_RERANK_SCORE,
+                "graph_storage": "Neo4JStorage",
+                "vector_storage": "QdrantVectorDBStorage",
             },
         )
 
@@ -1235,7 +1252,7 @@ class LocalRagService:
             if workspace_id in self._rag_instances:
                 return self._rag_instances[workspace_id]
             working_dir = str(Path(self.settings.working_dir_root) / workspace_id)
-            rag = self._build_rag(working_dir)
+            rag = self._build_rag(working_dir, workspace_id)
             self._register_callbacks_to_rag(rag)
             self._rag_instances[workspace_id] = rag
             return rag
@@ -1304,7 +1321,11 @@ class LocalRagService:
                         parse_method="auto",
                     )
                 else:
-                    await rag.process_folder_complete(str(file_path_obj), recursive=False)
+                    await rag.process_folder_complete(
+                        str(file_path_obj),
+                        output_dir=output_dir,
+                        recursive=False,
+                    )
             finally:
                 if old_chunking_func is not None:
                     # Restore both the kwargs and the live instance (if now initialized)
@@ -1386,10 +1407,10 @@ class LocalRagService:
         self,
         workspace_id: str,
         query: str,
-        mode: str = "hybrid",
-        top_k: int = 10,
-        chunk_top_k: int = 5,
-        enable_rerank: bool = True,
+        mode: str = DEFAULT_QUERY_MODE,
+        top_k: int = DEFAULT_TOP_K,
+        chunk_top_k: int = DEFAULT_CHUNK_TOP_K,
+        enable_rerank: bool = DEFAULT_ENABLE_RERANK,
     ):
         """Async generator — yields structured events via LightRAG aquery_llm().
 
@@ -1438,7 +1459,9 @@ class LocalRagService:
 
 
 if __name__ == "__main__":
-    
+    # 加载 .env 文件中的环境变量
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="RAG 后台管理工具")
     parser.add_argument("--path", "-p", required=True, help="要入库的文件或文件夹路径")
     parser.add_argument("--id", "-i", required=True, help="工作空间名称 (workspace_id)")
@@ -1451,16 +1474,42 @@ if __name__ == "__main__":
 
         target_path = args.path
         workspace_name = args.id
-        
+
         print(f"开始处理: {target_path}")
         print(f"目标工作区: {settings.working_dir_root}/{workspace_name}")
 
+        # output_dir 与 Web UI 保持一致：output/{workspace_id}/
+        workspace_output = str(Path(settings.output_dir) / workspace_name)
+
+        # 将源文件复制到 uploads/{workspace_id}/，使 /uploads 端点可见
+        # 使用 settings.uploads_dir 保证与服务器读取的路径一致
+        upload_workspace_dir = Path(settings.uploads_dir) / workspace_name
+        upload_workspace_dir.mkdir(parents=True, exist_ok=True)
+        supported_exts = {ext.strip().lower() for ext in DEFAULT_SUPPORTED_FILE_EXTENSIONS.split(",")}
+        target_path_obj = Path(target_path)
+        if target_path_obj.is_file():
+            files_to_register = [target_path_obj]
+        else:
+            # 只注册顶层文件（与 process_folder_complete recursive=False 保持一致）
+            files_to_register = [
+                p for p in target_path_obj.glob("*")
+                if p.is_file() and p.suffix.lower() in supported_exts
+            ]
+        for src in files_to_register:
+            dest = upload_workspace_dir / src.name
+            if not dest.exists():
+                shutil.copy2(str(src), str(dest))
+
         try:
-            await service.ingest(file_path=target_path, workspace_id=workspace_name)
+            await service.ingest(
+                file_path=target_path,
+                workspace_id=workspace_name,
+                output_dir=workspace_output,
+            )
 
             print(f"\n 入库成功！")
             print(f"知识图谱已更新: {settings.working_dir_root}/{workspace_name}/graph_chunk_entity_relation.graphml")
-            print(f"Markdown 已生成: {settings.output_dir}/{workspace_name}/")
+            print(f"Markdown 已生成: {workspace_output}/")
 
         except Exception as e:
             print(f"\n 发生错误: {e}")

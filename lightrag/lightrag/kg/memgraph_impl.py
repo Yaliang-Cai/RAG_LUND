@@ -769,9 +769,9 @@ class MemgraphStorage(BaseGraphStorage):
             raise RuntimeError(
                 "Memgraph driver is not initialized. Call 'await initialize()' first."
             )
+        workspace_label = self._get_workspace_label()
         try:
             async with self._driver.session(database=self._DATABASE) as session:
-                workspace_label = self._get_workspace_label()
                 query = f"MATCH (n:`{workspace_label}`) DETACH DELETE n"
                 result = await session.run(query)
                 await result.consume()

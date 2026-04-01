@@ -1892,6 +1892,82 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 
 ---
 
+## 增量更新（2026-03-30，main -> neo4j-milvus 合并说明：冲突解决 + 高风险语义修复）
+
+### 目标
+
+- 在 `neo4j-milvus` 分支合入 `main`，不改当前 `main` 工作区。
+- 解决文本冲突，并修复自动合并未报错但有高风险的语义问题。
+- 保持改动最小，避免新增并行冗余逻辑。
+
+### 合并范围
+
+- 执行位置：隔离 worktree `E:\\RAG\\Data\\_tmp_neo4j_milvus_wt`
+- 合并方式：`git merge --no-ff --no-commit main`
+- 本轮冲突文件：
+  - `rag-anything/raganything/constants.py`
+  - `rag-anything/raganything/processor.py`
+  - `rag-anything/raganything/services/local_rag.py`
+  - `RAGAnything_LocalRAG_VLM_Refactor_2026-02-20.md`
+
+### 冲突处理与决策
+
+- `raganything/constants.py`
+  - 保留两侧常量：`V2/V3`（synonym + multi-hop）与 `resilience/callback/eval`。
+  - 仅移除冲突标记，不改常量命名。
+- `raganything/processor.py`
+  - import 合并为并集：同时保留 `compute_entity_*` 与 `DEFAULT_MULTIMODAL_*`。
+  - 避免实体路径/多模态超时路径任一侧缺符号。
+- `raganything/services/local_rag.py`
+  - import 合并为并集：保留 `DEFAULT_QUERY_MODE/TOP_K/CHUNK_TOP_K/ENABLE_RERANK` + `workspace/resilience/callback` 常量。
+  - 去掉未使用的 `DEFAULT_SERIALIZE_INGEST_BY_DOC_ID`。
+- 本文档冲突
+  - 同时保留 `SurGE ingest 批量化` 与本节 `main -> neo4j-milvus 合并说明`。
+
+### 高风险语义修复（自动合并未报冲突部分）
+
+- `lightrag/operate.py`
+  - `_merge_nodes_then_upsert`：修复实体 ID 二次拼接风险。若入参已是复合 ID，不再再次 `compute_entity_id`。
+  - `_merge_edges_then_upsert`：统一边补点时的实体键口径，`entity_chunks_storage` 与图节点统一使用 `entity_id`。
+  - 边补点新增 `added_entities.entity_id`，避免后续阶段只靠 `entity_name` 造成键空间混用。
+  - `merge_nodes_and_edges` Phase 3：`full_entities` 优先写入 `entity_id`，与删除链路使用口径一致。
+- `lightrag/lightrag.py`
+  - `aquery_data` 补齐 `rerank_score_scope` 透传，避免 query_data 路径回落默认值。
+  - `adelete_by_doc_id` 读取节点键时改为 `entity_id or id`，提升历史数据兼容性。
+  - 删除实体向量时增加候选 ID 集合（legacy hash + canonical 计算），降低混键场景残留概率。
+- `lightrag/base.py`
+  - `DeletionResult.status` 类型补齐 `not_allowed`，与实际返回值一致。
+
+### 改动前后对照
+
+- 改动前：
+  - 多个文件存在 merge 冲突，无法完成合并提交。
+  - 存在实体键二次拼接/混用风险，删除链路有漏删残留隐患。
+  - `aquery_data` 未透传 `rerank_score_scope`。
+- 改动后：
+  - 冲突全部消除，冲突块按并集合并完成。
+  - 实体 ID 与 `full_entities/entity_chunks` 键口径统一，删除链路命中更稳定。
+  - `query_data` 与 `aquery_llm` 在 rerank score scope 口径对齐。
+
+### 本轮检查（按固定执行流程）
+
+- 冲突标记扫描（通过）：
+  - `rg -n \"^(<<<<<<<|=======|>>>>>>>)\" ...`（目标文件无残留）
+- 语法检查（通过）：
+  - `python -m py_compile rag-anything/raganything/constants.py rag-anything/raganything/processor.py rag-anything/raganything/services/local_rag.py`
+  - `python -m py_compile lightrag/lightrag/base.py lightrag/lightrag/operate.py lightrag/lightrag/lightrag.py`
+- 逻辑级检查（通过）：
+  - 内联守卫断言脚本输出：`MERGE_AND_SEMANTIC_GUARD_CHECK_PASSED`
+  - `pytest`：`python -m pytest -q tests/test_rerank_observability.py`（在 `lightrag/` 目录下执行）→ `4 passed`
+
+### 兼容性说明
+
+- 未新增环境变量与外部配置入口，默认行为保持兼容。
+- `full_entities` 本次写入策略与既有迁移逻辑口径一致（均以 `entity_id` 为主）。
+- 对历史混键数据，删除流程增加回退与候选删除策略，优先修复残留而非放大破坏面。
+
+---
+
 ## 增量更新（2026-03-31，LocalRAG 本地 endpoint 自动绕过环境代理）
 
 ### 目标

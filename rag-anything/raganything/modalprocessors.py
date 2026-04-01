@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from lightrag.utils import (
     logger,
     compute_mdhash_id,
+    compute_entity_id,
+    compute_entity_vdb_id,
     sanitize_text_for_encoding,
 )
 from lightrag.lightrag import LightRAG
@@ -556,9 +558,13 @@ class BaseModalProcessor:
         await self.chunks_vdb.upsert(chunk_vdb_data)
 
         # Create entity node
+        _disambig = self.global_config.get("enable_entity_disambiguation", True)
+        _ename = entity_info["entity_name"]
+        _etype = entity_info["entity_type"]
+        _composite_id = compute_entity_id(_ename, _etype, _disambig)
         node_data = {
-            "entity_id": entity_info["entity_name"],
-            "entity_type": entity_info["entity_type"],
+            "entity_id": _composite_id,
+            "entity_type": _etype,
             "description": entity_info["summary"],
             "source_id": chunk_id,
             "file_path": file_path,
@@ -566,15 +572,16 @@ class BaseModalProcessor:
         }
 
         await self.knowledge_graph_inst.upsert_node(
-            entity_info["entity_name"], node_data
+            _composite_id, node_data
         )
 
         # Insert entity into vector database
         entity_vdb_data = {
-            compute_mdhash_id(entity_info["entity_name"], prefix="ent-"): {
-                "entity_name": entity_info["entity_name"],
-                "entity_type": entity_info["entity_type"],
-                "content": f"{entity_info['entity_name']}\n{entity_info['summary']}",
+            compute_entity_vdb_id(_ename, _etype, _disambig): {
+                "entity_id": _composite_id,
+                "entity_name": _ename,
+                "entity_type": _etype,
+                "content": f"{_ename}\n{entity_info['summary']}",
                 "source_id": chunk_id,
                 "file_path": file_path,
             }

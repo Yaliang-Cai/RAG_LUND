@@ -557,6 +557,27 @@ def compute_mdhash_id(content: str, prefix: str = "") -> str:
     return prefix + compute_args_hash(content)
 
 
+def compute_entity_id(
+    entity_name: str,
+    entity_type: str = "",
+    enable_disambiguation: bool = True,
+) -> str:
+    """Generate entity graph node ID. Disambiguation switch is handled here only."""
+    if enable_disambiguation and entity_type:
+        return f"{entity_name}|{entity_type}"
+    return entity_name
+
+
+def compute_entity_vdb_id(
+    entity_name: str,
+    entity_type: str = "",
+    enable_disambiguation: bool = True,
+) -> str:
+    """Generate entity VDB hash ID using the composite key."""
+    composite = compute_entity_id(entity_name, entity_type, enable_disambiguation)
+    return compute_mdhash_id(composite, prefix="ent-")
+
+
 def generate_cache_key(mode: str, cache_type: str, hash_value: str) -> str:
     """Generate a flattened cache key in the format {mode}:{cache_type}:{hash}
 
@@ -1562,6 +1583,7 @@ async def aexport_data(
 
         # Optional: Get vector database information
         if include_vector_data:
+            # entity_name from graph is already composite ID when disambiguation is on
             entity_id = compute_mdhash_id(entity_name, prefix="ent-")
             vector_data = await entities_vdb.get_by_id(entity_id)
             entity_info["vector_data"] = vector_data
