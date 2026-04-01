@@ -222,6 +222,7 @@ class QueryMixin:
         # with the server API (these are no-ops when the caller passes explicitly)
         kwargs.setdefault("top_k", DEFAULT_TOP_K)
         kwargs.setdefault("chunk_top_k", DEFAULT_CHUNK_TOP_K)
+        kwargs.setdefault("rerank_score_scope", "all")
 
         # Check if VLM enhanced query should be used
         vlm_enhanced = kwargs.pop("vlm_enhanced", None)
@@ -491,6 +492,7 @@ class QueryMixin:
         # Cap only how many image paths are converted to image inputs.
         # Retrieval context itself remains strict rerank order.
         kwargs.setdefault("multimodal_top_k", DEFAULT_MULTIMODAL_TOP_K)
+        kwargs.setdefault("rerank_score_scope", "all")
         query_param = QueryParam(mode=mode, only_need_prompt=True, **kwargs)
         image_cap = query_param.multimodal_top_k
         if image_cap is None:

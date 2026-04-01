@@ -403,6 +403,7 @@ async def query_endpoint(
         top_k=top_k,
         chunk_top_k=chunk_top_k,
         enable_rerank=payload.enable_rerank,
+        rerank_score_scope="all",
     )
     retrieval = {}
     try:

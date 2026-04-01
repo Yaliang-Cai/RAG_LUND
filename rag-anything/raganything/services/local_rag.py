@@ -1407,6 +1407,7 @@ class LocalRagService:
                 top_k=top_k,
                 chunk_top_k=chunk_top_k,
                 enable_rerank=enable_rerank,
+                rerank_score_scope="all",
                 stream=True,
                 include_references=True,
                 user_prompt=_INLINE_CITATION_INSTRUCTION if _INLINE_CITATIONS_ENABLED else "",

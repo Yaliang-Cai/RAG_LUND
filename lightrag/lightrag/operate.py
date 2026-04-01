@@ -4632,10 +4632,10 @@ async def _build_context_str(
     This includes dynamic token calculation and final chunk truncation.
     """
     def _empty_rerank_chunk_debug() -> dict[str, Any]:
-        raw_scope = str(getattr(query_param, "rerank_score_scope", "top_k") or "top_k")
+        raw_scope = str(getattr(query_param, "rerank_score_scope", "all") or "all")
         scope = raw_scope.strip().lower()
         if scope not in {"top_k", "all"}:
-            scope = "top_k"
+            scope = "all"
         try:
             min_rerank_score = float(global_config.get("min_rerank_score", 0.5))
         except (TypeError, ValueError):

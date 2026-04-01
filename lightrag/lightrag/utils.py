@@ -2734,7 +2734,7 @@ async def process_chunks_unified(
             rerank_debug.update(
                 {
                     "enabled": False,
-                    "scope": "top_k",
+                    "scope": "all",
                     "min_rerank_score": 0.0,
                     "scores_all": [],
                     "scores_after_threshold": [],
@@ -2754,14 +2754,14 @@ async def process_chunks_unified(
 
     origin_count = len(unique_chunks)
     rerank_enabled = bool(query_param.enable_rerank and query)
-    raw_scope = str(getattr(query_param, "rerank_score_scope", "top_k") or "top_k")
+    raw_scope = str(getattr(query_param, "rerank_score_scope", "all") or "all")
     rerank_scope = raw_scope.strip().lower()
     if rerank_scope not in {"top_k", "all"}:
         logger.warning(
-            "Unknown rerank_score_scope '%s', fallback to 'top_k'",
+            "Unknown rerank_score_scope '%s', fallback to 'all'",
             raw_scope,
         )
-        rerank_scope = "top_k"
+        rerank_scope = "all"
 
     try:
         min_rerank_score = float(global_config.get("min_rerank_score", 0.5))

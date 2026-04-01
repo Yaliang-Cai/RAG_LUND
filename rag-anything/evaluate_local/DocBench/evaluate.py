@@ -598,6 +598,7 @@ def _build_raw_prompt_query_kwargs() -> dict[str, Any]:
         "mode": DOCBENCH_QUERY_PARAMS["mode"],
         "top_k": DOCBENCH_QUERY_PARAMS["top_k"],
         "chunk_top_k": DOCBENCH_QUERY_PARAMS["chunk_top_k"],
+        "rerank_score_scope": "all",
         "multimodal_top_k": DOCBENCH_QUERY_PARAMS.get("multimodal_top_k"),
         "image_token_estimate_method": DOCBENCH_QUERY_PARAMS[
             "image_token_estimate_method"

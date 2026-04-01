@@ -166,10 +166,10 @@ class QueryParam:
     Default is True to enable reranking when rerank model is available.
     """
 
-    rerank_score_scope: Literal["top_k", "all"] = "top_k"
+    rerank_score_scope: Literal["top_k", "all"] = "all"
     """Controls how many chunk candidates are scored by reranker.
-    - "top_k": score only up to chunk_top_k candidates (default, backward compatible).
-    - "all": score all chunk candidates before thresholding and truncation.
+    - "top_k": score only up to chunk_top_k candidates.
+    - "all": score all chunk candidates before thresholding and truncation (default).
     """
 
     include_references: bool = False
