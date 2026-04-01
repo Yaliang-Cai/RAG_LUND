@@ -249,8 +249,21 @@ def _resolve_eval_setup(use_raganything_eval_setup: bool) -> tuple[str, bool, st
     return ("docbench_official", False, DOCBENCH_EVAL_PROMPT_FILENAME)
 
 
-def _build_query_params(one_sentence: bool = False) -> dict[str, Any]:
+def _build_query_params(
+    one_sentence: bool = False,
+    *,
+    enable_multi_hop: bool = False,
+    multi_hop_depth: int = 2,
+    ppr_damping: float = 0.5,
+    ppr_top_k: int = 50,
+    passage_node_weight: float = 0.05,
+) -> dict[str, Any]:
     params = dict(DOCBENCH_QUERY_PARAMS)
+    params["enable_multi_hop"] = bool(enable_multi_hop)
+    params["multi_hop_depth"] = int(multi_hop_depth)
+    params["ppr_damping"] = float(ppr_damping)
+    params["ppr_top_k"] = int(ppr_top_k)
+    params["passage_node_weight"] = float(passage_node_weight)
     if one_sentence:
         params["user_prompt"] = ONE_SENTENCE_USER_PROMPT
         params["response_type"] = "Single Sentence"
@@ -669,7 +682,16 @@ def _rewrite_ingest_failures(failures: dict[str, dict[str, Any]]) -> None:
             _append_jsonl_record(f, failures[doc_id])
 
 
-def _build_shared_settings() -> LocalRagSettings:
+def _build_shared_settings(
+    *,
+    enable_entity_disambiguation: bool,
+    enable_synonym_linking: bool,
+    enable_multi_hop: bool,
+    multi_hop_depth: int,
+    ppr_damping: float,
+    ppr_top_k: int,
+    passage_node_weight: float,
+) -> LocalRagSettings:
     settings = LocalRagSettings.from_env()
     settings.working_dir_root = str(WORKING_DIR_ROOT)
     settings.output_dir = str(OUTPUT_MD_DIR)
@@ -687,6 +709,13 @@ def _build_shared_settings() -> LocalRagSettings:
     settings.query_max_tokens = 2048
     settings.ingest_max_tokens = 8192
     settings.vlm_enable_json_schema = True
+    settings.enable_entity_disambiguation = bool(enable_entity_disambiguation)
+    settings.enable_synonym_linking = bool(enable_synonym_linking)
+    settings.enable_multi_hop = bool(enable_multi_hop)
+    settings.multi_hop_depth = int(multi_hop_depth)
+    settings.ppr_damping = float(ppr_damping)
+    settings.ppr_top_k = int(ppr_top_k)
+    settings.passage_node_weight = float(passage_node_weight)
     return settings
 
 
@@ -784,11 +813,25 @@ async def generate_answers_shared(
     shared_workspace_id: str,
     retry_failed_only: bool,
     clear_failures_on_success: bool,
+    enable_entity_disambiguation: bool,
+    enable_synonym_linking: bool,
+    enable_multi_hop: bool,
+    multi_hop_depth: int,
+    ppr_damping: float,
+    ppr_top_k: int,
+    passage_node_weight: float,
 ) -> None:
     max_async_ingest = _normalize_max_async(max_async_ingest, default=4)
     max_async_generate = _normalize_max_async(max_async_generate, default=1)
     ingest_flush_every = DEFAULT_INGEST_FLUSH_EVERY
-    query_params = _build_query_params(one_sentence=one_sentence)
+    query_params = _build_query_params(
+        one_sentence=one_sentence,
+        enable_multi_hop=enable_multi_hop,
+        multi_hop_depth=multi_hop_depth,
+        ppr_damping=ppr_damping,
+        ppr_top_k=ppr_top_k,
+        passage_node_weight=passage_node_weight,
+    )
     _save_generation_config(
         profile_name=profile_name,
         eval_prompt_filename=eval_prompt_filename,
@@ -801,7 +844,15 @@ async def generate_answers_shared(
         query_params=query_params,
     )
 
-    settings = _build_shared_settings()
+    settings = _build_shared_settings(
+        enable_entity_disambiguation=enable_entity_disambiguation,
+        enable_synonym_linking=enable_synonym_linking,
+        enable_multi_hop=enable_multi_hop,
+        multi_hop_depth=multi_hop_depth,
+        ppr_damping=ppr_damping,
+        ppr_top_k=ppr_top_k,
+        passage_node_weight=passage_node_weight,
+    )
     service = LocalRagService(settings)
     _refresh_master_logging()
 
@@ -1387,6 +1438,13 @@ async def main() -> None:
     parser.add_argument("--max_async_ingest", type=int, default=4)
     parser.add_argument("--max_async_generate", type=int, default=1)
     parser.add_argument("--max_async_judge", type=int, default=4)
+    parser.add_argument("--enable_entity_disambiguation", type=str, default="true")
+    parser.add_argument("--enable_synonym_linking", type=str, default="false")
+    parser.add_argument("--enable_multi_hop", type=str, default="false")
+    parser.add_argument("--multi_hop_depth", type=int, default=2)
+    parser.add_argument("--ppr_damping", type=float, default=0.5)
+    parser.add_argument("--ppr_top_k", type=int, default=50)
+    parser.add_argument("--passage_node_weight", type=float, default=0.05)
     parser.add_argument(
         "--retry_failed_only",
         action="store_true",
@@ -1407,6 +1465,37 @@ async def main() -> None:
         help="Keep historical failure records even when docs succeed later.",
     )
     args = parser.parse_args()
+    args.enable_entity_disambiguation = str(args.enable_entity_disambiguation).lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    args.enable_synonym_linking = str(args.enable_synonym_linking).lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    args.enable_multi_hop = str(args.enable_multi_hop).lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    if args.multi_hop_depth <= 0:
+        raise ValueError(f"--multi_hop_depth must be > 0, got {args.multi_hop_depth}")
+    if args.ppr_top_k <= 0:
+        raise ValueError(f"--ppr_top_k must be > 0, got {args.ppr_top_k}")
+    if not (0.0 < args.ppr_damping < 1.0):
+        raise ValueError(f"--ppr_damping must be in (0,1), got {args.ppr_damping}")
+    if args.passage_node_weight < 0:
+        raise ValueError(
+            f"--passage_node_weight must be >= 0, got {args.passage_node_weight}"
+        )
 
     _ensure_master_log_handler()
 
@@ -1448,6 +1537,13 @@ async def main() -> None:
             shared_workspace_id=args.shared_workspace_id,
             retry_failed_only=args.retry_failed_only,
             clear_failures_on_success=args.clear_failures_on_success,
+            enable_entity_disambiguation=args.enable_entity_disambiguation,
+            enable_synonym_linking=args.enable_synonym_linking,
+            enable_multi_hop=args.enable_multi_hop,
+            multi_hop_depth=args.multi_hop_depth,
+            ppr_damping=args.ppr_damping,
+            ppr_top_k=args.ppr_top_k,
+            passage_node_weight=args.passage_node_weight,
         )
     elif args.mode == "evaluate":
         await evaluate_answers(

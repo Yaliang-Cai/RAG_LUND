@@ -79,6 +79,15 @@ from raganything.constants import (
     DEFAULT_CHUNK_TOP_K,
     DEFAULT_QUERY_MODE,
     DEFAULT_ENABLE_RERANK,
+    DEFAULT_ENABLE_SYNONYM_LINKING,
+    DEFAULT_SYNONYMY_THRESHOLD,
+    DEFAULT_SYNONYMY_TOPK,
+    DEFAULT_SYNONYMY_MIN_ENTITY_LEN,
+    DEFAULT_ENABLE_MULTI_HOP,
+    DEFAULT_MULTI_HOP_DEPTH,
+    DEFAULT_PPR_DAMPING,
+    DEFAULT_PPR_TOP_K,
+    DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID,
     DEFAULT_ENABLE_RESILIENCE,
     DEFAULT_RESILIENCE_MAX_ATTEMPTS,
@@ -173,6 +182,16 @@ class LocalRagSettings:
     breaker_reset_timeout_seconds: float = DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS
     enable_metrics_callback: bool = DEFAULT_ENABLE_METRICS_CALLBACK
     enable_callback_event_log: bool = DEFAULT_ENABLE_CALLBACK_EVENT_LOG
+    enable_entity_disambiguation: bool = True
+    enable_synonym_linking: bool = DEFAULT_ENABLE_SYNONYM_LINKING
+    synonymy_threshold: float = DEFAULT_SYNONYMY_THRESHOLD
+    synonymy_topk: int = DEFAULT_SYNONYMY_TOPK
+    synonymy_min_entity_len: int = DEFAULT_SYNONYMY_MIN_ENTITY_LEN
+    enable_multi_hop: bool = DEFAULT_ENABLE_MULTI_HOP
+    multi_hop_depth: int = DEFAULT_MULTI_HOP_DEPTH
+    ppr_damping: float = DEFAULT_PPR_DAMPING
+    ppr_top_k: int = DEFAULT_PPR_TOP_K
+    passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -321,6 +340,62 @@ class LocalRagSettings:
                 str(DEFAULT_ENABLE_CALLBACK_EVENT_LOG),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
+            enable_entity_disambiguation=os.getenv(
+                "RAGANYTHING_ENABLE_ENTITY_DISAMBIGUATION", "true"
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            enable_synonym_linking=os.getenv(
+                "RAGANYTHING_ENABLE_SYNONYM_LINKING",
+                str(DEFAULT_ENABLE_SYNONYM_LINKING),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            synonymy_threshold=float(
+                os.getenv(
+                    "RAGANYTHING_SYNONYMY_THRESHOLD",
+                    str(DEFAULT_SYNONYMY_THRESHOLD),
+                )
+            ),
+            synonymy_topk=int(
+                os.getenv(
+                    "RAGANYTHING_SYNONYMY_TOPK",
+                    str(DEFAULT_SYNONYMY_TOPK),
+                )
+            ),
+            synonymy_min_entity_len=int(
+                os.getenv(
+                    "RAGANYTHING_SYNONYMY_MIN_ENTITY_LEN",
+                    str(DEFAULT_SYNONYMY_MIN_ENTITY_LEN),
+                )
+            ),
+            enable_multi_hop=os.getenv(
+                "RAGANYTHING_ENABLE_MULTI_HOP",
+                str(DEFAULT_ENABLE_MULTI_HOP),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            multi_hop_depth=int(
+                os.getenv(
+                    "RAGANYTHING_MULTI_HOP_DEPTH",
+                    str(DEFAULT_MULTI_HOP_DEPTH),
+                )
+            ),
+            ppr_damping=float(
+                os.getenv(
+                    "RAGANYTHING_PPR_DAMPING",
+                    str(DEFAULT_PPR_DAMPING),
+                )
+            ),
+            ppr_top_k=int(
+                os.getenv(
+                    "RAGANYTHING_PPR_TOP_K",
+                    str(DEFAULT_PPR_TOP_K),
+                )
+            ),
+            passage_node_weight=float(
+                os.getenv(
+                    "RAGANYTHING_PASSAGE_NODE_WEIGHT",
+                    str(DEFAULT_PASSAGE_NODE_WEIGHT),
+                )
+            ),
         )
 
 
@@ -1242,6 +1317,17 @@ class LocalRagService:
                 # rerank 后保留 chunk 的最低分数（LightRAG 默认 0.0 = 不过滤）
                 # BGE-reranker-v2-m3 相关 chunk 典型得分 >0.5，不相关 <0.3
                 "min_rerank_score": DEFAULT_MIN_RERANK_SCORE,
+                # V1/V2/V3 ablation toggles
+                "enable_entity_disambiguation": self.settings.enable_entity_disambiguation,
+                "enable_synonym_linking": self.settings.enable_synonym_linking,
+                "synonymy_threshold": self.settings.synonymy_threshold,
+                "synonymy_topk": self.settings.synonymy_topk,
+                "synonymy_min_entity_len": self.settings.synonymy_min_entity_len,
+                "enable_multi_hop": self.settings.enable_multi_hop,
+                "multi_hop_depth": self.settings.multi_hop_depth,
+                "ppr_damping": self.settings.ppr_damping,
+                "ppr_top_k": self.settings.ppr_top_k,
+                "passage_node_weight": self.settings.passage_node_weight,
                 "graph_storage": "Neo4JStorage",
                 "vector_storage": "QdrantVectorDBStorage",
             },

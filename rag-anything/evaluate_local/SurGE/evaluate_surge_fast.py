@@ -220,12 +220,19 @@ def refresh_logging(mode: str) -> None:
     sync_master_logging_handlers()
 
 
-def settings_for_surge() -> LocalRagSettings:
+def settings_for_surge(args: argparse.Namespace) -> LocalRagSettings:
     _, _, LocalRagSettings = import_rag_dependencies()
     s = LocalRagSettings.from_env()
     s.working_dir_root = str(RAG_STORAGE_DIR)
     s.output_dir = str(RAG_OUTPUT_DIR)
     s.log_dir = str(LOG_DIR)
+    s.enable_entity_disambiguation = bool(args.enable_entity_disambiguation)
+    s.enable_synonym_linking = bool(args.enable_synonym_linking)
+    s.enable_multi_hop = bool(args.enable_multi_hop)
+    s.multi_hop_depth = int(args.multi_hop_depth)
+    s.ppr_damping = float(args.ppr_damping)
+    s.ppr_top_k = int(args.ppr_top_k)
+    s.passage_node_weight = float(args.passage_node_weight)
     return s
 
 
@@ -1459,7 +1466,7 @@ async def run_retrieval(args: argparse.Namespace) -> int:
     source_records, chunk_source_map, source_map_stats = prepare_source_records(chunks_by_doc)
     persist_chunk_source_map(chunk_source_map, source_map_stats)
     queries = load_queries(subset / args.queries_file, args.limit)
-    settings = settings_for_surge()
+    settings = settings_for_surge(args)
     service = LocalRagService(settings)
     ingest_summary = await ensure_workspace_index(
         service,
@@ -1486,6 +1493,11 @@ async def run_retrieval(args: argparse.Namespace) -> int:
         "chunk_top_k": chunk_top_k,
         "enable_rerank": args.enable_rerank,
         "rerank_score_scope": "all",
+        "enable_multi_hop": args.enable_multi_hop,
+        "multi_hop_depth": args.multi_hop_depth,
+        "ppr_damping": args.ppr_damping,
+        "ppr_top_k": args.ppr_top_k,
+        "passage_node_weight": args.passage_node_weight,
     }
     sem = asyncio.Semaphore(max(1, args.max_concurrency))
     done = 0
@@ -1512,6 +1524,11 @@ async def run_retrieval(args: argparse.Namespace) -> int:
                     chunk_top_k=chunk_top_k,
                     enable_rerank=args.enable_rerank,
                     rerank_score_scope="all",
+                    enable_multi_hop=args.enable_multi_hop,
+                    multi_hop_depth=args.multi_hop_depth,
+                    ppr_damping=args.ppr_damping,
+                    ppr_top_k=args.ppr_top_k,
+                    passage_node_weight=args.passage_node_weight,
                 )
                 retrieval = await with_retries(lambda: rag.lightrag.aquery_data(q, param=param), label=f"query {qid}", retries=args.max_retries)
                 retrieved, warns = await map_chunks_to_doc_ids(
@@ -1628,7 +1645,7 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
     source_records, chunk_source_map, source_map_stats = prepare_source_records(chunks_by_doc)
     persist_chunk_source_map(chunk_source_map, source_map_stats)
     surveys = load_surveys(subset / args.surveys_file, args.limit)
-    settings = settings_for_surge()
+    settings = settings_for_surge(args)
     service = LocalRagService(settings)
     ingest_summary = await ensure_workspace_index(
         service,
@@ -1656,6 +1673,11 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
         "chunk_top_k": chunk_top_k,
         "enable_rerank": args.enable_rerank,
         "rerank_score_scope": "all",
+        "enable_multi_hop": args.enable_multi_hop,
+        "multi_hop_depth": args.multi_hop_depth,
+        "ppr_damping": args.ppr_damping,
+        "ppr_top_k": args.ppr_top_k,
+        "passage_node_weight": args.passage_node_weight,
     }
 
     sem = asyncio.Semaphore(max(1, args.max_concurrency))
@@ -1690,6 +1712,11 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
                     chunk_top_k=chunk_top_k,
                     enable_rerank=args.enable_rerank,
                     rerank_score_scope="all",
+                    enable_multi_hop=args.enable_multi_hop,
+                    multi_hop_depth=args.multi_hop_depth,
+                    ppr_damping=args.ppr_damping,
+                    ppr_top_k=args.ppr_top_k,
+                    passage_node_weight=args.passage_node_weight,
                 )
                 retrieval = await with_retries(
                     lambda: rag.lightrag.aquery_data(survey_title, param=param),
@@ -2012,6 +2039,16 @@ def validate_args(args: argparse.Namespace) -> None:
         )
     if args.max_retries < 0:
         raise ValueError(f"--max-retries must be >= 0, got {args.max_retries}")
+    if args.multi_hop_depth <= 0:
+        raise ValueError(f"--multi-hop-depth must be > 0, got {args.multi_hop_depth}")
+    if args.ppr_top_k <= 0:
+        raise ValueError(f"--ppr-top-k must be > 0, got {args.ppr_top_k}")
+    if not (0.0 < args.ppr_damping < 1.0):
+        raise ValueError(f"--ppr-damping must be in (0,1), got {args.ppr_damping}")
+    if args.passage_node_weight < 0:
+        raise ValueError(
+            f"--passage-node-weight must be >= 0, got {args.passage_node_weight}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2072,6 +2109,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--max-retries", type=int, default=0)
     p.add_argument("--limit", type=int, default=0, help="0 means all queries/surveys")
+    p.add_argument("--enable-entity-disambiguation", type=as_bool, default=True)
+    p.add_argument("--enable-synonym-linking", type=as_bool, default=False)
+    p.add_argument("--enable-multi-hop", type=as_bool, default=False)
+    p.add_argument("--multi-hop-depth", type=int, default=2)
+    p.add_argument("--ppr-damping", type=float, default=0.5)
+    p.add_argument("--ppr-top-k", type=int, default=50)
+    p.add_argument("--passage-node-weight", type=float, default=0.05)
     return p
 
 
