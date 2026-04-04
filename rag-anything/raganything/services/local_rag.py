@@ -1326,11 +1326,8 @@ class LocalRagService:
                 "synonymy_threshold": self.settings.synonymy_threshold,
                 "synonymy_topk": self.settings.synonymy_topk,
                 "synonymy_min_entity_len": self.settings.synonymy_min_entity_len,
-                "enable_multi_hop": self.settings.enable_multi_hop,
-                "multi_hop_depth": self.settings.multi_hop_depth,
-                "ppr_damping": self.settings.ppr_damping,
-                "ppr_top_k": self.settings.ppr_top_k,
-                "passage_node_weight": self.settings.passage_node_weight,
+                # V3 knobs are query-time only (QueryParam) and should not be
+                # passed into LightRAG.__init__ for compatibility.
                 "graph_storage": "Neo4JStorage",
                 "vector_storage": "QdrantVectorDBStorage",
             },
