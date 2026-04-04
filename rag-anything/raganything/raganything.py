@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional, Callable
 import sys
 import asyncio
 import atexit
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
@@ -369,6 +370,35 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
 
                 # Merge user-provided lightrag_kwargs, which can override defaults
                 lightrag_params.update(self.lightrag_kwargs)
+
+                # Compatibility guard: different LightRAG versions may not accept
+                # the same constructor kwargs. Keep known keys only when __init__
+                # doesn't expose **kwargs.
+                try:
+                    sig = inspect.signature(LightRAG.__init__)
+                    has_var_kw = any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in sig.parameters.values()
+                    )
+                    if not has_var_kw:
+                        accepted = {
+                            name for name in sig.parameters.keys() if name != "self"
+                        }
+                        unsupported = sorted(
+                            k for k in list(lightrag_params.keys()) if k not in accepted
+                        )
+                        if unsupported:
+                            self.logger.warning(
+                                "Dropping unsupported LightRAG init kwargs for current runtime: %s",
+                                unsupported,
+                            )
+                            for key in unsupported:
+                                lightrag_params.pop(key, None)
+                except Exception as sig_exc:
+                    self.logger.warning(
+                        "Failed to inspect LightRAG.__init__ signature, proceeding without kwarg filtering: %s",
+                        sig_exc,
+                    )
 
                 # Log the parameters being used for initialization (excluding sensitive data)
                 log_params = {

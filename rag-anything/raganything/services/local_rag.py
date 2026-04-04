@@ -1352,7 +1352,23 @@ class LocalRagService:
             if workspace_id in self._warmed_workspaces:
                 return
             rag = await self.get_rag(workspace_id)
-            await rag._ensure_lightrag_initialized()
+            init_result = await rag._ensure_lightrag_initialized()
+            if not isinstance(init_result, dict) or not bool(
+                init_result.get("success", False)
+            ):
+                error_msg = (
+                    str(init_result.get("error", "")).strip()
+                    if isinstance(init_result, dict)
+                    else ""
+                )
+                raise RuntimeError(
+                    f"LightRAG warmup failed for workspace '{workspace_id}': "
+                    f"{error_msg or 'unknown error'}"
+                )
+            if getattr(rag, "lightrag", None) is None:
+                raise RuntimeError(
+                    f"LightRAG warmup failed for workspace '{workspace_id}': runtime not initialized"
+                )
             self._apply_multimodal_guardrails_to_rag(rag)
             self._warmed_workspaces.add(workspace_id)
             self.logger.info("Workspace warmup complete: %s", workspace_id)
