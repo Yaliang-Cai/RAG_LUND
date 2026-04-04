@@ -707,6 +707,9 @@ def build_llm_model_func(
                                 yield delta.content
                 except Exception as exc:
                     logger.error(f"LLM streaming error: {exc}")
+                    if is_ingest_call:
+                        raise
+                    raise RuntimeError(f"LLM streaming query failed: {exc}") from exc
             return _token_stream()
 
         # Non-streaming path (existing behaviour)
@@ -738,7 +741,7 @@ def build_llm_model_func(
             logger.error(f"LLM Error: {exc}")
             if is_ingest_call:
                 raise
-            return ""
+            raise RuntimeError(f"LLM query failed: {exc}") from exc
 
     return llm_model_func
 

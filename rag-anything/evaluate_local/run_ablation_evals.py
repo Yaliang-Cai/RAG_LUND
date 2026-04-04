@@ -25,13 +25,6 @@ class ProfileSpec:
 
 
 PROFILE_SPECS: dict[str, ProfileSpec] = {
-    "non_v0": ProfileSpec(
-        key="non_v0",
-        description="non_v0 baseline (DB switched to neo4j+qdrant, V1=off,V2=off,V3=off)",
-        enable_entity_disambiguation=False,
-        enable_synonym_linking=False,
-        enable_multi_hop=False,
-    ),
     "v0": ProfileSpec(
         key="v0",
         description="V0 (V1=off,V2=off,V3=off)",
@@ -65,7 +58,7 @@ PROFILE_SPECS: dict[str, ProfileSpec] = {
 
 
 PROFILE_ALIASES: dict[str, str] = {
-    "db_only": "non_v0",
+    "db_only": "v0",
     "db_v1": "v0_v1",
     "db_v1_v2": "v0_v1_v2",
     "db_v1_v2_v3": "v0_v1_v2_v3",
@@ -107,7 +100,7 @@ def _resolve_profiles(raw_profiles: list[str] | None, include_v3: bool) -> list[
             if resolved not in keys:
                 keys.append(resolved)
     else:
-        keys = ["non_v0", "v0", "v0_v1", "v0_v1_v2"]
+        keys = ["v0", "v0_v1", "v0_v1_v2"]
         if include_v3:
             keys.append("v0_v1_v2_v3")
     return [PROFILE_SPECS[key] for key in keys]
@@ -360,7 +353,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Profiles to run. Supports keys/aliases: "
-            "non_v0 v0 v0_v1 v0_v1_v2 v0_v1_v2_v3 db_only db_v1 db_v1_v2 db_v1_v2_v3"
+            "v0 v0_v1 v0_v1_v2 v0_v1_v2_v3 db_only db_v1 db_v1_v2 db_v1_v2_v3"
         ),
     )
     parser.add_argument(
@@ -394,6 +387,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Pass resume behavior to evaluate_shared (default is no_resume).",
     )
+    parser.add_argument(
+        "--run-shared-evaluate",
+        action="store_true",
+        help="Also run evaluate_shared --mode evaluate after shared_generate.",
+    )
+    parser.add_argument(
+        "--run-shared-stats",
+        action="store_true",
+        help="Also run evaluate_shared --mode stats (typically together with --run-shared-evaluate).",
+    )
 
     parser.add_argument("--shared-workspace-prefix", type=str, default="docbench_shared_ablation")
     parser.add_argument("--surge-workspace-prefix", type=str, default="surge_fast_ablation")
@@ -403,11 +406,20 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional override for DOCBENCH_SHARED_DATA_ROOT.",
     )
+    parser.add_argument(
+        "--shared-mineru-output-dir",
+        type=str,
+        default="evaluate_local/DocBench/docbench_shared_results/mineru_outputs",
+        help=(
+            "Directory for shared MinerU artifacts. "
+            "Defaults to evaluate_local/DocBench/docbench_shared_results/mineru_outputs."
+        ),
+    )
 
     parser.add_argument("--start-id", type=int, default=0)
     parser.add_argument("--end-id", type=int, default=49)
     parser.add_argument("--max-async-ingest", type=int, default=4)
-    parser.add_argument("--max-async-generate", type=int, default=1)
+    parser.add_argument("--max-async-generate", type=int, default=6)
     parser.add_argument("--max-async-judge", type=int, default=4)
 
     parser.add_argument(
@@ -432,7 +444,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-doc-concurrency", type=int, default=2)
     parser.add_argument("--ingest-batch-size", type=int, default=384)
     parser.add_argument("--llm-model-max-async", type=int, default=48)
-    parser.add_argument("--max-concurrency", type=int, default=8)
+    parser.add_argument("--max-concurrency", type=int, default=5)
     parser.add_argument("--max-retries", type=int, default=0)
     parser.add_argument("--limit", type=int, default=0)
 
@@ -445,6 +457,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.run_shared_stats and not args.run_shared_evaluate:
+        raise ValueError("--run-shared-stats requires --run-shared-evaluate.")
     profiles = _resolve_profiles(args.profiles, include_v3=bool(args.include_v3))
 
     eval_local_dir = Path(__file__).resolve().parent
@@ -472,6 +486,16 @@ def main() -> int:
         "failed_profiles": [],
     }
 
+    python_exe = str(args.python_exe)
+    base_env = _make_base_env(project_root=project_root, lightrag_root=lightrag_root)
+    if str(args.docbench_data_root or "").strip():
+        base_env["DOCBENCH_SHARED_DATA_ROOT"] = str(args.docbench_data_root).strip()
+    shared_mineru_output_dir: Path | None = None
+    if str(args.shared_mineru_output_dir or "").strip():
+        shared_mineru_output_dir = Path(str(args.shared_mineru_output_dir).strip())
+        if not shared_mineru_output_dir.is_absolute():
+            shared_mineru_output_dir = (project_root / shared_mineru_output_dir).resolve()
+
     _write_progress(
         progress_file=progress_file,
         latest_file=latest_file,
@@ -485,13 +509,13 @@ def main() -> int:
             "profiles": [p.key for p in profiles],
             "tasks": args.tasks,
             "dry_run": bool(args.dry_run),
+            "run_shared_evaluate": bool(args.run_shared_evaluate),
+            "run_shared_stats": bool(args.run_shared_stats),
+            "shared_mineru_output_dir": (
+                str(shared_mineru_output_dir) if shared_mineru_output_dir else ""
+            ),
         },
     )
-
-    python_exe = str(args.python_exe)
-    base_env = _make_base_env(project_root=project_root, lightrag_root=lightrag_root)
-    if str(args.docbench_data_root or "").strip():
-        base_env["DOCBENCH_SHARED_DATA_ROOT"] = str(args.docbench_data_root).strip()
 
     abort_run = False
     for profile in profiles:
@@ -516,6 +540,9 @@ def main() -> int:
             "enable_multi_hop": profile.enable_multi_hop,
             "shared_output_dir": str(shared_output_dir),
             "surge_output_dir": str(surge_output_dir),
+            "shared_mineru_output_dir": (
+                str(shared_mineru_output_dir) if shared_mineru_output_dir else ""
+            ),
         }
         _write_json(profile_dir / "profile_config.json", profile_meta)
         summary["profiles"].append(profile_meta)
@@ -536,6 +563,8 @@ def main() -> int:
         if args.tasks in ("both", "shared"):
             env_shared = dict(base_env)
             env_shared["DOCBENCH_SHARED_OUTPUT_DIR"] = str(shared_output_dir)
+            if shared_mineru_output_dir is not None:
+                env_shared["DOCBENCH_SHARED_MINERU_OUTPUT_DIR"] = str(shared_mineru_output_dir)
             env_shared["NEO4J_WORKSPACE"] = shared_workspace_id
             env_shared["QDRANT_WORKSPACE"] = shared_workspace_id
 
@@ -563,7 +592,7 @@ def main() -> int:
             if not ok and not args.continue_on_error:
                 abort_run = True
 
-            if profile_ok:
+            if profile_ok and bool(args.run_shared_evaluate):
                 shared_evaluate = list(shared_base) + ["--mode", "evaluate"]
                 ok, _ = _run_one_stage(
                     run_id=run_id,
@@ -581,7 +610,7 @@ def main() -> int:
                 if not ok and not args.continue_on_error:
                     abort_run = True
 
-            if profile_ok:
+            if profile_ok and bool(args.run_shared_stats):
                 shared_stats = list(shared_base) + ["--mode", "stats"]
                 ok, _ = _run_one_stage(
                     run_id=run_id,

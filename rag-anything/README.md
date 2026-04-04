@@ -1018,7 +1018,7 @@ This method is particularly useful when:
 
 * **作用**：它负责处理来自浏览器的 HTTP 请求（GET/POST）。它接收前端发来的“上传文件”、“提问”等请求，然后调用底层的业务逻辑来干活。
 
-* **关系**：它也引用并使用了 `local_rag.py`。它是 `LocalRagService` 的主要使用者。它把 HTTP 请求参数（doc_id, query 等）透传给 `LocalRagService`。
+* **关系**：它也引用并使用了 `local_rag.py`。它是 `LocalRagService` 的主要使用者。它把 HTTP 请求参数（workspace_id, query 等）透传给 `LocalRagService`。
 
 
 
@@ -1123,52 +1123,60 @@ python examples/text_format_test.py --check-reportlab --file dummy
 
 ---
 
-## Evaluation (DocBench / MMLongBench)
+## Evaluation (evaluate_shared / evaluate_surge_fast)
 
-### DocBench
-1. Download DocBench data and place it under `./data/docbench`.
-2. Ensure each folder contains a PDF and `{folder}_qa.jsonl`.
-3. Run:
+### DocBench shared evaluation (`evaluate_shared.py`)
+Use `evaluate_local/DocBench/evaluate_shared.py` directly.
 
 ```bash
-python scripts/eval_docbench.py --data_root ./data/docbench --output_dir ./eval_outputs/docbench
+# Optional: override defaults for your machine
+export DOCBENCH_SHARED_SCRIPT_DIR=$(pwd)/evaluate_local/DocBench
+export DOCBENCH_SHARED_DATA_ROOT=/path/to/data_for_DocBench
+export DOCBENCH_SHARED_OUTPUT_DIR=$(pwd)/evaluate_local/DocBench/docbench_shared_results
+
+# 1) Generate system answers (RAG-Anything setup, one-sentence output)
+python evaluate_local/DocBench/evaluate_shared.py --mode generate --start_id 0 --end_id 49 --raganything_eval_setup
+
+# 2) Judge
+python evaluate_local/DocBench/evaluate_shared.py --mode evaluate --start_id 0 --end_id 49 --raganything_eval_setup
+
+# 3) Aggregate stats
+python evaluate_local/DocBench/evaluate_shared.py --mode stats --start_id 0 --end_id 49 --raganything_eval_setup
 ```
 
-Outputs:
-- `./eval_outputs/docbench/raganything_eval_input.jsonl`
-- `./eval_outputs/docbench/raganything_results.jsonl`
+Core outputs are under `evaluate_local/DocBench/docbench_shared_results/` (or `DOCBENCH_SHARED_OUTPUT_DIR`):
+- `logs/`
+- `rag_workspaces/<shared_workspace_id>/`
+- `shared_ingest_manifest.json`
+- `generation_config.json`
+- `system_answers.jsonl`
+- `rerank_chunk_stats.jsonl`
+- `rerank_chunk_summary.json`
+- `eval_results.jsonl`
+- `statistics.json`
 
-You can feed `raganything_eval_input.jsonl` into DocBench's `evaluate.py` as the eval input file.
-
-Download script:
+### SurGE fast evaluation (`evaluate_surge_fast.py`)
+Use `evaluate_local/SurGE/evaluate_surge_fast.py` directly.
 
 ```bash
-python scripts/download_docbench.py --folder <google_drive_folder_url_or_id> --output_dir ./data/docbench
+# Optional: override output root
+export SURGE_FAST_OUTPUT_DIR=$(pwd)/evaluate_local/SurGE
+
+# Retrieval evaluation
+python evaluate_local/SurGE/evaluate_surge_fast.py --mode retrieval --survey-stage retrieval --workspace-id surge_subset_fast_shared
+
+# Survey retrieval
+python evaluate_local/SurGE/evaluate_surge_fast.py --mode survey --survey-stage retrieval --workspace-id surge_subset_fast_shared
+
+# Survey generation
+python evaluate_local/SurGE/evaluate_surge_fast.py --mode survey --survey-stage generate --workspace-id surge_subset_fast_shared
 ```
 
-### MMLongBench-Doc
-1. Download PDFs and place them under `./data/mmlongbench/docs` with name `{doc_id}.pdf`.
-2. Run (HF dataset):
-
-```bash
-python scripts/eval_mmlongbench.py --docs_dir ./data/mmlongbench/docs --output_dir ./eval_outputs/mmlongbench
-```
-
-Outputs:
-- `./eval_outputs/mmlongbench/raganything_results.jsonl`
-- `./eval_outputs/mmlongbench/raganything_metrics.json`
-
-Download questions (HF dataset):
-
-```bash
-python scripts/download_mmlongbench.py --output_jsonl ./data/mmlongbench/mmlongbench.jsonl
-```
-
-Optional: download PDFs with a manifest file containing `doc_id,url` per line:
-
-```bash
-python scripts/download_mmlongbench.py --docs_manifest ./data/mmlongbench/docs_manifest.csv --docs_dir ./data/mmlongbench/docs
-```
+Core outputs are under `evaluate_local/SurGE/` (or `SURGE_FAST_OUTPUT_DIR`):
+- `logs/`
+- `rag_storage/<workspace_id>/`
+- `retrieval_results_fast/`
+- `survey_results_fast/`
 
 ---
 
@@ -1200,14 +1208,14 @@ uvicorn server.app:app --host 0.0.0.0 --port 9621
 | `GET` | `/workspaces` | List all workspaces |
 | `POST` | `/ingest` | Upload & process document |
 | `POST` | `/query` | Query with structured response (entities, relations, chunks, references) |
-| `GET` | `/files/{doc_id}` | List parsed files |
-| `GET` | `/uploads/{doc_id}/{filename}` | Serve uploaded PDF |
-| `GET` | `/graph/{doc_id}/labels` | Get graph entity labels |
-| `GET` | `/graph/{doc_id}/subgraph` | Get subgraph by label |
-| `GET` | `/graph/{doc_id}/stats` | Graph statistics |
-| `GET` | `/graph/{doc_id}/search` | Search graph entities |
-| `GET` | `/workspace/{doc_id}/stats` | Workspace statistics |
-| `DELETE` | `/workspace/{doc_id}` | Delete workspace (all 3 layers) |
+| `GET` | `/files/{workspace_id}` | List parsed files |
+| `GET` | `/uploads/{workspace_id}/{filename}` | Serve uploaded PDF |
+| `GET` | `/graph/{workspace_id}/labels` | Get graph entity labels |
+| `GET` | `/graph/{workspace_id}/subgraph` | Get subgraph by label |
+| `GET` | `/graph/{workspace_id}/stats` | Graph statistics |
+| `GET` | `/graph/{workspace_id}/search` | Search graph entities |
+| `GET` | `/workspace/{workspace_id}/stats` | Workspace statistics |
+| `DELETE` | `/workspace/{workspace_id}` | Delete workspace (all 3 layers) |
 
 ---
 

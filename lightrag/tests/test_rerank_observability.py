@@ -42,7 +42,11 @@ async def test_process_chunks_unified_top_k_scope():
         ]
 
     chunks = [{"content": f"chunk-{i}", "chunk_id": f"c{i}"} for i in range(5)]
-    query_param = QueryParam(enable_rerank=True, chunk_top_k=2)
+    query_param = QueryParam(
+        enable_rerank=True,
+        chunk_top_k=2,
+        rerank_score_scope="top_k",
+    )
     rerank_debug = {}
 
     with patch("lightrag.utils.logger.info") as mock_info:
@@ -102,7 +106,7 @@ async def test_process_chunks_unified_all_scope_and_invalid_fallback():
     assert rerank_debug_all["scope"] == "all"
     assert rerank_debug_all["count_after_rerank"] == 5
 
-    # invalid scope -> fallback to top_k
+    # invalid scope -> fallback to all
     query_param_invalid = QueryParam(enable_rerank=True, chunk_top_k=2)
     query_param_invalid.rerank_score_scope = "invalid"
     rerank_debug_invalid = {}
@@ -114,8 +118,8 @@ async def test_process_chunks_unified_all_scope_and_invalid_fallback():
             global_config={"rerank_model_func": mock_rerank, "min_rerank_score": 0.0},
             rerank_debug=rerank_debug_invalid,
         )
-    assert seen["top_n"] == 2
-    assert rerank_debug_invalid["scope"] == "top_k"
+    assert seen["top_n"] == 5
+    assert rerank_debug_invalid["scope"] == "all"
     assert any(
         "Unknown rerank_score_scope" in str(call.args[0])
         for call in mock_warning.call_args_list

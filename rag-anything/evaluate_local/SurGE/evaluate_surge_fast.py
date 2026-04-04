@@ -815,6 +815,17 @@ def extract_rerank_payload(retrieval: dict[str, Any], query_params: dict[str, An
     top_k_count = parse_non_negative_int(dbg.get("count_after_chunk_top_k"))
     final_count = parse_non_negative_int(dbg.get("count_final"))
     chunk_ids = extract_chunk_ids_by_stage(retrieval)
+    selected_chunks = (
+        retrieval.get("data", {}).get("chunks", []) if isinstance(retrieval, dict) else []
+    )
+    if not isinstance(selected_chunks, list):
+        selected_chunks = []
+    selected_chunk_count = len(selected_chunks)
+    selected_missing_rerank_score = sum(
+        1
+        for c in selected_chunks
+        if isinstance(c, dict) and not isinstance(c.get("rerank_score"), (int, float))
+    )
     counts = {
         "input": input_count if input_count is not None else len(scores_all),
         "all": all_count if all_count is not None else len(scores_all),
@@ -833,8 +844,39 @@ def extract_rerank_payload(retrieval: dict[str, Any], query_params: dict[str, An
         },
         "scores": {"all": scores_all, "after_threshold": scores_thr, "final": scores_final},
         "chunk_ids": chunk_ids,
+        "selected_chunk_count": selected_chunk_count,
+        "selected_missing_rerank_score": selected_missing_rerank_score,
         "threshold_retention": build_threshold_retention(scores_all),
     }
+
+
+def assert_rerank_contract(
+    *,
+    rerank_payload: dict[str, Any],
+    query_params: dict[str, Any],
+    record_key: str,
+    record_id: Any,
+) -> None:
+    if not bool(query_params.get("enable_rerank", True)):
+        return
+    violations: list[str] = []
+    if str(rerank_payload.get("rerank_scope", "")).strip().lower() != "all":
+        violations.append(
+            f"rerank_scope={rerank_payload.get('rerank_scope')!r} (expected 'all')"
+        )
+    selected_chunk_count = int(rerank_payload.get("selected_chunk_count", 0) or 0)
+    selected_missing = int(rerank_payload.get("selected_missing_rerank_score", 0) or 0)
+    if selected_chunk_count > 0 and selected_missing > 0:
+        violations.append(
+            "selected chunks missing rerank_score "
+            f"({selected_missing}/{selected_chunk_count})"
+        )
+    if violations:
+        detail = "; ".join(violations)
+        raise RuntimeError(
+            "Strict rerank contract violated for evaluate_surge_fast: "
+            f"{record_key}={record_id}. {detail}"
+        )
 
 
 async def ensure_workspace_index(
@@ -1569,6 +1611,13 @@ async def run_retrieval(args: argparse.Namespace) -> int:
                     raise ValueError("empty prefix_titles_query")
                 param = QueryParam(**query_params)
                 retrieval = await with_retries(lambda: rag.lightrag.aquery_data(q, param=param), label=f"query {qid}", retries=args.max_retries)
+                rerank_for_contract = extract_rerank_payload(retrieval, query_params)
+                assert_rerank_contract(
+                    rerank_payload=rerank_for_contract,
+                    query_params=query_params,
+                    record_key="query_id",
+                    record_id=qid,
+                )
                 retrieved, warns = await map_chunks_to_doc_ids(
                     chunk_source_map=chunk_source_map,
                     retrieval=retrieval,
@@ -1578,7 +1627,7 @@ async def run_retrieval(args: argparse.Namespace) -> int:
             except Exception as exc:
                 error = {
                     "query_id": qid,
-                    "error": str(exc),
+                    "error": f"{type(exc).__name__}: {exc}",
                     "traceback_tail": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)[-3:]).strip(),
                 }
         row = {
@@ -1752,6 +1801,12 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
                     retries=args.max_retries,
                 )
                 rerank = extract_rerank_payload(retrieval, query_params)
+                assert_rerank_contract(
+                    rerank_payload=rerank,
+                    query_params=query_params,
+                    record_key="survey_id",
+                    record_id=survey_id,
+                )
                 chunk_ids = rerank.get("chunk_ids", {}) if isinstance(rerank, dict) else {}
                 if not isinstance(chunk_ids, dict):
                     chunk_ids = {}
@@ -1795,7 +1850,7 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
             except Exception as exc:
                 error = {
                     "survey_id": survey_id,
-                    "error": str(exc),
+                    "error": f"{type(exc).__name__}: {exc}",
                     "traceback_tail": "".join(
                         traceback.format_exception(type(exc), exc, exc.__traceback__)[-3:]
                     ).strip(),
@@ -2131,7 +2186,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--max-concurrency",
         type=int,
-        default=8,
+        default=5,
         help="Evaluation query concurrency (query-level / survey-retrieval).",
     )
     p.add_argument("--max-retries", type=int, default=0)

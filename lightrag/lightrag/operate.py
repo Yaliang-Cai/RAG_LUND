@@ -571,6 +571,59 @@ def _history_messages_signature(history_messages: list[dict[str, str]]) -> str:
     return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
 
+def _prompt_signature(prompt: str) -> str:
+    if not prompt:
+        return ""
+    return hashlib.md5(prompt.encode("utf-8")).hexdigest()
+
+
+def _build_query_cache_params(
+    query_param: QueryParam,
+    *,
+    history_signature: str,
+    user_prompt: str,
+    system_prompt: str,
+    hl_keywords_str: str = "",
+    ll_keywords_str: str = "",
+) -> dict[str, Any]:
+    """Build a canonical cache-parameter payload for query-level LLM cache."""
+    return {
+        "mode": query_param.mode,
+        "response_type": query_param.response_type,
+        "stream": query_param.stream,
+        "top_k": query_param.top_k,
+        "chunk_top_k": query_param.chunk_top_k,
+        "rerank_score_scope": query_param.rerank_score_scope,
+        "max_entity_tokens": query_param.max_entity_tokens,
+        "max_relation_tokens": query_param.max_relation_tokens,
+        "max_total_tokens": query_param.max_total_tokens,
+        "hl_keywords": hl_keywords_str,
+        "ll_keywords": ll_keywords_str,
+        "user_prompt": user_prompt,
+        "enable_rerank": query_param.enable_rerank,
+        "include_references": query_param.include_references,
+        "multimodal_top_k": query_param.multimodal_top_k,
+        "enable_image_token_budget": query_param.enable_image_token_budget,
+        "image_token_estimate_method": query_param.image_token_estimate_method,
+        "image_token_model_name_or_path": query_param.image_token_model_name_or_path,
+        "image_wrapper_tokens_per_image": query_param.image_wrapper_tokens_per_image,
+        "enable_multi_hop": query_param.enable_multi_hop,
+        "multi_hop_depth": query_param.multi_hop_depth,
+        "ppr_damping": query_param.ppr_damping,
+        "ppr_top_k": query_param.ppr_top_k,
+        "passage_node_weight": query_param.passage_node_weight,
+        "history_signature": history_signature,
+        "system_prompt_signature": _prompt_signature(system_prompt),
+    }
+
+
+def _compute_query_cache_args_hash(query: str, query_cache_params: dict[str, Any]) -> str:
+    """Compute query-cache hash from user query + canonical cache params."""
+    payload = {"query": query, **query_cache_params}
+    payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return compute_args_hash(payload_json)
+
+
 _QWEN_IMAGE_PROCESSOR_CACHE: dict[str, Any] = {}
 
 
@@ -3983,27 +4036,15 @@ async def kg_query(
     effective_history_messages = _build_effective_history_messages(query_param)
     history_signature = _history_messages_signature(effective_history_messages)
 
-    args_hash = compute_args_hash(
-        query_param.mode,
-        query,
-        query_param.response_type,
-        query_param.top_k,
-        query_param.chunk_top_k,
-        query_param.rerank_score_scope,
-        query_param.max_entity_tokens,
-        query_param.max_relation_tokens,
-        query_param.max_total_tokens,
-        hl_keywords_str,
-        ll_keywords_str,
-        query_param.user_prompt or "",
-        query_param.enable_rerank,
-        query_param.enable_multi_hop,
-        query_param.multi_hop_depth,
-        query_param.ppr_damping,
-        query_param.ppr_top_k,
-        query_param.passage_node_weight,
-        history_signature,
+    query_cache_params = _build_query_cache_params(
+        query_param,
+        history_signature=history_signature,
+        user_prompt=query_param.user_prompt or "",
+        system_prompt=sys_prompt,
+        hl_keywords_str=hl_keywords_str,
+        ll_keywords_str=ll_keywords_str,
     )
+    args_hash = _compute_query_cache_args_hash(query, query_cache_params)
 
     cached_result = await handle_cache(
         hashing_kv, args_hash, user_query, query_param.mode, cache_type="query"
@@ -4025,26 +4066,7 @@ async def kg_query(
         )
 
         if hashing_kv and hashing_kv.global_config.get("enable_llm_cache"):
-            queryparam_dict = {
-                "mode": query_param.mode,
-                "response_type": query_param.response_type,
-                "top_k": query_param.top_k,
-                "chunk_top_k": query_param.chunk_top_k,
-                "rerank_score_scope": query_param.rerank_score_scope,
-                "max_entity_tokens": query_param.max_entity_tokens,
-                "max_relation_tokens": query_param.max_relation_tokens,
-                "max_total_tokens": query_param.max_total_tokens,
-                "hl_keywords": hl_keywords_str,
-                "ll_keywords": ll_keywords_str,
-                "user_prompt": query_param.user_prompt or "",
-                "enable_rerank": query_param.enable_rerank,
-                "enable_multi_hop": query_param.enable_multi_hop,
-                "multi_hop_depth": query_param.multi_hop_depth,
-                "ppr_damping": query_param.ppr_damping,
-                "ppr_top_k": query_param.ppr_top_k,
-                "passage_node_weight": query_param.passage_node_weight,
-                "history_signature": history_signature,
-            }
+            queryparam_dict = dict(query_cache_params)
             await save_to_cache(
                 hashing_kv,
                 CacheData(
@@ -6312,20 +6334,13 @@ async def naive_query(
     effective_history_messages = history_messages
     history_signature = _history_messages_signature(effective_history_messages)
 
-    args_hash = compute_args_hash(
-        query_param.mode,
-        query,
-        query_param.response_type,
-        query_param.top_k,
-        query_param.chunk_top_k,
-        query_param.rerank_score_scope,
-        query_param.max_entity_tokens,
-        query_param.max_relation_tokens,
-        query_param.max_total_tokens,
-        query_param.user_prompt or "",
-        query_param.enable_rerank,
-        history_signature,
+    query_cache_params = _build_query_cache_params(
+        query_param,
+        history_signature=history_signature,
+        user_prompt=query_param.user_prompt or "",
+        system_prompt=sys_prompt,
     )
+    args_hash = _compute_query_cache_args_hash(query, query_cache_params)
     cached_result = await handle_cache(
         hashing_kv, args_hash, user_query, query_param.mode, cache_type="query"
     )
@@ -6345,19 +6360,7 @@ async def naive_query(
         )
 
         if hashing_kv and hashing_kv.global_config.get("enable_llm_cache"):
-            queryparam_dict = {
-                "mode": query_param.mode,
-                "response_type": query_param.response_type,
-                "top_k": query_param.top_k,
-                "chunk_top_k": query_param.chunk_top_k,
-                "rerank_score_scope": query_param.rerank_score_scope,
-                "max_entity_tokens": query_param.max_entity_tokens,
-                "max_relation_tokens": query_param.max_relation_tokens,
-                "max_total_tokens": query_param.max_total_tokens,
-                "user_prompt": query_param.user_prompt or "",
-                "enable_rerank": query_param.enable_rerank,
-                "history_signature": history_signature,
-            }
+            queryparam_dict = dict(query_cache_params)
             await save_to_cache(
                 hashing_kv,
                 CacheData(

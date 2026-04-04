@@ -493,10 +493,6 @@ class QueryMixin:
 
         self.logger.info(f"Executing VLM enhanced query: {query[:100]}...")
 
-        # Clear previous image cache
-        if hasattr(self, "_current_images_base64"):
-            delattr(self, "_current_images_base64")
-
         # 1. Get original retrieval prompt (without generating final answer)
         # Cap only how many image paths are converted to image inputs.
         # Retrieval context itself remains strict rerank order.
@@ -514,9 +510,10 @@ class QueryMixin:
         self.logger.debug("Retrieved raw prompt from LightRAG")
 
         # 2. Extract and process image paths, hard-capped to image_cap
-        enhanced_prompt, images_found = await self._process_image_paths_for_vlm(
+        enhanced_prompt, images_base64 = await self._process_image_paths_for_vlm(
             raw_prompt, max_images=image_cap
         )
+        images_found = len(images_base64)
 
         if not images_found:
             self.logger.info(
@@ -560,6 +557,7 @@ class QueryMixin:
             enhanced_prompt,
             query,
             system_prompt,
+            images_base64=images_base64,
             conversation_history=query_param.conversation_history,
             history_summary=query_param.history_summary,
         )
@@ -741,7 +739,7 @@ class QueryMixin:
 
     async def _process_image_paths_for_vlm(
         self, prompt: str, max_images: int | None = None
-    ) -> tuple[str, int]:
+    ) -> tuple[str, list[str]]:
         """
         Process image paths in prompt, keeping original paths and adding VLM markers.
         At most max_images images are encoded and sent to VLM; excess paths are
@@ -752,13 +750,11 @@ class QueryMixin:
             max_images: Maximum number of images to encode. None means no cap.
 
         Returns:
-            tuple: (processed prompt, image count)
+            tuple: (processed prompt, encoded images base64 list)
         """
         enhanced_prompt = prompt
         images_processed = 0
-
-        # Initialize image cache
-        self._current_images_base64 = []
+        images_base64: list[str] = []
 
         # Enhanced regex pattern for matching image paths
         # Build extension alternation from SUPPORTED_IMAGE_EXTENSIONS in constants.py
@@ -802,8 +798,7 @@ class QueryMixin:
                 image_base64 = encode_image_to_base64(image_path)
                 if image_base64:
                     images_processed += 1
-                    # Save base64 to instance variable for later use
-                    self._current_images_base64.append(image_base64)
+                    images_base64.append(image_base64)
 
                     # Keep original path info and add VLM marker
                     result = f"Image Path: {image_path}\n[VLM_IMAGE_{images_processed}]"
@@ -824,13 +819,14 @@ class QueryMixin:
             image_path_pattern, replace_image_path, enhanced_prompt
         )
 
-        return enhanced_prompt, images_processed
+        return enhanced_prompt, images_base64
 
     def _build_vlm_messages_with_images(
         self,
         enhanced_prompt: str,
         user_query: str,
         system_prompt: str | None,
+        images_base64: list[str] | None = None,
         conversation_history: list[dict[str, Any]] | None = None,
         history_summary: str | None = None,
     ) -> List[Dict]:
@@ -845,7 +841,7 @@ class QueryMixin:
         Returns:
             List[Dict]: VLM message format
         """
-        images_base64 = getattr(self, "_current_images_base64", [])
+        images_base64 = list(images_base64 or [])
         has_images = bool(images_base64)
 
         repacked = repack_query_messages(

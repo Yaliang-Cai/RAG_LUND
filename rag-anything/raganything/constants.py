@@ -104,11 +104,9 @@ DEFAULT_ENABLE_RERANK = True
 DEFAULT_VLM_ENHANCED = True
 
 # Reranker score 过滤阈值：rerank 完成后，得分低于此值的 chunk 会被丢弃。
-# LightRAG 原默认值为 0.0（即不过滤）；BGE-reranker-v2-m3（CrossEncoder）
-# 对相关 chunk 的典型得分 > 0.5，不相关 chunk 通常 < 0.3。
-# 设为 0.3 可过滤掉明显不相关的 chunk，同时保留模糊相关内容。
-# 调高此值（如 0.5）可进一步提升精确度，但可能降低召回率。
-DEFAULT_MIN_RERANK_SCORE = 0.3
+# 当前默认 0.0（不过滤），用于评测阶段保持召回完整性并避免
+# 因阈值过滤引入额外变量。需要更强精确率时可调高（如 0.3 / 0.5）。
+DEFAULT_MIN_RERANK_SCORE = 0.0
 
 # =============================================================================
 # Knowledge graph visualization defaults

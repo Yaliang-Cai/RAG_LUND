@@ -39,6 +39,10 @@ os.environ.setdefault("MINERU_VLLM_GPU_MEMORY_UTILIZATION", "0.1")
 
 # Add project root to import local_rag
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+_projects_root = Path(__file__).resolve().parents[3]
+_local_lightrag_root = _projects_root / "lightrag"
+if _local_lightrag_root.exists():
+    sys.path.insert(0, str(_local_lightrag_root))
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
 from raganything.constants import DEFAULT_EVAL_RETRY_FAILED_ONLY
@@ -58,7 +62,11 @@ else:
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WORKING_DIR_ROOT = OUTPUT_DIR / "rag_workspaces"
 WORKING_DIR_ROOT.mkdir(parents=True, exist_ok=True)
-OUTPUT_MD_DIR = OUTPUT_DIR / "mineru_outputs"
+_mineru_output_dir_override = str(os.getenv("DOCBENCH_SHARED_MINERU_OUTPUT_DIR", "")).strip()
+if _mineru_output_dir_override:
+    OUTPUT_MD_DIR = Path(_mineru_output_dir_override)
+else:
+    OUTPUT_MD_DIR = OUTPUT_DIR / "mineru_outputs"
 OUTPUT_MD_DIR.mkdir(parents=True, exist_ok=True)
 
 SYSTEM_ANSWERS_FILE = OUTPUT_DIR / "system_answers.jsonl"
@@ -1034,7 +1042,7 @@ async def generate_answers_shared(
     allow_legacy_index_profile_adoption: bool,
 ) -> None:
     max_async_ingest = _normalize_max_async(max_async_ingest, default=4)
-    max_async_generate = _normalize_max_async(max_async_generate, default=1)
+    max_async_generate = _normalize_max_async(max_async_generate, default=6)
     ingest_flush_every = DEFAULT_INGEST_FLUSH_EVERY
     settings = _build_shared_settings(
         ablation_flags=ablation_flags,
@@ -1360,6 +1368,8 @@ async def generate_answers_shared(
             qa_item = entry["qa_item"]
             question = qa_item["question"]
             write_answer = bool(entry.get("write_answer", True))
+            query_error: str | None = None
+            contract_error: str | None = None
             logger.info("[%s][Q%d] Question: %s", doc_name, qa_idx + 1, question[:80])
             async with sem:
                 try:
@@ -1373,9 +1383,35 @@ async def generate_answers_shared(
                     logger.info("[%s][Q%d] Answer: %s", doc_name, qa_idx + 1, answer[:80])
                 except Exception as exc:
                     logger.error("[%s][Q%d] query failed: %s", doc_name, qa_idx + 1, exc)
+                    query_error = f"{type(exc).__name__}: {exc}"
                     answer = ""
                     trace = {}
 
+            rerank_stats = _extract_rerank_chunk_payload(
+                trace if isinstance(trace, dict) else {},
+                query_params=query_params,
+            )
+            try:
+                _assert_rerank_contract(
+                    rerank_stats=rerank_stats,
+                    query_params=query_params,
+                    doc_id=doc_name,
+                    qa_idx=qa_idx,
+                )
+            except Exception as exc:
+                contract_error = f"{type(exc).__name__}: {exc}"
+                # Strict per-query fail-fast: keep the run alive, but mark this query failed.
+                logger.error(
+                    "[%s][Q%d] rerank contract violated (mark this query as failed): %s",
+                    doc_name,
+                    qa_idx + 1,
+                    contract_error,
+                )
+                answer = ""
+
+            merged_error = "; ".join(
+                x for x in [query_error, contract_error] if isinstance(x, str) and x
+            )
             result = None
             if write_answer:
                 result = {
@@ -1388,16 +1424,8 @@ async def generate_answers_shared(
                     "type": qa_item["type"],
                     "evidence": qa_item["evidence"],
                 }
-            rerank_stats = _extract_rerank_chunk_payload(
-                trace if isinstance(trace, dict) else {},
-                query_params=query_params,
-            )
-            _assert_rerank_contract(
-                rerank_stats=rerank_stats,
-                query_params=query_params,
-                doc_id=doc_name,
-                qa_idx=qa_idx,
-            )
+                if merged_error:
+                    result["query_error"] = merged_error
             rerank_payload = {
                 "experiment_id": experiment_id,
                 "doc_id": doc_name,
@@ -1412,6 +1440,10 @@ async def generate_answers_shared(
                 "type": qa_item["type"],
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
             }
+            if merged_error:
+                rerank_payload["query_error"] = merged_error
+            if contract_error:
+                rerank_payload["contract_error"] = contract_error
             async with progress_lock:
                 done_count += 1
                 if done_count == total_pending or done_count % max(1, total_pending // 10) == 0:
@@ -1759,7 +1791,7 @@ async def main() -> None:
     )
     parser.set_defaults(raganything_eval_setup=True)
     parser.add_argument("--max_async_ingest", type=int, default=4)
-    parser.add_argument("--max_async_generate", type=int, default=1)
+    parser.add_argument("--max_async_generate", type=int, default=6)
     parser.add_argument("--max_async_judge", type=int, default=4)
     add_ablation_arguments(parser)
     parser.add_argument(

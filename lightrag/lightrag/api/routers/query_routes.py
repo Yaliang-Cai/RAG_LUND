@@ -100,6 +100,41 @@ class QueryRequest(BaseModel):
         description="Enable reranking for retrieved text chunks. If True but no rerank model is configured, a warning will be issued. Default is True.",
     )
 
+    rerank_score_scope: Optional[Literal["top_k", "all"]] = Field(
+        default=None,
+        description='How many retrieved chunks are scored by reranker: "top_k" or "all".',
+    )
+
+    enable_multi_hop: Optional[bool] = Field(
+        default=None,
+        description="Enable V3 PPR multi-hop retrieval.",
+    )
+
+    multi_hop_depth: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Maximum traversal depth for multi-hop retrieval.",
+    )
+
+    ppr_damping: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        lt=1.0,
+        description="PPR damping factor in (0, 1).",
+    )
+
+    ppr_top_k: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Number of top PPR-ranked chunks to keep.",
+    )
+
+    passage_node_weight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="Scaling factor for passage-node prior in PPR ranking.",
+    )
+
     include_references: Optional[bool] = Field(
         default=True,
         description="If True, includes reference list in responses. Affects /query and /query/stream endpoints. /query/data always includes references.",

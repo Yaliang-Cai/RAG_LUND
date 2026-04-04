@@ -27,12 +27,12 @@ server/
 ```
 FastAPI 进程
   └── _service: LocalRagService          # 模块级全局变量，整个进程唯一
-        └── _rag_instances: Dict[str, RAGAnything]   # 按 doc_id 缓存
+        └── _rag_instances: Dict[str, RAGAnything]   # 按 workspace_id 缓存
               └── rag.lightrag: LightRAG             # 每个 RAGAnything 内部唯一
 ```
 
 - `get_service()`（第 133 行）：FastAPI 依赖注入函数，首次调用时从环境变量读取 `LocalRagSettings` 并创建 `LocalRagService`，之后全部复用同一实例。
-- `service.get_rag(doc_id)`（`local_rag.py`）：在 `asyncio.Lock` 保护下查缓存，同一 `doc_id` 只创建一次 `RAGAnything`。
+- `service.get_rag(workspace_id)`（`local_rag.py`）：在 `asyncio.Lock` 保护下查缓存，同一 `workspace_id` 只创建一次 `RAGAnything`。
 - `RAGAnything._ensure_lightrag_initialized()`：内部 LightRAG 实例懒初始化，有 `if self.lightrag is not None` 守卫，幂等可重复调用。
 
 ### 在线 / 离线模式自动检测
@@ -64,23 +64,23 @@ _USE_LOCAL_STATIC = all([
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/` | WebUI 主页 |
-| `GET` | `/files/{doc_id}` | 列出该工作空间下解析产物 `.md` 文件 |
-| `GET` | `/content/{doc_id}` | 读取 Markdown 内容（可选 `?filename=` 参数） |
+| `GET` | `/files/{workspace_id}` | 列出该工作空间下解析产物 `.md` 文件 |
+| `GET` | `/content/{workspace_id}` | 读取 Markdown 内容（可选 `?filename=` 参数） |
 
 ### 文件上传与入库
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/ingest` | 上传文件并触发 RAG 入库（multipart/form-data） |
-| `POST` | `/retry/{doc_id}` | 用已上传文件重新触发入库（后台任务） |
-| `GET` | `/uploads/{doc_id}` | 列出已上传的原始文件 |
-| `GET` | `/uploads/{doc_id}/{filename}` | 下载已上传原始文件 |
-| `GET` | `/output/{doc_id}/images/{path}` | 获取解析产物图片 |
+| `POST` | `/retry/{workspace_id}` | 用已上传文件重新触发入库（后台任务） |
+| `GET` | `/uploads/{workspace_id}` | 列出已上传的原始文件 |
+| `GET` | `/uploads/{workspace_id}/{filename}` | 下载已上传原始文件 |
+| `GET` | `/output/{workspace_id}/images/{path}` | 获取解析产物图片 |
 
 `/ingest` 的文件存储路径：
-- `uploads/{doc_id}/`：原始上传文件（永久保留，供 `/retry` 使用）
-- `output/{doc_id}/`：MinerU/Docling 解析产物（Markdown、图片）
-- `working_dir_root/{doc_id}/`：LightRAG 索引（知识图谱、向量库）
+- `uploads/{workspace_id}/`：原始上传文件（永久保留，供 `/retry` 使用）
+- `output/{workspace_id}/`：MinerU/Docling 解析产物（Markdown、图片）
+- `working_dir_root/{workspace_id}/`：LightRAG 索引（知识图谱、向量库）
 
 ### 查询
 
@@ -93,7 +93,7 @@ _USE_LOCAL_STATIC = all([
 
 ```json
 {
-  "doc_id": "MyGraph",
+  "workspace_id": "MyGraph",
   "query": "什么是...",
   "mode": "hybrid",
   "top_k": 60,
@@ -115,12 +115,12 @@ _USE_LOCAL_STATIC = all([
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/graph/{doc_id}/labels` | 获取所有实体标签（优先 LightRAG API，退回 NetworkX GraphML）|
-| `GET` | `/graph/{doc_id}/subgraph` | 以指定节点为中心展开子图（`?label=&max_depth=&max_nodes=`）|
-| `GET` | `/graph/{doc_id}/stats` | 实体数、关系数、文件大小 |
-| `GET` | `/graph/{doc_id}/search` | 实体名称模糊搜索（`?q=&limit=`）|
-| `GET` | `/graph/{doc_id}/overview` | 按度数取 Top-N 节点的概览子图 |
-| `GET` | `/graph/{doc_id}/html` | 生成 pyvis 自包含 HTML 可视化（`?q=&theme=&max_nodes=`）|
+| `GET` | `/graph/{workspace_id}/labels` | 获取所有实体标签（优先 LightRAG API，退回 NetworkX GraphML）|
+| `GET` | `/graph/{workspace_id}/subgraph` | 以指定节点为中心展开子图（`?label=&max_depth=&max_nodes=`）|
+| `GET` | `/graph/{workspace_id}/stats` | 实体数、关系数、文件大小 |
+| `GET` | `/graph/{workspace_id}/search` | 实体名称模糊搜索（`?q=&limit=`）|
+| `GET` | `/graph/{workspace_id}/overview` | 按度数取 Top-N 节点的概览子图 |
+| `GET` | `/graph/{workspace_id}/html` | 生成 pyvis 自包含 HTML 可视化（`?q=&theme=&max_nodes=`）|
 
 图谱端点有两层退路策略：优先调用 LightRAG 的异步 API（需要初始化存储），失败则退回 NetworkX 直接读 `graph_chunk_entity_relation.graphml`，确保图谱可视化不依赖完整的 RAG 初始化。
 
@@ -128,8 +128,8 @@ _USE_LOCAL_STATIC = all([
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `DELETE` | `/workspace/{doc_id}` | 删除三层目录（uploads/output/workspace）并清除内存缓存 |
-| `GET` | `/workspace/{doc_id}/stats` | 文件数、实体数、关系数、chunk 数、磁盘用量 |
+| `DELETE` | `/workspace/{workspace_id}` | 删除三层目录（uploads/output/workspace）并清除内存缓存 |
+| `GET` | `/workspace/{workspace_id}/stats` | 文件数、实体数、关系数、chunk 数、磁盘用量 |
 | `GET` | `/workspaces` | 列出所有工作空间及其状态 |
 
 ### 配置
@@ -167,13 +167,13 @@ python server/download_static.py --force
 ```
 ./
 ├── uploads/
-│   └── {doc_id}/           ← 原始上传文件
+│   └── {workspace_id}/           ← 原始上传文件
 ├── output/           (RAGANYTHING_OUTPUT_DIR)
-│   └── {doc_id}/
+│   └── {workspace_id}/
 │       └── hybrid_auto/    ← 解析产物 Markdown 与图片
 └── rag_storage/      (RAGANYTHING_WORKDIR_ROOT)
-    └── {doc_id}/           ← LightRAG 索引（向量库、知识图谱、KV 缓存）
+    └── {workspace_id}/           ← LightRAG 索引（向量库、知识图谱、KV 缓存）
         └── graph_chunk_entity_relation.graphml
 ```
 
-三层目录均以 `doc_id` 为子目录名隔离，`DELETE /workspace/{doc_id}` 会同时清除全部三层。
+三层目录均以 `workspace_id` 为子目录名隔离，`DELETE /workspace/{workspace_id}` 会同时清除全部三层。
