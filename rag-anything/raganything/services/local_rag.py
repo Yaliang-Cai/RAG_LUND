@@ -529,12 +529,19 @@ def build_lightrag_tokenizer(
 def build_embedding_func(
     settings: LocalRagSettings, st_model: SentenceTransformer
 ) -> EmbeddingFunc:
+    raw_model_path = str(settings.embedding_model_path or "").strip()
+    normalized_model_path = raw_model_path.rstrip("/\\")
+    model_name = Path(normalized_model_path).name if normalized_model_path else ""
+    if not model_name:
+        model_name = "embedding_model"
+
     async def _compute_embedding(texts: list[str]) -> np.ndarray:
         return st_model.encode(texts, normalize_embeddings=True)
 
     return EmbeddingFunc(
         embedding_dim=settings.embedding_dim,
         max_token_size=settings.max_token_size,
+        model_name=model_name,
         func=_compute_embedding,
     )
 
