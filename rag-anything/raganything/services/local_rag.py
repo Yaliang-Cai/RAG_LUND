@@ -1552,6 +1552,11 @@ class LocalRagService:
                 stream=True,
                 include_references=True,
                 user_prompt=_INLINE_CITATION_INSTRUCTION if _INLINE_CITATIONS_ENABLED else "",
+                enable_multi_hop=self.settings.enable_multi_hop,
+                multi_hop_depth=self.settings.multi_hop_depth,
+                ppr_damping=self.settings.ppr_damping,
+                ppr_top_k=self.settings.ppr_top_k,
+                passage_node_weight=self.settings.passage_node_weight,
             )
             result = await rag_instance.lightrag.aquery_llm(query, param=param)
 
