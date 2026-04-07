@@ -1474,6 +1474,12 @@ class LocalRagService:
         normalized_kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
             str(normalized_kwargs.get("image_token_estimate_method", ""))
         )
+        normalized_kwargs.setdefault("enable_multi_hop", self.settings.enable_multi_hop)
+        normalized_kwargs.setdefault("multi_hop_depth", self.settings.multi_hop_depth)
+        normalized_kwargs.setdefault("ppr_damping", self.settings.ppr_damping)
+        normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
+        normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
+
         async def _run_query() -> str:
             return await rag.aquery(query, **normalized_kwargs)
 
@@ -1499,6 +1505,11 @@ class LocalRagService:
         normalized_kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
             str(normalized_kwargs.get("image_token_estimate_method", ""))
         )
+        normalized_kwargs.setdefault("enable_multi_hop", self.settings.enable_multi_hop)
+        normalized_kwargs.setdefault("multi_hop_depth", self.settings.multi_hop_depth)
+        normalized_kwargs.setdefault("ppr_damping", self.settings.ppr_damping)
+        normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
+        normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
         normalized_kwargs["return_trace"] = True
 
         async def _run_query_with_trace() -> dict[str, Any]:
