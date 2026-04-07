@@ -471,6 +471,10 @@ async def query_stream_endpoint(
                 payload.workspace_id, payload.query,
                 mode=payload.mode, top_k=top_k,
                 chunk_top_k=chunk_top_k, enable_rerank=payload.enable_rerank,
+                enable_multi_hop=payload.enable_multi_hop,
+                multi_hop_depth=payload.multi_hop_depth,
+                ppr_damping=payload.ppr_damping,
+                ppr_top_k=payload.ppr_top_k,
             ):
                 if event["type"] == "meta":
                     retrieval_data = event  # keep for graph subquery

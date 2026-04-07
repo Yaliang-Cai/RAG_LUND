@@ -1479,6 +1479,10 @@ class LocalRagService:
         normalized_kwargs.setdefault("ppr_damping", self.settings.ppr_damping)
         normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
         normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
+        normalized_kwargs.setdefault(
+            "user_prompt",
+            _INLINE_CITATION_INSTRUCTION if _INLINE_CITATIONS_ENABLED else "",
+        )
 
         async def _run_query() -> str:
             return await rag.aquery(query, **normalized_kwargs)
@@ -1531,6 +1535,10 @@ class LocalRagService:
         top_k: int = DEFAULT_TOP_K,
         chunk_top_k: int = DEFAULT_CHUNK_TOP_K,
         enable_rerank: bool = DEFAULT_ENABLE_RERANK,
+        enable_multi_hop: bool | None = None,
+        multi_hop_depth: int | None = None,
+        ppr_damping: float | None = None,
+        ppr_top_k: int | None = None,
     ):
         """Async generator — yields structured events via LightRAG aquery_llm().
 
@@ -1552,10 +1560,10 @@ class LocalRagService:
                 stream=True,
                 include_references=True,
                 user_prompt=_INLINE_CITATION_INSTRUCTION if _INLINE_CITATIONS_ENABLED else "",
-                enable_multi_hop=self.settings.enable_multi_hop,
-                multi_hop_depth=self.settings.multi_hop_depth,
-                ppr_damping=self.settings.ppr_damping,
-                ppr_top_k=self.settings.ppr_top_k,
+                enable_multi_hop=enable_multi_hop if enable_multi_hop is not None else self.settings.enable_multi_hop,
+                multi_hop_depth=multi_hop_depth if multi_hop_depth is not None else self.settings.multi_hop_depth,
+                ppr_damping=ppr_damping if ppr_damping is not None else self.settings.ppr_damping,
+                ppr_top_k=ppr_top_k if ppr_top_k is not None else self.settings.ppr_top_k,
                 passage_node_weight=self.settings.passage_node_weight,
             )
             result = await rag_instance.lightrag.aquery_llm(query, param=param)
