@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional, Set
+from typing import List, Optional, Set
 
 import json as _json
 
@@ -290,6 +290,78 @@ async def ingest(
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
 
     return {"workspace_id": final_id, "filename": original_filename}
+
+
+@app.post("/ingest/batch")
+async def ingest_batch(
+    files: List[UploadFile] = File(...),
+    workspace_id: Optional[str] = Form(default=None),
+    chunking_strategy: Optional[str] = Form(default=None),
+    _auth: None = Depends(verify_api_key),
+    service: LocalRagService = Depends(get_service),
+):
+    """Ingest multiple files into the same workspace in one request.
+
+    All files are written to a temporary directory and processed via
+    ``process_folder_complete``, which applies the configured concurrency
+    (``MAX_CONCURRENT_FILES``) internally.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    for f in files:
+        ext = Path(f.filename).suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type: '{ext}' ({f.filename}). Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
+            )
+
+    if chunking_strategy and chunking_strategy not in VALID_CHUNKING_STRATEGIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid chunking_strategy '{chunking_strategy}'. Valid: {', '.join(sorted(VALID_CHUNKING_STRATEGIES))}",
+        )
+
+    first_stem = Path(files[0].filename).stem
+    final_workspace_id = workspace_id.strip() if workspace_id and workspace_id.strip() else _compute_workspace_id(first_stem)
+    _validate_workspace_id(final_workspace_id)
+
+    upload_dir = UPLOADS_DIR / final_workspace_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path(tempfile.mkdtemp())
+
+    filenames: List[str] = []
+    try:
+        for f in files:
+            content = await f.read()
+            name = Path(f.filename).name
+            if not name:
+                raise HTTPException(status_code=400, detail="Invalid filename")
+
+            upload_path = upload_dir / name
+            try:
+                upload_path.resolve().relative_to(upload_dir.resolve())
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid filename")
+
+            upload_path.write_bytes(content)
+            (tmp_dir / name).write_bytes(content)
+            filenames.append(name)
+
+        workspace_output = str(Path(service.settings.output_dir) / final_workspace_id)
+        # Pass the temp directory — service.ingest() detects a directory and calls
+        # rag.process_folder_complete(), which applies MAX_CONCURRENT_FILES concurrency.
+        final_id = await service.ingest(
+            str(tmp_dir),
+            workspace_id=final_workspace_id,
+            output_dir=workspace_output,
+            chunking_strategy=chunking_strategy or None,
+        )
+    finally:
+        shutil.rmtree(str(tmp_dir), ignore_errors=True)
+
+    return {"workspace_id": final_id, "files": filenames}
 
 
 @app.post("/retry/{workspace_id}")

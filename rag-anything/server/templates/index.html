@@ -1024,6 +1024,18 @@
       if (!r.ok) throw new Error(`Ingest failed (${r.status})`);
       return r.json();
     },
+    async ingestBatch(files, docId, chunkingStrategy) {
+      const fd = new FormData();
+      for (const f of files) fd.append('files', f);
+      if (docId) fd.append('workspace_id', docId);
+      if (chunkingStrategy) fd.append('chunking_strategy', chunkingStrategy);
+      const r = await fetch('/ingest/batch', { method: 'POST', headers: this._headers(), body: fd });
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `Batch ingest failed (${r.status})`);
+      }
+      return r.json(); // { workspace_id, files: [...] }
+    },
     async deleteWorkspace(docId) {
       const r = await fetch(`/workspace/${docId}`, { method: 'DELETE', headers: this._headers() });
       if (!r.ok) throw new Error(`Delete failed (${r.status})`);
@@ -2125,7 +2137,7 @@
               ${existingOpts}
             </select>
           </div>
-          <div class="upload-settings-row" id="customWsRow" style="display:none">
+          <div class="upload-settings-row" id="customWsRow">
             <label class="upload-settings-label" for="customWsInput">Custom Workspace Name</label>
             <input class="upload-settings-input" id="customWsInput" type="text"
               placeholder="e.g. my_project  (leave blank to use filename)" autocomplete="off">
@@ -2186,16 +2198,10 @@
         const files = Array.from(input.files);
         if (!files.length) return;
 
-        // lockedDocId: fixed after the first file succeeds so all files go to the same workspace
-        let lockedDocId = targetDocId;
-        let lastResult = null;
-        const failedFiles = [];
-
-        // Create one persistent overlay with per-file list
+        const wsLabel = targetDocId || '(auto)';
         const overlay = document.createElement('div');
         overlay.className = 'upload-overlay';
         overlay.id = 'uploadOverlay';
-        const wsLabel = targetDocId || '(auto)';
         overlay.innerHTML = `<div class="upload-dialog">
           <div class="upload-text">Uploading <strong>${files.length} file${files.length > 1 ? 's' : ''}</strong>
             <span style="font-size:11px;color:var(--text-tertiary);display:block;margin-top:2px;">Workspace: <span style="font-family:var(--font-mono);color:var(--accent)">${wsLabel}</span>&nbsp;·&nbsp;Strategy: ${chunkingStrategy}</span>
@@ -2209,8 +2215,8 @@
         files.forEach((file, idx) => {
           const li = document.createElement('li');
           li.id = `uFile${idx}`;
-          li.className = 'upload-file-row';
-          li.innerHTML = `<span class="upload-file-icon" id="uIcon${idx}">⏳</span><span class="upload-file-name" title="${file.name}">${file.name}</span><span class="upload-file-status" id="uStat${idx}">Waiting…</span>`;
+          li.className = 'upload-file-row active';
+          li.innerHTML = `<span class="upload-file-icon" id="uIcon${idx}">⏳</span><span class="upload-file-name" title="${file.name}">${file.name}</span><span class="upload-file-status" id="uStat${idx}">Processing…</span>`;
           listEl.appendChild(li);
         });
 
@@ -2220,53 +2226,45 @@
           if (el) el.textContent = `Elapsed: ${Math.round((Date.now() - startTime) / 1000)}s`;
         }, 1000);
 
-        for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
-          const file = files[fileIdx];
-          const expectedDocId = lockedDocId || this._computeDocId(file.name);
-          const li = document.getElementById(`uFile${fileIdx}`);
-          const iconEl = document.getElementById(`uIcon${fileIdx}`);
-          const statEl = document.getElementById(`uStat${fileIdx}`);
-
-          if (li) li.classList.add('active');
-          if (statEl) statEl.textContent = 'Processing…';
-
-          try {
-            const result = await API.ingest(file, lockedDocId, chunkingStrategy);
-            if (iconEl) iconEl.textContent = '✅';
-            if (statEl) statEl.textContent = `→ ${result.workspace_id}`;
-            if (li) { li.classList.remove('active'); li.classList.add('done'); }
-            lockedDocId = result.workspace_id;
-            lastResult = result;
-          } catch (e) {
+        let result = null;
+        let batchError = null;
+        try {
+          // Single request: all files go to the server together.
+          // service.ingest(tmp_dir) → rag.process_folder_complete() handles concurrency.
+          result = await API.ingestBatch(files, targetDocId, chunkingStrategy);
+          const succeededSet = new Set(result.files || []);
+          files.forEach((file, idx) => {
+            const li = document.getElementById(`uFile${idx}`);
+            const iconEl = document.getElementById(`uIcon${idx}`);
+            const statEl = document.getElementById(`uStat${idx}`);
+            const ok = succeededSet.has(file.name);
+            if (iconEl) iconEl.textContent = ok ? '✅' : '❌';
+            if (statEl) statEl.textContent = ok ? `→ ${result.workspace_id}` : 'Skipped / failed';
+            if (li) { li.classList.remove('active'); li.classList.add(ok ? 'done' : 'error'); }
+          });
+        } catch (e) {
+          batchError = e;
+          files.forEach((file, idx) => {
+            const li = document.getElementById(`uFile${idx}`);
+            const iconEl = document.getElementById(`uIcon${idx}`);
+            const statEl = document.getElementById(`uStat${idx}`);
             if (iconEl) iconEl.textContent = '❌';
             if (statEl) statEl.textContent = e.message || 'Failed';
             if (li) { li.classList.remove('active'); li.classList.add('error'); }
-            failedFiles.push({ file, docId: expectedDocId, rowIdx: fileIdx });
-          }
+          });
         }
 
         clearInterval(elapsedInterval);
 
-        // Add close / retry buttons
         const dialog = overlay.querySelector('.upload-dialog');
         const btnRow = document.createElement('div');
         btnRow.className = 'upload-btns';
-        if (failedFiles.length > 0) {
+        if (batchError && result?.workspace_id) {
           const retryBtn = document.createElement('button');
           retryBtn.className = 'upload-retry-btn';
-          retryBtn.textContent = `↻ Retry ${failedFiles.length} failed`;
-          retryBtn.onclick = () => {
-            failedFiles.forEach(async ({ docId, rowIdx }) => {
-              const iconEl2 = document.getElementById(`uIcon${rowIdx}`);
-              const statEl2 = document.getElementById(`uStat${rowIdx}`);
-              try {
-                await API.retry(docId);
-                if (iconEl2) iconEl2.textContent = '🔄';
-                if (statEl2) statEl2.textContent = 'Requeued';
-              } catch (e2) {
-                if (statEl2) statEl2.textContent = 'Retry failed: ' + e2.message;
-              }
-            });
+          retryBtn.textContent = '↻ Retry';
+          retryBtn.onclick = async () => {
+            try { await API.retry(result.workspace_id); } catch (_) {}
           };
           btnRow.appendChild(retryBtn);
         }
@@ -2278,10 +2276,10 @@
         dialog.appendChild(btnRow);
 
         input.value = '';
-        if (lastResult) {
+        if (result?.workspace_id) {
           await this.refreshWorkspaces();
-          document.getElementById('workspaceSelect').value = lastResult.workspace_id;
-          await this.loadWorkspace(lastResult.workspace_id);
+          document.getElementById('workspaceSelect').value = result.workspace_id;
+          await this.loadWorkspace(result.workspace_id);
         }
       };
       input.click();
