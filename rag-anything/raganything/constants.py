@@ -201,7 +201,7 @@ DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE = 2
 # When True, LLM is instructed to embed [DC1]/[DC2] inline citations after every
 # factual statement. When False, only the default doc-level ### References section
 # at the end of the answer is produced.
-DEFAULT_ENABLE_INLINE_CITATIONS = True
+DEFAULT_ENABLE_INLINE_CITATIONS = False
 
 # =============================================================================
 # V2: Synonym Linking (neo4j-milvus branch)
