@@ -1,6 +1,7 @@
 import asyncio
 import configparser
 import hashlib
+import math
 import os
 import uuid
 from dataclasses import dataclass
@@ -64,6 +65,21 @@ def workspace_filter_condition(workspace: str) -> models.FieldCondition:
     return models.FieldCondition(
         key=WORKSPACE_ID_FIELD, match=models.MatchValue(value=workspace)
     )
+
+
+def _normalize_timeout_seconds(raw_value: Any, env_name: str) -> int:
+    """Parse timeout input and normalize to positive integer seconds."""
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{env_name} must be a numeric timeout in seconds, got {raw_value!r}"
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(f"{env_name} must be > 0, got {value}")
+
+    return max(1, int(math.ceil(value)))
 
 
 def _find_legacy_collection(
@@ -484,14 +500,16 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         self._client = None
         self._max_batch_size = self.global_config["embedding_batch_num"]
         self._initialized = False
-        self._client_timeout = float(
+        self._client_timeout = _normalize_timeout_seconds(
             os.environ.get(
                 "QDRANT_CLIENT_TIMEOUT",
-                config.get("qdrant", "timeout", fallback=120.0),
-            )
+                config.get("qdrant", "timeout", fallback=120),
+            ),
+            "QDRANT_CLIENT_TIMEOUT",
         )
-        self._operation_timeout = float(
-            os.environ.get("QDRANT_OPERATION_TIMEOUT", self._client_timeout)
+        self._operation_timeout = _normalize_timeout_seconds(
+            os.environ.get("QDRANT_OPERATION_TIMEOUT", self._client_timeout),
+            "QDRANT_OPERATION_TIMEOUT",
         )
 
         # --- Tuning options from environment variables ---
