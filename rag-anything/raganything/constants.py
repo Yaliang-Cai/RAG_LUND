@@ -99,7 +99,7 @@ SUPPORTED_IMAGE_EXTENSIONS = [
 # =============================================================================
 DEFAULT_TOP_K = 20        # default and max allowed value for top_k
 DEFAULT_CHUNK_TOP_K = 10  # default and max allowed value for chunk_top_k
-DEFAULT_QUERY_MODE = "hybrid"   # "naive" | "local" | "global" | "hybrid"
+DEFAULT_QUERY_MODE = "hybrid"   # "naive" | "local" | "global" | "hybrid" | "mix" | "rrf"
 DEFAULT_ENABLE_RERANK = True
 DEFAULT_VLM_ENHANCED = True
 
@@ -161,6 +161,12 @@ DEFAULT_MAX_PARALLEL_INSERT = 4
 # True keeps same-workspace ingest serialized (safer); False allows concurrent
 # ingest into one shared workspace when caller manages race-safety.
 DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID = True
+
+# CLI 文件夹模式下的文档级并发入库数（对应 evaluate_shared.py 的 max_async_ingest）。
+# 与 DEFAULT_LLM_MODEL_MAX_ASYNC 分属两层：
+#   - 此值控制同时进入 pipeline（解析 + LLM 抽取）的文件数
+#   - DEFAULT_LLM_MODEL_MAX_ASYNC 控制所有文件共享的 LLM HTTP 请求并发上限
+DEFAULT_MAX_ASYNC_INGEST = 4
 
 # Embedding 模型单次批处理的最大文本数。
 # LightRAG 默认值为 10；BGE-M3 支持更大 batch，设为 32 可减少

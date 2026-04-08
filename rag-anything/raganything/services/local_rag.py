@@ -89,6 +89,7 @@ from raganything.constants import (
     DEFAULT_PPR_TOP_K,
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID,
+    DEFAULT_MAX_ASYNC_INGEST,
     DEFAULT_ENABLE_RESILIENCE,
     DEFAULT_RESILIENCE_MAX_ATTEMPTS,
     DEFAULT_INGEST_RETRY_BASE_DELAY,
@@ -1601,8 +1602,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RAG 后台管理工具")
     parser.add_argument("--path", "-p", required=True, help="要入库的文件或文件夹路径")
     parser.add_argument("--id", "-i", required=True, help="工作空间名称 (workspace_id)")
+    parser.add_argument(
+        "--max-async-ingest",
+        type=int,
+        default=DEFAULT_MAX_ASYNC_INGEST,
+        help=f"文件夹模式下，同时并发入库的最大文件数（默认 {DEFAULT_MAX_ASYNC_INGEST}）",
+    )
     args = parser.parse_args()
-    
+
     async def main():
         print(f"正在初始化 RAG 服务...")
         settings = LocalRagSettings.from_env()
@@ -1610,6 +1617,7 @@ if __name__ == "__main__":
 
         target_path = args.path
         workspace_name = args.id
+        max_async_ingest: int = max(1, args.max_async_ingest)
 
         print(f"开始处理: {target_path}")
         print(f"目标工作区: {settings.working_dir_root}/{workspace_name}")
@@ -1636,18 +1644,65 @@ if __name__ == "__main__":
             if not dest.exists():
                 shutil.copy2(str(src), str(dest))
 
-        try:
-            await service.ingest(
-                file_path=target_path,
-                workspace_id=workspace_name,
-                output_dir=workspace_output,
-            )
+        if target_path_obj.is_file():
+            # 单文件：直接入库
+            try:
+                await service.ingest(
+                    file_path=target_path,
+                    workspace_id=workspace_name,
+                    output_dir=workspace_output,
+                )
+                print(f"\n 入库成功！")
+                print(f"知识图谱已更新: {settings.working_dir_root}/{workspace_name}/graph_chunk_entity_relation.graphml")
+                print(f"Markdown 已生成: {workspace_output}/")
+            except Exception as e:
+                print(f"\n 发生错误: {e}")
+        else:
+            # 文件夹：参考 evaluate_shared.py 的并发批处理模式
+            # serialize_by_workspace_id=False 避免 workspace 级锁串行化；
+            # LightRAG 内部的 llm_model_max_async 信号量仍会限制最大并发 LLM 调用数。
+            ingest_jobs = files_to_register
+            if not ingest_jobs:
+                print(f"未找到可入库的文件：{target_path}")
+                return
 
-            print(f"\n 入库成功！")
+            print(f"共 {len(ingest_jobs)} 个文件，每批并发 {max_async_ingest} 个")
+            success_count = 0
+            failed_files: list[str] = []
+
+            for batch_start in range(0, len(ingest_jobs), max_async_ingest):
+                batch = ingest_jobs[batch_start : batch_start + max_async_ingest]
+                batch_label = f"{batch_start + 1}-{batch_start + len(batch)}"
+                print(f"[批次 {batch_label}/{len(ingest_jobs)}] 开始并发入库...")
+
+                async def _ingest_one(file_path: Path) -> str:
+                    await service.ingest(
+                        file_path=str(file_path),
+                        workspace_id=workspace_name,
+                        output_dir=workspace_output,
+                        serialize_by_workspace_id=False,
+                    )
+                    return str(file_path)
+
+                batch_results = await asyncio.gather(
+                    *[_ingest_one(f) for f in batch],
+                    return_exceptions=True,
+                )
+
+                for f, result in zip(batch, batch_results):
+                    if isinstance(result, Exception):
+                        print(f"  [失败] {f.name}: {result}")
+                        failed_files.append(str(f))
+                    else:
+                        print(f"  [完成] {f.name}")
+                        success_count += 1
+
+            print(f"\n 入库完成：成功 {success_count} / 共 {len(ingest_jobs)} 个文件")
+            if failed_files:
+                print(f" 失败文件：")
+                for fp in failed_files:
+                    print(f"  - {fp}")
             print(f"知识图谱已更新: {settings.working_dir_root}/{workspace_name}/graph_chunk_entity_relation.graphml")
             print(f"Markdown 已生成: {workspace_output}/")
 
-        except Exception as e:
-            print(f"\n 发生错误: {e}")
-    
     asyncio.run(main())
