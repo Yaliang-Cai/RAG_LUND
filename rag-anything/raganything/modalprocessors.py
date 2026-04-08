@@ -1049,7 +1049,7 @@ class ImageModalProcessor(BaseModalProcessor):
                 "entity_type": "image",
                 "summary": f"Image content: {str(modal_content)[:100]}",
             }
-            return str(modal_content), fallback_entity
+            return str(modal_content), fallback_entity, []
 
     def _parse_response(
         self, response: str, entity_name: str = None
@@ -1247,7 +1247,7 @@ class TableModalProcessor(BaseModalProcessor):
                 "entity_type": "table",
                 "summary": f"Table content: {str(modal_content)[:100]}",
             }
-            return str(modal_content), fallback_entity
+            return str(modal_content), fallback_entity, []
 
     def _parse_table_response(
         self, response: str, entity_name: str = None
@@ -1435,7 +1435,7 @@ class EquationModalProcessor(BaseModalProcessor):
                 "entity_type": "equation",
                 "summary": f"Equation content: {str(modal_content)[:100]}",
             }
-            return str(modal_content), fallback_entity
+            return str(modal_content), fallback_entity, []
 
     def _parse_equation_response(
         self, response: str, entity_name: str = None
@@ -1600,7 +1600,7 @@ class GenericModalProcessor(BaseModalProcessor):
                 "entity_type": content_type,
                 "summary": f"{content_type} content: {str(modal_content)[:100]}",
             }
-            return str(modal_content), fallback_entity
+            return str(modal_content), fallback_entity, []
 
     def _parse_generic_response(
         self, response: str, entity_name: str = None, content_type: str = "content"

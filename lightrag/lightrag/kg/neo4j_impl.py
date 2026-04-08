@@ -138,21 +138,21 @@ class Neo4JStorage(BaseGraphStorage):
             CONNECTION_TIMEOUT = float(
                 os.environ.get(
                     "NEO4J_CONNECTION_TIMEOUT",
-                    config.get("neo4j", "connection_timeout", fallback=30.0),
+                    config.get("neo4j", "connection_timeout", fallback=120.0),
                 ),
             )
             CONNECTION_ACQUISITION_TIMEOUT = float(
                 os.environ.get(
                     "NEO4J_CONNECTION_ACQUISITION_TIMEOUT",
                     config.get(
-                        "neo4j", "connection_acquisition_timeout", fallback=30.0
+                        "neo4j", "connection_acquisition_timeout", fallback=120.0
                     ),
                 ),
             )
             MAX_TRANSACTION_RETRY_TIME = float(
                 os.environ.get(
                     "NEO4J_MAX_TRANSACTION_RETRY_TIME",
-                    config.get("neo4j", "max_transaction_retry_time", fallback=30.0),
+                    config.get("neo4j", "max_transaction_retry_time", fallback=120.0),
                 ),
             )
             MAX_CONNECTION_LIFETIME = float(
@@ -164,7 +164,7 @@ class Neo4JStorage(BaseGraphStorage):
             LIVENESS_CHECK_TIMEOUT = float(
                 os.environ.get(
                     "NEO4J_LIVENESS_CHECK_TIMEOUT",
-                    config.get("neo4j", "liveness_check_timeout", fallback=30.0),
+                    config.get("neo4j", "liveness_check_timeout", fallback=120.0),
                 ),
             )
             KEEP_ALIVE = os.environ.get(

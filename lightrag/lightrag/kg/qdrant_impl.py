@@ -484,6 +484,15 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         self._client = None
         self._max_batch_size = self.global_config["embedding_batch_num"]
         self._initialized = False
+        self._client_timeout = float(
+            os.environ.get(
+                "QDRANT_CLIENT_TIMEOUT",
+                config.get("qdrant", "timeout", fallback=120.0),
+            )
+        )
+        self._operation_timeout = float(
+            os.environ.get("QDRANT_OPERATION_TIMEOUT", self._client_timeout)
+        )
 
         # --- Tuning options from environment variables ---
         # Distance metric
@@ -547,6 +556,7 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                             config.get("qdrant", "apikey", fallback=None),
                         ),
                         prefer_grpc=self._prefer_grpc,
+                        timeout=self._client_timeout,
                     )
                     logger.debug(
                         f"[{self.workspace}] QdrantClient created successfully"
@@ -585,6 +595,23 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                     f"[{self.workspace}] Failed to initialize Qdrant collection '{self.namespace}': {e}"
                 )
                 raise
+
+    async def _run_client_call_with_timeout(self, method, *args, **kwargs):
+        """
+        Run blocking qdrant-client calls in a worker thread.
+
+        Prefer per-call timeout, but gracefully fall back for older qdrant-client
+        versions that don't accept the `timeout` keyword.
+        """
+        kwargs_with_timeout = dict(kwargs)
+        kwargs_with_timeout.setdefault("timeout", self._operation_timeout)
+        try:
+            return await asyncio.to_thread(method, *args, **kwargs_with_timeout)
+        except TypeError as exc:
+            error_text = str(exc)
+            if "unexpected keyword argument 'timeout'" not in error_text:
+                raise
+            return await asyncio.to_thread(method, *args, **kwargs)
 
     async def upsert(self, data: dict[str, dict[str, Any]]) -> None:
         logger.debug(f"[{self.workspace}] Inserting {len(data)} to {self.namespace}")
@@ -627,8 +654,11 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                 )
             )
 
-        results = self._client.upsert(
-            collection_name=self.final_namespace, points=list_points, wait=True
+        results = await self._run_client_call_with_timeout(
+            self._client.upsert,
+            collection_name=self.final_namespace,
+            points=list_points,
+            wait=True,
         )
         return results
 
@@ -643,7 +673,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             )  # higher priority for query
             embedding = embedding_result[0]
 
-        results = self._client.query_points(
+        query_response = await self._run_client_call_with_timeout(
+            self._client.query_points,
             collection_name=self.final_namespace,
             query=embedding,
             limit=top_k,
@@ -655,7 +686,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             search_params=models.SearchParams(hnsw_ef=self._search_ef)
             if self._search_ef
             else None,
-        ).points
+        )
+        results = query_response.points
 
         return [
             {
@@ -686,7 +718,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                 for id in ids
             ]
             # Delete points from the collection with workspace filtering
-            self._client.delete(
+            await self._run_client_call_with_timeout(
+                self._client.delete,
                 collection_name=self.final_namespace,
                 points_selector=models.PointIdsList(points=qdrant_ids),
                 wait=True,
@@ -715,7 +748,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
 
             # Scroll to find the entity by its ID field in payload with workspace filtering
             # This is safer than reconstructing the Qdrant point ID
-            results = self._client.scroll(
+            results = await self._run_client_call_with_timeout(
+                self._client.scroll,
                 collection_name=self.final_namespace,
                 scroll_filter=models.Filter(
                     must=[
@@ -733,7 +767,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             points = results[0]
             if points:
                 ids_to_delete = [point.id for point in points]
-                self._client.delete(
+                await self._run_client_call_with_timeout(
+                    self._client.delete,
                     collection_name=self.final_namespace,
                     points_selector=models.PointIdsList(points=ids_to_delete),
                     wait=True,
@@ -777,7 +812,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             while True:
                 # Scroll to find relations, using with_payload=False for efficiency
                 # since we only need point IDs for deletion
-                results = self._client.scroll(
+                results = await self._run_client_call_with_timeout(
+                    self._client.scroll,
                     collection_name=self.final_namespace,
                     scroll_filter=relation_filter,
                     with_payload=False,
@@ -794,7 +830,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                 ids_to_delete = [point.id for point in points]
 
                 # Delete the batch of relations
-                self._client.delete(
+                await self._run_client_call_with_timeout(
+                    self._client.delete,
                     collection_name=self.final_namespace,
                     points_selector=models.PointIdsList(points=ids_to_delete),
                     wait=True,
@@ -835,7 +872,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             )
 
             # Retrieve the point by ID with workspace filtering
-            result = self._client.retrieve(
+            result = await self._run_client_call_with_timeout(
+                self._client.retrieve,
                 collection_name=self.final_namespace,
                 ids=[qdrant_id],
                 with_payload=True,
@@ -875,7 +913,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             ]
 
             # Retrieve the points by IDs
-            results = self._client.retrieve(
+            results = await self._run_client_call_with_timeout(
+                self._client.retrieve,
                 collection_name=self.final_namespace,
                 ids=qdrant_ids,
                 with_payload=True,
@@ -933,7 +972,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             ]
 
             # Retrieve the points by IDs with vectors
-            results = self._client.retrieve(
+            results = await self._run_client_call_with_timeout(
+                self._client.retrieve,
                 collection_name=self.final_namespace,
                 ids=qdrant_ids,
                 with_vectors=True,  # Important: request vectors
@@ -972,7 +1012,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         # No need to lock: data integrity is ensured by allowing only one process to hold pipeline at a time
         try:
             # Delete all points for the current workspace
-            self._client.delete(
+            await self._run_client_call_with_timeout(
+                self._client.delete,
                 collection_name=self.final_namespace,
                 points_selector=models.FilterSelector(
                     filter=models.Filter(
