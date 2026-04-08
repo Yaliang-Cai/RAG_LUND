@@ -508,7 +508,8 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         )
 
         # HNSW build parameters
-        self._hnsw_m = int(os.environ.get("QDRANT_HNSW_M", "0"))
+        _m_env = os.environ.get("QDRANT_HNSW_M")
+        self._hnsw_m = int(_m_env) if _m_env else None
         _ef_env = os.environ.get("QDRANT_HNSW_EF_CONSTRUCT")
         self._hnsw_ef_construct = int(_ef_env) if _ef_env else None
         self._hnsw_on_disk = os.environ.get("QDRANT_HNSW_ON_DISK", "false").lower() == "true"
