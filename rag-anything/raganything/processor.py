@@ -788,11 +788,7 @@ class ProcessorMixin:
                     }
 
                     # Process content and get chunk results instead of immediately merging
-                    (
-                        enhanced_caption,
-                        entity_info,
-                        chunk_results,
-                    ) = await processor.process_multimodal_content(
+                    process_result = await processor.process_multimodal_content(
                         modal_content=item,
                         content_type=content_type,
                         file_path=file_name,
@@ -802,6 +798,19 @@ class ProcessorMixin:
                         chunk_order_index=existing_chunks_count
                         + i,  # Proper order index
                     )
+
+                    if not isinstance(process_result, tuple):
+                        raise TypeError(
+                            "process_multimodal_content must return a 3-tuple, got "
+                            f"{type(process_result).__name__}"
+                        )
+                    if len(process_result) != 3:
+                        raise ValueError(
+                            "process_multimodal_content must return "
+                            "(description, entity_info, chunk_results), got tuple length "
+                            f"{len(process_result)} for {content_type}"
+                        )
+                    enhanced_caption, entity_info, chunk_results = process_result
 
                     # Collect chunk results for batch processing
                     all_chunk_results.extend(chunk_results)

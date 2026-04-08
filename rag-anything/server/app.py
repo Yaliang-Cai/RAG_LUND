@@ -36,6 +36,7 @@ from raganything.constants import (
     DEFAULT_MULTI_HOP_DEPTH,
     DEFAULT_PPR_DAMPING,
     DEFAULT_PPR_TOP_K,
+    DEFAULT_PASSAGE_NODE_WEIGHT,
 )
 
 VALID_CHUNKING_STRATEGIES: Set[str] = set(CHUNKING_STRATEGIES.keys())
@@ -174,6 +175,7 @@ class QueryRequest(BaseModel):
     multi_hop_depth: int = DEFAULT_MULTI_HOP_DEPTH
     ppr_damping: float = DEFAULT_PPR_DAMPING
     ppr_top_k: int = DEFAULT_PPR_TOP_K
+    passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
 
 # =========================================================================
 # 路由
@@ -489,6 +491,7 @@ async def query_endpoint(
         multi_hop_depth=payload.multi_hop_depth,
         ppr_damping=payload.ppr_damping,
         ppr_top_k=payload.ppr_top_k,
+        passage_node_weight=payload.passage_node_weight,
     )
     retrieval = {}
     try:
@@ -509,6 +512,7 @@ async def query_endpoint(
         multi_hop_depth=payload.multi_hop_depth,
         ppr_damping=payload.ppr_damping,
         ppr_top_k=payload.ppr_top_k,
+        passage_node_weight=payload.passage_node_weight,
     )
 
     # Step 3: 可选获取子图数据
@@ -547,6 +551,7 @@ async def query_stream_endpoint(
                 multi_hop_depth=payload.multi_hop_depth,
                 ppr_damping=payload.ppr_damping,
                 ppr_top_k=payload.ppr_top_k,
+                passage_node_weight=payload.passage_node_weight,
             ):
                 if event["type"] == "meta":
                     retrieval_data = event  # keep for graph subquery

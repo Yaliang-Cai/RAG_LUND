@@ -523,7 +523,7 @@ class BaseModalProcessor:
         doc_id: str = None,
         chunk_order_index: int = 0,
         page_idx: int = 0,
-    ) -> Tuple[str, Dict[str, Any]]:
+    ) -> Tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
         """Create entity and text chunk"""
         # Create chunk
         chunk_id = compute_mdhash_id(str(modal_chunk), prefix="chunk-")
@@ -997,7 +997,7 @@ class ImageModalProcessor(BaseModalProcessor):
         batch_mode: bool = False,
         doc_id: str = None,
         chunk_order_index: int = 0,
-    ) -> Tuple[str, Dict[str, Any]]:
+    ) -> Tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
         """Process image content with context support"""
         try:
             # Generate description and entity info
@@ -1196,7 +1196,7 @@ class TableModalProcessor(BaseModalProcessor):
         batch_mode: bool = False,
         doc_id: str = None,
         chunk_order_index: int = 0,
-    ) -> Tuple[str, Dict[str, Any]]:
+    ) -> Tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
         """Process table content with context support"""
         try:
             # Generate description and entity info
@@ -1388,7 +1388,7 @@ class EquationModalProcessor(BaseModalProcessor):
         batch_mode: bool = False,
         doc_id: str = None,
         chunk_order_index: int = 0,
-    ) -> Tuple[str, Dict[str, Any]]:
+    ) -> Tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
         """Process equation content with context support"""
         try:
             # Generate description and entity info
@@ -1566,7 +1566,7 @@ class GenericModalProcessor(BaseModalProcessor):
         batch_mode: bool = False,
         doc_id: str = None,
         chunk_order_index: int = 0,
-    ) -> Tuple[str, Dict[str, Any]]:
+    ) -> Tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
         """Process generic modal content with context support"""
         try:
             # Generate description and entity info

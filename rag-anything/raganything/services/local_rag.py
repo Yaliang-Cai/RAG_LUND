@@ -1539,6 +1539,7 @@ class LocalRagService:
         multi_hop_depth: int | None = None,
         ppr_damping: float | None = None,
         ppr_top_k: int | None = None,
+        passage_node_weight: float | None = None,
     ):
         """Async generator — yields structured events via LightRAG aquery_llm().
 
@@ -1564,7 +1565,9 @@ class LocalRagService:
                 multi_hop_depth=multi_hop_depth if multi_hop_depth is not None else self.settings.multi_hop_depth,
                 ppr_damping=ppr_damping if ppr_damping is not None else self.settings.ppr_damping,
                 ppr_top_k=ppr_top_k if ppr_top_k is not None else self.settings.ppr_top_k,
-                passage_node_weight=self.settings.passage_node_weight,
+                passage_node_weight=passage_node_weight
+                if passage_node_weight is not None
+                else self.settings.passage_node_weight,
             )
             result = await rag_instance.lightrag.aquery_llm(query, param=param)
 
