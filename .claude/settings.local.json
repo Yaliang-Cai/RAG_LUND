@@ -1,31 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep:*)",
-      "Bash(cd:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)",
       "Bash(python:*)",
-      "Bash(git push:*)",
-      "WebFetch(domain:community.databricks.com)",
+      "Bash(pip:*)",
+      "Bash(grep:*)",
+      "Bash(wc:*)",
+      "Bash(xargs:*)",
+      "Bash(ls:*)",
       "WebSearch",
-      "Bash(git fetch:*)",
-      "Bash(git stash:*)",
-      "Bash(git add:*)",
-      "Bash(pip install:*)",
-      "Bash(gh api:*)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:api.github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(git -C D:/HUAWEI/RAG_LUND log --oneline -20 -- lightrag/lightrag/lightrag.py lightrag/lightrag/base.py lightrag/lightrag/utils.py)",
-      "Bash(git -C D:/HUAWEI/RAG_LUND show 0ad1d33 --stat --format=\"%H %s\")",
-      "Bash(git -C D:/HUAWEI/RAG_LUND show 0ad1d33 -- lightrag/lightrag/operate.py | head -100)",
-      "Bash(git -C D:/HUAWEI/RAG_LUND show 8a4351e --stat --format=\"%H %s\")",
-      "Bash(git -C D:/HUAWEI/RAG_LUND show 9a68276 --stat --format=\"%H %s\")",
-      "Bash(git -C D:/HUAWEI/RAG_LUND log --oneline -- lightrag/lightrag/kg/networkx_impl.py)",
-      "Bash(xargs wc:*)",
-      "Bash(git:*)",
-      "Bash(wc -l /d/HUAWEI/RAG_LUND/lightrag/lightrag/*.py)",
-      "Bash(rm -rf C:/Users/14647/AppData/Local/Temp/*)",
-      "Bash(rm -rf C:/Windows/Temp/*)"
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

@@ -5408,6 +5408,19 @@ async def _ppr_rank_chunks(
     if not entity_seed_weights:
         return []
 
+    # Step 1b: Hub penalty — down-weight high-degree generic entities
+    if query_param.hub_penalty_threshold > 0:
+        import math
+        seed_ids_for_degree = list(entity_seed_weights.keys())
+        try:
+            degrees = await knowledge_graph_inst.node_degrees_batch(seed_ids_for_degree)
+            for eid in seed_ids_for_degree:
+                deg = degrees.get(eid, 0)
+                if deg > query_param.hub_penalty_threshold:
+                    entity_seed_weights[eid] /= math.log(1 + deg)
+        except Exception as e:
+            logger.warning(f"PPR: hub penalty degree query failed: {e}")
+
     # Step 2: Get subgraph (entities + edges)
     seed_ids = list(entity_seed_weights.keys())
     subgraph_nodes, subgraph_edges = await knowledge_graph_inst.get_subgraph_for_ppr(
@@ -5426,6 +5439,21 @@ async def _ppr_rank_chunks(
                 chunk_id = chunk_id.strip()
                 if chunk_id:
                     chunk_to_entities.setdefault(chunk_id, []).append(eid)
+
+    # Also include chunks referenced by edges (relation source_id)
+    for edge in subgraph_edges:
+        edge_source_ids = edge.get("source_id", "")
+        if edge_source_ids:
+            src, tgt = edge.get("src"), edge.get("tgt")
+            for chunk_id in split_string_by_multi_markers(
+                edge_source_ids, [GRAPH_FIELD_SEP]
+            ):
+                chunk_id = chunk_id.strip()
+                if chunk_id:
+                    if src:
+                        chunk_to_entities.setdefault(chunk_id, []).append(src)
+                    if tgt:
+                        chunk_to_entities.setdefault(chunk_id, []).append(tgt)
 
     if not chunk_to_entities:
         logger.debug("PPR: no chunk-entity mappings found in subgraph")

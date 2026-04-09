@@ -25,15 +25,19 @@
     · 来源 2：relationships_vdb.query(top_k) → rel["distance"] 赋给 src_id / tgt_id
     · 两信号对同一实体取 max
   ↓
+[2b] ✅ operate.py — Hub 节点惩罚（方案 A，已实现）
+    · node_degrees_batch(seed_ids) 批量查询度数
+    · deg > hub_penalty_threshold(50) 时：weight /= log(1 + deg)
+  ↓
 [3] operate.py:5411-5415 — get_subgraph_for_ppr(seed_ids, max_depth=2)
     · 基础实现（base.py:745）：BFS max_depth 轮，逐节点 get_node/get_node_edges/get_edge
     · Neo4j 实现（neo4j_impl.py:1103）：单条 Cypher MATCH path=(seed)-[*1..depth]-(n)
-    · 返回 (nodes_list, edges_list)；边 dict 仅含 {src, tgt, weight}，无 source_id
+    · ✅ 边 dict 含 {src, tgt, weight, source_id}（方案 B，已实现）
   ↓
-[4] operate.py:5417-5439 — 从节点 source_id 构建虚拟 chunk 节点 + chunk-entity 边
-    · 仅遍历节点的 source_id 字段（GRAPH_FIELD_SEP 分隔）
-    · 边的 source_id 未使用（见方案 B）
-    · chunk-entity 边 weight 固定 1.0（见方案 A）
+[4] ✅ operate.py:5417-5450 — 从节点 + 边 source_id 构建虚拟 chunk 节点（方案 B，已实现）
+    · 遍历节点的 source_id 字段（GRAPH_FIELD_SEP 分隔）
+    · 遍历边的 source_id 字段，关系关联的 chunk 也参与 PPR
+    · chunk-entity 边 weight 固定 1.0
   ↓
 [5] operate.py:5441-5460 — chunks_vdb.query(top_k = ppr_top_k × 2)
     · 对检索结果做 min-max 归一化
@@ -57,14 +61,14 @@
 
 ### 已识别的问题（对应实际代码位置）
 
-| 问题 | 代码位置 | 影响 |
-|------|----------|------|
-| chunk-entity 边统一 `weight=1.0` | `ppr.py:76` | 忽略共现频率，高频关联 chunk 未得额外权重 |
-| 边的 `source_id` 未参与 chunk 映射 | `operate.py:5417-5428`，`base.py:768-773` | 遗漏通过关系而非实体关联的文档（如"华为与5G"关系对应的 chunk） |
-| hub 节点未被惩罚 | `operate.py:5383-5406`（seed 构建） | 高度数通用实体（"中国"、"技术"）获得 seed 权重后子图膨胀，PPR 信号稀释 |
-| `damping=0.5` 固定 | `operate.py:5463` | 对简单/复杂查询一视同仁，多跳深度无自适应 |
-| PPR 输出未经语义重排 | `operate.py:5477-5495`（取回后直接返回） | 图结构高分但语义无关的 chunk 排在前面 |
-| SYNONYM 边与普通关系边权重相同 | `ppr.py:63` | 同义关系传播强度与事实关系相同，语义相似性被过估 |
+| 问题 | 代码位置 | 影响 | 状态 |
+|------|----------|------|------|
+| chunk-entity 边统一 `weight=1.0` | `ppr.py:76` | 忽略共现频率，高频关联 chunk 未得额外权重 | 待处理 |
+| ~~边的 `source_id` 未参与 chunk 映射~~ | `operate.py`，`base.py`，`neo4j_impl.py` | 遗漏通过关系而非实体关联的文档 | ✅ 已完成（方案 B）|
+| ~~hub 节点未被惩罚~~ | `operate.py`，`base.py` | 高度数通用实体子图膨胀，PPR 信号稀释 | ✅ 已完成（方案 A）|
+| `damping=0.5` 固定 | `operate.py:5463` | 对简单/复杂查询一视同仁，多跳深度无自适应 | 待处理 |
+| PPR 输出未经语义重排 | `operate.py:5477-5495`（取回后直接返回） | 图结构高分但语义无关的 chunk 排在前面 | 待处理 |
+| SYNONYM 边与普通关系边权重相同 | `ppr.py:63` | 同义关系传播强度与事实关系相同，语义相似性被过估 | 待处理 |
 
 ---
 
@@ -356,13 +360,13 @@ ppr_rerank_alpha: float = 0.6
 
 ```
 阶段 1（无 API 改动，可独立验证）
-  └─ A. Hub 节点惩罚
+  └─ ✅ A. Hub 节点惩罚（已完成）
   └─ D. 自适应 damping
   └─ E. PPR + Reranker
 
 阶段 2（统一扩展 get_subgraph_for_ppr 接口）
-  └─ B. 边 source_id 扩充（改 base.py + neo4j_impl.py 各 1 行）
-  └─ C. SYNONYM 折扣（依赖 B）
+  └─ ✅ B. 边 source_id 扩充（已完成）
+  └─ C. SYNONYM 折扣（依赖 B，B 已完成，可实施）
 
 阶段 3（锦上添花）
   └─ F. 文档级聚合

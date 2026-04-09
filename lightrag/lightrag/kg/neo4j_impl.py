@@ -1145,6 +1145,7 @@ class Neo4JStorage(BaseGraphStorage):
                                 "src": src,
                                 "tgt": tgt,
                                 "weight": float(rprops.get("weight", 1.0)),
+                                "source_id": rprops.get("source_id", ""),
                             })
             except Exception as e:
                 logger.error(f"[{self.workspace}] PPR subgraph extraction error: {e}")

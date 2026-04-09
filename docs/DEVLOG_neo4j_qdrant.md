@@ -269,17 +269,37 @@ subgraph_nodes, subgraph_edges = await knowledge_graph_inst.get_subgraph_for_ppr
 )
 ```
 
-- **基础实现**（`base.py:745-780`）：BFS 循环 `max_depth` 轮，每轮对当前边界节点调用 `get_node()` + `get_node_edges()` + `get_edge()`。边 dict 仅含 `{src, tgt, weight}`，**不含 `source_id`**（已知差距，见 TODO 方案 B）。
-- **Neo4j 优化实现**（`neo4j_impl.py:1103`）：单条 Cypher `MATCH path = (seed)-[*1..{max_depth}]-(neighbor)` 替代 BFS N×M 次串行 IO。
+- **基础实现**（`base.py:745-780`）：BFS 循环 `max_depth` 轮，每轮对当前边界节点调用 `get_node()` + `get_node_edges()` + `get_edge()`。边 dict 含 `{src, tgt, weight, source_id}`。
+- **Neo4j 优化实现**（`neo4j_impl.py:1103`）：单条 Cypher `MATCH path = (seed)-[*1..{max_depth}]-(neighbor)` 替代 BFS N×M 次串行 IO。边 dict 同样含 `source_id`（来自 `rprops`）。
 
-**步骤 3：构建虚拟 chunk 节点 + chunk-entity 边（`operate.py:5417-5439`）**
+**步骤 1b：Hub 节点惩罚（`operate.py`，Step 1 之后）**
 
 ```python
-# 从节点 source_id 字段反向映射（逗号分隔）
+# 对度数超过阈值的通用实体（"技术"、"中国"等）施加对数惩罚，防止子图膨胀
+if query_param.hub_penalty_threshold > 0:
+    degrees = await knowledge_graph_inst.node_degrees_batch(seed_ids)
+    for eid in seed_ids:
+        deg = degrees.get(eid, 0)
+        if deg > query_param.hub_penalty_threshold:
+            entity_seed_weights[eid] /= math.log(1 + deg)
+```
+
+**步骤 3：构建虚拟 chunk 节点 + chunk-entity 边（`operate.py:5417-5450`）**
+
+```python
+# 从节点 source_id 字段反向映射
 chunk_to_entities: dict[str, list[str]] = {}
 for node in subgraph_nodes:
     for chunk_id in split_string_by_multi_markers(node["source_id"], [GRAPH_FIELD_SEP]):
         chunk_to_entities.setdefault(chunk_id.strip(), []).append(node["entity_id"])
+
+# 同时从边 source_id 映射（描述该关系的 chunk 也参与 PPR）
+for edge in subgraph_edges:
+    for chunk_id in split_string_by_multi_markers(edge.get("source_id", ""), [GRAPH_FIELD_SEP]):
+        chunk_id = chunk_id.strip()
+        if chunk_id:
+            chunk_to_entities.setdefault(chunk_id, []).append(edge["src"])
+            chunk_to_entities.setdefault(chunk_id, []).append(edge["tgt"])
 
 chunk_nodes = [{"chunk_id": cid} for cid in chunk_to_entities]
 chunk_entity_edges = [
@@ -289,7 +309,7 @@ chunk_entity_edges = [
 ]
 ```
 
-注意：仅使用**节点**的 `source_id`，边的 `source_id` 当前未用（见 TODO 方案 B）。
+节点和边的 `source_id` 均参与 chunk 映射，确保"描述某条关系的 chunk"（如描述"华为-5G"这条边的段落）对 PPR 可见。
 
 **步骤 4：构建 Chunk Seed 权重（DPR 分 × passage_node_weight，`operate.py:5441-5460`）**
 
@@ -349,12 +369,13 @@ if ppr_chunks:
 
 **参数直觉：**
 
-| 参数                  | 默认值 | 直觉                                              |
-| --------------------- | ------ | ------------------------------------------------- |
-| `ppr_damping`         | 0.5    | 50% 继续游走，50% 回 seed；与 HippoRAG2 一致      |
-| `passage_node_weight` | 0.05   | 过大→退化为 VDB 排序；过小→chunk 节点初始权重太低 |
-| `multi_hop_depth`     | 2      | BFS 深度；Neo4j 用 Cypher 变长路径                |
-| `ppr_top_k`           | 50     | PPR 输出的最大 chunk 数；VDB 查询用 top_k × 2     |
+| 参数                    | 默认值 | 直觉                                                           |
+| ----------------------- | ------ | -------------------------------------------------------------- |
+| `ppr_damping`           | 0.5    | 50% 继续游走，50% 回 seed；与 HippoRAG2 一致                   |
+| `passage_node_weight`   | 0.05   | 过大→退化为 VDB 排序；过小→chunk 节点初始权重太低              |
+| `multi_hop_depth`       | 2      | BFS 深度；Neo4j 用 Cypher 变长路径                             |
+| `ppr_top_k`             | 50     | PPR 输出的最大 chunk 数；VDB 查询用 top_k × 2                  |
+| `hub_penalty_threshold` | 50     | 度数超过此值的实体 seed 权重除以 log(1+degree)；0 = 禁用惩罚   |
 
 #### 集成点
 
@@ -573,6 +594,8 @@ result = await rag.aquery(
 | 图节点类型         | Entity + Passage + Fact               | Entity + virtual Chunk                  | Fact 节点缺失 |
 | Seed 信号          | 双信号（entity + passage DPR × 0.05） | 双信号（entity VDB + chunk VDB × 0.05） | 方向一致 ✅    |
 | PPR 输出           | Passage 分数直接排序                  | Chunk 分数直接排序                      | 对齐 ✅        |
+| 边 source_id 映射  | Passage 与 Fact 直接相连              | 节点 + 边 source_id 均参与 chunk 映射   | 对齐 ✅        |
+| Hub 节点抑制       | 无显式机制（Recognition Memory 过滤） | log(1+degree) 惩罚（threshold=50）      | 对齐 ✅        |
 | Recognition Memory | LLM fact reranking                    | 无                                      | **最大差距**  |
 | Fact 三元组节点    | 独立节点                              | 无                                      | 架构限制      |
 
@@ -587,3 +610,7 @@ result = await rag.aquery(
 3. ~~**V2 topk 受 VDB 限制**~~：已改用本地 numpy matmul，全量精确余弦，零 VDB 往返，差距已消除。
 
 4. **Neo4j PPR Cypher 待验证**：`get_subgraph_for_ppr` 的 Cypher 在真实 Neo4j 实例上的语法正确性需要实测。基类 BFS 默认实现可作为 fallback。
+
+5. ~~**PPR 边 source_id 丢弃**~~：已修复。`base.py` BFS 和 `neo4j_impl.py` Cypher 均在 edge dict 中携带 `source_id`；`operate.py` Step 3 同时遍历节点和边的 `source_id` 建立 chunk 映射。
+
+6. ~~**Hub 节点无惩罚**~~：已修复。`QueryParam.hub_penalty_threshold`（默认 50）控制对高度数实体的 log 惩罚，防止"技术"、"中国"等通用实体膨胀子图。

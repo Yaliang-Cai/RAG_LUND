@@ -226,6 +226,10 @@ class QueryParam:
     passage_node_weight: float = 0.05
     """HippoRAG2 parameter: scaling factor for DPR chunk scores in PPR seed weights."""
 
+    hub_penalty_threshold: int = 50
+    """Degree threshold above which entity seed weights are penalised by log(1 + degree).
+    Set to 0 to disable. Reduces subgraph bloat caused by high-degree generic entities."""
+
     # RRF mode
     rrf_k: int = int(os.getenv("RRF_K", "60"))
     """Smoothing constant for Reciprocal Rank Fusion. Higher values reduce the impact of top ranks.
@@ -770,6 +774,7 @@ class BaseGraphStorage(StorageNameSpace, ABC):
                         "src": src,
                         "tgt": tgt,
                         "weight": float(edge_data.get("weight", 1.0)) if edge_data else 1.0,
+                        "source_id": edge_data.get("source_id", "") if edge_data else "",
                     })
                     if src not in visited_nodes:
                         next_frontier.append(src)
