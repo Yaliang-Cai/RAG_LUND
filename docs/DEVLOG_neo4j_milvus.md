@@ -218,39 +218,130 @@ def compute_entity_id(entity_name, entity_type="", enable_disambiguation=True):
 
 #### 算法原理（HippoRAG2 对齐版：异构图 + 虚拟 chunk 节点 + 双信号 seed）
 
-**步骤 1：构建双信号 Seed**
-```python
-# 信号 1：entity VDB 分数 + relation VDB 分数（取最大）
-entity_seeds[entity.id] = entity.score
-entity_seeds[relation.src/tgt] = max(..., relation.score)
+**步骤 1：构建双信号 Entity Seed（`operate.py:5383-5406`）**
 
-# 信号 2：chunk VDB 分数 × passage_node_weight（0.05）
-chunk_seeds[chunk.id] = chunk.score * 0.05
+```python
+# 信号 1a：entity VDB 分数（_get_node_data 已检索）
+for nd in node_datas:
+    eid = nd.get("entity_id", nd.get("entity_name", ""))
+    entity_seed_weights[eid] = max(entity_seed_weights.get(eid, 0), nd["vdb_score"])
+
+# 信号 1b：relation VDB 分数 → 关系两端实体也获得 seed 权重（取 max）
+rel_results = await relationships_vdb.query(query, top_k=query_param.top_k)
+for rel in rel_results:
+    score = rel["distance"]
+    for field in ("src_id", "tgt_id"):
+        entity_seed_weights[rel[field]] = max(entity_seed_weights.get(rel[field], 0), score)
 ```
 
-**步骤 2：构建异构图**
-- entity-chunk 边：通过 `entity.source_id` 字段反向映射
-- entity-entity 边：来自知识图谱
+两个信号合并到同一个 `entity_seed_weights` 字典，对同一实体取最大值。
 
-**步骤 3：运行 PPR（networkx）**
+**步骤 2：提取子图（`base.py:733` / `neo4j_impl.py:1103`）**
+
 ```python
-ppr_scores = nx.pagerank(G, alpha=damping, personalization=seed_weights)
-# 从 PPR 分数中提取 chunk 节点，按分数降序取 top_k
+seed_ids = list(entity_seed_weights.keys())
+subgraph_nodes, subgraph_edges = await knowledge_graph_inst.get_subgraph_for_ppr(
+    seed_ids, max_depth=query_param.multi_hop_depth  # 默认 2
+)
 ```
 
-**步骤 4：PPR chunks 以最高优先级合并**（优先于 VDB chunks）
+- **基础实现**（`base.py:745-780`）：BFS 循环 `max_depth` 轮，每轮对当前边界节点调用 `get_node()` + `get_node_edges()` + `get_edge()`。边 dict 仅含 `{src, tgt, weight}`，**不含 `source_id`**（已知差距，见 TODO 方案 B）。
+- **Neo4j 优化实现**（`neo4j_impl.py:1103`）：单条 Cypher `MATCH path = (seed)-[*1..{max_depth}]-(neighbor)` 替代 BFS N×M 次串行 IO。
 
-**PPR 参数直觉：**
-- `damping=0.5`：50% 继续游走，50% 回 seed，与 HippoRAG2 一致
-- `passage_node_weight=0.05`：值过大退化为 VDB 排序，值过小 chunk 节点初始权重太低
+**步骤 3：构建虚拟 chunk 节点 + chunk-entity 边（`operate.py:5417-5439`）**
+
+```python
+# 从节点 source_id 字段反向映射（逗号分隔）
+chunk_to_entities: dict[str, list[str]] = {}
+for node in subgraph_nodes:
+    for chunk_id in split_string_by_multi_markers(node["source_id"], [GRAPH_FIELD_SEP]):
+        chunk_to_entities.setdefault(chunk_id.strip(), []).append(node["entity_id"])
+
+chunk_nodes = [{"chunk_id": cid} for cid in chunk_to_entities]
+chunk_entity_edges = [
+    {"chunk_id": cid, "entity_id": eid}
+    for cid, eids in chunk_to_entities.items()
+    for eid in eids
+]
+```
+
+注意：仅使用**节点**的 `source_id`，边的 `source_id` 当前未用（见 TODO 方案 B）。
+
+**步骤 4：构建 Chunk Seed 权重（DPR 分 × passage_node_weight，`operate.py:5441-5460`）**
+
+```python
+chunk_results = await chunks_vdb.query(query, top_k=ppr_top_k * 2)
+# min-max 归一化后缩放
+normalized = (score - min_s) / (max_s - min_s)
+chunk_seed_weights[cid] = normalized * passage_node_weight   # 默认 0.05
+
+# 仅对已出现在 chunk_to_entities 中的 chunk 赋 seed 权重
+# （子图外的 VDB chunk 不参与 PPR）
+```
+
+**步骤 5：运行 PPR（`ppr.py:personalized_pagerank`，`operate.py:5462-5472`）**
+
+```python
+# ppr.py 内部图构建
+G = nx.Graph()
+G.add_nodes_from(entity_ids, node_type="entity")
+G.add_edges_from(entity_edges, weight=edge["weight"])   # 原图权重
+G.add_nodes_from(chunk_ids, node_type="chunk")
+G.add_edges_from(chunk_entity_edges, weight=1.0)        # 固定权重（已知差距，见 TODO 方案 A/B）
+
+# 合并双信号 seed，归一化到 sum=1
+personalization = {**entity_seed_weights, **chunk_seed_weights}
+personalization = {k: v / sum(personalization.values()) for k, v in personalization.items()}
+
+pr = nx.pagerank(G, alpha=damping, personalization=personalization, weight="weight")
+
+# 仅提取 chunk 节点的 PPR 分数，降序取 top_k
+chunk_scores = [(nid, pr[nid]) for nid in chunk_node_ids]
+chunk_scores.sort(key=lambda x: x[1], reverse=True)
+return chunk_scores[:top_k]
+```
+
+- `damping`（即 nx.pagerank 的 `alpha`）越高，分布越集中在 seed 附近，多跳效果越弱；越低传播越广。
+- `nx.PowerIterationFailedConvergence` 时 fallback 到 seed chunk 直接排序。
+
+**步骤 6：取回 chunk 内容（`operate.py:5477-5495`）**
+
+```python
+chunk_data_list = await text_chunks_db.get_by_ids(ranked_chunk_ids)
+# 附加 source_type="ppr" 和 ppr_score 字段
+```
+
+**步骤 7：PPR chunks 最高优先级合并（`operate.py:4720-4760`，`_merge_all_chunks`）**
+
+```python
+if ppr_chunks:
+    # 1. PPR chunks（图结构排序）
+    merged = deduplicate(ppr_chunks)
+    # 2. vector_chunks 补充（去重）
+    merged += [c for c in vector_chunks if c["chunk_id"] not in seen]
+    return merged
+    # 注意：enable_multi_hop 时，entity/relation chunk 推导被跳过
+```
+
+**参数直觉：**
+
+| 参数 | 默认值 | 直觉 |
+|------|--------|------|
+| `ppr_damping` | 0.5 | 50% 继续游走，50% 回 seed；与 HippoRAG2 一致 |
+| `passage_node_weight` | 0.05 | 过大→退化为 VDB 排序；过小→chunk 节点初始权重太低 |
+| `multi_hop_depth` | 2 | BFS 深度；Neo4j 用 Cypher 变长路径 |
+| `ppr_top_k` | 50 | PPR 输出的最大 chunk 数；VDB 查询用 top_k × 2 |
 
 #### 集成点
 
-| 位置 | 说明 |
-|------|------|
-| `operate.py: _perform_kg_search()` | V3 入口 |
-| `operate.py: _ppr_rank_chunks()` | 核心：构建图 + seed + 运行 PPR |
-| `operate.py: _merge_all_chunks()` | PPR chunks 最高优先级合并 |
+| 位置 | 行号（参考） | 说明 |
+|------|-------------|------|
+| `operate.py: _perform_kg_search()` | 4467-4491 | V3 入口：`enable_multi_hop` 守卫 |
+| `operate.py: _ppr_rank_chunks()` | 5358-5495 | 主编排：seed → 子图 → PPR → 取回内容 |
+| `ppr.py: personalized_pagerank()` | 19-110 | NetworkX 图构建 + PPR 计算 + chunk 抽取 |
+| `base.py: get_subgraph_for_ppr()` | 733-780 | 基础 BFS 实现（通用后端） |
+| `neo4j_impl.py: get_subgraph_for_ppr()` | 1103-1152 | Cypher 优化实现（Neo4j） |
+| `operate.py: _merge_all_chunks()` | 4700-4760 | PPR chunks 最高优先级合并，vector 补充 |
 
 ---
 
