@@ -198,8 +198,8 @@ class LightRAG:
     synonymy_threshold: float = field(default=0.8)
     """Cosine similarity threshold for synonym detection (aligned with HippoRAG2 default)."""
 
-    synonymy_topk: int = field(default=100)
-    """Number of KNN neighbors to check for synonym candidates (aligned with HippoRAG2 max 100/entity)."""
+    synonymy_topk: int = field(default=2048)
+    """Number of KNN neighbors to check for synonym candidates (aligned with HippoRAG2 ~2047; Qdrant has no hard limit)."""
 
     synonymy_min_entity_len: int = field(default=2)
     """Minimum alphanumeric/CJK character count in entity name for synonym detection."""

@@ -146,9 +146,9 @@ DEFAULT_DEVICE = "cuda:0"
 # =============================================================================
 
 # 每个 chunk 的 entity extraction LLM 调用最大并发数。
-# LightRAG 默认值为 4；A6000 48GB + FP8 30B 模型理论最大约 59，
-# 设为 16 可大幅提速同时保留安全余量。
-DEFAULT_LLM_MODEL_MAX_ASYNC = 16
+# 单卡 48GB FP8 MoE 模型建议不超过 6，配合 vLLM --max-num-seqs 6 使用。
+# 过高会导致请求在 vLLM scheduler 排队，产生超时。
+DEFAULT_LLM_MODEL_MAX_ASYNC = 6
 
 # Entity extraction 的 gleaning（补充提取）轮数。
 # gleaning=1 表示每个 chunk 做 2 次串行 LLM 调用（初始 + 1 次补充），
@@ -216,7 +216,7 @@ DEFAULT_ENABLE_INLINE_CITATIONS = False
 # =============================================================================
 DEFAULT_ENABLE_SYNONYM_LINKING = False          # Enable/disable V2
 DEFAULT_SYNONYMY_THRESHOLD = 0.8                # cosine similarity threshold for synonyms
-DEFAULT_SYNONYMY_TOPK = 100                     # KNN top-K for synonym detection
+DEFAULT_SYNONYMY_TOPK = 2048                    # KNN top-K for synonym detection（Qdrant 无上限，对齐 HippoRAG2 ~2047）
 DEFAULT_SYNONYMY_MIN_ENTITY_LEN = 2             # Min entity name length (filter short entities)
 
 # =============================================================================
