@@ -3967,9 +3967,9 @@ async def kg_query(
     logger.debug(f"Low-level  keywords: {ll_keywords}")
 
     # Handle empty keywords
-    if ll_keywords == [] and query_param.mode in ["local", "hybrid", "mix"]:
+    if ll_keywords == [] and query_param.mode in ["local", "hybrid", "mix", "rrf"]:
         logger.warning("low_level_keywords is empty")
-    if hl_keywords == [] and query_param.mode in ["global", "hybrid", "mix"]:
+    if hl_keywords == [] and query_param.mode in ["global", "hybrid", "mix", "rrf"]:
         logger.warning("high_level_keywords is empty")
     if hl_keywords == [] and ll_keywords == []:
         if len(query) < 50:
@@ -4384,8 +4384,8 @@ async def _perform_kg_search(
                 query_param,
             )
 
-        # Get vector chunks for mix mode
-        if query_param.mode == "mix" and chunks_vdb:
+        # Get vector chunks for mix/rrf mode
+        if query_param.mode in ("mix", "rrf") and chunks_vdb:
             vector_chunks = await _get_vector_context(
                 query,
                 chunks_vdb,
@@ -4662,6 +4662,41 @@ async def _apply_token_truncation(
     }
 
 
+def _rrf_merge(ranking_lists: list[list[dict]], k: int = 60) -> list[dict]:
+    """Reciprocal Rank Fusion over multiple ranked chunk lists.
+
+    Each chunk's RRF score = sum of 1 / (k + rank_i) across all lists it appears in.
+    Chunks are deduplicated by chunk_id; the first occurrence's metadata is kept.
+    """
+    scores: dict[str, float] = {}
+    meta: dict[str, dict] = {}
+
+    for ranked in ranking_lists:
+        for rank, chunk in enumerate(ranked):
+            chunk_id = chunk.get("chunk_id") or chunk.get("id")
+            if not chunk_id:
+                continue
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
+            if chunk_id not in meta:
+                meta[chunk_id] = chunk
+
+    sorted_ids = sorted(scores, key=lambda cid: scores[cid], reverse=True)
+    result = []
+    for cid in sorted_ids:
+        chunk = meta[cid]
+        result.append(
+            {
+                "content": chunk["content"],
+                "file_path": chunk.get("file_path", "unknown_source"),
+                "chunk_id": cid,
+                "is_multimodal": chunk.get("is_multimodal", False),
+                "page_idx": chunk.get("page_idx"),
+                "rrf_score": scores[cid],
+            }
+        )
+    return result
+
+
 async def _merge_all_chunks(
     filtered_entities: list[dict],
     filtered_relations: list[dict],
@@ -4724,8 +4759,7 @@ async def _merge_all_chunks(
         )
         return merged_chunks
 
-    # Original logic: round-robin merge from entity/relation/vector sources
-    # Get chunks from entities
+    # Get chunks from entities (shared by both RRF and round-robin paths)
     entity_chunks = []
     if filtered_entities and text_chunks_db:
         entity_chunks = await _find_related_text_unit_from_entities(
@@ -4739,7 +4773,7 @@ async def _merge_all_chunks(
             query_embedding=query_embedding,
         )
 
-    # Get chunks from relations
+    # Get chunks from relations (shared by both RRF and round-robin paths)
     relation_chunks = []
     if filtered_relations and text_chunks_db:
         relation_chunks = await _find_related_text_unit_from_relations(
@@ -4753,7 +4787,21 @@ async def _merge_all_chunks(
             query_embedding=query_embedding,
         )
 
-    # Round-robin merge chunks from different sources with deduplication
+    # RRF path: Reciprocal Rank Fusion merge
+    if query_param is not None and query_param.mode == "rrf":
+        ranking_lists = [lst for lst in [vector_chunks, entity_chunks, relation_chunks] if lst]
+        if not ranking_lists:
+            return []
+        rrf_k = getattr(query_param, "rrf_k", 60)
+        merged_chunks = _rrf_merge(ranking_lists, k=rrf_k)
+        origin_len = len(vector_chunks) + len(entity_chunks) + len(relation_chunks)
+        logger.info(
+            f"RRF merged chunks: {origin_len} -> {len(merged_chunks)} (k={rrf_k}, "
+            f"sources: vector={len(vector_chunks)}, entity={len(entity_chunks)}, relation={len(relation_chunks)})"
+        )
+        return merged_chunks
+
+    # Default path: round-robin merge from entity/relation/vector sources
     merged_chunks = []
     seen_chunk_ids = set()
     max_len = max(len(vector_chunks), len(entity_chunks), len(relation_chunks))
@@ -5214,7 +5262,7 @@ async def _build_query_context(
     )
 
     if not search_result["final_entities"] and not search_result["final_relations"]:
-        if query_param.mode != "mix":
+        if query_param.mode not in ("mix", "rrf"):
             return None
         else:
             if not search_result["chunk_tracking"]:

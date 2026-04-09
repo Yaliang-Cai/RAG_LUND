@@ -206,7 +206,7 @@ class QueryMixin:
 
         Args:
             query: Query text
-            mode: Query mode ("local", "global", "hybrid", "naive", "mix", "bypass")
+            mode: Query mode ("local", "global", "hybrid", "naive", "mix", "bypass", "rrf")
             system_prompt: Optional system prompt to include.
             **kwargs: Other query parameters, will be passed to QueryParam
                 - vlm_enhanced: bool, default True when vision_model_func is available.
@@ -334,7 +334,7 @@ class QueryMixin:
             multimodal_content: List of multimodal content, each element contains:
                 - type: Content type ("image", "table", "equation", etc.)
                 - Other fields depend on type (e.g., img_path, table_data, latex, etc.)
-            mode: Query mode ("local", "global", "hybrid", "naive", "mix", "bypass")
+            mode: Query mode ("local", "global", "hybrid", "naive", "mix", "bypass", "rrf")
             **kwargs: Other query parameters, will be passed to QueryParam
 
         Returns:
@@ -1004,7 +1004,7 @@ class QueryMixin:
 
         Args:
             query: Query text
-            mode: Query mode ("local", "global", "hybrid", "naive", "mix", "bypass")
+            mode: Query mode ("local", "global", "hybrid", "naive", "mix", "bypass", "rrf")
             **kwargs: Other query parameters, will be passed to QueryParam
                 - vlm_enhanced: bool, default True when vision_model_func is available.
                   If True, will parse image paths in retrieved context and replace them
@@ -1031,7 +1031,7 @@ class QueryMixin:
             multimodal_content: List of multimodal content, each element contains:
                 - type: Content type ("image", "table", "equation", etc.)
                 - Other fields depend on type (e.g., img_path, table_data, latex, etc.)
-            mode: Query mode ("local", "global", "hybrid", "naive", "mix", "bypass")
+            mode: Query mode ("local", "global", "hybrid", "naive", "mix", "bypass", "rrf")
             **kwargs: Other query parameters, will be passed to QueryParam
 
         Returns:

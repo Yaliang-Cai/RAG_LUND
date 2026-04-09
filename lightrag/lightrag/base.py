@@ -86,13 +86,14 @@ T = TypeVar("T")
 class QueryParam:
     """Configuration parameters for query execution in LightRAG."""
 
-    mode: Literal["local", "global", "hybrid", "naive", "mix", "bypass"] = "mix"
+    mode: Literal["local", "global", "hybrid", "naive", "mix", "bypass", "rrf"] = "mix"
     """Specifies the retrieval mode:
     - "local": Focuses on context-dependent information.
     - "global": Utilizes global knowledge.
     - "hybrid": Combines local and global retrieval methods.
     - "naive": Performs a basic search without advanced techniques.
     - "mix": Integrates knowledge graph and vector retrieval.
+    - "rrf": Like mix, but uses Reciprocal Rank Fusion to merge multi-source chunks.
     """
 
     only_need_context: bool = False
@@ -224,6 +225,12 @@ class QueryParam:
 
     passage_node_weight: float = 0.05
     """HippoRAG2 parameter: scaling factor for DPR chunk scores in PPR seed weights."""
+
+    # RRF mode
+    rrf_k: int = int(os.getenv("RRF_K", "60"))
+    """Smoothing constant for Reciprocal Rank Fusion. Higher values reduce the impact of top ranks.
+    Only used when mode="rrf". Default 60 is the standard RRF value from the original paper.
+    """
 
 
 @dataclass
