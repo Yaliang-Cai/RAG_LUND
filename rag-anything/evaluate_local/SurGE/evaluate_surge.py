@@ -822,7 +822,11 @@ async def ensure_workspace_index(
     for doc_id in stale_docs:
         try:
             await with_retries(
-                lambda: rag.lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=False),
+                lambda: service.lightrag_adelete_by_doc_id(
+                    workspace_id,
+                    doc_id,
+                    delete_llm_cache=False,
+                ),
                 label=f"cleanup stale doc_id={doc_id}",
                 retries=retries,
             )
@@ -842,7 +846,8 @@ async def ensure_workspace_index(
             input_payload = records[0]["text"]
             ids_payload = records[0]["doc_id"]
             files_payload = records[0]["file_path"]
-        await rag.lightrag.ainsert(
+        await service.lightrag_ainsert(
+            workspace_id,
             input=input_payload,
             ids=ids_payload,
             file_paths=files_payload,
@@ -1214,7 +1219,15 @@ async def run_retrieval(args: argparse.Namespace) -> int:
                     ppr_top_k=args.ppr_top_k,
                     passage_node_weight=args.passage_node_weight,
                 )
-                retrieval = await with_retries(lambda: rag.lightrag.aquery_data(q, param=param), label=f"query {qid}", retries=args.max_retries)
+                retrieval = await with_retries(
+                    lambda: service.lightrag_aquery_data(
+                        args.workspace_id,
+                        q,
+                        param=param,
+                    ),
+                    label=f"query {qid}",
+                    retries=args.max_retries,
+                )
                 retrieved, warns = await map_chunks_to_doc_ids(
                     rag=rag,
                     retrieval=retrieval,
@@ -1395,7 +1408,11 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
                     passage_node_weight=args.passage_node_weight,
                 )
                 retrieval = await with_retries(
-                    lambda: rag.lightrag.aquery_data(survey_title, param=param),
+                    lambda: service.lightrag_aquery_data(
+                        args.workspace_id,
+                        survey_title,
+                        param=param,
+                    ),
                     label=f"survey {survey_id}",
                     retries=args.max_retries,
                 )

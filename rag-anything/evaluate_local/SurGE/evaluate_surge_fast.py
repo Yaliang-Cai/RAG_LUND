@@ -990,7 +990,11 @@ async def ensure_workspace_index(
     for batch_doc_id in stale_docs:
         try:
             await with_retries(
-                lambda: rag.lightrag.adelete_by_doc_id(batch_doc_id, delete_llm_cache=False),
+                lambda: service.lightrag_adelete_by_doc_id(
+                    workspace_id,
+                    batch_doc_id,
+                    delete_llm_cache=False,
+                ),
                 label=f"cleanup stale doc_id={batch_doc_id}",
                 retries=retries,
             )
@@ -1000,7 +1004,8 @@ async def ensure_workspace_index(
             record_failure(batch_doc_id, f"stale cleanup failed: {exc}")
 
     async def ainsert_batch(batch: dict[str, Any]) -> None:
-        await rag.lightrag.ainsert(
+        await service.lightrag_ainsert(
+            workspace_id,
             input=str(batch["content"]),
             ids=str(batch["batch_doc_id"]),
             file_paths=str(batch["file_path"]),
@@ -1610,7 +1615,15 @@ async def run_retrieval(args: argparse.Namespace) -> int:
                 if not q:
                     raise ValueError("empty prefix_titles_query")
                 param = QueryParam(**query_params)
-                retrieval = await with_retries(lambda: rag.lightrag.aquery_data(q, param=param), label=f"query {qid}", retries=args.max_retries)
+                retrieval = await with_retries(
+                    lambda: service.lightrag_aquery_data(
+                        args.workspace_id,
+                        q,
+                        param=param,
+                    ),
+                    label=f"query {qid}",
+                    retries=args.max_retries,
+                )
                 rerank_for_contract = extract_rerank_payload(retrieval, query_params)
                 assert_rerank_contract(
                     rerank_payload=rerank_for_contract,
@@ -1796,7 +1809,11 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
                     raise ValueError("empty survey_title")
                 param = QueryParam(**query_params)
                 retrieval = await with_retries(
-                    lambda: rag.lightrag.aquery_data(survey_title, param=param),
+                    lambda: service.lightrag_aquery_data(
+                        args.workspace_id,
+                        survey_title,
+                        param=param,
+                    ),
                     label=f"survey {survey_id}",
                     retries=args.max_retries,
                 )

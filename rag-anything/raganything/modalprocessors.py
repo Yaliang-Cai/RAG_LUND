@@ -497,6 +497,7 @@ class BaseModalProcessor:
         content_type: str,
         item_info: Dict[str, Any] = None,
         entity_name: str = None,
+        raise_on_error: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Generate text description and entity info only, without entity relation extraction.
@@ -507,6 +508,7 @@ class BaseModalProcessor:
             content_type: Type of modal content
             item_info: Item information for context extraction
             entity_name: Optional predefined entity name
+            raise_on_error: Whether to re-raise processing exceptions
 
         Returns:
             Tuple of (description, entity_info)
@@ -887,6 +889,7 @@ class ImageModalProcessor(BaseModalProcessor):
         content_type: str,
         item_info: Dict[str, Any] = None,
         entity_name: str = None,
+        raise_on_error: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Generate image description and entity info only, without entity relation extraction.
@@ -977,6 +980,8 @@ class ImageModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error generating image description: {e}")
+            if raise_on_error:
+                raise
             # Fallback processing
             fallback_entity = {
                 "entity_name": entity_name
@@ -1002,7 +1007,11 @@ class ImageModalProcessor(BaseModalProcessor):
         try:
             # Generate description and entity info
             enhanced_caption, entity_info = await self.generate_description_only(
-                modal_content, content_type, item_info, entity_name
+                modal_content,
+                content_type,
+                item_info,
+                entity_name,
+                raise_on_error=batch_mode,
             )
 
             # Build complete image content
@@ -1041,6 +1050,8 @@ class ImageModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing image content: {e}")
+            if batch_mode:
+                raise
             # Fallback processing
             fallback_entity = {
                 "entity_name": entity_name
@@ -1102,6 +1113,7 @@ class TableModalProcessor(BaseModalProcessor):
         content_type: str,
         item_info: Dict[str, Any] = None,
         entity_name: str = None,
+        raise_on_error: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Generate table description and entity info only, without entity relation extraction.
@@ -1176,6 +1188,8 @@ class TableModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error generating table description: {e}")
+            if raise_on_error:
+                raise
             # Fallback processing
             fallback_entity = {
                 "entity_name": entity_name
@@ -1201,7 +1215,11 @@ class TableModalProcessor(BaseModalProcessor):
         try:
             # Generate description and entity info
             enhanced_caption, entity_info = await self.generate_description_only(
-                modal_content, content_type, item_info, entity_name
+                modal_content,
+                content_type,
+                item_info,
+                entity_name,
+                raise_on_error=batch_mode,
             )
 
             # Parse table content for building complete chunk
@@ -1239,6 +1257,8 @@ class TableModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing table content: {e}")
+            if batch_mode:
+                raise
             # Fallback processing
             fallback_entity = {
                 "entity_name": entity_name
@@ -1300,6 +1320,7 @@ class EquationModalProcessor(BaseModalProcessor):
         content_type: str,
         item_info: Dict[str, Any] = None,
         entity_name: str = None,
+        raise_on_error: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Generate equation description and entity info only, without entity relation extraction.
@@ -1368,6 +1389,8 @@ class EquationModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error generating equation description: {e}")
+            if raise_on_error:
+                raise
             # Fallback processing
             fallback_entity = {
                 "entity_name": entity_name
@@ -1393,7 +1416,11 @@ class EquationModalProcessor(BaseModalProcessor):
         try:
             # Generate description and entity info
             enhanced_caption, entity_info = await self.generate_description_only(
-                modal_content, content_type, item_info, entity_name
+                modal_content,
+                content_type,
+                item_info,
+                entity_name,
+                raise_on_error=batch_mode,
             )
 
             # Parse equation content for building complete chunk
@@ -1427,6 +1454,8 @@ class EquationModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing equation content: {e}")
+            if batch_mode:
+                raise
             # Fallback processing
             fallback_entity = {
                 "entity_name": entity_name
@@ -1488,6 +1517,7 @@ class GenericModalProcessor(BaseModalProcessor):
         content_type: str,
         item_info: Dict[str, Any] = None,
         entity_name: str = None,
+        raise_on_error: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Generate generic modal description and entity info only, without entity relation extraction.
@@ -1546,6 +1576,8 @@ class GenericModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error generating {content_type} description: {e}")
+            if raise_on_error:
+                raise
             # Fallback processing
             fallback_entity = {
                 "entity_name": entity_name
@@ -1571,7 +1603,11 @@ class GenericModalProcessor(BaseModalProcessor):
         try:
             # Generate description and entity info
             enhanced_caption, entity_info = await self.generate_description_only(
-                modal_content, content_type, item_info, entity_name
+                modal_content,
+                content_type,
+                item_info,
+                entity_name,
+                raise_on_error=batch_mode,
             )
 
             # Build complete content
@@ -1592,6 +1628,8 @@ class GenericModalProcessor(BaseModalProcessor):
 
         except Exception as e:
             logger.error(f"Error processing {content_type} content: {e}")
+            if batch_mode:
+                raise
             # Fallback processing
             fallback_entity = {
                 "entity_name": entity_name

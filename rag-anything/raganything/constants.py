@@ -45,9 +45,9 @@ DEFAULT_MULTIMODAL_TOP_K = 3
 
 # Multimodal ingest timeout/guardrail defaults
 # Single multimodal item request timeout (seconds)
-DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS = 600
+DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS = 1200
 # Whole multimodal batch watchdog timeout (seconds)
-DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS = 3600
+DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS = 7200
 # Grace period for cancelled multimodal tasks to exit (seconds)
 DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS = 10
 # Enable two-stage strict fallback for multimodal ingest:
@@ -134,6 +134,8 @@ DEFAULT_TOKENIZER_MODEL_PATH = DEFAULT_VISION_MODEL_PATH
 DEFAULT_VLLM_API_BASE = "http://localhost:8001/v1"
 DEFAULT_VLLM_API_KEY = "EMPTY"
 DEFAULT_LLM_MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+DEFAULT_TEXT_REQUEST_TIMEOUT_SECONDS = 1200.0
+DEFAULT_VISION_REQUEST_TIMEOUT_SECONDS = 1200.0
 DEFAULT_DEVICE = "cuda:0"
 
 # =============================================================================

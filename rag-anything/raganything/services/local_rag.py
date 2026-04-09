@@ -29,6 +29,8 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 import numpy as np
+import httpx
+import openai
 from lightrag.types import GPTKeywordExtractionFormat
 from lightrag.utils import EmbeddingFunc, Tokenizer
 from openai import AsyncOpenAI
@@ -51,6 +53,8 @@ from raganything.constants import (
     DEFAULT_VLLM_API_BASE,
     DEFAULT_VLLM_API_KEY,
     DEFAULT_LLM_MODEL_NAME,
+    DEFAULT_TEXT_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_VISION_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_DEVICE,
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_MAX_TOKEN_SIZE,
@@ -143,9 +147,11 @@ class LocalRagSettings:
     vllm_api_base: str = DEFAULT_VLLM_API_BASE
     vllm_api_key: str = DEFAULT_VLLM_API_KEY
     llm_model_name: str = DEFAULT_LLM_MODEL_NAME
+    text_request_timeout_seconds: float = DEFAULT_TEXT_REQUEST_TIMEOUT_SECONDS
     vision_vllm_api_base: str = DEFAULT_VLLM_API_BASE
     vision_vllm_api_key: str = DEFAULT_VLLM_API_KEY
     vision_model_name: str = DEFAULT_LLM_MODEL_NAME
+    vision_request_timeout_seconds: float = DEFAULT_VISION_REQUEST_TIMEOUT_SECONDS
     device: str = DEFAULT_DEVICE
 
     embedding_dim: int = DEFAULT_EMBEDDING_DIM
@@ -216,9 +222,21 @@ class LocalRagSettings:
             vllm_api_base=vllm_base,
             vllm_api_key=vllm_key,
             llm_model_name=llm_name,
+            text_request_timeout_seconds=float(
+                os.getenv(
+                    "RAGANYTHING_TEXT_REQUEST_TIMEOUT_SECONDS",
+                    str(DEFAULT_TEXT_REQUEST_TIMEOUT_SECONDS),
+                )
+            ),
             vision_vllm_api_base=os.getenv("VISION_VLLM_API_BASE", vllm_base),
             vision_vllm_api_key=os.getenv("VISION_VLLM_API_KEY", vllm_key),
             vision_model_name=os.getenv("VISION_MODEL_NAME", llm_name),
+            vision_request_timeout_seconds=float(
+                os.getenv(
+                    "RAGANYTHING_VISION_REQUEST_TIMEOUT_SECONDS",
+                    str(DEFAULT_VISION_REQUEST_TIMEOUT_SECONDS),
+                )
+            ),
             device=os.getenv("RAGANYTHING_DEVICE", DEFAULT_DEVICE),
             working_dir_root=os.getenv("RAGANYTHING_WORKDIR_ROOT", DEFAULT_WORKING_DIR_ROOT),
             output_dir=os.getenv("RAGANYTHING_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
@@ -656,6 +674,84 @@ def _is_entity_extraction_call(system_prompt: Any, prompt: Any) -> bool:
     )
 
 
+def _is_transient_llm_exception(exc: BaseException) -> bool:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+        return True
+    if isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.ReadTimeout,
+            httpx.WriteTimeout,
+            httpx.PoolTimeout,
+            openai.APIConnectionError,
+            openai.APITimeoutError,
+            openai.RateLimitError,
+            openai.InternalServerError,
+        ),
+    ):
+        return True
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "timed out",
+            "timeout",
+            "connection",
+            "rate limit",
+            "temporarily unavailable",
+            "broken pipe",
+            "429",
+            "503",
+        )
+    )
+
+
+def _resolve_llm_retry_policy(
+    settings: LocalRagSettings, *, ingest_path: bool
+) -> tuple[int, float, float]:
+    if not settings.enable_resilience:
+        return 1, 0.0, 0.0
+    attempts = max(1, min(3, int(settings.resilience_max_attempts)))
+    base_delay = (
+        float(settings.ingest_retry_base_delay)
+        if ingest_path
+        else float(settings.query_retry_base_delay)
+    )
+    base_delay = max(0.0, base_delay)
+    max_delay = max(base_delay, float(settings.resilience_max_delay))
+    return attempts, base_delay, max_delay
+
+
+async def _run_llm_with_transient_retry(
+    *,
+    logger: logging.Logger,
+    operation_name: str,
+    call: Callable[[], Awaitable[Any]],
+    max_attempts: int,
+    base_delay: float,
+    max_delay: float,
+) -> Any:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await call()
+        except Exception as exc:
+            retryable = _is_transient_llm_exception(exc)
+            if attempt >= max_attempts or not retryable:
+                raise
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            logger.warning(
+                "LLM transient retry: op=%s attempt=%d/%d delay=%.1fs reason=%s",
+                operation_name,
+                attempt,
+                max_attempts,
+                delay,
+                exc,
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+
 def build_llm_model_func(
     settings: LocalRagSettings,
     client: AsyncOpenAI,
@@ -674,6 +770,10 @@ def build_llm_model_func(
             max_tokens = settings.ingest_max_tokens
         else:
             max_tokens = settings.query_max_tokens
+        retry_attempts, retry_base_delay, retry_max_delay = _resolve_llm_retry_policy(
+            settings,
+            ingest_path=is_ingest_call,
+        )
         if keyword_extraction:
             cleaned_kwargs["response_format"] = GPTKeywordExtractionFormat
         messages = []
@@ -722,22 +822,31 @@ def build_llm_model_func(
 
         # Non-streaming path (existing behaviour)
         try:
-            if "response_format" in cleaned_kwargs:
-                response = await client.chat.completions.parse(
+            async def _request_once():
+                if "response_format" in cleaned_kwargs:
+                    return await client.chat.completions.parse(
+                        model=model_name,
+                        messages=messages,
+                        temperature=settings.temperature,
+                        max_tokens=max_tokens,
+                        **cleaned_kwargs,
+                    )
+                return await client.chat.completions.create(
                     model=model_name,
                     messages=messages,
                     temperature=settings.temperature,
                     max_tokens=max_tokens,
                     **cleaned_kwargs,
                 )
-            else:
-                response = await client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=settings.temperature,
-                    max_tokens=max_tokens,
-                    **cleaned_kwargs,
-                )
+
+            response = await _run_llm_with_transient_retry(
+                logger=logger,
+                operation_name="ingest" if is_ingest_call else "query",
+                call=_request_once,
+                max_attempts=retry_attempts,
+                base_delay=retry_base_delay,
+                max_delay=retry_max_delay,
+            )
             message = response.choices[0].message
             if hasattr(message, "parsed") and message.parsed is not None:
                 parsed = message.parsed
@@ -763,6 +872,12 @@ def build_vision_model_func(
     llm_fallback = build_llm_model_func(settings, client, logger, model_name)
     schema_stats = {"total": 0, "success": 0, "fallback": 0}
     item_timeout = max(1.0, float(settings.multimodal_item_timeout_seconds))
+    query_retry_attempts, query_retry_base_delay, query_retry_max_delay = (
+        _resolve_llm_retry_policy(settings, ingest_path=False)
+    )
+    ingest_retry_attempts, ingest_retry_base_delay, ingest_retry_max_delay = (
+        _resolve_llm_retry_policy(settings, ingest_path=True)
+    )
 
     async def _vision_once(
         *,
@@ -780,15 +895,26 @@ def build_vision_model_func(
                 item_timeout,
                 attempt,
             )
-            return await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model_name,
-                    messages=messages_payload,
-                    temperature=settings.temperature,
-                    max_tokens=settings.ingest_max_tokens,
-                    **request_kwargs,
-                ),
-                timeout=item_timeout,
+
+            async def _request_once():
+                return await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model_name,
+                        messages=messages_payload,
+                        temperature=settings.temperature,
+                        max_tokens=settings.ingest_max_tokens,
+                        **request_kwargs,
+                    ),
+                    timeout=item_timeout,
+                )
+
+            return await _run_llm_with_transient_retry(
+                logger=logger,
+                operation_name=f"vision_ingest:{task_type}",
+                call=_request_once,
+                max_attempts=ingest_retry_attempts,
+                base_delay=ingest_retry_base_delay,
+                max_delay=ingest_retry_max_delay,
             )
         except Exception as exc:
             logger.warning(
@@ -818,12 +944,22 @@ def build_vision_model_func(
         #   路径实体已在索引阶段被过滤，无需查询时二次处理）
         if messages:
             try:
-                response = await client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=settings.temperature,
-                    max_tokens=settings.query_max_tokens,
-                    **cleaned_kwargs,
+                async def _query_once():
+                    return await client.chat.completions.create(
+                        model=model_name,
+                        messages=messages,
+                        temperature=settings.temperature,
+                        max_tokens=settings.query_max_tokens,
+                        **cleaned_kwargs,
+                    )
+
+                response = await _run_llm_with_transient_retry(
+                    logger=logger,
+                    operation_name="vision_query",
+                    call=_query_once,
+                    max_attempts=query_retry_attempts,
+                    base_delay=query_retry_base_delay,
+                    max_delay=query_retry_max_delay,
                 )
                 return response.choices[0].message.content
             except Exception as exc:
@@ -1110,14 +1246,37 @@ class LocalRagService:
             self.settings.vlm_enable_json_schema,
         )
         self.logger.info(
+            "Text request timeout configured: %.1fs",
+            self.settings.text_request_timeout_seconds,
+        )
+        self.logger.info(
+            "Vision request timeout configured: %.1fs; multimodal item timeout: %.1fs",
+            self.settings.vision_request_timeout_seconds,
+            self.settings.multimodal_item_timeout_seconds,
+        )
+        self.logger.info(
             "Image token estimate configured: method=qwen_vl, model_path=%s, wrapper_tokens=%s",
             self.settings.image_token_model_name_or_path,
             self.settings.image_wrapper_tokens_per_image,
         )
 
         self.text_model_name = text_model
-        self.text_client = AsyncOpenAI(api_key=text_key, base_url=text_base)
-        self.vision_client = AsyncOpenAI(api_key=vision_key, base_url=vision_base)
+        text_request_timeout = max(
+            1.0, float(self.settings.text_request_timeout_seconds)
+        )
+        self.text_client = AsyncOpenAI(
+            api_key=text_key,
+            base_url=text_base,
+            timeout=text_request_timeout,
+        )
+        vision_request_timeout = max(
+            1.0, float(self.settings.vision_request_timeout_seconds)
+        )
+        self.vision_client = AsyncOpenAI(
+            api_key=vision_key,
+            base_url=vision_base,
+            timeout=vision_request_timeout,
+        )
         self._rag_instances: Dict[str, RAGAnything] = {}
         self._init_lock = asyncio.Lock()
         self._registered_callbacks: list[ProcessingCallback] = []
@@ -1288,6 +1447,15 @@ class LocalRagService:
         addon_params["multimodal_cancel_grace_seconds"] = float(
             self.settings.multimodal_cancel_grace_seconds
         )
+        addon_params["multimodal_transient_retry_attempts"] = int(
+            max(2, min(3, self.settings.resilience_max_attempts))
+        )
+        addon_params["multimodal_transient_retry_base_delay"] = float(
+            max(0.0, self.settings.ingest_retry_base_delay)
+        )
+        addon_params["multimodal_transient_retry_max_delay"] = float(
+            max(0.0, self.settings.resilience_max_delay)
+        )
 
     def _build_rag(self, working_dir: str, workspace_id: str) -> RAGAnything:
         config = RAGAnythingConfig(
@@ -1456,6 +1624,68 @@ class LocalRagService:
             await self._safe_ingest_call(_run_ingest)
 
         return workspace_id
+
+    async def lightrag_ainsert(
+        self,
+        workspace_id: str,
+        *,
+        input: str | list[str],
+        ids: str | list[str] | None = None,
+        file_paths: str | list[str] | None = None,
+        split_by_character: str | None = None,
+        split_by_character_only: bool = False,
+    ) -> Any:
+        """Resilience-wrapped proxy to LightRAG.ainsert for prebuilt-chunk ingest paths."""
+        rag = await self.get_rag(workspace_id)
+        await self._ensure_workspace_warmed(workspace_id)
+
+        async def _run_insert() -> Any:
+            return await rag.lightrag.ainsert(
+                input=input,
+                ids=ids,
+                file_paths=file_paths,
+                split_by_character=split_by_character,
+                split_by_character_only=split_by_character_only,
+            )
+
+        return await self._safe_ingest_call(_run_insert)
+
+    async def lightrag_adelete_by_doc_id(
+        self,
+        workspace_id: str,
+        doc_id: str,
+        *,
+        delete_llm_cache: bool = False,
+    ) -> Any:
+        """Resilience-wrapped proxy to LightRAG.adelete_by_doc_id."""
+        rag = await self.get_rag(workspace_id)
+        await self._ensure_workspace_warmed(workspace_id)
+
+        async def _run_delete() -> Any:
+            return await rag.lightrag.adelete_by_doc_id(
+                doc_id, delete_llm_cache=delete_llm_cache
+            )
+
+        return await self._safe_ingest_call(_run_delete)
+
+    async def lightrag_aquery_data(
+        self,
+        workspace_id: str,
+        query: str,
+        *,
+        param: Any,
+    ) -> dict[str, Any]:
+        """Resilience-wrapped proxy to LightRAG.aquery_data for retrieval-only evaluations."""
+        rag = await self.get_rag(workspace_id)
+        await self._ensure_workspace_warmed(workspace_id)
+
+        async def _run_query_data() -> dict[str, Any]:
+            result = await rag.lightrag.aquery_data(query, param=param)
+            if isinstance(result, dict):
+                return result
+            return {"result": result}
+
+        return await self._safe_query_call(_run_query_data)
 
     async def query(self, workspace_id: str, query: str, **kwargs) -> str:
         rag = await self.get_rag(workspace_id)

@@ -8,7 +8,7 @@ import os
 import time
 import hashlib
 import json
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Dict, List, Any, Tuple, Optional, Callable, Awaitable
 from pathlib import Path
 
 from raganything.base import DocStatus
@@ -27,9 +27,321 @@ from raganything.constants import (
     DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS,
 )
 
+_HTTPX_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = ()
+_OPENAI_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = ()
+
+try:
+    import httpx
+
+    _HTTPX_RETRYABLE_EXCEPTIONS = (
+        httpx.ConnectError,
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.PoolTimeout,
+    )
+except Exception:
+    pass
+
+try:
+    import openai
+
+    _OPENAI_RETRYABLE_EXCEPTIONS = (
+        openai.APIConnectionError,
+        openai.APITimeoutError,
+        openai.RateLimitError,
+        openai.InternalServerError,
+    )
+except Exception:
+    pass
+
+
+class MultimodalPartialFailureError(RuntimeError):
+    """Partial multimodal failure that keeps failed item metadata for targeted retry."""
+
+    def __init__(self, message: str, failed_items: List[Dict[str, Any]]):
+        super().__init__(message)
+        self.failed_items = failed_items
+
 
 class ProcessorMixin:
     """ProcessorMixin class containing document processing functionality for RAGAnything"""
+
+    def _get_multimodal_retry_policy(self) -> Tuple[int, float, float]:
+        """Return (max_attempts, base_delay_seconds, max_delay_seconds)."""
+        addon_params = getattr(self.lightrag, "addon_params", {}) or {}
+        attempts = int(
+            addon_params.get(
+                "multimodal_transient_retry_attempts",
+                addon_params.get("resilience_max_attempts", 3),
+            )
+        )
+        base_delay = float(
+            addon_params.get(
+                "multimodal_transient_retry_base_delay",
+                addon_params.get("ingest_retry_base_delay", 1.0),
+            )
+        )
+        max_delay = float(
+            addon_params.get(
+                "multimodal_transient_retry_max_delay",
+                addon_params.get("resilience_max_delay", 20.0),
+            )
+        )
+        attempts = max(2, min(3, attempts))
+        base_delay = max(0.0, base_delay)
+        max_delay = max(base_delay, max_delay)
+        return attempts, base_delay, max_delay
+
+    def _build_multimodal_failed_result(
+        self,
+        *,
+        index: int,
+        content_type: str,
+        item: Optional[Dict[str, Any]],
+        category: str,
+        error: Any,
+    ) -> Dict[str, Any]:
+        """Create a normalized failed-item record used by runtime and doc_status."""
+        normalized_category = (
+            category
+            if category in {"timeout", "parse", "model", "cancelled", "other"}
+            else "other"
+        )
+        return {
+            "status": "failed",
+            "index": index,
+            "type": content_type or "unknown",
+            "item": item,
+            "category": normalized_category,
+            "error": str(error),
+        }
+
+    def _normalize_multimodal_task_result(
+        self,
+        *,
+        result: Any,
+        index: int,
+        content_type: str,
+        item: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Normalize gather/task output to either a successful record or a failed record."""
+        if isinstance(result, BaseException):
+            return self._build_multimodal_failed_result(
+                index=index,
+                content_type=content_type,
+                item=item,
+                category=self._categorize_multimodal_failure(result),
+                error=result,
+            )
+
+        if isinstance(result, dict):
+            status = str(result.get("status", ""))
+            if status == "ok":
+                return result
+            if status == "failed":
+                return self._build_multimodal_failed_result(
+                    index=int(result.get("index", index)),
+                    content_type=str(result.get("type", content_type)),
+                    item=result.get("item", item),
+                    category=str(result.get("category", "other")),
+                    error=result.get("error", ""),
+                )
+
+        return self._build_multimodal_failed_result(
+            index=index,
+            content_type=content_type,
+            item=item,
+            category="other",
+            error=f"Unexpected task result type: {type(result).__name__}",
+        )
+
+    def _resolve_multimodal_batch_guardrails(
+        self, *, total_items: int
+    ) -> Dict[str, Any]:
+        """
+        Resolve per-document multimodal batch guardrails.
+
+        Keep guardrails simple and predictable:
+        - item timeout: per-item timeout
+        - batch watchdog: configured timeout floor (>= item timeout)
+        - parallelism: runtime per-doc multimodal concurrency
+        """
+        _ = total_items
+        addon_params = getattr(self.lightrag, "addon_params", {}) or {}
+        item_timeout_seconds = max(
+            1.0,
+            float(
+                addon_params.get(
+                    "multimodal_item_timeout_seconds",
+                    DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS,
+                )
+            ),
+        )
+        configured_watchdog_seconds = max(
+            item_timeout_seconds,
+            float(
+                addon_params.get(
+                    "multimodal_batch_watchdog_seconds",
+                    DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS,
+                )
+            ),
+        )
+        cancel_grace_seconds = max(
+            0.0,
+            float(
+                addon_params.get(
+                    "multimodal_cancel_grace_seconds",
+                    DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS,
+                )
+            ),
+        )
+        parallelism = max(1, int(getattr(self.lightrag, "max_parallel_insert", 2)))
+
+        retry_attempts, retry_base_delay, retry_max_delay = (
+            self._get_multimodal_retry_policy()
+        )
+
+        return {
+            "item_timeout_seconds": item_timeout_seconds,
+            "batch_watchdog_seconds": configured_watchdog_seconds,
+            "cancel_grace_seconds": cancel_grace_seconds,
+            "parallelism": parallelism,
+            "retry_attempts": retry_attempts,
+            "retry_base_delay": retry_base_delay,
+            "retry_max_delay": retry_max_delay,
+        }
+
+    def _categorize_multimodal_failure(self, exc: BaseException) -> str:
+        """Map an exception to one of: timeout/parse/model/cancelled/other."""
+        if isinstance(exc, asyncio.CancelledError):
+            return "cancelled"
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+            return "timeout"
+        if isinstance(exc, (ValueError, json.JSONDecodeError)):
+            text = str(exc).lower()
+            if "json" in text or "parse" in text or "field" in text:
+                return "parse"
+        text = str(exc).lower()
+        if any(
+            key in text
+            for key in (
+                "connection",
+                "timeout",
+                "rate limit",
+                "api",
+                "vllm",
+                "openai",
+                "httpx",
+            )
+        ):
+            return "model"
+        return "other"
+
+    def _is_transient_multimodal_exception(self, exc: BaseException) -> bool:
+        """Classify transient errors that are safe to retry."""
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+            return True
+        if _HTTPX_RETRYABLE_EXCEPTIONS and isinstance(
+            exc, _HTTPX_RETRYABLE_EXCEPTIONS
+        ):
+            return True
+        if _OPENAI_RETRYABLE_EXCEPTIONS and isinstance(
+            exc, _OPENAI_RETRYABLE_EXCEPTIONS
+        ):
+            return True
+
+        message = str(exc).lower()
+        transient_markers = (
+            "timed out",
+            "timeout",
+            "connection",
+            "rate limit",
+            "temporarily unavailable",
+            "503",
+            "429",
+            "broken pipe",
+        )
+        return any(marker in message for marker in transient_markers)
+
+    async def _run_multimodal_call_with_retry(
+        self,
+        operation_name: str,
+        operation: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """Run one multimodal operation with transient-error retry."""
+        max_attempts, base_delay, max_delay = self._get_multimodal_retry_policy()
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await operation()
+            except Exception as exc:
+                can_retry = self._is_transient_multimodal_exception(exc)
+                if attempt >= max_attempts or not can_retry:
+                    raise
+                delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                self.logger.warning(
+                    "Multimodal transient retry: %s attempt=%d/%d delay=%.1fs reason=%s",
+                    operation_name,
+                    attempt,
+                    max_attempts,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+
+    def _serialize_multimodal_item(self, item: Dict[str, Any]) -> str:
+        """Build a stable signature for one multimodal item."""
+        try:
+            return json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:
+            return repr(item)
+
+    def _select_multimodal_retry_subset(
+        self,
+        multimodal_items: List[Dict[str, Any]],
+        existing_doc_status: Optional[Dict[str, Any]],
+        doc_id: str,
+    ) -> List[Dict[str, Any]]:
+        """If doc_status contains failed multimodal items, retry only that subset."""
+        if not isinstance(existing_doc_status, dict):
+            return multimodal_items
+
+        failed_entries = existing_doc_status.get("multimodal_failed_items")
+        if not isinstance(failed_entries, list) or not failed_entries:
+            return multimodal_items
+
+        failed_candidates = [
+            entry.get("item")
+            for entry in failed_entries
+            if isinstance(entry, dict) and isinstance(entry.get("item"), dict)
+        ]
+        if not failed_candidates:
+            return multimodal_items
+
+        source_map: Dict[str, Dict[str, Any]] = {}
+        for item in multimodal_items:
+            if isinstance(item, dict):
+                key = self._serialize_multimodal_item(item)
+                source_map.setdefault(key, item)
+
+        selected: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for candidate in failed_candidates:
+            key = self._serialize_multimodal_item(candidate)
+            if key in seen:
+                continue
+            selected.append(source_map.get(key, candidate))
+            seen.add(key)
+
+        if not selected:
+            return multimodal_items
+
+        self.logger.info(
+            "Resuming multimodal with failed subset: %d/%d items (doc_id=%s)",
+            len(selected),
+            len(multimodal_items),
+            doc_id,
+        )
+        return selected
 
     def _get_file_reference(self, file_path: str) -> str:
         """
@@ -661,15 +973,9 @@ class ProcessorMixin:
 
         callback_manager = getattr(self, "callback_manager", None)
         mm_start_time = time.time()
-        if callback_manager is not None:
-            callback_manager.dispatch(
-                "on_multimodal_start",
-                file_path=file_path,
-                item_count=len(multimodal_items),
-                doc_id=doc_id,
-            )
 
         # Check multimodal processing status - handle LightRAG's early DocStatus.PROCESSED marking
+        existing_doc_status: Optional[Dict[str, Any]] = None
         try:
             existing_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
             if existing_doc_status:
@@ -702,6 +1008,17 @@ class ProcessorMixin:
             self.logger.debug(f"Error checking document status for {doc_id}: {e}")
             # Continue with processing if cache check fails
 
+        multimodal_items = self._select_multimodal_retry_subset(
+            multimodal_items, existing_doc_status, doc_id
+        )
+        if callback_manager is not None:
+            callback_manager.dispatch(
+                "on_multimodal_start",
+                file_path=file_path,
+                item_count=len(multimodal_items),
+                doc_id=doc_id,
+            )
+
         # Use ProcessorMixin's own batch processing that can handle multiple content types
         log_message = "Starting multimodal content processing..."
         self.logger.info(log_message)
@@ -714,9 +1031,37 @@ class ProcessorMixin:
             # Ensure LightRAG is initialized
             await self._ensure_lightrag_initialized()
 
-            await self._process_multimodal_content_batch_type_aware(
-                multimodal_items=multimodal_items, file_path=file_path, doc_id=doc_id
-            )
+            try:
+                await self._process_multimodal_content_batch_type_aware(
+                    multimodal_items=multimodal_items,
+                    file_path=file_path,
+                    doc_id=doc_id,
+                )
+            except MultimodalPartialFailureError as partial_error:
+                try:
+                    await self._mark_multimodal_doc_status_failed(
+                        doc_id=doc_id,
+                        error_msg=str(partial_error),
+                        failed_items=partial_error.failed_items,
+                    )
+                except Exception as status_error:
+                    raise RuntimeError(
+                        "Multimodal batch partial failure and failed to persist "
+                        f"doc_status failure state: {status_error}"
+                    ) from partial_error
+                raise
+            except Exception as batch_error:
+                try:
+                    await self._mark_multimodal_doc_status_failed(
+                        doc_id=doc_id,
+                        error_msg=str(batch_error),
+                    )
+                except Exception as status_error:
+                    raise RuntimeError(
+                        "Multimodal batch failure and failed to persist "
+                        f"doc_status failure state: {status_error}"
+                    ) from batch_error
+                raise
 
             log_message = "Multimodal content processing complete"
             self.logger.info(log_message)
@@ -734,16 +1079,9 @@ class ProcessorMixin:
                     duration_seconds=duration,
                     doc_id=doc_id,
                 )
-
         except Exception as e:
             self.logger.error(f"Error in multimodal processing: {e}")
-            # Fallback to individual processing if batch processing fails
-            self.logger.warning("Falling back to individual multimodal processing")
-            await self._process_multimodal_content_individual(
-                multimodal_items, file_path, doc_id
-            )
-
-            # Fallback path finalizes doc_status inside individual processing.
+            raise
 
     async def _process_multimodal_content_individual(
         self, multimodal_items: List[Dict[str, Any]], file_path: str, doc_id: str
@@ -768,6 +1106,17 @@ class ProcessorMixin:
         existing_chunks_count = (
             existing_doc_status.get("chunks_count", 0) if existing_doc_status else 0
         )
+        addon_params = getattr(self.lightrag, "addon_params", {}) or {}
+        item_timeout_seconds = max(
+            1.0,
+            float(
+                addon_params.get(
+                    "multimodal_item_timeout_seconds",
+                    DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS,
+                )
+            ),
+        )
+        failed_items: List[Dict[str, Any]] = []
 
         for i, item in enumerate(multimodal_items):
             try:
@@ -788,15 +1137,23 @@ class ProcessorMixin:
                     }
 
                     # Process content and get chunk results instead of immediately merging
-                    process_result = await processor.process_multimodal_content(
-                        modal_content=item,
-                        content_type=content_type,
-                        file_path=file_name,
-                        item_info=item_info,  # Pass item info for context extraction
-                        batch_mode=True,
-                        doc_id=doc_id,  # Pass doc_id for proper association
-                        chunk_order_index=existing_chunks_count
-                        + i,  # Proper order index
+                    async def _process_once() -> Tuple[str, Dict[str, Any], List[Any]]:
+                        return await asyncio.wait_for(
+                            processor.process_multimodal_content(
+                                modal_content=item,
+                                content_type=content_type,
+                                file_path=file_name,
+                                item_info=item_info,
+                                batch_mode=True,
+                                doc_id=doc_id,
+                                chunk_order_index=existing_chunks_count + i,
+                            ),
+                            timeout=item_timeout_seconds,
+                        )
+
+                    process_result = await self._run_multimodal_call_with_retry(
+                        operation_name=f"{content_type} item {i}",
+                        operation=_process_once,
                     )
 
                     if not isinstance(process_result, tuple):
@@ -811,6 +1168,10 @@ class ProcessorMixin:
                             f"{len(process_result)} for {content_type}"
                         )
                     enhanced_caption, entity_info, chunk_results = process_result
+                    if not chunk_results:
+                        raise RuntimeError(
+                            f"{content_type} item {i} returned empty chunk_results"
+                        )
 
                     # Collect chunk results for batch processing
                     all_chunk_results.extend(chunk_results)
@@ -831,6 +1192,15 @@ class ProcessorMixin:
             except Exception as e:
                 self.logger.error(f"Error processing multimodal content: {str(e)}")
                 self.logger.debug("Exception details:", exc_info=True)
+                failed_items.append(
+                    self._build_multimodal_failed_result(
+                        index=i,
+                        content_type=str(item.get("type", "unknown")),
+                        item=item,
+                        category=self._categorize_multimodal_failure(e),
+                        error=e,
+                    )
+                )
                 continue
 
         # Batch merge all multimodal content results (similar to text content processing)
@@ -866,6 +1236,13 @@ class ProcessorMixin:
 
         self.logger.info("Individual multimodal content processing complete")
 
+        if failed_items:
+            error_msg = (
+                "Multimodal fallback completed with failures: "
+                f"{len(failed_items)}/{len(multimodal_items)} items failed"
+            )
+            raise MultimodalPartialFailureError(error_msg, failed_items)
+
         await self._finalize_multimodal_doc_status(doc_id, multimodal_chunk_ids)
 
     async def _process_multimodal_content_batch_type_aware(
@@ -884,34 +1261,13 @@ class ProcessorMixin:
             self.logger.debug("No multimodal content to process")
             return
 
-        addon_params = getattr(self.lightrag, "addon_params", {}) or {}
-        item_timeout_seconds = max(
-            1.0,
-            float(
-                addon_params.get(
-                    "multimodal_item_timeout_seconds",
-                    DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS,
-                )
-            ),
-        )
-        batch_watchdog_seconds = max(
-            item_timeout_seconds,
-            float(
-                addon_params.get(
-                    "multimodal_batch_watchdog_seconds",
-                    DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS,
-                )
-            ),
-        )
-        cancel_grace_seconds = max(
-            0.0,
-            float(
-                addon_params.get(
-                    "multimodal_cancel_grace_seconds",
-                    DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS,
-                )
-            ),
-        )
+        total_items = len(multimodal_items)
+        guardrails = self._resolve_multimodal_batch_guardrails(total_items=total_items)
+        item_timeout_seconds = float(guardrails["item_timeout_seconds"])
+        batch_watchdog_seconds = float(guardrails["batch_watchdog_seconds"])
+        cancel_grace_seconds = float(guardrails["cancel_grace_seconds"])
+        item_parallelism = int(guardrails["parallelism"])
+        retry_attempts = int(guardrails["retry_attempts"])
 
         # Get existing chunks count for proper order indexing
         try:
@@ -922,37 +1278,66 @@ class ProcessorMixin:
         except Exception:
             existing_chunks_count = 0
 
-        # Use LightRAG's concurrency control
-        semaphore = asyncio.Semaphore(getattr(self.lightrag, "max_parallel_insert", 2))
+        # Use per-document item parallelism derived from LightRAG runtime settings.
+        semaphore = asyncio.Semaphore(item_parallelism)
 
         # Progress tracking variables
-        total_items = len(multimodal_items)
         completed_count = 0
         progress_lock = asyncio.Lock()
+        progress_log_interval = max(1, total_items // 10)
 
         # Log processing start
-        self.logger.info(f"Starting to process {total_items} multimodal content items")
+        self.logger.info(
+            "Starting multimodal batch: items=%d parallelism=%d item_timeout=%.1fs "
+            "retry_attempts=%d batch_watchdog=%.1fs doc_id=%s",
+            total_items,
+            item_parallelism,
+            item_timeout_seconds,
+            retry_attempts,
+            batch_watchdog_seconds,
+            doc_id,
+        )
+
+        async def _record_progress() -> None:
+            nonlocal completed_count
+            async with progress_lock:
+                completed_count += 1
+                if (
+                    completed_count % progress_log_interval == 0
+                    or completed_count == total_items
+                ):
+                    progress_percent = (completed_count / total_items) * 100
+                    self.logger.info(
+                        "Multimodal chunk generation progress: %d/%d (%.1f%%)",
+                        completed_count,
+                        total_items,
+                        progress_percent,
+                    )
 
         # Stage 1: Concurrent generation of descriptions using correct processors for each type
         async def process_single_item_with_correct_processor(
             item: Dict[str, Any], index: int, file_path: str
         ):
             """Process single item using the correct processor for its type"""
-            nonlocal completed_count
             async with semaphore:
+                content_type = str(item.get("type", "unknown"))
                 try:
-                    content_type = item.get("type", "unknown")
-
                     # Select the correct processor based on content type
                     processor = get_processor_for_type(
                         self.modal_processors, content_type
                     )
 
                     if not processor:
-                        self.logger.warning(
-                            f"No processor found for type: {content_type}"
+                        error = f"No processor found for type: {content_type}"
+                        self.logger.warning(error)
+                        await _record_progress()
+                        return self._build_multimodal_failed_result(
+                            index=index,
+                            content_type=content_type,
+                            item=item,
+                            category="other",
+                            error=error,
                         )
-                        return None
 
                     item_info = {
                         "page_idx": item.get("page_idx", 0),
@@ -961,34 +1346,31 @@ class ProcessorMixin:
                     }
 
                     # Call the correct processor's description generation method
-                    (
-                        description,
-                        entity_info,
-                    ) = await asyncio.wait_for(
-                        processor.generate_description_only(
-                            modal_content=item,
-                            content_type=content_type,
-                            item_info=item_info,
-                            entity_name=None,  # Let LLM auto-generate
-                        ),
-                        timeout=item_timeout_seconds,
+                    async def _generate_once() -> Tuple[str, Dict[str, Any]]:
+                        return await asyncio.wait_for(
+                            processor.generate_description_only(
+                                modal_content=item,
+                                content_type=content_type,
+                                item_info=item_info,
+                                entity_name=None,
+                                raise_on_error=True,
+                            ),
+                            timeout=item_timeout_seconds,
+                        )
+
+                    description, entity_info = (
+                        await self._run_multimodal_call_with_retry(
+                            operation_name=f"{content_type} item {index}",
+                            operation=_generate_once,
+                        )
                     )
 
-                    # Update progress (non-blocking)
-                    async with progress_lock:
-                        completed_count += 1
-                        if (
-                            completed_count % max(1, total_items // 10) == 0
-                            or completed_count == total_items
-                        ):
-                            progress_percent = (completed_count / total_items) * 100
-                            self.logger.info(
-                                f"Multimodal chunk generation progress: {completed_count}/{total_items} ({progress_percent:.1f}%)"
-                            )
+                    await _record_progress()
 
                     return {
+                        "status": "ok",
                         "index": index,
-                        "content_type": content_type,
+                        "type": content_type,
                         "description": description,
                         "entity_info": entity_info,
                         "original_item": item,
@@ -999,49 +1381,67 @@ class ProcessorMixin:
                     }
 
                 except Exception as e:
-                    # Update progress even on error (non-blocking)
-                    async with progress_lock:
-                        completed_count += 1
-                        if (
-                            completed_count % max(1, total_items // 10) == 0
-                            or completed_count == total_items
-                        ):
-                            progress_percent = (completed_count / total_items) * 100
-                            self.logger.info(
-                                f"Multimodal chunk generation progress: {completed_count}/{total_items} ({progress_percent:.1f}%)"
-                            )
-
+                    await _record_progress()
                     self.logger.error(
                         f"Error generating description for {content_type} item {index}: {e}"
                     )
-                    return None
+                    return self._build_multimodal_failed_result(
+                        index=index,
+                        content_type=content_type,
+                        item=item,
+                        category=self._categorize_multimodal_failure(e),
+                        error=e,
+                    )
 
         # Process all items concurrently with correct processors
-        tasks = [
-            asyncio.create_task(
-                process_single_item_with_correct_processor(item, i, file_path)
+        task_specs = []
+        for index, item in enumerate(multimodal_items):
+            task_specs.append(
+                {
+                    "index": index,
+                    "type": str(item.get("type", "unknown")),
+                    "item": item,
+                    "task": asyncio.create_task(
+                        process_single_item_with_correct_processor(item, index, file_path)
+                    ),
+                }
             )
-            for i, item in enumerate(multimodal_items)
-        ]
 
         try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
+            raw_results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[spec["task"] for spec in task_specs], return_exceptions=True
+                ),
                 timeout=batch_watchdog_seconds,
             )
+            results = [
+                self._normalize_multimodal_task_result(
+                    result=result,
+                    index=int(spec["index"]),
+                    content_type=str(spec["type"]),
+                    item=spec["item"],
+                )
+                for spec, result in zip(task_specs, raw_results)
+            ]
         except asyncio.TimeoutError:
             self.logger.error(
-                "Multimodal batch watchdog timeout after %.1fs (doc_id=%s). Cancelling pending tasks.",
+                "Multimodal batch watchdog timeout after %.1fs: items=%d parallelism=%d doc_id=%s. Cancelling pending tasks.",
                 batch_watchdog_seconds,
+                total_items,
+                item_parallelism,
                 doc_id,
             )
-            for task in tasks:
+            for spec in task_specs:
+                task = spec["task"]
                 if not task.done():
                     task.cancel()
             if cancel_grace_seconds > 0:
                 try:
                     await asyncio.wait_for(
-                        asyncio.gather(*tasks, return_exceptions=True),
+                        asyncio.gather(
+                            *[spec["task"] for spec in task_specs],
+                            return_exceptions=True,
+                        ),
                         timeout=cancel_grace_seconds,
                     )
                 except Exception as cancel_exc:
@@ -1051,20 +1451,53 @@ class ProcessorMixin:
                         cancel_exc,
                     )
             results = []
-            for task in tasks:
+            for spec in task_specs:
+                task = spec["task"]
                 if not task.done():
-                    results.append(asyncio.TimeoutError("pending task not finished"))
+                    results.append(
+                        self._build_multimodal_failed_result(
+                            index=int(spec["index"]),
+                            content_type=str(spec["type"]),
+                            item=spec["item"],
+                            category="timeout",
+                            error="pending task not finished before watchdog cleanup",
+                        )
+                    )
                     continue
                 if task.cancelled():
-                    results.append(asyncio.CancelledError("task cancelled by watchdog"))
+                    results.append(
+                        self._build_multimodal_failed_result(
+                            index=int(spec["index"]),
+                            content_type=str(spec["type"]),
+                            item=spec["item"],
+                            category="cancelled",
+                            error="task cancelled by watchdog",
+                        )
+                    )
                     continue
                 try:
-                    results.append(task.result())
+                    results.append(
+                        self._normalize_multimodal_task_result(
+                            result=task.result(),
+                            index=int(spec["index"]),
+                            content_type=str(spec["type"]),
+                            item=spec["item"],
+                        )
+                    )
                 except BaseException as exc:
-                    results.append(exc)
+                    results.append(
+                        self._build_multimodal_failed_result(
+                            index=int(spec["index"]),
+                            content_type=str(spec["type"]),
+                            item=spec["item"],
+                            category=self._categorize_multimodal_failure(exc),
+                            error=exc,
+                        )
+                    )
 
-        # Filter successful results
-        multimodal_data_list = []
+        # Filter successful results and keep structured failure records.
+        multimodal_data_list: List[Dict[str, Any]] = []
+        failed_items: List[Dict[str, Any]] = []
         failure_stats = {
             "timeout": 0,
             "parse": 0,
@@ -1073,54 +1506,47 @@ class ProcessorMixin:
             "other": 0,
         }
         for result in results:
-            if isinstance(result, BaseException):
-                self.logger.error(f"Task failed: {result}")
-                if isinstance(result, asyncio.TimeoutError):
-                    failure_stats["timeout"] += 1
-                elif isinstance(result, asyncio.CancelledError):
-                    failure_stats["cancelled"] += 1
-                else:
-                    text = str(result).lower()
-                    if isinstance(result, (ValueError, json.JSONDecodeError)) or (
-                        "json" in text or "parse" in text
-                    ):
-                        failure_stats["parse"] += 1
-                    elif any(
-                        key in text
-                        for key in (
-                            "connection",
-                            "timeout",
-                            "rate limit",
-                            "api",
-                            "vllm",
-                            "openai",
-                        )
-                    ):
-                        failure_stats["model"] += 1
-                    else:
-                        failure_stats["other"] += 1
-                continue
             if isinstance(result, dict):
-                multimodal_data_list.append(result)
-            elif result is not None:
-                self.logger.error(
-                    "Unexpected multimodal task result type: %s",
-                    type(result).__name__,
-                )
-                failure_stats["other"] += 1
+                status = result.get("status", "")
+                if status == "ok":
+                    multimodal_data_list.append(result)
+                    continue
+                if status == "failed":
+                    category = str(result.get("category", "other"))
+                    if category not in failure_stats:
+                        category = "other"
+                    failure_stats[category] += 1
+                    failed_items.append(result)
+                    self.logger.error(
+                        "Multimodal task failed: index=%s type=%s category=%s error=%s",
+                        result.get("index", -1),
+                        result.get("type", "unknown"),
+                        category,
+                        result.get("error", ""),
+                    )
+                    continue
 
-        failed_count = len(results) - len(multimodal_data_list)
-        if failed_count > 0:
-            self.logger.warning(
-                "Multimodal batch partial failures: failed=%d/%d details=%s",
-                failed_count,
-                len(results),
-                failure_stats,
+            failure_stats["other"] += 1
+            failed_items.append(
+                self._build_multimodal_failed_result(
+                    index=-1,
+                    content_type="unknown",
+                    item=None,
+                    category="other",
+                    error=f"Unexpected task result type: {type(result).__name__}",
+                )
             )
 
         if not multimodal_data_list:
-            self.logger.warning("No valid multimodal descriptions generated")
-            return
+            self.logger.warning(
+                "No valid multimodal descriptions generated: failed=%d/%d details=%s",
+                len(failed_items),
+                len(results),
+                failure_stats,
+            )
+            raise MultimodalPartialFailureError(
+                "No valid multimodal descriptions generated", failed_items
+            )
 
         self.logger.info(
             f"Generated descriptions for {len(multimodal_data_list)}/{len(multimodal_items)} multimodal items using correct processors"
@@ -1157,7 +1583,23 @@ class ProcessorMixin:
             enhanced_chunk_results, file_path, doc_id
         )
 
-        # Stage 7: Finalize multimodal doc_status atomically
+        # Stage 7: Finalize multimodal doc_status.
+        if failed_items:
+            self.logger.warning(
+                "Multimodal batch partial failures: failed=%d/%d details=%s",
+                len(failed_items),
+                len(results),
+                failure_stats,
+            )
+            # Persist successful chunk progress first, then let upper layer retry failed items.
+            await self._finalize_multimodal_doc_status(
+                doc_id, chunk_ids, mark_processed=False
+            )
+            raise MultimodalPartialFailureError(
+                f"Multimodal batch failed for {len(failed_items)}/{len(results)} items",
+                failed_items,
+            )
+
         await self._finalize_multimodal_doc_status(doc_id, chunk_ids)
 
     def _convert_to_lightrag_chunks_type_aware(
@@ -1171,7 +1613,7 @@ class ProcessorMixin:
             description = data["description"]
             entity_info = data["entity_info"]
             chunk_order_index = data["chunk_order_index"]
-            content_type = data["content_type"]
+            content_type = data["type"]
             original_item = data["original_item"]
 
             # Apply the appropriate chunk template based on content type
@@ -1199,7 +1641,7 @@ class ProcessorMixin:
                 # Multimodal-specific metadata
                 "is_multimodal": True,
                 "modal_entity_name": entity_info["entity_name"],
-                "original_type": data["content_type"],
+                "original_type": data["type"],
                 "page_idx": data["item_info"].get("page_idx", 0),
             }
 
@@ -1330,7 +1772,7 @@ class ProcessorMixin:
             entity_info = data["entity_info"]
             entity_name = entity_info["entity_name"]
             description = data["description"]
-            content_type = data["content_type"]
+            content_type = data["type"]
             original_item = data["original_item"]
 
             # Apply the same chunk template to get the formatted content
@@ -1494,7 +1936,7 @@ class ProcessorMixin:
 
         for data in multimodal_data_list:
             description = data["description"]
-            content_type = data["content_type"]
+            content_type = data["type"]
             original_item = data["original_item"]
 
             # Use the same template formatting as in _convert_to_lightrag_chunks_type_aware
@@ -1584,7 +2026,10 @@ class ProcessorMixin:
         await self.lightrag._insert_done()
 
     async def _finalize_multimodal_doc_status(
-        self, doc_id: str, new_chunk_ids: List[str]
+        self,
+        doc_id: str,
+        new_chunk_ids: List[str],
+        mark_processed: bool = True,
     ) -> None:
         """Finalize multimodal doc_status with one atomic upsert."""
         try:
@@ -1600,21 +2045,50 @@ class ProcessorMixin:
                 **current_doc_status,
                 "chunks_list": merged_chunks_list,
                 "chunks_count": len(merged_chunks_list),
-                "multimodal_processed": True,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
             }
+            if mark_processed:
+                updated_doc_status["multimodal_processed"] = True
+                updated_doc_status.pop("multimodal_error_msg", None)
+                updated_doc_status.pop("multimodal_failed_items", None)
+            else:
+                updated_doc_status["multimodal_processed"] = False
             await self.lightrag.doc_status.upsert({doc_id: updated_doc_status})
             await self.lightrag.doc_status.index_done_callback()
             self.logger.info(
-                "Finalized multimodal doc_status for %s: chunks=%d (added=%d)",
+                "Finalized multimodal doc_status for %s: chunks=%d (added=%d, processed=%s)",
                 doc_id,
                 len(merged_chunks_list),
                 len(new_chunk_ids),
+                mark_processed,
             )
         except Exception as e:
             raise RuntimeError(
                 f"Failed to finalize multimodal doc_status for {doc_id}: {e}"
             ) from e
+
+    async def _mark_multimodal_doc_status_failed(
+        self,
+        doc_id: str,
+        error_msg: str,
+        failed_items: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Persist multimodal failure state; raise if persistence fails."""
+        current_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
+        if not current_doc_status:
+            raise RuntimeError(
+                f"Missing doc_status for document {doc_id} while persisting multimodal failure"
+            )
+
+        updated_doc_status = {
+            **current_doc_status,
+            "multimodal_processed": False,
+            "multimodal_error_msg": str(error_msg)[:4096],
+            "multimodal_failed_items": failed_items or [],
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        }
+        await self.lightrag.doc_status.upsert({doc_id: updated_doc_status})
+        await self.lightrag.doc_status.index_done_callback()
 
     async def is_document_fully_processed(self, doc_id: str) -> bool:
         """
