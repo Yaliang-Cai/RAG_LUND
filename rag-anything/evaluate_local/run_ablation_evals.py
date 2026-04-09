@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -78,6 +79,28 @@ def _bool_arg(v: bool) -> str:
 
 def _default_run_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _sanitize_workspace_fragment(raw: str) -> str:
+    token = re.sub(r"[^0-9A-Za-z_-]+", "_", str(raw or "").strip())
+    token = token.strip("_")
+    return token or "run"
+
+
+def _resolve_workspace_prefixes(
+    *,
+    run_id: str,
+    shared_workspace_prefix: str,
+    surge_workspace_prefix: str,
+) -> tuple[str, str]:
+    run_token = _sanitize_workspace_fragment(run_id)
+    shared_prefix = str(shared_workspace_prefix or "").strip()
+    surge_prefix = str(surge_workspace_prefix or "").strip()
+    if not shared_prefix:
+        shared_prefix = f"docbench_shared_{run_token}"
+    if not surge_prefix:
+        surge_prefix = f"surge_fast_{run_token}"
+    return shared_prefix, surge_prefix
 
 
 def _resolve_profile_key(raw: str) -> str:
@@ -398,8 +421,24 @@ def parse_args() -> argparse.Namespace:
         help="Also run evaluate_shared --mode stats (typically together with --run-shared-evaluate).",
     )
 
-    parser.add_argument("--shared-workspace-prefix", type=str, default="docbench_shared_ablation")
-    parser.add_argument("--surge-workspace-prefix", type=str, default="surge_fast_ablation")
+    parser.add_argument(
+        "--shared-workspace-prefix",
+        type=str,
+        default="",
+        help=(
+            "Workspace prefix for evaluate_shared. Default: auto -> "
+            "docbench_shared_<run-id>."
+        ),
+    )
+    parser.add_argument(
+        "--surge-workspace-prefix",
+        type=str,
+        default="",
+        help=(
+            "Workspace prefix for evaluate_surge_fast. Default: auto -> "
+            "surge_fast_<run-id>."
+        ),
+    )
     parser.add_argument(
         "--docbench-data-root",
         type=str,
@@ -467,6 +506,11 @@ def main() -> int:
     lightrag_root = projects_root / "lightrag"
 
     run_id = str(args.run_id or "").strip() or _default_run_id()
+    shared_workspace_prefix, surge_workspace_prefix = _resolve_workspace_prefixes(
+        run_id=run_id,
+        shared_workspace_prefix=str(args.shared_workspace_prefix),
+        surge_workspace_prefix=str(args.surge_workspace_prefix),
+    )
     runs_root = (project_root / args.runs_root).resolve()
     run_root = (runs_root / run_id).resolve()
     if run_root.exists() and any(run_root.iterdir()) and not bool(args.allow_reuse_run_id):
@@ -514,14 +558,16 @@ def main() -> int:
             "shared_mineru_output_dir": (
                 str(shared_mineru_output_dir) if shared_mineru_output_dir else ""
             ),
+            "shared_workspace_prefix": shared_workspace_prefix,
+            "surge_workspace_prefix": surge_workspace_prefix,
         },
     )
 
     abort_run = False
     for profile in profiles:
         workspace_key = profile.reuse_index_from or profile.key
-        shared_workspace_id = f"{args.shared_workspace_prefix}_{workspace_key}"
-        surge_workspace_id = f"{args.surge_workspace_prefix}_{workspace_key}"
+        shared_workspace_id = f"{shared_workspace_prefix}_{workspace_key}"
+        surge_workspace_id = f"{surge_workspace_prefix}_{workspace_key}"
 
         profile_dir = run_root / profile.key
         shared_output_dir = profile_dir / "evaluate_shared"
