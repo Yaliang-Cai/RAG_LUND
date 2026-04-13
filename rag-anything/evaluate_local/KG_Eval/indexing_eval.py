@@ -1,21 +1,44 @@
+import argparse
+import asyncio
 import os
 import pickle
-import pandas as pd
-import numpy as np
-import igraph as ig
-from typing import Dict, List, Optional, Union
+import sys
 import warnings
-import argparse
+from pathlib import Path
+from typing import Dict, List, Optional, Union
+
+import igraph as ig
+import numpy as np
+import pandas as pd
 
 # -----------------------------------------------------------------------------
 # Optional in-file run config
 # Set USE_INLINE_CONFIG=True to run without CLI args and use paths below.
 # -----------------------------------------------------------------------------
 USE_INLINE_CONFIG = True
-INLINE_FRAMEWORK = "lightrag"  # choices: microsoft_graphrag, lightrag, fast_graphrag, hipporag2, graphml
+INLINE_FRAMEWORK = "lightrag"  # choices: microsoft_graphrag, lightrag, fast_graphrag, hipporag2, graphml, neo4j
 INLINE_BASE_PATH = ""          # e.g. /data/.../rag_workspaces
 INLINE_FOLDER_NAME = None      # only needed for hipporag2
 INLINE_OUTPUT = None           # e.g. /data/.../indexing_metrics.txt
+
+
+SCRIPT_PATH = Path(__file__).resolve()
+RAG_ANYTHING_ROOT = SCRIPT_PATH.parents[2]
+LIGHTRAG_PROJECT_ROOT = RAG_ANYTHING_ROOT.parent / "lightrag"
+for _path in (RAG_ANYTHING_ROOT, LIGHTRAG_PROJECT_ROOT):
+    _path_str = str(_path)
+    if _path_str not in sys.path:
+        sys.path.insert(0, _path_str)
+
+
+WORKSPACE_MARKERS = (
+    "kv_store_doc_status.json",
+    "kv_store_full_docs.json",
+    "vdb_chunks.json",
+    "vdb_entities.json",
+    "vdb_relationships.json",
+    "graph_chunk_entity_relation.graphml",
+)
 
 
 def analyze_graph(g: ig.Graph) -> Dict[str, float]:
@@ -175,6 +198,129 @@ def load_graph_from_graphml(graphml_path: str) -> ig.Graph:
     return g
 
 
+def _is_workspace_dir(path: Path) -> bool:
+    return path.is_dir() and any((path / marker).exists() for marker in WORKSPACE_MARKERS)
+
+
+def _resolve_workspace_dirs(base_path: str, workspace_name: Optional[str] = None) -> List[Path]:
+    base = Path(base_path).resolve()
+    if not base.exists():
+        raise FileNotFoundError(f"Base path does not exist: {base}")
+
+    if workspace_name:
+        candidate = (base / workspace_name).resolve()
+        if _is_workspace_dir(candidate):
+            return [candidate]
+        raise FileNotFoundError(
+            f"Workspace '{workspace_name}' not found under {base} or missing workspace marker files."
+        )
+
+    if _is_workspace_dir(base):
+        return [base]
+
+    workspaces = [path for path in sorted(base.iterdir()) if _is_workspace_dir(path)]
+    return workspaces
+
+
+def _build_igraph_from_neo4j_records(
+    nodes: List[Dict[str, object]], edges: List[Dict[str, object]]
+) -> ig.Graph:
+    g = ig.Graph(directed=False)
+    node_names: List[str] = []
+    seen_nodes: set[str] = set()
+
+    for node in nodes:
+        entity_id = node.get("entity_id") or node.get("id")
+        if entity_id is None:
+            continue
+        entity_name = str(entity_id)
+        if entity_name not in seen_nodes:
+            node_names.append(entity_name)
+            seen_nodes.add(entity_name)
+
+    if node_names:
+        g.add_vertices(node_names)
+
+    edge_pairs: List[tuple[str, str]] = []
+    edge_weights: List[float] = []
+    for edge in edges:
+        source = edge.get("source")
+        target = edge.get("target")
+        if source is None or target is None:
+            continue
+
+        source_name = str(source)
+        target_name = str(target)
+        if source_name not in seen_nodes:
+            g.add_vertex(name=source_name)
+            seen_nodes.add(source_name)
+        if target_name not in seen_nodes:
+            g.add_vertex(name=target_name)
+            seen_nodes.add(target_name)
+
+        properties = edge.get("properties") or {}
+        weight = 1.0
+        if isinstance(properties, dict):
+            try:
+                weight = float(properties.get("weight", 1.0))
+            except (TypeError, ValueError):
+                weight = 1.0
+
+        edge_pairs.append((source_name, target_name))
+        edge_weights.append(weight)
+
+    if edge_pairs:
+        g.add_edges(edge_pairs)
+        g.es["weight"] = edge_weights
+
+    return g
+
+
+async def _load_graph_from_neo4j_workspace(workspace_dir: Path) -> ig.Graph:
+    from lightrag.kg.neo4j_impl import Neo4JStorage
+    from lightrag.namespace import NameSpace
+
+    storage = Neo4JStorage(
+        namespace=NameSpace.GRAPH_STORE_CHUNK_ENTITY_RELATION,
+        workspace=workspace_dir.name,
+        global_config={"working_dir": str(workspace_dir)},
+        embedding_func=None,
+    )
+    await storage.initialize()
+    try:
+        nodes = await storage.get_all_nodes()
+        edges = await storage.get_all_edges()
+    finally:
+        await storage.finalize()
+
+    return _build_igraph_from_neo4j_records(nodes, edges)
+
+
+async def _process_graphs_neo4j_async(
+    base_path: str, workspace_name: Optional[str] = None
+) -> List[Dict]:
+    results: List[Dict] = []
+    for workspace_dir in _resolve_workspace_dirs(base_path, workspace_name):
+        try:
+            g = await _load_graph_from_neo4j_workspace(workspace_dir)
+            result = analyze_graph(g)
+            results.append(result)
+        except Exception as e:
+            print(f"Error processing Neo4j workspace {workspace_dir.name}: {e}")
+    return results
+
+
+def process_graphs_neo4j(base_path: str, workspace_name: Optional[str] = None) -> List[Dict]:
+    """
+    Process graph data stored in Neo4j, one workspace label per workspace directory.
+
+    :param base_path: Workspaces root directory, or a single workspace directory
+    :param workspace_name: Optional workspace directory name to evaluate
+    :return: A list containing metric dictionaries for each graph
+    """
+    return asyncio.run(_process_graphs_neo4j_async(base_path, workspace_name))
+
+
 def process_graphs_microsoft_graphrag(base_path: str, folder_name: str) -> List[Dict]:
     """
     Process graph data generated by Microsoft GraphRAG.
@@ -325,6 +471,8 @@ def _collect_indexing_results(framework: str, base_path: str, folder_name: Optio
         return process_graphs_hipporag2(base_path, folder_name)
     elif framework == 'graphml':
         return process_graphs_graphml(base_path)
+    elif framework == 'neo4j':
+        return process_graphs_neo4j(base_path, folder_name)
     raise ValueError(f"Unsupported framework: {framework}")
 
 
@@ -332,7 +480,7 @@ def calculate_indexing_metrics(framework: str, base_path: str, folder_name: Opti
     """
     Calculate indexing graph metrics for specified framework.
 
-    :param framework: Framework name ('microsoft_graphrag', 'lightrag', 'fast_graphrag', 'hipporag2', 'graphml')
+    :param framework: Framework name ('microsoft_graphrag', 'lightrag', 'fast_graphrag', 'hipporag2', 'graphml', 'neo4j')
     :param base_path: Root path containing graph data
     :param folder_name: Subdirectory name (required for some frameworks)
     :return: Average metrics dictionary
@@ -362,7 +510,7 @@ def parse_args():
         type=str, 
         required=required_cli,
         default=None,
-        choices=['microsoft_graphrag', 'lightrag', 'fast_graphrag', 'hipporag2', 'graphml'],
+        choices=['microsoft_graphrag', 'lightrag', 'fast_graphrag', 'hipporag2', 'graphml', 'neo4j'],
         help='Framework to analyze'
     )
     
@@ -378,7 +526,7 @@ def parse_args():
         '--folder_name', 
         type=str, 
         default=None,
-        help='Subdirectory name (required for hipporag2)'
+        help='Subdirectory name (required for hipporag2; for neo4j it filters a single workspace name)'
     )
     
     parser.add_argument(

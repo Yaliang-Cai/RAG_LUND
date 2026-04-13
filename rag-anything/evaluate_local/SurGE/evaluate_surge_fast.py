@@ -14,6 +14,7 @@ import sys
 import time
 import traceback
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -256,6 +257,76 @@ def build_query_params(args: argparse.Namespace, *, chunk_top_k: int) -> dict[st
     query_params["enable_rerank"] = True
     query_params["rerank_score_scope"] = "all"
     return query_params
+
+
+async def _cleanup_workspace_service(
+    service: Any | None,
+    workspace_id: str,
+    *,
+    stage: str,
+) -> None:
+    try:
+        if service is not None:
+            await service.cleanup_workspace_instance(workspace_id)
+    except Exception as exc:
+        logger.warning(
+            "Workspace cleanup failed after %s for %s: %s",
+            stage,
+            workspace_id,
+            exc,
+        )
+    finally:
+        gc.collect()
+        clear_cuda_cache()
+
+
+@asynccontextmanager
+async def prepared_workspace_service(
+    args: argparse.Namespace,
+    source_records: list[dict[str, Any]],
+    *,
+    stage: str,
+):
+    _, LocalRagService, _ = import_rag_dependencies()
+    ablation_flags = get_ablation_flags(args)
+    settings = settings_for_surge(args)
+    current_index_profile = build_index_profile(ablation_flags, settings=settings)
+    ensured_index_profile = ensure_workspace_index_profile(
+        working_dir_root=settings.working_dir_root,
+        workspace_id=args.workspace_id,
+        index_profile=current_index_profile,
+        allow_legacy_adoption=bool(args.allow_legacy_index_profile_adoption),
+    )
+    service = None
+    try:
+        service = LocalRagService(settings)
+        ingest_summary = await ensure_workspace_index(
+            service,
+            args.workspace_id,
+            source_records,
+            ablation_flags,
+            args.max_retries,
+            args.ingest_batch_size,
+            args.batch_doc_concurrency,
+            args.llm_model_max_async,
+        )
+        sync_master_logging_handlers()
+        blockers = collect_ingest_blockers(ingest_summary)
+        if blockers:
+            detail = ", ".join(f"{k}={v}" for k, v in sorted(blockers.items()))
+            logger.error("Ingest integrity check failed before %s: %s", stage, detail)
+            raise RuntimeError(
+                f"Workspace ingest incomplete; abort {stage}. Details: {detail}"
+            )
+        rag = await service.get_rag(args.workspace_id)
+        await ensure_rag_runtime_ready(rag, args.workspace_id)
+        yield service, ablation_flags, ensured_index_profile, ingest_summary
+    finally:
+        await _cleanup_workspace_service(
+            service,
+            args.workspace_id,
+            stage=stage,
+        )
 
 
 def load_chunks(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
@@ -1557,456 +1628,456 @@ async def ensure_query_retrieval_for_survey(args: argparse.Namespace) -> None:
 async def run_retrieval(args: argparse.Namespace) -> int:
     ks = parse_k_list(args.k_list)
     chunk_top_k = resolve_chunk_top_k(args.chunk_top_k, ks)
-    QueryParam, LocalRagService, _ = import_rag_dependencies()
+    QueryParam, _, _ = import_rag_dependencies()
     data_root = Path(args.data_root)
     subset = data_root / args.subset_dir
     chunks_by_doc, chunk_stats = load_chunks(subset / args.chunks_file)
     source_records, chunk_source_map, source_map_stats = prepare_source_records(chunks_by_doc)
     persist_chunk_source_map(chunk_source_map, source_map_stats)
     queries = load_queries(subset / args.queries_file, args.limit)
-    ablation_flags = get_ablation_flags(args)
-    settings = settings_for_surge(args)
-    current_index_profile = build_index_profile(ablation_flags, settings=settings)
-    ensured_index_profile = ensure_workspace_index_profile(
-        working_dir_root=settings.working_dir_root,
-        workspace_id=args.workspace_id,
-        index_profile=current_index_profile,
-        allow_legacy_adoption=bool(args.allow_legacy_index_profile_adoption),
-    )
-    service = LocalRagService(settings)
-    ingest_summary = await ensure_workspace_index(
-        service,
-        args.workspace_id,
+    async with prepared_workspace_service(
+        args,
         source_records,
-        ablation_flags,
-        args.max_retries,
-        args.ingest_batch_size,
-        args.batch_doc_concurrency,
-        args.llm_model_max_async,
-    )
-    sync_master_logging_handlers()
-    blockers = collect_ingest_blockers(ingest_summary)
-    if blockers:
-        detail = ", ".join(f"{k}={v}" for k, v in sorted(blockers.items()))
-        logger.error("Ingest integrity check failed before retrieval: %s", detail)
-        raise RuntimeError(
-            f"Workspace ingest incomplete; abort retrieval evaluation. Details: {detail}"
-        )
-    rag = await service.get_rag(args.workspace_id)
-    await ensure_rag_runtime_ready(rag, args.workspace_id)
-    query_params = build_query_params(args, chunk_top_k=chunk_top_k)
-    sem = asyncio.Semaphore(max(1, args.max_concurrency))
-    done = 0
-    lock = asyncio.Lock()
-    total = len(queries)
+        stage="retrieval evaluation",
+    ) as (service, ablation_flags, ensured_index_profile, ingest_summary):
+        query_params = build_query_params(args, chunk_top_k=chunk_top_k)
+        sem = asyncio.Semaphore(max(1, args.max_concurrency))
+        done = 0
+        lock = asyncio.Lock()
+        total = len(queries)
 
-    async def one(i: int, item: dict[str, Any]):
-        nonlocal done
-        qid = item.get("query_id", i + 1)
-        q = str(item.get("prefix_titles_query") or "").strip()
-        gt = {int(x) for x in item.get("cites", []) if parse_int(x) is not None}
-        t0 = time.perf_counter()
-        warns = []
-        error = None
-        retrieved: list[int] = []
-        retrieval = {}
-        async with sem:
-            try:
-                if not q:
-                    raise ValueError("empty prefix_titles_query")
-                param = QueryParam(**query_params)
-                retrieval = await with_retries(
-                    lambda: service.lightrag_aquery_data(
-                        args.workspace_id,
-                        q,
-                        param=param,
-                    ),
-                    label=f"query {qid}",
-                    retries=args.max_retries,
-                )
-                rerank_for_contract = extract_rerank_payload(retrieval, query_params)
-                assert_rerank_contract(
-                    rerank_payload=rerank_for_contract,
-                    query_params=query_params,
-                    record_key="query_id",
-                    record_id=qid,
-                )
-                retrieved, warns = await map_chunks_to_doc_ids(
-                    chunk_source_map=chunk_source_map,
-                    retrieval=retrieval,
-                    record_key="query_id",
-                    record_id=qid,
-                )
-            except Exception as exc:
-                error = {
-                    "query_id": qid,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "traceback_tail": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)[-3:]).strip(),
-                }
-        row = {
-            "query_id": qid,
-            "question": q,
-            "category": item.get("category"),
-            "gt_count": len(gt),
-            "retrieved_count": len(retrieved),
-            "gt_doc_ids": sorted(gt),
-            "retrieved_doc_ids": retrieved,
-            "hit_at_k": {str(k): len(gt & set(retrieved[:k])) for k in ks},
-            "recall_at_k": recall_at_k(gt, retrieved, ks),
-            "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
-            "error": error,
-        }
-        rerank = extract_rerank_payload(retrieval, query_params)
-        rerank_row = {
-            "query_id": qid,
-            "question": q,
-            "rerank_scope": rerank.get("rerank_scope"),
-            "min_rerank_score": rerank.get("min_rerank_score"),
-            "counts": rerank.get("counts", {}),
-            "distribution": rerank.get("distribution", {}),
-            "scores": rerank.get("scores", {}),
-            "threshold_retention": rerank.get("threshold_retention", []),
-            "category": item.get("category"),
+        async def one(i: int, item: dict[str, Any]):
+            nonlocal done
+            qid = item.get("query_id", i + 1)
+            q = str(item.get("prefix_titles_query") or "").strip()
+            gt = {int(x) for x in item.get("cites", []) if parse_int(x) is not None}
+            t0 = time.perf_counter()
+            warns = []
+            error = None
+            retrieved: list[int] = []
+            retrieval = {}
+            async with sem:
+                try:
+                    if not q:
+                        raise ValueError("empty prefix_titles_query")
+                    param = QueryParam(**query_params)
+                    retrieval = await with_retries(
+                        lambda: service.lightrag_aquery_data(
+                            args.workspace_id,
+                            q,
+                            param=param,
+                        ),
+                        label=f"query {qid}",
+                        retries=args.max_retries,
+                    )
+                    rerank_for_contract = extract_rerank_payload(retrieval, query_params)
+                    assert_rerank_contract(
+                        rerank_payload=rerank_for_contract,
+                        query_params=query_params,
+                        record_key="query_id",
+                        record_id=qid,
+                    )
+                    retrieved, warns = await map_chunks_to_doc_ids(
+                        chunk_source_map=chunk_source_map,
+                        retrieval=retrieval,
+                        record_key="query_id",
+                        record_id=qid,
+                    )
+                except Exception as exc:
+                    error = {
+                        "query_id": qid,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "traceback_tail": "".join(
+                            traceback.format_exception(
+                                type(exc),
+                                exc,
+                                exc.__traceback__,
+                            )[-3:]
+                        ).strip(),
+                    }
+            row = {
+                "query_id": qid,
+                "question": q,
+                "category": item.get("category"),
+                "gt_count": len(gt),
+                "retrieved_count": len(retrieved),
+                "gt_doc_ids": sorted(gt),
+                "retrieved_doc_ids": retrieved,
+                "hit_at_k": {str(k): len(gt & set(retrieved[:k])) for k in ks},
+                "recall_at_k": recall_at_k(gt, retrieved, ks),
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
+                "error": error,
+            }
+            rerank = extract_rerank_payload(retrieval, query_params)
+            rerank_row = {
+                "query_id": qid,
+                "question": q,
+                "rerank_scope": rerank.get("rerank_scope"),
+                "min_rerank_score": rerank.get("min_rerank_score"),
+                "counts": rerank.get("counts", {}),
+                "distribution": rerank.get("distribution", {}),
+                "scores": rerank.get("scores", {}),
+                "threshold_retention": rerank.get("threshold_retention", []),
+                "category": item.get("category"),
+                "top_k": args.top_k,
+                "chunk_top_k": chunk_top_k,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            async with lock:
+                done += 1
+                if done == total or done % max(1, total // 10) == 0:
+                    logger.info("Retrieval progress: %d/%d", done, total)
+            return row, rerank_row, warns, error
+
+        results = await asyncio.gather(
+            *[asyncio.create_task(one(i, q)) for i, q in enumerate(queries)]
+        )
+        per_rows, rerank_rows, warnings, errors = [], [], [], []
+        for pr, rr, ws, err in results:
+            per_rows.append(pr)
+            rerank_rows.append(rr)
+            warnings.extend(ws)
+            if err:
+                errors.append(err)
+        append_jsonl(PER_QUERY_FILE, per_rows)
+        append_jsonl(RERANK_STATS_FILE, rerank_rows)
+        append_jsonl(WARNINGS_FILE, warnings)
+        avg = compute_macro_recall(per_rows, ks)
+        save_json(SUMMARY_FILE, {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": "retrieval",
             "top_k": args.top_k,
             "chunk_top_k": chunk_top_k,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        async with lock:
-            done += 1
-            if done == total or done % max(1, total // 10) == 0:
-                logger.info("Retrieval progress: %d/%d", done, total)
-        return row, rerank_row, warns, error
-
-    results = await asyncio.gather(*[asyncio.create_task(one(i, q)) for i, q in enumerate(queries)])
-    per_rows, rerank_rows, warnings, errors = [], [], [], []
-    for pr, rr, ws, err in results:
-        per_rows.append(pr)
-        rerank_rows.append(rr)
-        warnings.extend(ws)
-        if err:
-            errors.append(err)
-    append_jsonl(PER_QUERY_FILE, per_rows)
-    append_jsonl(RERANK_STATS_FILE, rerank_rows)
-    append_jsonl(WARNINGS_FILE, warnings)
-    avg = compute_macro_recall(per_rows, ks)
-    save_json(SUMMARY_FILE, {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "mode": "retrieval",
-        "top_k": args.top_k,
-        "chunk_top_k": chunk_top_k,
-        "k_list": ks,
-        "query_count": len(per_rows),
-        "success_count": sum(1 for r in per_rows if r.get("error") is None),
-        "failed_count": len(errors),
-        "mapping_warning_count": len(warnings),
-        "non_empty_retrieval_count": sum(1 for r in per_rows if int(r.get("retrieved_count", 0)) > 0),
-        "avg_recall_at_k": avg,
-        "workspace_id": args.workspace_id,
-        "data_root": str(data_root),
-        "subset_dir": str(subset),
-        "queries_file": str(subset / args.queries_file),
-        "chunks_file": str(subset / args.chunks_file),
-        "corpus_file": str(subset / args.corpus_file),
-        "effective_query_params": query_params | {
-            "ablation_group": ablation_flags.ablation_group(),
-            "ablation_flags": ablation_flags.to_dict(),
-            "index_profile": ensured_index_profile,
-            "max_concurrency": args.max_concurrency,
-            "max_retries": args.max_retries,
             "k_list": ks,
-        },
-        "ingest_summary": ingest_summary,
-        "chunks_source_stats": chunk_stats,
-    })
-    all_scores = [s for r in rerank_rows for s in r.get("scores", {}).get("all", []) if isinstance(s, (int, float))]
-    thr_scores = [s for r in rerank_rows for s in r.get("scores", {}).get("after_threshold", []) if isinstance(s, (int, float))]
-    fin_scores = [s for r in rerank_rows for s in r.get("scores", {}).get("final", []) if isinstance(s, (int, float))]
-    save_json(RERANK_SUMMARY_FILE, {
-        "total_queries": len(rerank_rows),
-        "questions_with_rerank_trace": count_rows_with_rerank_trace(rerank_rows),
-        "overall_distribution": {
-            "all": score_distribution([float(x) for x in all_scores]),
-            "after_threshold": score_distribution([float(x) for x in thr_scores]),
-            "final": score_distribution([float(x) for x in fin_scores]),
-        },
-        "macro_distribution_over_queries": summarize_macro_distribution(rerank_rows),
-        "threshold_retention_overall": summarize_threshold_retention(rerank_rows),
-    })
-    logger.info("Retrieval complete: %s", SUMMARY_FILE)
-    gc.collect()
-    clear_cuda_cache()
-    return 0
+            "query_count": len(per_rows),
+            "success_count": sum(1 for r in per_rows if r.get("error") is None),
+            "failed_count": len(errors),
+            "mapping_warning_count": len(warnings),
+            "non_empty_retrieval_count": sum(
+                1 for r in per_rows if int(r.get("retrieved_count", 0)) > 0
+            ),
+            "avg_recall_at_k": avg,
+            "workspace_id": args.workspace_id,
+            "data_root": str(data_root),
+            "subset_dir": str(subset),
+            "queries_file": str(subset / args.queries_file),
+            "chunks_file": str(subset / args.chunks_file),
+            "corpus_file": str(subset / args.corpus_file),
+            "effective_query_params": query_params | {
+                "ablation_group": ablation_flags.ablation_group(),
+                "ablation_flags": ablation_flags.to_dict(),
+                "index_profile": ensured_index_profile,
+                "max_concurrency": args.max_concurrency,
+                "max_retries": args.max_retries,
+                "k_list": ks,
+            },
+            "ingest_summary": ingest_summary,
+            "chunks_source_stats": chunk_stats,
+        })
+        all_scores = [
+            s
+            for r in rerank_rows
+            for s in r.get("scores", {}).get("all", [])
+            if isinstance(s, (int, float))
+        ]
+        thr_scores = [
+            s
+            for r in rerank_rows
+            for s in r.get("scores", {}).get("after_threshold", [])
+            if isinstance(s, (int, float))
+        ]
+        fin_scores = [
+            s
+            for r in rerank_rows
+            for s in r.get("scores", {}).get("final", [])
+            if isinstance(s, (int, float))
+        ]
+        save_json(RERANK_SUMMARY_FILE, {
+            "total_queries": len(rerank_rows),
+            "questions_with_rerank_trace": count_rows_with_rerank_trace(rerank_rows),
+            "overall_distribution": {
+                "all": score_distribution([float(x) for x in all_scores]),
+                "after_threshold": score_distribution([float(x) for x in thr_scores]),
+                "final": score_distribution([float(x) for x in fin_scores]),
+            },
+            "macro_distribution_over_queries": summarize_macro_distribution(rerank_rows),
+            "threshold_retention_overall": summarize_threshold_retention(rerank_rows),
+        })
+        logger.info("Retrieval complete: %s", SUMMARY_FILE)
+        return 0
 
 
 async def run_survey_retrieval(args: argparse.Namespace) -> int:
     survey_ks = parse_k_list(args.survey_k_list)
     chunk_top_k = resolve_chunk_top_k(args.chunk_top_k, survey_ks)
-    QueryParam, LocalRagService, _ = import_rag_dependencies()
+    QueryParam, _, _ = import_rag_dependencies()
     data_root = Path(args.data_root)
     subset = data_root / args.subset_dir
     chunks_by_doc, chunk_stats = load_chunks(subset / args.chunks_file)
     source_records, chunk_source_map, source_map_stats = prepare_source_records(chunks_by_doc)
     persist_chunk_source_map(chunk_source_map, source_map_stats)
     surveys = load_surveys(subset / args.surveys_file, args.limit)
-    ablation_flags = get_ablation_flags(args)
-    settings = settings_for_surge(args)
-    current_index_profile = build_index_profile(ablation_flags, settings=settings)
-    ensured_index_profile = ensure_workspace_index_profile(
-        working_dir_root=settings.working_dir_root,
-        workspace_id=args.workspace_id,
-        index_profile=current_index_profile,
-        allow_legacy_adoption=bool(args.allow_legacy_index_profile_adoption),
-    )
-    service = LocalRagService(settings)
-    ingest_summary = await ensure_workspace_index(
-        service,
-        args.workspace_id,
+    async with prepared_workspace_service(
+        args,
         source_records,
-        ablation_flags,
-        args.max_retries,
-        args.ingest_batch_size,
-        args.batch_doc_concurrency,
-        args.llm_model_max_async,
-    )
-    sync_master_logging_handlers()
-    blockers = collect_ingest_blockers(ingest_summary)
-    if blockers:
-        detail = ", ".join(f"{k}={v}" for k, v in sorted(blockers.items()))
-        logger.error("Ingest integrity check failed before survey retrieval: %s", detail)
-        raise RuntimeError(
-            f"Workspace ingest incomplete; abort survey retrieval evaluation. Details: {detail}"
+        stage="survey retrieval evaluation",
+    ) as (service, ablation_flags, ensured_index_profile, ingest_summary):
+        query_params = build_query_params(args, chunk_top_k=chunk_top_k)
+
+        sem = asyncio.Semaphore(max(1, args.max_concurrency))
+        done = 0
+        lock = asyncio.Lock()
+        total = len(surveys)
+
+        async def one(i: int, item: dict[str, Any]):
+            nonlocal done
+            survey_id = item.get("survey_id", i + 1)
+            survey_title = str(item.get("survey_title") or "").strip()
+            gt = {int(x) for x in item.get("all_cites", []) if parse_int(x) is not None}
+            t0 = time.perf_counter()
+            warns = []
+            error = None
+            retrieved: list[int] = []
+            retrieved_by_scope: dict[str, list[int]] = {
+                "all": [],
+                "threshold": [],
+                "final": [],
+            }
+            retrieval = {}
+            rerank: dict[str, Any] = {}
+
+            async with sem:
+                try:
+                    if not survey_title:
+                        raise ValueError("empty survey_title")
+                    param = QueryParam(**query_params)
+                    retrieval = await with_retries(
+                        lambda: service.lightrag_aquery_data(
+                            args.workspace_id,
+                            survey_title,
+                            param=param,
+                        ),
+                        label=f"survey {survey_id}",
+                        retries=args.max_retries,
+                    )
+                    rerank = extract_rerank_payload(retrieval, query_params)
+                    assert_rerank_contract(
+                        rerank_payload=rerank,
+                        query_params=query_params,
+                        record_key="survey_id",
+                        record_id=survey_id,
+                    )
+                    chunk_ids = (
+                        rerank.get("chunk_ids", {}) if isinstance(rerank, dict) else {}
+                    )
+                    if not isinstance(chunk_ids, dict):
+                        chunk_ids = {}
+
+                    all_chunk_ids = chunk_ids.get("all", [])
+                    thr_chunk_ids = chunk_ids.get("after_threshold", [])
+                    fin_chunk_ids = chunk_ids.get("final", [])
+                    if not isinstance(all_chunk_ids, list):
+                        all_chunk_ids = []
+                    if not isinstance(thr_chunk_ids, list):
+                        thr_chunk_ids = []
+                    if not isinstance(fin_chunk_ids, list):
+                        fin_chunk_ids = []
+
+                    all_docs, all_warns = map_chunk_ids_to_doc_ids(
+                        chunk_source_map=chunk_source_map,
+                        chunk_ids=all_chunk_ids,
+                        record_key="survey_id",
+                        record_id=survey_id,
+                        stage="all",
+                    )
+                    thr_docs, thr_warns = map_chunk_ids_to_doc_ids(
+                        chunk_source_map=chunk_source_map,
+                        chunk_ids=thr_chunk_ids,
+                        record_key="survey_id",
+                        record_id=survey_id,
+                        stage="threshold",
+                    )
+                    fin_docs, fin_warns = map_chunk_ids_to_doc_ids(
+                        chunk_source_map=chunk_source_map,
+                        chunk_ids=fin_chunk_ids,
+                        record_key="survey_id",
+                        record_id=survey_id,
+                        stage="final",
+                    )
+                    warns = all_warns + thr_warns + fin_warns
+                    retrieved_by_scope["all"] = all_docs
+                    retrieved_by_scope["threshold"] = thr_docs
+                    retrieved_by_scope["final"] = fin_docs
+                    retrieved = list(fin_docs)
+                except Exception as exc:
+                    error = {
+                        "survey_id": survey_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "traceback_tail": "".join(
+                            traceback.format_exception(
+                                type(exc),
+                                exc,
+                                exc.__traceback__,
+                            )[-3:]
+                        ).strip(),
+                    }
+
+            hit_final = hit_at_k(gt, retrieved_by_scope["final"], survey_ks)
+            recall_final = recall_at_k(gt, retrieved_by_scope["final"], survey_ks)
+            hit_by_scope = {
+                "all": hit_at_k(gt, retrieved_by_scope["all"], survey_ks),
+                "threshold": hit_at_k(gt, retrieved_by_scope["threshold"], survey_ks),
+                "final": hit_final,
+            }
+            recall_by_scope = {
+                "all": recall_at_k(gt, retrieved_by_scope["all"], survey_ks),
+                "threshold": recall_at_k(gt, retrieved_by_scope["threshold"], survey_ks),
+                "final": recall_final,
+            }
+            row = {
+                "survey_id": survey_id,
+                "survey_title": survey_title,
+                "gt_count": len(gt),
+                "retrieved_count": len(retrieved),
+                "retrieved_count_by_scope": {
+                    "all": len(retrieved_by_scope["all"]),
+                    "threshold": len(retrieved_by_scope["threshold"]),
+                    "final": len(retrieved_by_scope["final"]),
+                },
+                "gt_doc_ids": sorted(gt),
+                "retrieved_doc_ids": retrieved,
+                "retrieved_doc_ids_by_scope": retrieved_by_scope,
+                "hit_at_k": hit_final,
+                "recall_at_k": recall_final,
+                "hit_at_k_by_scope": hit_by_scope,
+                "recall_at_k_by_scope": recall_by_scope,
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
+                "error": error,
+            }
+            if not rerank:
+                rerank = extract_rerank_payload(retrieval, query_params)
+            rerank_row = {
+                "survey_id": survey_id,
+                "survey_title": survey_title,
+                "rerank_scope": rerank.get("rerank_scope"),
+                "min_rerank_score": rerank.get("min_rerank_score"),
+                "counts": rerank.get("counts", {}),
+                "distribution": rerank.get("distribution", {}),
+                "scores": rerank.get("scores", {}),
+                "chunk_ids": rerank.get("chunk_ids", {}),
+                "threshold_retention": rerank.get("threshold_retention", []),
+                "top_k": args.top_k,
+                "chunk_top_k": chunk_top_k,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            async with lock:
+                done += 1
+                if done == total or done % max(1, total // 5) == 0:
+                    logger.info("Survey retrieval progress: %d/%d", done, total)
+            return row, rerank_row, warns, error
+
+        results = await asyncio.gather(
+            *[asyncio.create_task(one(i, s)) for i, s in enumerate(surveys)]
+        )
+        per_rows: list[dict[str, Any]] = []
+        rerank_rows: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for pr, rr, ws, err in results:
+            per_rows.append(pr)
+            rerank_rows.append(rr)
+            warnings.extend(ws)
+            if err:
+                errors.append(err)
+
+        append_jsonl(SURVEY_PER_FILE, per_rows)
+        append_jsonl(SURVEY_RERANK_STATS_FILE, rerank_rows)
+        append_jsonl(SURVEY_WARNINGS_FILE, warnings)
+
+        macro = compute_macro_recall(per_rows, survey_ks)
+        micro = compute_micro_recall(per_rows, survey_ks)
+        macro_by_scope, micro_by_scope = compute_scope_macro_micro_recall(
+            per_rows,
+            survey_ks,
+            recall_scopes_key="recall_at_k_by_scope",
+            hit_scopes_key="hit_at_k_by_scope",
+        )
+        cut_summary = summarize_final_cut_reason(
+            rerank_rows,
+            chunk_top_k=chunk_top_k,
         )
 
-    rag = await service.get_rag(args.workspace_id)
-    await ensure_rag_runtime_ready(rag, args.workspace_id)
-    query_params = build_query_params(args, chunk_top_k=chunk_top_k)
-
-    sem = asyncio.Semaphore(max(1, args.max_concurrency))
-    done = 0
-    lock = asyncio.Lock()
-    total = len(surveys)
-
-    async def one(i: int, item: dict[str, Any]):
-        nonlocal done
-        survey_id = item.get("survey_id", i + 1)
-        survey_title = str(item.get("survey_title") or "").strip()
-        gt = {int(x) for x in item.get("all_cites", []) if parse_int(x) is not None}
-        t0 = time.perf_counter()
-        warns = []
-        error = None
-        retrieved: list[int] = []
-        retrieved_by_scope: dict[str, list[int]] = {
-            "all": [],
-            "threshold": [],
-            "final": [],
-        }
-        retrieval = {}
-        rerank: dict[str, Any] = {}
-
-        async with sem:
-            try:
-                if not survey_title:
-                    raise ValueError("empty survey_title")
-                param = QueryParam(**query_params)
-                retrieval = await with_retries(
-                    lambda: service.lightrag_aquery_data(
-                        args.workspace_id,
-                        survey_title,
-                        param=param,
-                    ),
-                    label=f"survey {survey_id}",
-                    retries=args.max_retries,
-                )
-                rerank = extract_rerank_payload(retrieval, query_params)
-                assert_rerank_contract(
-                    rerank_payload=rerank,
-                    query_params=query_params,
-                    record_key="survey_id",
-                    record_id=survey_id,
-                )
-                chunk_ids = rerank.get("chunk_ids", {}) if isinstance(rerank, dict) else {}
-                if not isinstance(chunk_ids, dict):
-                    chunk_ids = {}
-
-                all_chunk_ids = chunk_ids.get("all", [])
-                thr_chunk_ids = chunk_ids.get("after_threshold", [])
-                fin_chunk_ids = chunk_ids.get("final", [])
-                if not isinstance(all_chunk_ids, list):
-                    all_chunk_ids = []
-                if not isinstance(thr_chunk_ids, list):
-                    thr_chunk_ids = []
-                if not isinstance(fin_chunk_ids, list):
-                    fin_chunk_ids = []
-
-                all_docs, all_warns = map_chunk_ids_to_doc_ids(
-                    chunk_source_map=chunk_source_map,
-                    chunk_ids=all_chunk_ids,
-                    record_key="survey_id",
-                    record_id=survey_id,
-                    stage="all",
-                )
-                thr_docs, thr_warns = map_chunk_ids_to_doc_ids(
-                    chunk_source_map=chunk_source_map,
-                    chunk_ids=thr_chunk_ids,
-                    record_key="survey_id",
-                    record_id=survey_id,
-                    stage="threshold",
-                )
-                fin_docs, fin_warns = map_chunk_ids_to_doc_ids(
-                    chunk_source_map=chunk_source_map,
-                    chunk_ids=fin_chunk_ids,
-                    record_key="survey_id",
-                    record_id=survey_id,
-                    stage="final",
-                )
-                warns = all_warns + thr_warns + fin_warns
-                retrieved_by_scope["all"] = all_docs
-                retrieved_by_scope["threshold"] = thr_docs
-                retrieved_by_scope["final"] = fin_docs
-                retrieved = list(fin_docs)
-            except Exception as exc:
-                error = {
-                    "survey_id": survey_id,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "traceback_tail": "".join(
-                        traceback.format_exception(type(exc), exc, exc.__traceback__)[-3:]
-                    ).strip(),
-                }
-
-        hit_final = hit_at_k(gt, retrieved_by_scope["final"], survey_ks)
-        recall_final = recall_at_k(gt, retrieved_by_scope["final"], survey_ks)
-        hit_by_scope = {
-            "all": hit_at_k(gt, retrieved_by_scope["all"], survey_ks),
-            "threshold": hit_at_k(gt, retrieved_by_scope["threshold"], survey_ks),
-            "final": hit_final,
-        }
-        recall_by_scope = {
-            "all": recall_at_k(gt, retrieved_by_scope["all"], survey_ks),
-            "threshold": recall_at_k(gt, retrieved_by_scope["threshold"], survey_ks),
-            "final": recall_final,
-        }
-        row = {
-            "survey_id": survey_id,
-            "survey_title": survey_title,
-            "gt_count": len(gt),
-            "retrieved_count": len(retrieved),
-            "retrieved_count_by_scope": {
-                "all": len(retrieved_by_scope["all"]),
-                "threshold": len(retrieved_by_scope["threshold"]),
-                "final": len(retrieved_by_scope["final"]),
-            },
-            "gt_doc_ids": sorted(gt),
-            "retrieved_doc_ids": retrieved,
-            "retrieved_doc_ids_by_scope": retrieved_by_scope,
-            "hit_at_k": hit_final,
-            "recall_at_k": recall_final,
-            "hit_at_k_by_scope": hit_by_scope,
-            "recall_at_k_by_scope": recall_by_scope,
-            "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
-            "error": error,
-        }
-        if not rerank:
-            rerank = extract_rerank_payload(retrieval, query_params)
-        rerank_row = {
-            "survey_id": survey_id,
-            "survey_title": survey_title,
-            "rerank_scope": rerank.get("rerank_scope"),
-            "min_rerank_score": rerank.get("min_rerank_score"),
-            "counts": rerank.get("counts", {}),
-            "distribution": rerank.get("distribution", {}),
-            "scores": rerank.get("scores", {}),
-            "chunk_ids": rerank.get("chunk_ids", {}),
-            "threshold_retention": rerank.get("threshold_retention", []),
+        save_json(SURVEY_SUMMARY_FILE, {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": "survey",
+            "survey_stage": "retrieval",
             "top_k": args.top_k,
             "chunk_top_k": chunk_top_k,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        async with lock:
-            done += 1
-            if done == total or done % max(1, total // 5) == 0:
-                logger.info("Survey retrieval progress: %d/%d", done, total)
-        return row, rerank_row, warns, error
-
-    results = await asyncio.gather(*[asyncio.create_task(one(i, s)) for i, s in enumerate(surveys)])
-    per_rows: list[dict[str, Any]] = []
-    rerank_rows: list[dict[str, Any]] = []
-    warnings: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
-    for pr, rr, ws, err in results:
-        per_rows.append(pr)
-        rerank_rows.append(rr)
-        warnings.extend(ws)
-        if err:
-            errors.append(err)
-
-    append_jsonl(SURVEY_PER_FILE, per_rows)
-    append_jsonl(SURVEY_RERANK_STATS_FILE, rerank_rows)
-    append_jsonl(SURVEY_WARNINGS_FILE, warnings)
-
-    macro = compute_macro_recall(per_rows, survey_ks)
-    micro = compute_micro_recall(per_rows, survey_ks)
-    macro_by_scope, micro_by_scope = compute_scope_macro_micro_recall(
-        per_rows,
-        survey_ks,
-        recall_scopes_key="recall_at_k_by_scope",
-        hit_scopes_key="hit_at_k_by_scope",
-    )
-    cut_summary = summarize_final_cut_reason(rerank_rows, chunk_top_k=chunk_top_k)
-
-    save_json(SURVEY_SUMMARY_FILE, {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "mode": "survey",
-        "survey_stage": "retrieval",
-        "top_k": args.top_k,
-        "chunk_top_k": chunk_top_k,
-        "k_list": survey_ks,
-        "survey_count": len(per_rows),
-        "success_count": sum(1 for r in per_rows if r.get("error") is None),
-        "failed_count": len(errors),
-        "mapping_warning_count": len(warnings),
-        "non_empty_retrieval_count": sum(1 for r in per_rows if int(r.get("retrieved_count", 0)) > 0),
-        "macro_recall_at_k": macro,
-        "micro_recall_at_k": micro,
-        "macro_recall_at_k_by_scope": macro_by_scope,
-        "micro_recall_at_k_by_scope": micro_by_scope,
-        "final_cut_reason": cut_summary.get("final_cut_reason"),
-        "final_cut_breakdown": cut_summary.get("final_cut_breakdown", {}),
-        "workspace_id": args.workspace_id,
-        "data_root": str(data_root),
-        "subset_dir": str(subset),
-        "surveys_file": str(subset / args.surveys_file),
-        "chunks_file": str(subset / args.chunks_file),
-        "corpus_file": str(subset / args.corpus_file),
-        "effective_query_params": query_params | {
-            "ablation_group": ablation_flags.ablation_group(),
-            "ablation_flags": ablation_flags.to_dict(),
-            "index_profile": ensured_index_profile,
-            "max_concurrency": args.max_concurrency,
-            "max_retries": args.max_retries,
             "k_list": survey_ks,
-        },
-        "ingest_summary": ingest_summary,
-        "chunks_source_stats": chunk_stats,
-    })
+            "survey_count": len(per_rows),
+            "success_count": sum(1 for r in per_rows if r.get("error") is None),
+            "failed_count": len(errors),
+            "mapping_warning_count": len(warnings),
+            "non_empty_retrieval_count": sum(
+                1 for r in per_rows if int(r.get("retrieved_count", 0)) > 0
+            ),
+            "macro_recall_at_k": macro,
+            "micro_recall_at_k": micro,
+            "macro_recall_at_k_by_scope": macro_by_scope,
+            "micro_recall_at_k_by_scope": micro_by_scope,
+            "final_cut_reason": cut_summary.get("final_cut_reason"),
+            "final_cut_breakdown": cut_summary.get("final_cut_breakdown", {}),
+            "workspace_id": args.workspace_id,
+            "data_root": str(data_root),
+            "subset_dir": str(subset),
+            "surveys_file": str(subset / args.surveys_file),
+            "chunks_file": str(subset / args.chunks_file),
+            "corpus_file": str(subset / args.corpus_file),
+            "effective_query_params": query_params | {
+                "ablation_group": ablation_flags.ablation_group(),
+                "ablation_flags": ablation_flags.to_dict(),
+                "index_profile": ensured_index_profile,
+                "max_concurrency": args.max_concurrency,
+                "max_retries": args.max_retries,
+                "k_list": survey_ks,
+            },
+            "ingest_summary": ingest_summary,
+            "chunks_source_stats": chunk_stats,
+        })
 
-    all_scores = [s for r in rerank_rows for s in r.get("scores", {}).get("all", []) if isinstance(s, (int, float))]
-    thr_scores = [s for r in rerank_rows for s in r.get("scores", {}).get("after_threshold", []) if isinstance(s, (int, float))]
-    fin_scores = [s for r in rerank_rows for s in r.get("scores", {}).get("final", []) if isinstance(s, (int, float))]
-    save_json(SURVEY_RERANK_SUMMARY_FILE, {
-        "total_surveys": len(rerank_rows),
-        "questions_with_rerank_trace": count_rows_with_rerank_trace(rerank_rows),
-        "overall_distribution": {
-            "all": score_distribution([float(x) for x in all_scores]),
-            "after_threshold": score_distribution([float(x) for x in thr_scores]),
-            "final": score_distribution([float(x) for x in fin_scores]),
-        },
-        "macro_distribution_over_surveys": summarize_macro_distribution(rerank_rows),
-        "threshold_retention_overall": summarize_threshold_retention(rerank_rows),
-    })
-    logger.info("Survey retrieval complete: %s", SURVEY_SUMMARY_FILE)
-    gc.collect()
-    clear_cuda_cache()
-    return 0
+        all_scores = [
+            s
+            for r in rerank_rows
+            for s in r.get("scores", {}).get("all", [])
+            if isinstance(s, (int, float))
+        ]
+        thr_scores = [
+            s
+            for r in rerank_rows
+            for s in r.get("scores", {}).get("after_threshold", [])
+            if isinstance(s, (int, float))
+        ]
+        fin_scores = [
+            s
+            for r in rerank_rows
+            for s in r.get("scores", {}).get("final", [])
+            if isinstance(s, (int, float))
+        ]
+        save_json(SURVEY_RERANK_SUMMARY_FILE, {
+            "total_surveys": len(rerank_rows),
+            "questions_with_rerank_trace": count_rows_with_rerank_trace(rerank_rows),
+            "overall_distribution": {
+                "all": score_distribution([float(x) for x in all_scores]),
+                "after_threshold": score_distribution([float(x) for x in thr_scores]),
+                "final": score_distribution([float(x) for x in fin_scores]),
+            },
+            "macro_distribution_over_surveys": summarize_macro_distribution(
+                rerank_rows
+            ),
+            "threshold_retention_overall": summarize_threshold_retention(rerank_rows),
+        })
+        logger.info("Survey retrieval complete: %s", SURVEY_SUMMARY_FILE)
+        return 0
 
 
 async def run_survey_generate_placeholder(args: argparse.Namespace) -> int:

@@ -63,6 +63,15 @@ class MultimodalPartialFailureError(RuntimeError):
         self.failed_items = failed_items
 
 
+_MM_STAGE_CHUNKS_STORED = "chunks_stored"
+_MM_STAGE_MAIN_ENTITY_FAILED = "stage3_5_main_entity_failed"
+_MM_STAGE_ER_FAILED = "stage4_er_extract_failed"
+_MM_STAGE_BELONGS_TO_FAILED = "stage5_belongs_to_failed"
+_MM_STAGE_MERGE_FAILED = "stage6_merge_failed"
+_MM_STAGE_PARTIAL_FAILED = "partial_failed"
+_MM_STAGE_COMPLETED = "completed"
+
+
 class ProcessorMixin:
     """ProcessorMixin class containing document processing functionality for RAGAnything"""
 
@@ -342,6 +351,193 @@ class ProcessorMixin:
             doc_id,
         )
         return selected
+
+    def _get_multimodal_chunk_ids_from_status(
+        self, doc_status: Optional[Dict[str, Any]]
+    ) -> List[str]:
+        if not isinstance(doc_status, dict):
+            return []
+        chunk_ids = doc_status.get("multimodal_chunk_ids")
+        if not isinstance(chunk_ids, list):
+            return []
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for chunk_id in chunk_ids:
+            if not isinstance(chunk_id, str):
+                continue
+            value = chunk_id.strip()
+            if not value or value in seen:
+                continue
+            normalized.append(value)
+            seen.add(value)
+        return normalized
+
+    def _should_resume_multimodal_from_stored_chunks(
+        self, doc_status: Optional[Dict[str, Any]]
+    ) -> bool:
+        if not isinstance(doc_status, dict):
+            return False
+        if bool(doc_status.get("multimodal_processed", False)):
+            return False
+        if doc_status.get("multimodal_failed_items"):
+            return False
+        stage = str(doc_status.get("multimodal_stage", "") or "").strip()
+        if stage not in {
+            _MM_STAGE_CHUNKS_STORED,
+            _MM_STAGE_MAIN_ENTITY_FAILED,
+            _MM_STAGE_ER_FAILED,
+            _MM_STAGE_BELONGS_TO_FAILED,
+            _MM_STAGE_MERGE_FAILED,
+        }:
+            return False
+        return len(self._get_multimodal_chunk_ids_from_status(doc_status)) > 0
+
+    async def _load_lightrag_chunks_from_storage(
+        self, chunk_ids: List[str]
+    ) -> Dict[str, Any]:
+        if not chunk_ids:
+            return {}
+        chunk_rows = await self.lightrag.text_chunks.get_by_ids(chunk_ids)
+        if not isinstance(chunk_rows, list):
+            return {}
+        chunks: Dict[str, Any] = {}
+        for idx, row in enumerate(chunk_rows):
+            if not isinstance(row, dict):
+                continue
+            # Different KV backends may return either "id" or "_id", and some
+            # rely on call-site ordering without embedding the ID in payload.
+            chunk_id = row.get("id") or row.get("_id")
+            if (not isinstance(chunk_id, str) or not chunk_id) and idx < len(chunk_ids):
+                chunk_id = chunk_ids[idx]
+            if not isinstance(chunk_id, str) or not chunk_id:
+                continue
+            normalized_row = dict(row)
+            normalized_row.setdefault("id", chunk_id)
+            normalized_row.setdefault("_id", chunk_id)
+            chunks[chunk_id] = normalized_row
+        return chunks
+
+    async def _store_multimodal_main_entities_from_stored_chunks(
+        self, lightrag_chunks: Dict[str, Any], doc_id: str
+    ) -> None:
+        entities_to_store: Dict[str, Dict[str, Any]] = {}
+        _disambig = getattr(self.lightrag, "enable_entity_disambiguation", True)
+        for chunk_id, chunk_data in lightrag_chunks.items():
+            if not isinstance(chunk_data, dict):
+                continue
+            if not chunk_data.get("is_multimodal"):
+                continue
+            entity_name = str(chunk_data.get("modal_entity_name", "")).strip()
+            if not entity_name:
+                continue
+            entity_type = str(chunk_data.get("original_type", "multimodal")).strip()
+            if not entity_type:
+                entity_type = "multimodal"
+            file_path = str(chunk_data.get("file_path", "unknown_source"))
+            content = str(chunk_data.get("content", "")).strip()
+            entity_id = compute_entity_id(entity_name, entity_type, _disambig)
+            entity_vdb_id = compute_entity_vdb_id(entity_name, entity_type, _disambig)
+            entities_to_store[entity_vdb_id] = {
+                "entity_name": entity_name,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "content": content,
+                "source_id": chunk_id,
+                "file_path": file_path,
+            }
+
+        if not entities_to_store:
+            return
+
+        await self.lightrag.entities_vdb.upsert(entities_to_store)
+        await self.lightrag.entities_vdb.index_done_callback()
+
+        current_doc_entities = await self.lightrag.full_entities.get_by_id(doc_id)
+        if not current_doc_entities:
+            entity_names = sorted(
+                entity_data["entity_id"] for entity_data in entities_to_store.values()
+            )
+            doc_entities_data = {
+                "entity_names": entity_names,
+                "count": len(entity_names),
+                "update_time": int(time.time()),
+            }
+        else:
+            existing_entity_names = list(current_doc_entities.get("entity_names", []))
+            seen_entity_names = set(existing_entity_names)
+            for entity_data in entities_to_store.values():
+                entity_id = entity_data["entity_id"]
+                if entity_id not in seen_entity_names:
+                    existing_entity_names.append(entity_id)
+                    seen_entity_names.add(entity_id)
+            doc_entities_data = {
+                **current_doc_entities,
+                "entity_names": existing_entity_names,
+                "count": len(existing_entity_names),
+                "update_time": int(time.time()),
+            }
+
+        await self.lightrag.full_entities.upsert({doc_id: doc_entities_data})
+        await self.lightrag.full_entities.index_done_callback()
+
+    async def _resume_multimodal_from_stored_chunks(
+        self, doc_id: str, chunk_ids: List[str], file_path: str
+    ) -> None:
+        self.logger.info(
+            "Resuming multimodal from stored chunks: doc_id=%s chunks=%d",
+            doc_id,
+            len(chunk_ids),
+        )
+        lightrag_chunks = await self._load_lightrag_chunks_from_storage(chunk_ids)
+        if not lightrag_chunks:
+            raise RuntimeError(
+                f"{_MM_STAGE_CHUNKS_STORED}: no stored chunks found for doc_id={doc_id}"
+            )
+        try:
+            await self._store_multimodal_main_entities_from_stored_chunks(
+                lightrag_chunks, doc_id
+            )
+        except Exception as exc:
+            raise RuntimeError(f"{_MM_STAGE_MAIN_ENTITY_FAILED}: {exc}") from exc
+
+        try:
+            chunk_results = await self._batch_extract_entities_lightrag_style_type_aware(
+                lightrag_chunks
+            )
+        except Exception as exc:
+            raise RuntimeError(f"{_MM_STAGE_ER_FAILED}: {exc}") from exc
+
+        try:
+            enhanced_chunk_results = (
+                await self._batch_add_belongs_to_relations_from_stored_chunks(
+                    chunk_results, lightrag_chunks
+                )
+            )
+        except Exception as exc:
+            raise RuntimeError(f"{_MM_STAGE_BELONGS_TO_FAILED}: {exc}") from exc
+
+        try:
+            await self._batch_merge_lightrag_style_type_aware(
+                enhanced_chunk_results, file_path, doc_id
+            )
+        except Exception as exc:
+            raise RuntimeError(f"{_MM_STAGE_MERGE_FAILED}: {exc}") from exc
+
+        await self._finalize_multimodal_doc_status(
+            doc_id, list(lightrag_chunks.keys()), mark_processed=True
+        )
+
+    def _infer_multimodal_stage_from_error(self, error_msg: str) -> str:
+        msg = str(error_msg or "")
+        if msg.startswith(f"{_MM_STAGE_MAIN_ENTITY_FAILED}:"):
+            return _MM_STAGE_MAIN_ENTITY_FAILED
+        if msg.startswith(f"{_MM_STAGE_ER_FAILED}:"):
+            return _MM_STAGE_ER_FAILED
+        if msg.startswith(f"{_MM_STAGE_BELONGS_TO_FAILED}:"):
+            return _MM_STAGE_BELONGS_TO_FAILED
+        if msg.startswith(f"{_MM_STAGE_MERGE_FAILED}:"):
+            return _MM_STAGE_MERGE_FAILED
+        return _MM_STAGE_CHUNKS_STORED
 
     def _get_file_reference(self, file_path: str) -> str:
         """
@@ -1008,6 +1204,30 @@ class ProcessorMixin:
             self.logger.debug(f"Error checking document status for {doc_id}: {e}")
             # Continue with processing if cache check fails
 
+        if self._should_resume_multimodal_from_stored_chunks(existing_doc_status):
+            chunk_ids = self._get_multimodal_chunk_ids_from_status(existing_doc_status)
+            try:
+                await self._resume_multimodal_from_stored_chunks(
+                    doc_id=doc_id,
+                    chunk_ids=chunk_ids,
+                    file_path=file_path,
+                )
+            except Exception as resume_error:
+                stage = self._infer_multimodal_stage_from_error(str(resume_error))
+                try:
+                    await self._mark_multimodal_doc_status_failed(
+                        doc_id=doc_id,
+                        error_msg=str(resume_error),
+                        stage=stage,
+                    )
+                except Exception as status_error:
+                    raise RuntimeError(
+                        "Multimodal resume failure and failed to persist "
+                        f"doc_status failure state: {status_error}"
+                    ) from resume_error
+                raise
+            return
+
         multimodal_items = self._select_multimodal_retry_subset(
             multimodal_items, existing_doc_status, doc_id
         )
@@ -1043,6 +1263,7 @@ class ProcessorMixin:
                         doc_id=doc_id,
                         error_msg=str(partial_error),
                         failed_items=partial_error.failed_items,
+                        stage=_MM_STAGE_PARTIAL_FAILED,
                     )
                 except Exception as status_error:
                     raise RuntimeError(
@@ -1051,10 +1272,12 @@ class ProcessorMixin:
                     ) from partial_error
                 raise
             except Exception as batch_error:
+                stage = self._infer_multimodal_stage_from_error(str(batch_error))
                 try:
                     await self._mark_multimodal_doc_status_failed(
                         doc_id=doc_id,
                         error_msg=str(batch_error),
+                        stage=stage,
                     )
                 except Exception as status_error:
                     raise RuntimeError(
@@ -1560,28 +1783,48 @@ class ProcessorMixin:
         # Stage 3: Store chunks to LightRAG storage
         await self._store_chunks_to_lightrag_storage_type_aware(lightrag_chunks)
 
-        # Stage 3.5: Store multimodal main entities to entities_vdb and full_entities
-        await self._store_multimodal_main_entities(
-            multimodal_data_list, lightrag_chunks, file_path, doc_id
-        )
-
         # Track chunk IDs for doc_status update
         chunk_ids = list(lightrag_chunks.keys())
+        await self._finalize_multimodal_doc_status(
+            doc_id=doc_id,
+            new_chunk_ids=chunk_ids,
+            mark_processed=False,
+            stage=_MM_STAGE_CHUNKS_STORED,
+        )
+
+        # Stage 3.5: Store multimodal main entities to entities_vdb and full_entities
+        try:
+            await self._store_multimodal_main_entities(
+                multimodal_data_list, lightrag_chunks, file_path, doc_id
+            )
+        except Exception as exc:
+            raise RuntimeError(f"{_MM_STAGE_MAIN_ENTITY_FAILED}: {exc}") from exc
 
         # Stage 4: Use LightRAG's batch entity relation extraction
-        chunk_results = await self._batch_extract_entities_lightrag_style_type_aware(
-            lightrag_chunks
-        )
+        try:
+            chunk_results = await self._batch_extract_entities_lightrag_style_type_aware(
+                lightrag_chunks
+            )
+        except Exception as exc:
+            raise RuntimeError(f"{_MM_STAGE_ER_FAILED}: {exc}") from exc
 
         # Stage 5: Add belongs_to relations (multimodal-specific)
-        enhanced_chunk_results = await self._batch_add_belongs_to_relations_type_aware(
-            chunk_results, multimodal_data_list
-        )
+        try:
+            enhanced_chunk_results = (
+                await self._batch_add_belongs_to_relations_type_aware(
+                    chunk_results, multimodal_data_list
+                )
+            )
+        except Exception as exc:
+            raise RuntimeError(f"{_MM_STAGE_BELONGS_TO_FAILED}: {exc}") from exc
 
         # Stage 6: Use LightRAG's batch merge
-        await self._batch_merge_lightrag_style_type_aware(
-            enhanced_chunk_results, file_path, doc_id
-        )
+        try:
+            await self._batch_merge_lightrag_style_type_aware(
+                enhanced_chunk_results, file_path, doc_id
+            )
+        except Exception as exc:
+            raise RuntimeError(f"{_MM_STAGE_MERGE_FAILED}: {exc}") from exc
 
         # Stage 7: Finalize multimodal doc_status.
         if failed_items:
@@ -1593,7 +1836,10 @@ class ProcessorMixin:
             )
             # Persist successful chunk progress first, then let upper layer retry failed items.
             await self._finalize_multimodal_doc_status(
-                doc_id, chunk_ids, mark_processed=False
+                doc_id,
+                chunk_ids,
+                mark_processed=False,
+                stage=_MM_STAGE_PARTIAL_FAILED,
             )
             raise MultimodalPartialFailureError(
                 f"Multimodal batch failed for {len(failed_items)}/{len(results)} items",
@@ -1853,13 +2099,17 @@ class ProcessorMixin:
         try:
             # Get current full_entities data for this document
             current_doc_entities = await self.lightrag.full_entities.get_by_id(doc_id)
+            incoming_entity_ids = [
+                str(entity_data.get("entity_id", "")).strip()
+                for entity_data in entities_to_store.values()
+            ]
+            incoming_entity_ids = [
+                entity_id for entity_id in incoming_entity_ids if entity_id
+            ]
 
             if current_doc_entities is None:
                 # Create new document entry
-                entity_names = list(
-                    entity_data["entity_name"]
-                    for entity_data in entities_to_store.values()
-                )
+                entity_names = incoming_entity_ids
                 doc_entities_data = {
                     "entity_names": entity_names,
                     "count": len(entity_names),
@@ -1871,11 +2121,10 @@ class ProcessorMixin:
                     current_doc_entities.get("entity_names", [])
                 )
                 seen_entity_names = set(existing_entity_names)
-                for entity_data in entities_to_store.values():
-                    entity_name = entity_data["entity_name"]
-                    if entity_name not in seen_entity_names:
-                        existing_entity_names.append(entity_name)
-                        seen_entity_names.add(entity_name)
+                for entity_id in incoming_entity_ids:
+                    if entity_id not in seen_entity_names:
+                        existing_entity_names.append(entity_id)
+                        seen_entity_names.add(entity_id)
                 doc_entities_data = {
                     **current_doc_entities,
                     "entity_names": existing_entity_names,
@@ -1948,6 +2197,40 @@ class ProcessorMixin:
             chunk_to_modal_entity[chunk_id] = data["entity_info"]["entity_name"]
             chunk_to_file_path[chunk_id] = data.get("file_path", "multimodal_content")
 
+        return await self._batch_add_belongs_to_relations_by_chunk_mapping(
+            chunk_results=chunk_results,
+            chunk_to_modal_entity=chunk_to_modal_entity,
+            chunk_to_file_path=chunk_to_file_path,
+        )
+
+    async def _batch_add_belongs_to_relations_from_stored_chunks(
+        self, chunk_results: List[Tuple], lightrag_chunks: Dict[str, Any]
+    ) -> List[Tuple]:
+        chunk_to_modal_entity: Dict[str, str] = {}
+        chunk_to_file_path: Dict[str, str] = {}
+        for chunk_id, chunk_data in lightrag_chunks.items():
+            if not isinstance(chunk_data, dict):
+                continue
+            modal_entity_name = str(chunk_data.get("modal_entity_name", "")).strip()
+            if not modal_entity_name:
+                continue
+            chunk_to_modal_entity[chunk_id] = modal_entity_name
+            chunk_to_file_path[chunk_id] = str(
+                chunk_data.get("file_path", "multimodal_content")
+            )
+
+        return await self._batch_add_belongs_to_relations_by_chunk_mapping(
+            chunk_results=chunk_results,
+            chunk_to_modal_entity=chunk_to_modal_entity,
+            chunk_to_file_path=chunk_to_file_path,
+        )
+
+    async def _batch_add_belongs_to_relations_by_chunk_mapping(
+        self,
+        chunk_results: List[Tuple],
+        chunk_to_modal_entity: Dict[str, str],
+        chunk_to_file_path: Dict[str, str],
+    ) -> List[Tuple]:
         enhanced_chunk_results = []
         belongs_to_count = 0
 
@@ -1958,6 +2241,12 @@ class ProcessorMixin:
                 if nodes_dict:
                     chunk_id = nodes_dict[0].get("source_id")
                     break
+            if not chunk_id:
+                for edge_records in maybe_edges.values():
+                    if edge_records:
+                        chunk_id = edge_records[0].get("source_id")
+                        if chunk_id:
+                            break
 
             if chunk_id and chunk_id in chunk_to_modal_entity:
                 modal_entity_name = chunk_to_modal_entity[chunk_id]
@@ -2030,6 +2319,7 @@ class ProcessorMixin:
         doc_id: str,
         new_chunk_ids: List[str],
         mark_processed: bool = True,
+        stage: Optional[str] = None,
     ) -> None:
         """Finalize multimodal doc_status with one atomic upsert."""
         try:
@@ -2041,26 +2331,40 @@ class ProcessorMixin:
             merged_chunks_list = list(
                 dict.fromkeys([*existing_chunks_list, *new_chunk_ids])
             )
+            existing_multimodal_chunks = current_doc_status.get(
+                "multimodal_chunk_ids", []
+            )
+            if not isinstance(existing_multimodal_chunks, list):
+                existing_multimodal_chunks = []
+            merged_multimodal_chunks = list(
+                dict.fromkeys([*existing_multimodal_chunks, *new_chunk_ids])
+            )
             updated_doc_status = {
                 **current_doc_status,
                 "chunks_list": merged_chunks_list,
                 "chunks_count": len(merged_chunks_list),
+                "multimodal_chunk_ids": merged_multimodal_chunks,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
             }
             if mark_processed:
                 updated_doc_status["multimodal_processed"] = True
-                updated_doc_status.pop("multimodal_error_msg", None)
-                updated_doc_status.pop("multimodal_failed_items", None)
+                updated_doc_status["multimodal_stage"] = _MM_STAGE_COMPLETED
+                updated_doc_status["multimodal_error_msg"] = None
+                updated_doc_status["multimodal_failed_items"] = []
             else:
                 updated_doc_status["multimodal_processed"] = False
+                if stage:
+                    updated_doc_status["multimodal_stage"] = stage
             await self.lightrag.doc_status.upsert({doc_id: updated_doc_status})
             await self.lightrag.doc_status.index_done_callback()
             self.logger.info(
-                "Finalized multimodal doc_status for %s: chunks=%d (added=%d, processed=%s)",
+                "Finalized multimodal doc_status for %s: chunks=%d (added=%d, mm_chunks=%d, processed=%s, stage=%s)",
                 doc_id,
                 len(merged_chunks_list),
                 len(new_chunk_ids),
+                len(merged_multimodal_chunks),
                 mark_processed,
+                updated_doc_status.get("multimodal_stage", ""),
             )
         except Exception as e:
             raise RuntimeError(
@@ -2072,6 +2376,7 @@ class ProcessorMixin:
         doc_id: str,
         error_msg: str,
         failed_items: Optional[List[Dict[str, Any]]] = None,
+        stage: Optional[str] = None,
     ) -> None:
         """Persist multimodal failure state; raise if persistence fails."""
         current_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
@@ -2087,6 +2392,8 @@ class ProcessorMixin:
             "multimodal_failed_items": failed_items or [],
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
         }
+        if stage:
+            updated_doc_status["multimodal_stage"] = stage
         await self.lightrag.doc_status.upsert({doc_id: updated_doc_status})
         await self.lightrag.doc_status.index_done_callback()
 

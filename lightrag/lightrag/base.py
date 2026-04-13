@@ -863,6 +863,16 @@ class DocProcessingStatus:
     """Additional metadata"""
     multimodal_processed: bool | None = field(default=None, repr=False)
     """Internal field: indicates if multimodal processing is complete. Not shown in repr() but accessible for debugging."""
+    multimodal_stage: str | None = field(default=None, repr=False)
+    """Internal multimodal stage marker for resume logic."""
+    multimodal_error_msg: str | None = field(default=None, repr=False)
+    """Last multimodal failure message."""
+    multimodal_failed_items: list[dict[str, Any]] | None = field(
+        default_factory=list, repr=False
+    )
+    """Structured multimodal failed items for targeted retry."""
+    multimodal_chunk_ids: list[str] | None = field(default_factory=list, repr=False)
+    """Multimodal chunk IDs generated for this document."""
 
     def __post_init__(self):
         """

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import os
 from typing import Any, Union, final
 
@@ -29,6 +29,43 @@ from .shared_storage import (
 @dataclass
 class JsonDocStatusStorage(DocStatusStorage):
     """JSON implementation of document status storage"""
+
+    _DOC_STATUS_FIELDS = {f.name for f in fields(DocProcessingStatus)}
+
+    @classmethod
+    def _normalize_doc_status_data(cls, raw_data: dict[str, Any]) -> dict[str, Any]:
+        """Drop unknown keys before constructing DocProcessingStatus."""
+        return {k: v for k, v in raw_data.items() if k in cls._DOC_STATUS_FIELDS}
+
+    @staticmethod
+    def _merge_status_record(
+        existing: dict[str, Any] | None, incoming: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Merge a status update without dropping existing multimodal/chunk fields."""
+        old = existing if isinstance(existing, dict) else {}
+        new = dict(incoming)
+
+        # Once multimodal is marked complete, stale failure diagnostics must be cleared.
+        if new.get("multimodal_processed") is True:
+            new["multimodal_error_msg"] = None
+            new["multimodal_failed_items"] = []
+
+        if "chunks_list" not in new:
+            new["chunks_list"] = old.get("chunks_list", [])
+        if not isinstance(new.get("chunks_list"), list):
+            new["chunks_list"] = []
+
+        merged = {**old, **new}
+        old_chunks = old.get("chunks_list", [])
+        new_chunks = new.get("chunks_list", [])
+        if isinstance(old_chunks, list) and isinstance(new_chunks, list):
+            merged_chunks = list(dict.fromkeys([*new_chunks, *old_chunks]))
+        else:
+            merged_chunks = new_chunks if isinstance(new_chunks, list) else []
+
+        merged["chunks_list"] = merged_chunks
+        merged["chunks_count"] = len(merged_chunks)
+        return merged
 
     def __post_init__(self):
         working_dir = self.global_config["working_dir"]
@@ -121,10 +158,11 @@ class JsonDocStatusStorage(DocStatusStorage):
                             data["metadata"] = {}
                         if "error_msg" not in data:
                             data["error_msg"] = None
-                        result[k] = DocProcessingStatus(**data)
-                    except KeyError as e:
+                        normalized = self._normalize_doc_status_data(data)
+                        result[k] = DocProcessingStatus(**normalized)
+                    except (KeyError, TypeError, ValueError) as e:
                         logger.error(
-                            f"[{self.workspace}] Missing required field for document {k}: {e}"
+                            f"[{self.workspace}] Invalid doc status payload for document {k}: {e}"
                         )
                         continue
         return result
@@ -150,10 +188,11 @@ class JsonDocStatusStorage(DocStatusStorage):
                             data["metadata"] = {}
                         if "error_msg" not in data:
                             data["error_msg"] = None
-                        result[k] = DocProcessingStatus(**data)
-                    except KeyError as e:
+                        normalized = self._normalize_doc_status_data(data)
+                        result[k] = DocProcessingStatus(**normalized)
+                    except (KeyError, TypeError, ValueError) as e:
                         logger.error(
-                            f"[{self.workspace}] Missing required field for document {k}: {e}"
+                            f"[{self.workspace}] Invalid doc status payload for document {k}: {e}"
                         )
                         continue
         return result
@@ -197,11 +236,14 @@ class JsonDocStatusStorage(DocStatusStorage):
         if self._storage_lock is None:
             raise StorageNotInitializedError("JsonDocStatusStorage")
         async with self._storage_lock:
-            # Ensure chunks_list field exists for new documents
+            merged_data: dict[str, dict[str, Any]] = {}
+
             for doc_id, doc_data in data.items():
-                if "chunks_list" not in doc_data:
-                    doc_data["chunks_list"] = []
-            self._data.update(data)
+                merged_data[doc_id] = self._merge_status_record(
+                    self._data.get(doc_id), doc_data
+                )
+
+            self._data.update(merged_data)
             await set_all_update_flags(self.namespace, workspace=self.workspace)
 
         await self.index_done_callback()
@@ -281,7 +323,8 @@ class JsonDocStatusStorage(DocStatusStorage):
                     if "error_msg" not in data:
                         data["error_msg"] = None
 
-                    doc_status = DocProcessingStatus(**data)
+                    normalized = self._normalize_doc_status_data(data)
+                    doc_status = DocProcessingStatus(**normalized)
 
                     # Add sort key for sorting
                     if sort_field == "id":
@@ -295,7 +338,7 @@ class JsonDocStatusStorage(DocStatusStorage):
 
                     all_docs.append((doc_id, doc_status))
 
-                except KeyError as e:
+                except (KeyError, TypeError, ValueError) as e:
                     logger.error(
                         f"[{self.workspace}] Error processing document {doc_id}: {e}"
                     )

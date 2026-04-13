@@ -2469,23 +2469,51 @@ async def _merge_nodes_then_upsert(
     else:  # In FIFO mode, keep all nodes - truncation happens at source_ids level only
         nodes_data = list(nodes_data)
 
-    # 5. Check if we need to skip summary due to source_ids limit
-    if (
-        limit_method == SOURCE_IDS_LIMIT_METHOD_KEEP
-        and len(existing_full_source_ids) >= max_source_limit
-        and not nodes_data
-    ):
+    # 5. Keep merge idempotent by accepting only first-time source evidence.
+    # Also collapse same-source repeats inside one merge pass to the richest description.
+    existing_source_id_set = {
+        chunk_id for chunk_id in existing_full_source_ids if chunk_id
+    }
+    best_node_by_source: dict[str, dict] = {}
+    source_less_nodes: list[dict] = []
+
+    for node_data in nodes_data:
+        source_id_value = str(node_data.get("source_id", "") or "").strip()
+        if not source_id_value:
+            source_less_nodes.append(node_data)
+            continue
+        if source_id_value in existing_source_id_set:
+            continue
+
+        previous = best_node_by_source.get(source_id_value)
+        if previous is None:
+            best_node_by_source[source_id_value] = node_data
+            continue
+
+        previous_desc_len = len(str(previous.get("description", "") or ""))
+        current_desc_len = len(str(node_data.get("description", "") or ""))
+        if current_desc_len > previous_desc_len:
+            best_node_by_source[source_id_value] = node_data
+
+    nodes_data = source_less_nodes + list(best_node_by_source.values())
+
+    # Nothing new to merge: keep existing entity as-is.
+    if not nodes_data:
         if already_node:
-            logger.info(
-                f"Skipped `{entity_name}`: KEEP old chunks {already_source_ids}/{len(full_source_ids)}"
-            )
-            existing_node_data = dict(already_node)
-            return existing_node_data
-        else:
-            logger.error(f"Internal Error: already_node missing for `{entity_name}`")
-            raise ValueError(
-                f"Internal Error: already_node missing for `{entity_name}`"
-            )
+            if (
+                limit_method == SOURCE_IDS_LIMIT_METHOD_KEEP
+                and len(existing_full_source_ids) >= max_source_limit
+            ):
+                logger.info(
+                    f"Skipped `{entity_name}`: KEEP old chunks {already_source_ids}/{len(full_source_ids)}"
+                )
+            else:
+                logger.debug(
+                    f"Skipped `{entity_name}`: no new source evidence (idempotent replay)"
+                )
+            return dict(already_node)
+        logger.error(f"Internal Error: already_node missing for `{entity_name}`")
+        raise ValueError(f"Internal Error: already_node missing for `{entity_name}`")
 
     # 6.1 Finalize source_id
     source_id = GRAPH_FIELD_SEP.join(source_ids)
@@ -2801,31 +2829,74 @@ async def _merge_edges_then_upsert(
     else:  # In FIFO mode, keep all edges - truncation happens at source_ids level only
         edges_data = list(edges_data)
 
-    # 5. Check if we need to skip summary due to source_ids limit
-    if (
-        limit_method == SOURCE_IDS_LIMIT_METHOD_KEEP
-        and len(existing_full_source_ids) >= max_source_limit
-        and not edges_data
-    ):
+    # 5. Keep merge idempotent by accepting only first-time source evidence.
+    existing_source_id_set = {
+        chunk_id for chunk_id in existing_full_source_ids if chunk_id
+    }
+    source_weight_increments: dict[str, float] = {}
+    filtered_incremental_edges: list[dict] = []
+
+    for edge_data in edges_data:
+        source_id_value = str(edge_data.get("source_id", "") or "").strip()
+        if source_id_value and source_id_value in existing_source_id_set:
+            continue
+
+        filtered_incremental_edges.append(edge_data)
+
+        if source_id_value:
+            edge_weight = edge_data.get("weight", 1.0)
+            try:
+                parsed_weight = float(edge_weight)
+            except (TypeError, ValueError):
+                parsed_weight = 1.0
+            source_weight_increments[source_id_value] = max(
+                source_weight_increments.get(source_id_value, 0.0),
+                parsed_weight,
+            )
+
+    edges_data = filtered_incremental_edges
+
+    # Nothing new to merge: keep existing edge as-is.
+    if not edges_data:
         if already_edge:
-            logger.info(
-                f"Skipped `{src_id}`~`{tgt_id}`: KEEP old chunks  {already_source_ids}/{len(full_source_ids)}"
-            )
-            existing_edge_data = dict(already_edge)
-            return existing_edge_data
-        else:
-            logger.error(
-                f"Internal Error: already_node missing for `{src_id}`~`{tgt_id}`"
-            )
-            raise ValueError(
-                f"Internal Error: already_node missing for `{src_id}`~`{tgt_id}`"
-            )
+            if (
+                limit_method == SOURCE_IDS_LIMIT_METHOD_KEEP
+                and len(existing_full_source_ids) >= max_source_limit
+            ):
+                logger.info(
+                    f"Skipped `{src_id}`~`{tgt_id}`: KEEP old chunks  {already_source_ids}/{len(full_source_ids)}"
+                )
+            else:
+                logger.debug(
+                    f"Skipped `{src_id}`~`{tgt_id}`: no new source evidence (idempotent replay)"
+                )
+            return dict(already_edge)
+        logger.error(f"Internal Error: already_edge missing for `{src_id}`~`{tgt_id}`")
+        raise ValueError(
+            f"Internal Error: already_edge missing for `{src_id}`~`{tgt_id}`"
+        )
 
     # 6.1 Finalize source_id
     source_id = GRAPH_FIELD_SEP.join(source_ids)
 
-    # 6.2 Finalize weight by summing new edges and existing weights
-    weight = sum([dp["weight"] for dp in edges_data] + already_weights)
+    # 6.2 Finalize weight: existing weight + one increment per new source_id.
+    # This keeps retries and cache replays idempotent for the same chunk.
+    already_weight_sum = sum(already_weights)
+    source_less_weight_sum = 0.0
+    for edge_data in edges_data:
+        source_id_value = str(edge_data.get("source_id", "") or "").strip()
+        if source_id_value:
+            continue
+        edge_weight = edge_data.get("weight", 1.0)
+        try:
+            source_less_weight_sum += float(edge_weight)
+        except (TypeError, ValueError):
+            source_less_weight_sum += 1.0
+    weight = (
+        already_weight_sum
+        + sum(source_weight_increments.values())
+        + source_less_weight_sum
+    )
 
     # 6.2 Finalize keywords by merging existing and new keywords
     all_keywords = set()

@@ -125,8 +125,14 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
             DoclingParser() if self.config.parser == "docling" else MineruParser()
         )
 
+        self._atexit_close_callback = self.close
+        self._close_registered = False
+        self._finalized = False
+        self._finalize_lock: asyncio.Lock | None = None
+
         # Register close method for cleanup
-        atexit.register(self.close)
+        atexit.register(self._atexit_close_callback)
+        self._close_registered = True
 
         # Create working directory if needed
         if not os.path.exists(self.working_dir):
@@ -156,6 +162,10 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
         try:
             import asyncio
 
+            if self._finalized:
+                self._unregister_close_handler()
+                return
+
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
@@ -176,6 +186,15 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
         except Exception:
             # Ignore interpreter-shutdown races (stdout/loop might already be gone).
             pass
+
+    def _unregister_close_handler(self) -> None:
+        if not self._close_registered:
+            return
+        try:
+            atexit.unregister(self._atexit_close_callback)
+        except Exception:
+            pass
+        self._close_registered = False
 
     def _create_context_config(self) -> ContextConfig:
         """Create context configuration from RAGAnything config"""
@@ -462,29 +481,42 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
             - Manual calling is recommended in production environments
             - All finalization tasks run concurrently for better performance
         """
-        try:
-            tasks = []
+        if self._finalized:
+            return
+        if self._finalize_lock is None:
+            self._finalize_lock = asyncio.Lock()
 
-            # Finalize parse cache if it exists
-            if self.parse_cache is not None:
-                tasks.append(self.parse_cache.finalize())
-                self.logger.debug("Scheduled parse cache finalization")
+        async with self._finalize_lock:
+            if self._finalized:
+                return
 
-            # Finalize LightRAG storages if LightRAG is initialized
-            if self.lightrag is not None:
-                tasks.append(self.lightrag.finalize_storages())
-                self.logger.debug("Scheduled LightRAG storages finalization")
+            self._unregister_close_handler()
+            try:
+                tasks = []
 
-            # Run all finalization tasks concurrently
-            if tasks:
-                await asyncio.gather(*tasks)
-                self.logger.info("Successfully finalized all RAGAnything storages")
-            else:
-                self.logger.debug("No storages to finalize")
+                # Finalize parse cache if it exists
+                if self.parse_cache is not None:
+                    tasks.append(self.parse_cache.finalize())
+                    self.logger.debug("Scheduled parse cache finalization")
 
-        except Exception as e:
-            self.logger.error(f"Error during storage finalization: {e}")
-            raise
+                # Finalize LightRAG storages if LightRAG is initialized
+                if self.lightrag is not None:
+                    tasks.append(self.lightrag.finalize_storages())
+                    self.logger.debug("Scheduled LightRAG storages finalization")
+
+                # Run all finalization tasks concurrently
+                if tasks:
+                    await asyncio.gather(*tasks)
+                    self.parse_cache = None
+                    self.lightrag = None
+                    self.logger.info("Successfully finalized all RAGAnything storages")
+                else:
+                    self.logger.debug("No storages to finalize")
+                self._finalized = True
+
+            except Exception as e:
+                self.logger.error(f"Error during storage finalization: {e}")
+                raise
 
     def check_parser_installation(self) -> bool:
         """
