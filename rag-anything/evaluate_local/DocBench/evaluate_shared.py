@@ -1792,7 +1792,7 @@ async def main() -> None:
     parser.set_defaults(raganything_eval_setup=True)
     parser.add_argument("--max_async_ingest", type=int, default=4)
     parser.add_argument("--max_async_generate", type=int, default=6)
-    parser.add_argument("--max_async_judge", type=int, default=4)
+    parser.add_argument("--max_async_judge", type=int, default=32)
     add_ablation_arguments(parser)
     parser.add_argument(
         "--allow_legacy_index_profile_adoption",

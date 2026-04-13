@@ -467,7 +467,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-id", type=int, default=49)
     parser.add_argument("--max-async-ingest", type=int, default=4)
     parser.add_argument("--max-async-generate", type=int, default=6)
-    parser.add_argument("--max-async-judge", type=int, default=4)
+    parser.add_argument("--max-async-judge", type=int, default=32)
 
     parser.add_argument(
         "--surge-data-root",
