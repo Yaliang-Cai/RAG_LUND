@@ -420,6 +420,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also run evaluate_shared --mode stats (typically together with --run-shared-evaluate).",
     )
+    parser.add_argument(
+        "--skip-shared-generate",
+        action="store_true",
+        help=(
+            "Skip shared_generate stage. Useful when answers are already generated "
+            "and you only want evaluate/stats."
+        ),
+    )
 
     parser.add_argument(
         "--shared-workspace-prefix",
@@ -498,6 +506,15 @@ def main() -> int:
     args = parse_args()
     if args.run_shared_stats and not args.run_shared_evaluate:
         raise ValueError("--run-shared-stats requires --run-shared-evaluate.")
+    if (
+        args.tasks in ("both", "shared")
+        and bool(args.skip_shared_generate)
+        and not (bool(args.run_shared_evaluate) or bool(args.run_shared_stats))
+    ):
+        raise ValueError(
+            "--skip-shared-generate requires at least one of "
+            "--run-shared-evaluate/--run-shared-stats for shared tasks."
+        )
     profiles = _resolve_profiles(args.profiles, include_v3=bool(args.include_v3))
 
     eval_local_dir = Path(__file__).resolve().parent
@@ -555,6 +572,7 @@ def main() -> int:
             "dry_run": bool(args.dry_run),
             "run_shared_evaluate": bool(args.run_shared_evaluate),
             "run_shared_stats": bool(args.run_shared_stats),
+            "skip_shared_generate": bool(args.skip_shared_generate),
             "shared_mineru_output_dir": (
                 str(shared_mineru_output_dir) if shared_mineru_output_dir else ""
             ),
@@ -621,22 +639,35 @@ def main() -> int:
                 args=args,
             )
 
-            shared_generate = list(shared_base) + ["--mode", "generate"]
-            ok, _ = _run_one_stage(
-                run_id=run_id,
-                progress_file=progress_file,
-                latest_file=latest_file,
-                profile_key=profile.key,
-                stage_name="shared_generate",
-                command=shared_generate,
-                cwd=project_root,
-                env=env_shared,
-                log_file=profile_log_dir / "shared_generate.log",
-                dry_run=bool(args.dry_run),
-            )
-            profile_ok = profile_ok and ok
-            if not ok and not args.continue_on_error:
-                abort_run = True
+            run_shared_generate = not bool(args.skip_shared_generate)
+            if run_shared_generate:
+                shared_generate = list(shared_base) + ["--mode", "generate"]
+                ok, _ = _run_one_stage(
+                    run_id=run_id,
+                    progress_file=progress_file,
+                    latest_file=latest_file,
+                    profile_key=profile.key,
+                    stage_name="shared_generate",
+                    command=shared_generate,
+                    cwd=project_root,
+                    env=env_shared,
+                    log_file=profile_log_dir / "shared_generate.log",
+                    dry_run=bool(args.dry_run),
+                )
+                profile_ok = profile_ok and ok
+                if not ok and not args.continue_on_error:
+                    abort_run = True
+            else:
+                _write_progress(
+                    progress_file=progress_file,
+                    latest_file=latest_file,
+                    run_id=run_id,
+                    profile_key=profile.key,
+                    stage="shared_generate",
+                    status="skipped",
+                    message="shared_generate skipped by --skip-shared-generate",
+                    extra={"shared_workspace_id": shared_workspace_id},
+                )
 
             if profile_ok and bool(args.run_shared_evaluate):
                 shared_evaluate = list(shared_base) + ["--mode", "evaluate"]

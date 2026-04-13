@@ -174,60 +174,88 @@ async def build_synonym_edges(
     is_symmetric = new_entity_ids is None  # full mode: Q rows == R rows
 
     # ------------------------------------------------------------------
-    # 5. Batched matmul 鈫?find pairs above threshold 鈫?write edges
+    # 5. Batched matmul 鈫?collect canonical pairs above threshold
     # ------------------------------------------------------------------
-    created = 0
+    best_similarity_by_pair: dict[tuple[str, str], float] = {}
     n_query = len(valid_query_ids)
 
     for batch_start in range(0, n_query, _MATMUL_BATCH):
         batch_end = min(batch_start + _MATMUL_BATCH, n_query)
-        q_batch = Q[batch_start:batch_end]          # (B, dim)
-        sim_batch = q_batch @ R.T                   # (B, n_ref)
-
+        q_batch = Q[batch_start:batch_end]  # (B, dim)
+        sim_batch = q_batch @ R.T  # (B, n_ref)
         row_local, col_idx = np.where(sim_batch >= synonymy_threshold)
 
         for r_local, c in zip(row_local.tolist(), col_idx.tolist()):
             r = batch_start + r_local
 
-            # In symmetric (full) mode, process only the upper triangle
-            # to avoid writing both (A鈫払) and (B鈫扐) as separate edges.
+            # Full mode: only keep upper triangle (pair-level dedupe baseline)
             if is_symmetric and r >= c:
                 continue
 
-            entity_id    = valid_query_ids[r]
+            entity_id = valid_query_ids[r]
             candidate_id = valid_ref_ids[c]
-
             if entity_id == candidate_id:
                 continue
 
+            src_id, tgt_id = (
+                (entity_id, candidate_id)
+                if entity_id < candidate_id
+                else (candidate_id, entity_id)
+            )
+            pair_key = (src_id, tgt_id)
             distance = float(sim_batch[r_local, c])
+            prev = best_similarity_by_pair.get(pair_key)
+            if prev is None or distance > prev:
+                best_similarity_by_pair[pair_key] = distance
 
-            # Skip if a SYNONYM edge already exists in either direction
-            for src, tgt in ((entity_id, candidate_id), (candidate_id, entity_id)):
-                if await knowledge_graph_inst.has_edge(src, tgt):
-                    existing = await knowledge_graph_inst.get_edge(src, tgt)
-                    if existing and existing.get("edge_type") == "SYNONYM":
-                        break
-            else:
-                entity_name    = entity_id.split("|")[0]    if "|" in entity_id    else entity_id
-                candidate_name = candidate_id.split("|")[0] if "|" in candidate_id else candidate_id
+    if not best_similarity_by_pair:
+        return 0
 
-                edge_data: dict[str, Any] = {
-                    "weight":      float(distance),
-                    "description": f"Synonym: {entity_name} 鈮?{candidate_name}",
-                    "keywords":    "synonym,alias",
-                    # Keep source_id reserved for real chunk IDs only.
-                    # Synthetic edge provenance is tracked separately.
-                    "provenance":  "synonym_detection",
-                    "edge_type":   "SYNONYM",
-                }
-                await knowledge_graph_inst.upsert_edge(entity_id, candidate_id, edge_data)
-                created += 1
-                logger.debug(
-                    f"Synonym edge: {entity_id} <-> {candidate_id} (sim={distance:.3f})"
-                )
+    sorted_pairs = sorted(best_similarity_by_pair.items(), key=lambda item: item[0])
+    existing_edges = await knowledge_graph_inst.get_edges_batch(
+        [{"src": src_id, "tgt": tgt_id} for (src_id, tgt_id), _ in sorted_pairs]
+    )
 
-    if created:
-        logger.info(f"Synonym linking: created {created} SYNONYM edges")
+    edges_to_upsert: list[tuple[str, str, dict[str, Any]]] = []
+    for (src_id, tgt_id), distance in sorted_pairs:
+        entity_name = src_id.split("|")[0] if "|" in src_id else src_id
+        candidate_name = tgt_id.split("|")[0] if "|" in tgt_id else tgt_id
+        edge_data: dict[str, Any] = {
+            "weight": float(distance),
+            "description": f"Synonym: {entity_name} 鈮?{candidate_name}",
+            "keywords": "synonym,alias",
+            # Keep source_id reserved for real chunk IDs only.
+            # Synthetic edge provenance is tracked separately.
+            "provenance": "synonym_detection",
+            "edge_type": "SYNONYM",
+        }
 
+        existing = existing_edges.get((src_id, tgt_id))
+        if existing and existing.get("edge_type") == "SYNONYM":
+            existing_weight = existing.get("weight")
+            try:
+                existing_weight_float = float(existing_weight)
+            except (TypeError, ValueError):
+                existing_weight_float = None
+
+            if (
+                existing_weight_float is not None
+                and abs(existing_weight_float - distance) <= 1e-5
+                and existing.get("provenance") == edge_data["provenance"]
+            ):
+                continue
+
+        edges_to_upsert.append((src_id, tgt_id, edge_data))
+
+    if not edges_to_upsert:
+        return 0
+
+    await knowledge_graph_inst.upsert_edges_batch(edges_to_upsert)
+    created = len(edges_to_upsert)
+
+    logger.info(
+        "Synonym linking: upserted %d SYNONYM edges (candidates=%d)",
+        created,
+        len(best_similarity_by_pair),
+    )
     return created

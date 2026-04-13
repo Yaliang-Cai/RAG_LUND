@@ -2033,7 +2033,7 @@ class LightRAG:
                                         )
 
                                 # Use chunk_results from entity_relation_task
-                                await merge_nodes_and_edges(
+                                merge_result = await merge_nodes_and_edges(
                                     chunk_results=chunk_results,  # result collected from entity_relation_task
                                     knowledge_graph_inst=self.chunk_entity_relation_graph,
                                     entity_vdb=self.entities_vdb,
@@ -2055,10 +2055,17 @@ class LightRAG:
                                 # V2: Synonym linking (ingestion-only, orthogonal to V3)
                                 if self.enable_synonym_linking:
                                     from lightrag.synonym_linking import build_synonym_edges
+
+                                    changed_entity_ids = []
+                                    if merge_result:
+                                        changed_entity_ids = merge_result.get(
+                                            "changed_entity_ids", []
+                                        )
+
                                     await build_synonym_edges(
                                         entities_vdb=self.entities_vdb,
                                         knowledge_graph_inst=self.chunk_entity_relation_graph,
-                                        new_entity_ids=None,  # process all entities in this batch
+                                        new_entity_ids=changed_entity_ids,
                                         synonymy_threshold=self.synonymy_threshold,
                                         synonymy_topk=self.synonymy_topk,
                                         min_entity_len=self.synonymy_min_entity_len,

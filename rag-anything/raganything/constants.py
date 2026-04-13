@@ -1,4 +1,4 @@
-"""
+﻿"""
 Centralized configuration constants for RAG-Anything.
 
 This module defines default values for all configuration constants used across
@@ -148,7 +148,7 @@ DEFAULT_DEVICE = "cuda:0"
 # 每个 chunk 的 entity extraction LLM 调用最大并发数。
 # 单卡 48GB FP8 MoE 模型建议不超过 6，配合 vLLM --max-num-seqs 6 使用。
 # 过高会导致请求在 vLLM scheduler 排队，产生超时。
-DEFAULT_LLM_MODEL_MAX_ASYNC = 6
+DEFAULT_LLM_MODEL_MAX_ASYNC = 16
 
 # Entity extraction 的 gleaning（补充提取）轮数。
 # gleaning=1 表示每个 chunk 做 2 次串行 LLM 调用（初始 + 1 次补充），

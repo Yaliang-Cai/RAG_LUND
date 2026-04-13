@@ -1,7 +1,7 @@
 import os
 import re
 from dataclasses import dataclass
-from typing import final
+from typing import Any, final
 import configparser
 
 
@@ -57,6 +57,21 @@ READ_RETRY = retry(
     retry=retry_if_exception_type(READ_RETRY_EXCEPTIONS),
     reraise=True,
 )
+
+WRITE_RETRY_EXCEPTIONS = (
+    neo4jExceptions.ServiceUnavailable,
+    neo4jExceptions.TransientError,
+    neo4jExceptions.WriteServiceUnavailable,
+    neo4jExceptions.ClientError,
+    neo4jExceptions.SessionExpired,
+    ConnectionResetError,
+    OSError,
+)
+
+if hasattr(neo4jExceptions, "ResultFailedError"):
+    WRITE_RETRY_EXCEPTIONS = WRITE_RETRY_EXCEPTIONS + (
+        neo4jExceptions.ResultFailedError,
+    )
 
 
 @final
@@ -1042,17 +1057,7 @@ class Neo4JStorage(BaseGraphStorage):
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type(
-            (
-                neo4jExceptions.ServiceUnavailable,
-                neo4jExceptions.TransientError,
-                neo4jExceptions.WriteServiceUnavailable,
-                neo4jExceptions.ClientError,
-                neo4jExceptions.SessionExpired,
-                ConnectionResetError,
-                OSError,
-            )
-        ),
+        retry=retry_if_exception_type(WRITE_RETRY_EXCEPTIONS),
     )
     async def upsert_edge(
         self, source_node_id: str, target_node_id: str, edge_data: dict[str, str]
@@ -1098,6 +1103,66 @@ class Neo4JStorage(BaseGraphStorage):
                 await session.execute_write(execute_upsert)
         except Exception as e:
             logger.error(f"[{self.workspace}] Error during edge upsert: {str(e)}")
+            raise
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type(WRITE_RETRY_EXCEPTIONS),
+    )
+    async def upsert_edges_batch(
+        self, edges: list[tuple[str, str, dict[str, Any]]]
+    ) -> None:
+        """Batch upsert edges with deterministic ordering to reduce lock contention."""
+        if not edges:
+            return
+
+        rows_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
+        for source_node_id, target_node_id, edge_data in edges:
+            if not source_node_id or not target_node_id:
+                continue
+            if source_node_id == target_node_id:
+                continue
+            src_id, tgt_id = (
+                (source_node_id, target_node_id)
+                if source_node_id < target_node_id
+                else (target_node_id, source_node_id)
+            )
+            rows_by_pair[(src_id, tgt_id)] = {
+                "src": src_id,
+                "tgt": tgt_id,
+                "properties": edge_data,
+            }
+
+        if not rows_by_pair:
+            return
+
+        rows = [rows_by_pair[key] for key in sorted(rows_by_pair)]
+        workspace_label = self._get_workspace_label()
+        query = f"""
+        UNWIND $rows AS row
+        WITH row
+        ORDER BY row.src, row.tgt
+        MATCH (source:`{workspace_label}` {{entity_id: row.src}})
+        MATCH (target:`{workspace_label}` {{entity_id: row.tgt}})
+        MERGE (source)-[r:DIRECTED]-(target)
+        SET r += row.properties
+        RETURN count(r) AS affected
+        """
+
+        try:
+            async with self._driver.session(database=self._DATABASE) as session:
+
+                async def execute_upsert(tx: AsyncManagedTransaction):
+                    result = await tx.run(query, rows=rows)
+                    try:
+                        await result.fetch(1)
+                    finally:
+                        await result.consume()
+
+                await session.execute_write(execute_upsert)
+        except Exception as e:
+            logger.error(f"[{self.workspace}] Error during edge batch upsert: {str(e)}")
             raise
 
     async def get_subgraph_for_ppr(

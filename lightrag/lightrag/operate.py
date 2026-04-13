@@ -2511,7 +2511,9 @@ async def _merge_nodes_then_upsert(
                 logger.debug(
                     f"Skipped `{entity_name}`: no new source evidence (idempotent replay)"
                 )
-            return dict(already_node)
+            unchanged_node = dict(already_node)
+            unchanged_node["_changed"] = False
+            return unchanged_node
         logger.error(f"Internal Error: already_node missing for `{entity_name}`")
         raise ValueError(f"Internal Error: already_node missing for `{entity_name}`")
 
@@ -2707,6 +2709,7 @@ async def _merge_nodes_then_upsert(
             max_retries=3,
             retry_delay=0.1,
         )
+    node_data["_changed"] = True
     return node_data
 
 
@@ -3334,7 +3337,7 @@ async def merge_nodes_and_edges(
     current_file_number: int = 0,
     total_files: int = 0,
     file_path: str = "unknown_source",
-) -> None:
+) -> dict[str, list[str]]:
     """Two-phase merge: process all entities first, then all relationships
 
     This approach ensures data consistency by:
@@ -3359,6 +3362,10 @@ async def merge_nodes_and_edges(
         current_file_number: Current file number for logging
         total_files: Total files for logging
         file_path: File path for logging
+
+    Returns:
+        dict containing ``changed_entity_ids`` (newly added or updated entity IDs)
+        for incremental synonym-linking query-side selection.
     """
 
     # Check for cancellation at the start of merge
@@ -3647,6 +3654,22 @@ async def merge_nodes_and_edges(
         if first_exception is not None:
             raise first_exception
 
+    changed_entity_ids: set[str] = set()
+    for entity_data in processed_entities:
+        if not entity_data:
+            continue
+        if entity_data.get("_changed", True):
+            entity_id = entity_data.get("entity_id") or entity_data.get("entity_name")
+            if entity_id:
+                changed_entity_ids.add(entity_id)
+
+    for added_entity in all_added_entities:
+        if not added_entity:
+            continue
+        entity_id = added_entity.get("entity_id") or added_entity.get("entity_name")
+        if entity_id:
+            changed_entity_ids.add(entity_id)
+
     # ===== Phase 3: Update full_entities and full_relations storage =====
     if full_entities_storage and full_relations_storage and doc_id:
         try:
@@ -3727,6 +3750,8 @@ async def merge_nodes_and_edges(
     async with pipeline_status_lock:
         pipeline_status["latest_message"] = log_message
         pipeline_status["history_messages"].append(log_message)
+
+    return {"changed_entity_ids": sorted(changed_entity_ids)}
 
 
 async def extract_entities(

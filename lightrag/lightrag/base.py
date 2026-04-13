@@ -669,6 +669,18 @@ class BaseGraphStorage(StorageNameSpace, ABC):
             edge_data: A dictionary of edge properties
         """
 
+    async def upsert_edges_batch(
+        self, edges: list[tuple[str, str, dict[str, Any]]]
+    ) -> None:
+        """Batch upsert edges.
+
+        Default implementation writes one by one. Backends with native batch
+        support (e.g. Neo4j UNWIND) should override this for performance and
+        better lock behavior.
+        """
+        for source_node_id, target_node_id, edge_data in edges:
+            await self.upsert_edge(source_node_id, target_node_id, edge_data)
+
     @abstractmethod
     async def delete_node(self, node_id: str) -> None:
         """Delete a node from the graph.

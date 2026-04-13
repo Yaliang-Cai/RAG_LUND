@@ -1,0 +1,13 @@
+{
+  "profile": "v0",
+  "description": "V0 (V1=off,V2=off,V3=off)",
+  "workspace_key": "v0",
+  "shared_workspace_id": "docbench_shared_dryrun_shared_eval_only_v0",
+  "surge_workspace_id": "surge_fast_dryrun_shared_eval_only_v0",
+  "enable_entity_disambiguation": false,
+  "enable_synonym_linking": false,
+  "enable_multi_hop": false,
+  "shared_output_dir": "E:\\RAG\\Data\\y50056788\\Yaliang\\projects\\rag-anything\\evaluate_local\\ablation_runs\\_dryrun_shared_eval_only\\v0\\evaluate_shared",
+  "surge_output_dir": "E:\\RAG\\Data\\y50056788\\Yaliang\\projects\\rag-anything\\evaluate_local\\ablation_runs\\_dryrun_shared_eval_only\\v0\\evaluate_surge_fast",
+  "shared_mineru_output_dir": "E:\\RAG\\Data\\y50056788\\Yaliang\\projects\\rag-anything\\evaluate_local\\DocBench\\docbench_shared_results\\mineru_outputs"
+}
