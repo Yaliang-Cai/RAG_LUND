@@ -2529,23 +2529,28 @@ async def pick_by_vector_similarity(
             f"Vector similarity chunk selection: {len(chunk_vectors)} chunk vectors Retrieved"
         )
 
-        if not chunk_vectors or len(chunk_vectors) != len(all_chunk_ids):
-            if not chunk_vectors:
-                logger.warning(
-                    "Vector similarity chunk selection: no vectors retrieved from chunks_vdb"
-                )
-            else:
-                logger.warning(
-                    f"Vector similarity chunk selection: found {len(chunk_vectors)} but expecting {len(all_chunk_ids)}"
-                )
+        if not chunk_vectors:
+            logger.warning(
+                "Vector similarity chunk selection: no vectors retrieved from chunks_vdb"
+            )
             return []
+
+        # Continue with available vectors instead of all-or-nothing fallback.
+        if len(chunk_vectors) != len(all_chunk_ids):
+            missing_count = len(all_chunk_ids) - len(chunk_vectors)
+            logger.warning(
+                "Vector similarity chunk selection: found %d but expecting %d (missing=%d), continuing with available vectors",
+                len(chunk_vectors),
+                len(all_chunk_ids),
+                missing_count,
+            )
 
         # Calculate cosine similarities
         similarities = []
         valid_vectors = 0
         for chunk_id in all_chunk_ids:
-            if chunk_id in chunk_vectors:
-                chunk_embedding = chunk_vectors[chunk_id]
+            chunk_embedding = chunk_vectors.get(chunk_id)
+            if chunk_embedding is not None:
                 try:
                     # Calculate cosine similarity
                     similarity = cosine_similarity(query_embedding, chunk_embedding)
@@ -2555,10 +2560,12 @@ async def pick_by_vector_similarity(
                     logger.warning(
                         f"Vector similarity chunk selection: failed to calculate similarity for chunk {chunk_id}: {e}"
                     )
-            else:
-                logger.warning(
-                    f"Vector similarity chunk selection:  no vector found for chunk {chunk_id}"
-                )
+
+        if valid_vectors == 0:
+            logger.warning(
+                "Vector similarity chunk selection: no usable vectors after filtering/scoring"
+            )
+            return []
 
         # Sort by similarity (highest first) and select top num_of_chunks
         similarities.sort(key=lambda x: x[1], reverse=True)

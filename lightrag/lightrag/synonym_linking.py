@@ -1,10 +1,10 @@
-"""V2: Synonym Linking — build SYNONYM edges between semantically similar entities.
+﻿"""V2: Synonym Linking 鈥?build SYNONYM edges between semantically similar entities.
 
 HippoRAG2-aligned: uses pre-computed entity embeddings for exact cosine similarity
 via local numpy matrix multiplication.  All embeddings are fetched once from the VDB
-and pairwise similarities are computed in Python — zero per-entity VDB round-trips.
+and pairwise similarities are computed in Python 鈥?zero per-entity VDB round-trips.
 
-Computation is batched row-wise so the full N×N matrix is never materialised in memory.
+Computation is batched row-wise so the full N脳N matrix is never materialised in memory.
 
 This module is ingestion-only and fully independent of V3 (PPR multi-hop).
 When V3 is enabled, PPR naturally propagates along SYNONYM edges.
@@ -20,7 +20,7 @@ import numpy as np
 from lightrag.base import BaseVectorStorage, BaseGraphStorage
 from lightrag.utils import logger, compute_entity_vdb_id
 
-# Rows processed per matmul batch.  1 000 rows × 100 000 cols × float32 ≈ 400 MB peak.
+# Rows processed per matmul batch.  1 000 rows 脳 100 000 cols 脳 float32 鈮?400 MB peak.
 # Reduce if memory is constrained; increase for throughput on large corpora.
 _MATMUL_BATCH = 1_000
 
@@ -49,14 +49,14 @@ async def build_synonym_edges(
     knowledge_graph_inst: BaseGraphStorage,
     new_entity_ids: list[str] | None = None,
     synonymy_threshold: float = 0.8,
-    synonymy_topk: int = 2048,  # unused — kept for API compatibility; exact pairwise replaces KNN
+    synonymy_topk: int = 2048,  # unused 鈥?kept for API compatibility; exact pairwise replaces KNN
     min_entity_len: int = 2,
     enable_entity_disambiguation: bool = True,
 ) -> int:
     """Create SYNONYM edges between semantically similar entities.
 
     Fetches all entity embeddings from the VDB once, then computes cosine
-    similarity locally via batched numpy matmul — aligned with HippoRAG2's
+    similarity locally via batched numpy matmul 鈥?aligned with HippoRAG2's
     exact matrix-multiply approach.
 
     Args:
@@ -99,7 +99,7 @@ async def build_synonym_edges(
     # 2. Fetch embeddings
     #    Reference side always = entire entity universe (so new entities
     #    can form edges with existing ones in incremental mode).
-    #    Full mode: query_ids == all_labels → single fetch, shared dict.
+    #    Full mode: query_ids == all_labels 鈫?single fetch, shared dict.
     # ------------------------------------------------------------------
     ref_vdb_ids = [
         _graph_id_to_vdb_id(eid, enable_entity_disambiguation) for eid in all_labels
@@ -144,7 +144,7 @@ async def build_synonym_edges(
     if not valid_query_embs:
         return 0
 
-    # Build reference matrix (no length filter — candidates may be short)
+    # Build reference matrix (no length filter 鈥?candidates may be short)
     valid_ref_ids: list[str] = []
     valid_ref_embs: list[list[float]] = []
     for gid, vid in zip(all_labels, ref_vdb_ids):
@@ -174,7 +174,7 @@ async def build_synonym_edges(
     is_symmetric = new_entity_ids is None  # full mode: Q rows == R rows
 
     # ------------------------------------------------------------------
-    # 5. Batched matmul → find pairs above threshold → write edges
+    # 5. Batched matmul 鈫?find pairs above threshold 鈫?write edges
     # ------------------------------------------------------------------
     created = 0
     n_query = len(valid_query_ids)
@@ -190,7 +190,7 @@ async def build_synonym_edges(
             r = batch_start + r_local
 
             # In symmetric (full) mode, process only the upper triangle
-            # to avoid writing both (A→B) and (B→A) as separate edges.
+            # to avoid writing both (A鈫払) and (B鈫扐) as separate edges.
             if is_symmetric and r >= c:
                 continue
 
@@ -213,10 +213,12 @@ async def build_synonym_edges(
                 candidate_name = candidate_id.split("|")[0] if "|" in candidate_id else candidate_id
 
                 edge_data: dict[str, Any] = {
-                    "weight":      distance,
-                    "description": f"Synonym: {entity_name} ≈ {candidate_name}",
+                    "weight":      float(distance),
+                    "description": f"Synonym: {entity_name} 鈮?{candidate_name}",
                     "keywords":    "synonym,alias",
-                    "source_id":   "synonym_detection",
+                    # Keep source_id reserved for real chunk IDs only.
+                    # Synthetic edge provenance is tracked separately.
+                    "provenance":  "synonym_detection",
                     "edge_type":   "SYNONYM",
                 }
                 await knowledge_graph_inst.upsert_edge(entity_id, candidate_id, edge_data)
