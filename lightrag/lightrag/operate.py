@@ -4626,6 +4626,18 @@ async def _apply_token_truncation(
         global_config.get("max_relation_tokens", DEFAULT_MAX_RELATION_TOKENS),
     )
 
+    # HippoRAG2 alignment: PPR modes surface only chunk text to the LLM.
+    # Entity/relation context adds token overhead without improving PPR recall.
+    if getattr(query_param, "mode", None) in ("ppr", "ppr_local"):
+        return {
+            "entities_context": [],
+            "relations_context": [],
+            "filtered_entities": [],
+            "filtered_relations": [],
+            "entity_id_to_original": {},
+            "relation_id_to_original": {},
+        }
+
     final_entities = search_result["final_entities"]
     final_relations = search_result["final_relations"]
 
