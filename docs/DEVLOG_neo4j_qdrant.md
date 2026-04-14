@@ -56,36 +56,36 @@ lightrag_kwargs={
 
 **LightRAG 初始化参数（影响 Indexing）**
 
-| 开关                           | 默认值  | 说明                                                    |
-| ------------------------------ | ------- | ------------------------------------------------------- |
-| `enable_entity_disambiguation` | `True`  | V1：实体消歧（`name\|type` 复合 ID）                    |
-| `enable_synonym_linking`       | `False` | V2：同义词 SYNONYM 边构建                               |
-| `synonymy_threshold`           | `0.8`   | V2：cosine 阈值                                         |
-| `synonymy_topk`                | `2048`  | V2：保留接口，内部已改为全量精确 matmul，不再做 KNN     |
-| `synonymy_min_entity_len`      | `2`     | V2：最短实体名（字符数）                                |
+| 开关                           | 默认值  | 说明                                                |
+| ------------------------------ | ------- | --------------------------------------------------- |
+| `enable_entity_disambiguation` | `True`  | V1：实体消歧（`name\|type` 复合 ID）                |
+| `enable_synonym_linking`       | `False` | V2：同义词 SYNONYM 边构建                           |
+| `synonymy_threshold`           | `0.8`   | V2：cosine 阈值                                     |
+| `synonymy_topk`                | `2048`  | V2：保留接口，内部已改为全量精确 matmul，不再做 KNN |
+| `synonymy_min_entity_len`      | `2`     | V2：最短实体名（字符数）                            |
 
 **QueryParam 参数（影响单次查询）**
 
-| 参数                    | 默认值  | 说明                                                             |
-| ----------------------- | ------- | ---------------------------------------------------------------- |
-| `mode`                  | `"mix"` | `hybrid` / `mix` / `rrf` / `ppr_local` / `ppr`                  |
-| `rrf_k`                 | `60`    | RRF 平滑常数（仅 `mode="rrf"` 时生效）                           |
-| `enable_multi_hop`      | `False` | **已废弃**，请改用 `mode="ppr_local"`，保留仅为向后兼容          |
-| `multi_hop_depth`       | `2`     | 仅 `ppr_local`：BFS 子图提取深度                                 |
-| `ppr_damping`           | `0.5`   | PPR damping 因子 α（`ppr` 和 `ppr_local` 均生效）                |
-| `ppr_top_k`             | `50`    | PPR 返回的最高分 chunk 数                                        |
-| `passage_node_weight`   | `0.05`  | chunk seed 总权重相对于 entity seed 总权重的比例                 |
-| `hub_penalty_threshold` | `50`    | 度数超过此值的实体 seed 权重除以 log(1+degree)；0 = 禁用惩罚    |
+| 参数                    | 默认值  | 说明                                                         |
+| ----------------------- | ------- | ------------------------------------------------------------ |
+| `mode`                  | `"mix"` | `hybrid` / `mix` / `rrf` / `ppr_local` / `ppr`               |
+| `rrf_k`                 | `60`    | RRF 平滑常数（仅 `mode="rrf"` 时生效）                       |
+| `enable_multi_hop`      | `False` | **已废弃**，请改用 `mode="ppr_local"`，保留仅为向后兼容      |
+| `multi_hop_depth`       | `2`     | 仅 `ppr_local`：BFS 子图提取深度                             |
+| `ppr_damping`           | `0.5`   | PPR damping 因子 α（`ppr` 和 `ppr_local` 均生效）            |
+| `ppr_top_k`             | `50`    | PPR 返回的最高分 chunk 数                                    |
+| `passage_node_weight`   | `0.05`  | chunk seed 总权重相对于 entity seed 总权重的比例             |
+| `hub_penalty_threshold` | `50`    | 度数超过此值的实体 seed 权重除以 log(1+degree)；0 = 禁用惩罚 |
 
 ### 0.5 版本总览
 
-| 版本 | 功能                                | 开关                                         | 默认值                       |
-| ---- | ----------------------------------- | -------------------------------------------- | ---------------------------- |
-| V0   | Neo4j + Qdrant 存储后端             | `local_rag.py: _build_rag()` lightrag_kwargs | 默认 NetworkX + NanoVectorDB |
-| V1   | Entity Disambiguation（实体消歧）   | `enable_entity_disambiguation`               | `True`                       |
-| V2   | Synonym Linking（同义词边）         | `enable_synonym_linking`                     | `False`                      |
-| V3   | PPR Multi-hop Reasoning（局部）     | `mode="ppr_local"`                           | —                            |
-| V3b  | PPR Global（全图传播）              | `mode="ppr"`                                 | —                            |
+| 版本 | 功能                              | 开关                                         | 默认值                       |
+| ---- | --------------------------------- | -------------------------------------------- | ---------------------------- |
+| V0   | Neo4j + Qdrant 存储后端           | `local_rag.py: _build_rag()` lightrag_kwargs | 默认 NetworkX + NanoVectorDB |
+| V1   | Entity Disambiguation（实体消歧） | `enable_entity_disambiguation`               | `True`                       |
+| V2   | Synonym Linking（同义词边）       | `enable_synonym_linking`                     | `False`                      |
+| V3   | PPR Multi-hop Reasoning（局部）   | `mode="ppr_local"`                           | —                            |
+| V3b  | PPR Global（全图传播）            | `mode="ppr"`                                 | —                            |
 
 **关键原则**：全部开关设为 `False` 时，代码物理执行路径与 main 分支 100% 一致。
 
@@ -138,11 +138,11 @@ vdb_id    = md5(entity_id + "ent-")            # VDB hash
 **增量模式**：传入 `new_entity_ids` 时，仅以新实体为查询侧，参考侧仍为全量实体。  
 **集成点**：`lightrag.py: ainsert()` 在 `merge_nodes_and_edges()` 完成后执行。
 
-| 参数       | 我们                                 | HippoRAG2    |
-| ---------- | ------------------------------------ | ------------ |
-| 阈值       | 0.8                                  | 0.8 ✅        |
-| 向量来源   | 预计算 embedding + numpy matmul      | 精确矩阵乘法 ✅|
-| 短实体过滤 | `min_entity_len=2`                   | `len > 2` ✅  |
+| 参数       | 我们                            | HippoRAG2      |
+| ---------- | ------------------------------- | -------------- |
+| 阈值       | 0.8                             | 0.8 ✅          |
+| 向量来源   | 预计算 embedding + numpy matmul | 精确矩阵乘法 ✅ |
+| 短实体过滤 | `min_entity_len=2`              | `len > 2` ✅    |
 
 ---
 
@@ -203,10 +203,10 @@ score(chunk) = Σ_{source i}  1 / (k + rank_i)
 
 同一 chunk 被多路高排名时分数叠加，共识信号被放大。`k=60` 防止头部排名过度主导。
 
-| mode  | 合并方式                          |
-| ----- | --------------------------------- |
-| `mix` | round-robin 轮流取                |
-| `rrf` | RRF 公式，共识 chunk 得分叠加     |
+| mode  | 合并方式                      |
+| ----- | ----------------------------- |
+| `mix` | round-robin 轮流取            |
+| `rrf` | RRF 公式，共识 chunk 得分叠加 |
 
 召回阶段完全相同，差异只在 `_merge_all_chunks()`（`operate.py:4791`）。
 
@@ -216,26 +216,26 @@ score(chunk) = Σ_{source i}  1 / (k + rank_i)
 
 ### 修改的文件
 
-| 文件                                               | 涉及版本  | 说明                                                                                  |
-| -------------------------------------------------- | --------- | ------------------------------------------------------------------------------------- |
-| `lightrag/lightrag/utils.py`                       | V1        | 工厂函数 `compute_entity_id`, `compute_entity_vdb_id`                                 |
-| `lightrag/lightrag/base.py`                        | V1/V3/RRF | `QueryParam` 扩展（V3 字段 + `rrf_k` + mode Literal 新增 `ppr`/`ppr_local`）          |
-| `lightrag/lightrag/lightrag.py`                    | V0/V1/V2  | Feature Toggles + synonym linking 集成                                                |
-| `lightrag/lightrag/operate.py`                     | V1/V3/RRF | 实体 ID 替换 + 分组守卫 + `_ppr_rank_chunks()` + `_ppr_rank_chunks_global()` + `_rrf_merge()` |
-| `lightrag/lightrag/kg/neo4j_impl.py`               | V0/V3/V3b | pipmaster 移除 + PPR 子图 Cypher + `get_all_nodes_and_edges()`                        |
-| `lightrag/lightrag/kg/qdrant_impl.py`              | V1        | `delete_entity` 改用 `compute_entity_vdb_id`                                          |
-| `lightrag/lightrag/kg/postgres_impl.py`            | V1        | 消歧模式下 `WHERE entity_name=$2 AND entity_type=$3`                                  |
-| `rag-anything/raganything/services/local_rag.py`   | V0        | `_build_rag()` 指定 Neo4J + Qdrant + workspace 隔离                                   |
-| `rag-anything/server/app.py`                       | patch     | `DELETE /workspace` 端点：清除 Neo4j + Qdrant + KV 存储                               |
+| 文件                                             | 涉及版本  | 说明                                                                                          |
+| ------------------------------------------------ | --------- | --------------------------------------------------------------------------------------------- |
+| `lightrag/lightrag/utils.py`                     | V1        | 工厂函数 `compute_entity_id`, `compute_entity_vdb_id`                                         |
+| `lightrag/lightrag/base.py`                      | V1/V3/RRF | `QueryParam` 扩展（V3 字段 + `rrf_k` + mode Literal 新增 `ppr`/`ppr_local`）                  |
+| `lightrag/lightrag/lightrag.py`                  | V0/V1/V2  | Feature Toggles + synonym linking 集成                                                        |
+| `lightrag/lightrag/operate.py`                   | V1/V3/RRF | 实体 ID 替换 + 分组守卫 + `_ppr_rank_chunks()` + `_ppr_rank_chunks_global()` + `_rrf_merge()` |
+| `lightrag/lightrag/kg/neo4j_impl.py`             | V0/V3/V3b | pipmaster 移除 + PPR 子图 Cypher + `get_all_nodes_and_edges()`                                |
+| `lightrag/lightrag/kg/qdrant_impl.py`            | V1        | `delete_entity` 改用 `compute_entity_vdb_id`                                                  |
+| `lightrag/lightrag/kg/postgres_impl.py`          | V1        | 消歧模式下 `WHERE entity_name=$2 AND entity_type=$3`                                          |
+| `rag-anything/raganything/services/local_rag.py` | V0        | `_build_rag()` 指定 Neo4J + Qdrant + workspace 隔离                                           |
+| `rag-anything/server/app.py`                     | patch     | `DELETE /workspace` 端点：清除 Neo4j + Qdrant + KV 存储                                       |
 
 ### 新增文件
 
-| 文件                                   | 版本 | 说明                              |
-| -------------------------------------- | ---- | --------------------------------- |
-| `lightrag/lightrag/synonym_linking.py` | V2   | 同义词边构建                      |
-| `lightrag/lightrag/ppr.py`             | V3   | PPR 计算（NetworkX）              |
-| `lightrag/lightrag/ppr_engine.py`      | V3b  | GlobalPPREngine：缓存 + sparse PPR|
-| `.env.example`                         | V0   | 环境变量模板                      |
+| 文件                                   | 版本 | 说明                               |
+| -------------------------------------- | ---- | ---------------------------------- |
+| `lightrag/lightrag/synonym_linking.py` | V2   | 同义词边构建                       |
+| `lightrag/lightrag/ppr.py`             | V3   | PPR 计算（NetworkX）               |
+| `lightrag/lightrag/ppr_engine.py`      | V3b  | GlobalPPREngine：缓存 + sparse PPR |
+| `.env.example`                         | V0   | 环境变量模板                       |
 
 ---
 
@@ -255,20 +255,18 @@ score(chunk) = Σ_{source i}  1 / (k + rank_i)
 
 ## 四、与 HippoRAG2 的差距分析
 
-| 维度                | HippoRAG2                             | 我们                                    | 状态             |
-| ------------------- | ------------------------------------- | --------------------------------------- | ---------------- |
-| 图节点类型          | Entity + Passage + Fact               | Entity + virtual Chunk                  | Fact 节点缺失    |
-| Seed 信号           | 双信号（entity + passage DPR × 0.05） | 双信号（entity VDB + chunk VDB × 0.05） | 方向一致 ✅       |
-| Hub 节点抑制        | Recognition Memory 过滤               | log(1+degree) 惩罚                      | 对齐 ✅           |
-| Seed 归一化         | 分离归一化                            | 分离归一化                              | 对齐 ✅           |
-| PPR 图范围          | 全图传播                              | 全图传播（mode=ppr）                    | 对齐 ✅           |
-| chunk→entity 边权重 | embedding cosine                      | embedding cosine（fallback 1.0）        | 基本对齐 ✅       |
-| Recognition Memory  | LLM fact reranking                    | 无                                      | **最大差距**     |
+| 维度                | HippoRAG2                             | 我们                                    | 状态          |
+| ------------------- | ------------------------------------- | --------------------------------------- | ------------- |
+| 图节点类型          | Entity + Passage + Fact               | Entity + virtual Chunk                  | Fact 节点缺失 |
+| Seed 信号           | 双信号（entity + passage DPR × 0.05） | 双信号（entity VDB + chunk VDB × 0.05） | 方向一致 ✅    |
+| Hub 节点抑制        | Recognition Memory 过滤               | log(1+degree) 惩罚                      | 对齐 ✅        |
+| Seed 归一化         | 分离归一化                            | 分离归一化                              | 对齐 ✅        |
+| PPR 图范围          | 全图传播                              | 全图传播（mode=ppr）                    | 对齐 ✅        |
+| chunk→entity 边权重 | embedding cosine                      | embedding cosine（fallback 1.0）        | 基本对齐 ✅    |
+| Recognition Memory  | LLM fact reranking                    | 无                                      | **最大差距**  |
 
 ---
 
 ## 五、已知局限
 
-1. **V2 增量模式未启用**：`build_synonym_edges()` 已实现 `new_entity_ids` 增量路径，但 `lightrag.py` 调用时仍传 `new_entity_ids=None`，每次 insert 重算全图。后续可在 `ainsert()` 中收集本批次新增 entity_id 列表并传入以减少重复计算。
-
-2. **Recognition Memory 缺失**：HippoRAG2 最核心创新（LLM 对候选三元组重排序），当前无法在不引入独立 fact 存储的情况下实现。
+1. **Recognition Memory 缺失**：HippoRAG2 最核心创新（LLM 对候选三元组重排序），当前无法在不引入独立 fact 存储的情况下实现。
