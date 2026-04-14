@@ -86,14 +86,20 @@ T = TypeVar("T")
 class QueryParam:
     """Configuration parameters for query execution in LightRAG."""
 
-    mode: Literal["local", "global", "hybrid", "naive", "mix", "bypass", "rrf"] = "mix"
+    mode: Literal[
+        "local", "global", "hybrid", "naive", "mix", "bypass", "rrf",
+        "ppr", "ppr_local",
+    ] = "mix"
     """Specifies the retrieval mode:
-    - "local": Focuses on context-dependent information.
-    - "global": Utilizes global knowledge.
-    - "hybrid": Combines local and global retrieval methods.
-    - "naive": Performs a basic search without advanced techniques.
-    - "mix": Integrates knowledge graph and vector retrieval.
-    - "rrf": Like mix, but uses Reciprocal Rank Fusion to merge multi-source chunks.
+    - "local":     Focuses on context-dependent information (entity VDB).
+    - "global":    Utilizes global knowledge (relation VDB).
+    - "hybrid":    Combines local and global retrieval methods.
+    - "naive":     Performs a basic search without advanced techniques.
+    - "mix":       Integrates knowledge graph and vector retrieval.
+    - "rrf":       Like mix, but uses Reciprocal Rank Fusion to merge multi-source chunks.
+    - "ppr":       Full-graph PPR (GlobalPPREngine + scipy/fast-pagerank). Requires
+                   Neo4j backend and ``pip install fast-pagerank``.
+    - "ppr_local": Local-subgraph PPR via BFS + networkx (ablation baseline).
     """
 
     only_need_context: bool = False
@@ -210,9 +216,12 @@ class QueryParam:
     - False: fallback to official-style available_chunk_tokens token truncation.
     """
 
-    # V3: PPR Multi-hop Reasoning (orthogonal to V2 synonym linking)
+    # V3: PPR Multi-hop Reasoning
+    # Prefer mode="ppr" (global) or mode="ppr_local" (local BFS) over this flag.
+    # This flag is kept for backward compatibility: setting it True is equivalent
+    # to mode="ppr_local" when mode is not already a PPR mode.
     enable_multi_hop: bool = False
-    """Enable PPR multi-hop reasoning in retrieval. Independent of enable_synonym_linking."""
+    """[Deprecated] Enable local PPR. Use mode="ppr_local" or mode="ppr" instead."""
 
     multi_hop_depth: int = 2
     """Max depth for subgraph extraction around seed entities."""

@@ -4063,9 +4063,9 @@ async def kg_query(
     logger.debug(f"Low-level  keywords: {ll_keywords}")
 
     # Handle empty keywords
-    if ll_keywords == [] and query_param.mode in ["local", "hybrid", "mix", "rrf"]:
+    if ll_keywords == [] and query_param.mode in ["local", "hybrid", "mix", "rrf", "ppr", "ppr_local"]:
         logger.warning("low_level_keywords is empty")
-    if hl_keywords == [] and query_param.mode in ["global", "hybrid", "mix", "rrf"]:
+    if hl_keywords == [] and query_param.mode in ["global", "hybrid", "mix", "rrf", "ppr", "ppr_local"]:
         logger.warning("high_level_keywords is empty")
     if hl_keywords == [] and ll_keywords == []:
         if len(query) < 50:
@@ -4448,6 +4448,8 @@ async def _perform_kg_search(
                 query_embedding = None
 
     # Handle local and global modes
+    _ppr_mode = query_param.mode in ("ppr", "ppr_local")
+
     if query_param.mode == "local" and len(ll_keywords) > 0:
         local_entities, local_relations = await _get_node_data(
             ll_keywords,
@@ -4464,7 +4466,7 @@ async def _perform_kg_search(
             query_param,
         )
 
-    else:  # hybrid or mix mode
+    else:  # hybrid / mix / rrf / ppr / ppr_local — or any unrecognised mode
         if len(ll_keywords) > 0:
             local_entities, local_relations = await _get_node_data(
                 ll_keywords,
@@ -4480,7 +4482,7 @@ async def _perform_kg_search(
                 query_param,
             )
 
-        # Get vector chunks for mix/rrf mode
+        # Get vector chunks for mix/rrf mode (PPR modes handle chunks internally)
         if query_param.mode in ("mix", "rrf") and chunks_vdb:
             vector_chunks = await _get_vector_context(
                 query,
@@ -4560,9 +4562,13 @@ async def _perform_kg_search(
         f"Raw search results: {len(final_entities)} entities, {len(final_relations)} relations, {len(vector_chunks)} vector chunks"
     )
 
-    # V3: HippoRAG2-style PPR chunk ranking
+    # V3: PPR chunk ranking
+    # Triggered by mode="ppr" / mode="ppr_local" or the legacy enable_multi_hop flag.
     ppr_chunks = []
-    if query_param.enable_multi_hop and chunks_vdb:
+    _run_ppr = _ppr_mode or query_param.enable_multi_hop
+    _use_global_ppr = query_param.mode == "ppr"
+
+    if _run_ppr and chunks_vdb:
         all_entities = final_entities
         if all_entities:
             ppr_chunks = await _ppr_rank_chunks(
@@ -4575,6 +4581,7 @@ async def _perform_kg_search(
                 text_chunks_db=text_chunks_db,
                 query_param=query_param,
                 query_embedding=query_embedding,
+                use_global=_use_global_ppr,
             )
 
     return {
@@ -5358,10 +5365,10 @@ async def _build_query_context(
     )
 
     if not search_result["final_entities"] and not search_result["final_relations"]:
-        if query_param.mode not in ("mix", "rrf"):
+        if query_param.mode not in ("mix", "rrf", "ppr", "ppr_local"):
             return None
         else:
-            if not search_result["chunk_tracking"]:
+            if not search_result["chunk_tracking"] and not search_result.get("ppr_chunks"):
                 return None
 
     # Stage 1.5 (optional): Rerank entities and relations by query relevance
@@ -5451,6 +5458,99 @@ async def _build_query_context(
     return QueryContextResult(context=context, raw_data=raw_data)
 
 
+async def _ppr_rank_chunks_global(
+    query: str,
+    entity_seed_weights: dict[str, float],
+    knowledge_graph_inst: BaseGraphStorage,
+    chunks_vdb: BaseVectorStorage,
+    text_chunks_db: BaseKVStorage,
+    query_param: QueryParam,
+    query_embedding: list[float] = None,
+) -> list[dict]:
+    """Global PPR path: full-graph engine, skips BFS subgraph extraction.
+
+    entity_seed_weights must already have hub-penalty applied (raw, not yet normalised).
+    """
+    from lightrag.ppr_engine import get_engine
+
+    engine = get_engine(knowledge_graph_inst)
+
+    passage_node_weight = query_param.passage_node_weight
+
+    # Normalise entity seeds to sum=1
+    entity_total = sum(entity_seed_weights.values())
+    if entity_total > 0:
+        entity_seed_weights = {k: v / entity_total for k, v in entity_seed_weights.items()}
+
+    # Build chunk seed weights from VDB query
+    chunk_seed_weights: dict[str, float] = {}
+    try:
+        chunk_results = await chunks_vdb.query(
+            query, top_k=query_param.ppr_top_k * 2, query_embedding=query_embedding
+        )
+        if chunk_results:
+            scores = [c.get("distance", 0.0) for c in chunk_results]
+            min_s, max_s = min(scores), max(scores)
+            range_s = max_s - min_s if max_s > min_s else 1.0
+            for c in chunk_results:
+                cid = c.get("chunk_id") or c.get("id")
+                if cid:
+                    normalized = (c.get("distance", 0.0) - min_s) / range_s
+                    chunk_seed_weights[cid] = normalized
+    except Exception as e:
+        logger.warning(f"PPR(global): chunks VDB query failed: {e}")
+
+    # Normalise chunk seeds to sum=1, then scale by passage_node_weight
+    chunk_total = sum(chunk_seed_weights.values())
+    if chunk_total > 0:
+        chunk_seed_weights = {
+            k: (v / chunk_total) * passage_node_weight
+            for k, v in chunk_seed_weights.items()
+        }
+
+    # Build chunk_to_entities from engine's pre-loaded mapping
+    # (restrict to chunks that have VDB scores for virtual node efficiency)
+    await engine._ensure_loaded()
+    chunk_to_entities = {
+        cid: engine._chunk_to_entities[cid]
+        for cid in chunk_seed_weights
+        if cid in engine._chunk_to_entities
+    }
+
+    if not chunk_to_entities:
+        logger.debug("PPR(global): no chunk-entity mappings for VDB result chunks")
+        return []
+
+    ppr_ranked = await engine.run_ppr(
+        entity_seed_weights=entity_seed_weights,
+        chunk_seed_weights=chunk_seed_weights,
+        chunk_to_entities=chunk_to_entities,
+        damping=query_param.ppr_damping,
+        top_k=query_param.ppr_top_k,
+    )
+
+    if not ppr_ranked:
+        return []
+
+    ranked_chunk_ids = [cid for cid, _ in ppr_ranked]
+    chunk_data_list = await text_chunks_db.get_by_ids(ranked_chunk_ids)
+
+    result_chunks = []
+    for (chunk_id, ppr_score), chunk_data in zip(ppr_ranked, chunk_data_list):
+        if chunk_data and chunk_data.get("content"):
+            chunk = chunk_data.copy()
+            chunk["chunk_id"] = chunk_id
+            chunk["source_type"] = "ppr"
+            chunk["ppr_score"] = ppr_score
+            result_chunks.append(chunk)
+
+    logger.info(
+        f"PPR(global): {len(result_chunks)} chunks ranked, "
+        f"{len(chunk_to_entities)} virtual chunk nodes"
+    )
+    return result_chunks
+
+
 async def _ppr_rank_chunks(
     query: str,
     node_datas: list[dict],
@@ -5461,14 +5561,13 @@ async def _ppr_rank_chunks(
     text_chunks_db: BaseKVStorage,
     query_param: QueryParam,
     query_embedding: list[float] = None,
+    use_global: bool = False,
 ) -> list[dict]:
-    """HippoRAG2-style PPR chunk ranking.
+    """PPR chunk ranking — local BFS (use_global=False) or full-graph (use_global=True).
 
-    Builds a heterogeneous graph with entity nodes (from graph storage) and
-    virtual chunk nodes (from entity source_id mappings).  Dual-signal seed
-    weights drive PPR: relation VDB scores → entity weights, chunks VDB scores
-    × passage_node_weight → chunk weights.  PPR scores directly determine
-    chunk ordering.
+    Local path: BFS subgraph from seed entities → nx.pagerank on heterogeneous graph.
+    Global path: full entity graph cached in GlobalPPREngine → pagerank_power via
+                 scipy CSR + fast-pagerank.
 
     Returns:
         Ranked list of chunk dicts with ``ppr_score`` and ``source_type="ppr"``.
@@ -5516,6 +5615,20 @@ async def _ppr_rank_chunks(
                     entity_seed_weights[eid] /= math.log(1 + deg)
         except Exception as e:
             logger.warning(f"PPR: hub penalty degree query failed: {e}")
+
+    # ------------------------------------------------------------------ #
+    # Global PPR path: skip BFS, use full-graph GlobalPPREngine            #
+    # ------------------------------------------------------------------ #
+    if use_global:
+        return await _ppr_rank_chunks_global(
+            query=query,
+            entity_seed_weights=entity_seed_weights,
+            knowledge_graph_inst=knowledge_graph_inst,
+            chunks_vdb=chunks_vdb,
+            text_chunks_db=text_chunks_db,
+            query_param=query_param,
+            query_embedding=query_embedding,
+        )
 
     # Step 2: Get subgraph (entities + edges)
     seed_ids = list(entity_seed_weights.keys())
@@ -5579,9 +5692,24 @@ async def _ppr_rank_chunks(
                 cid = c.get("chunk_id") or c.get("id")
                 if cid and cid in chunk_to_entities:
                     normalized = (c.get("distance", 0.0) - min_s) / range_s
-                    chunk_seed_weights[cid] = normalized * passage_node_weight
+                    chunk_seed_weights[cid] = normalized  # raw score; scaled below
     except Exception as e:
         logger.warning(f"PPR: chunks VDB query failed: {e}")
+
+    # Normalize entity seeds to sum=1 (after hub penalty)
+    entity_seed_total = sum(entity_seed_weights.values())
+    if entity_seed_total > 0:
+        entity_seed_weights = {
+            k: v / entity_seed_total for k, v in entity_seed_weights.items()
+        }
+
+    # Normalize chunk seeds to sum=1, then scale the whole group by passage_node_weight
+    chunk_seed_total = sum(chunk_seed_weights.values())
+    if chunk_seed_total > 0:
+        chunk_seed_weights = {
+            k: (v / chunk_seed_total) * passage_node_weight
+            for k, v in chunk_seed_weights.items()
+        }
 
     # Step 5: Run PPR
     ppr_ranked = personalized_pagerank(

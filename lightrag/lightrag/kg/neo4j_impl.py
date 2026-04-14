@@ -1217,6 +1217,74 @@ class Neo4JStorage(BaseGraphStorage):
 
         return nodes, edges
 
+    async def get_all_nodes_and_edges(self) -> tuple[list[dict], list[dict]]:
+        """Fetch every node and edge in the workspace for GlobalPPREngine.
+
+        Returns:
+            nodes: list of dicts with entity_id, source_id, embedding (may be None).
+            edges: list of dicts with src, tgt, weight (default 1.0).
+        """
+        workspace_label = self._get_workspace_label()
+        nodes: list[dict] = []
+        edges: list[dict] = []
+
+        async with self._driver.session(
+            database=self._DATABASE, default_access_mode="READ"
+        ) as session:
+            try:
+                node_result = await session.run(
+                    f"MATCH (n:`{workspace_label}`) "
+                    f"RETURN n.entity_id AS entity_id, "
+                    f"       n.source_id  AS source_id, "
+                    f"       n.embedding  AS embedding"
+                )
+                for record in await node_result.data():
+                    eid = record.get("entity_id")
+                    if eid:
+                        nodes.append(
+                            {
+                                "entity_id": eid,
+                                "source_id": record.get("source_id") or "",
+                                "embedding": record.get("embedding"),
+                            }
+                        )
+            except Exception as e:
+                logger.error(
+                    f"[{self.workspace}] get_all_nodes_and_edges node query failed: {e}"
+                )
+
+        async with self._driver.session(
+            database=self._DATABASE, default_access_mode="READ"
+        ) as session:
+            try:
+                edge_result = await session.run(
+                    f"MATCH (a:`{workspace_label}`)-[r]->(b:`{workspace_label}`) "
+                    f"RETURN a.entity_id AS src, b.entity_id AS tgt, "
+                    f"       r.weight AS weight, r.source_id AS source_id"
+                )
+                for record in await edge_result.data():
+                    src, tgt = record.get("src"), record.get("tgt")
+                    if src and tgt:
+                        w = record.get("weight")
+                        edges.append(
+                            {
+                                "src": src,
+                                "tgt": tgt,
+                                "weight": float(w) if w is not None else 1.0,
+                                "source_id": record.get("source_id") or "",
+                            }
+                        )
+            except Exception as e:
+                logger.error(
+                    f"[{self.workspace}] get_all_nodes_and_edges edge query failed: {e}"
+                )
+
+        logger.info(
+            f"[{self.workspace}] get_all_nodes_and_edges: "
+            f"{len(nodes)} nodes, {len(edges)} edges"
+        )
+        return nodes, edges
+
     async def get_knowledge_graph(
         self,
         node_label: str,
