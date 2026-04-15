@@ -5496,9 +5496,9 @@ async def _recognition_memory_filter(
     """HippoRAG2-style recognition memory filter for global PPR entity seeds.
 
     Three-step hybrid filter:
-      1. Numpy step  — vectors already retrieved by hybrid search (no new VDB calls)
-      2. LLM step    — unified candidate list sent to LLM for relevance judgment
-      3. Difflib step — LLM text output remapped to graph entity_ids
+      1. Normalisation step — scores already retrieved by hybrid search (no new VDB calls)
+      2. LLM step           — unified candidate list sent to LLM for relevance judgment
+      3. Difflib step       — LLM text output remapped to graph entity_ids
 
     Args:
         query:             User query string.
@@ -5565,7 +5565,11 @@ async def _recognition_memory_filter(
     )
 
     # --- Step 6: LLM call ---
-    llm_output: str = await llm_model_func(prompt)
+    try:
+        llm_output: str = await llm_model_func(prompt)
+    except Exception as e:
+        logger.warning(f"PPR: recognition memory LLM call failed: {e}")
+        return {}
 
     # --- Step 7: Difflib mapping ---
     recognized_ids: set[str] = set()
