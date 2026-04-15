@@ -5490,7 +5490,7 @@ async def _recognition_memory_filter(
     query: str,
     node_datas: list[dict],
     rel_results: list[dict],
-    llm_model_func,
+    llm_model_func: Callable,
     recognition_top_k: int = 10,
 ) -> dict[str, float]:
     """HippoRAG2-style recognition memory filter for global PPR entity seeds.
