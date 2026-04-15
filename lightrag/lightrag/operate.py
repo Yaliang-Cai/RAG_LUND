@@ -5710,21 +5710,82 @@ async def _ppr_rank_chunks(
     """
     from lightrag.ppr import personalized_pagerank
 
-    # Step 1: Build entity seed weights from relation VDB + entity VDB scores
+    # Step 1: Build entity seed weights
+    # Global PPR path: recognition memory filters seeds via LLM (when enabled).
+    # Local PPR path: direct max-merge (unchanged behaviour).
     entity_seed_weights: dict[str, float] = {}
 
-    # From entity VDB scores (already retrieved by _get_node_data)
-    for nd in node_datas:
-        eid = nd.get("entity_id", nd.get("entity_name", ""))
-        if eid:
-            vdb_score = nd.get("vdb_score", 0.0)
-            entity_seed_weights[eid] = max(entity_seed_weights.get(eid, 0), vdb_score)
-
-    # From relation VDB scores (fact-query similarity → entity seeds)
+    # Always fetch relation VDB results — used by both paths
+    rel_results: list[dict] = []
     try:
         rel_results = await relationships_vdb.query(
             query, top_k=query_param.top_k, query_embedding=query_embedding
         )
+    except Exception as e:
+        logger.warning(f"PPR: relation VDB query failed: {e}")
+
+    if use_global and query_param.recognition_top_k > 0:
+        # --- Recognition Memory path (global PPR only) ---
+        llm_func = text_chunks_db.global_config.get("llm_model_func")
+        if llm_func and (node_datas or rel_results):
+            try:
+                recognized = await _recognition_memory_filter(
+                    query=query,
+                    node_datas=node_datas,
+                    rel_results=rel_results,
+                    llm_model_func=llm_func,
+                    recognition_top_k=query_param.recognition_top_k,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"PPR(global): recognition memory failed, falling back to direct merge: {e}"
+                )
+                recognized = {}
+            if recognized:
+                entity_seed_weights = recognized
+            else:
+                logger.warning(
+                    "PPR(global): recognition memory returned empty; using direct seed merge"
+                )
+                # Fallback: direct max-merge (same as local path)
+                for nd in node_datas:
+                    eid = nd.get("entity_id", nd.get("entity_name", ""))
+                    if eid:
+                        entity_seed_weights[eid] = max(
+                            entity_seed_weights.get(eid, 0), nd.get("vdb_score", 0.0)
+                        )
+                for rel in rel_results:
+                    score = rel.get("distance", 0.0)
+                    for field_name in ("src_id", "tgt_id"):
+                        eid = rel.get(field_name)
+                        if eid:
+                            entity_seed_weights[eid] = max(
+                                entity_seed_weights.get(eid, 0), score
+                            )
+        else:
+            # No LLM configured — direct merge
+            for nd in node_datas:
+                eid = nd.get("entity_id", nd.get("entity_name", ""))
+                if eid:
+                    entity_seed_weights[eid] = max(
+                        entity_seed_weights.get(eid, 0), nd.get("vdb_score", 0.0)
+                    )
+            for rel in rel_results:
+                score = rel.get("distance", 0.0)
+                for field_name in ("src_id", "tgt_id"):
+                    eid = rel.get(field_name)
+                    if eid:
+                        entity_seed_weights[eid] = max(
+                            entity_seed_weights.get(eid, 0), score
+                        )
+    else:
+        # Local PPR path OR recognition_top_k=0 (disabled): direct max-merge
+        for nd in node_datas:
+            eid = nd.get("entity_id", nd.get("entity_name", ""))
+            if eid:
+                entity_seed_weights[eid] = max(
+                    entity_seed_weights.get(eid, 0), nd.get("vdb_score", 0.0)
+                )
         for rel in rel_results:
             score = rel.get("distance", 0.0)
             for field_name in ("src_id", "tgt_id"):
@@ -5733,8 +5794,6 @@ async def _ppr_rank_chunks(
                     entity_seed_weights[eid] = max(
                         entity_seed_weights.get(eid, 0), score
                     )
-    except Exception as e:
-        logger.warning(f"PPR: relation VDB query failed: {e}")
 
     if not entity_seed_weights:
         return []
