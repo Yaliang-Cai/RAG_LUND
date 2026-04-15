@@ -5486,6 +5486,107 @@ def _min_max_norm(scores: dict[str, float]) -> dict[str, float]:
     return {k: (v - lo) / span for k, v in scores.items()}
 
 
+async def _recognition_memory_filter(
+    query: str,
+    node_datas: list[dict],
+    rel_results: list[dict],
+    llm_model_func,
+    recognition_top_k: int = 10,
+) -> dict[str, float]:
+    """HippoRAG2-style recognition memory filter for global PPR entity seeds.
+
+    Three-step hybrid filter:
+      1. Numpy step  — vectors already retrieved by hybrid search (no new VDB calls)
+      2. LLM step    — unified candidate list sent to LLM for relevance judgment
+      3. Difflib step — LLM text output remapped to graph entity_ids
+
+    Args:
+        query:             User query string.
+        node_datas:        Entity VDB results (each dict has "entity_id", "vdb_score").
+        rel_results:       Relation VDB results (each dict has "src_id", "tgt_id",
+                           "description", "distance").
+        llm_model_func:    Async callable — global_config["llm_model_func"].
+        recognition_top_k: Max triplets to show LLM. Entity cap = recognition_top_k * 2.
+
+    Returns:
+        {entity_id: normalised_weight} for LLM-recognised entities.
+        Empty dict signals fallback to direct score merge in the caller.
+    """
+    import difflib
+
+    # --- Step 1: Candidate pool sizing ---
+    top_rels = rel_results[:recognition_top_k]
+    top_nodes = node_datas[:recognition_top_k * 2]
+
+    # --- Step 2: fact_scores — max across triplets for same entity ---
+    fact_scores: dict[str, float] = {}
+    for rel in top_rels:
+        for eid in (rel.get("src_id"), rel.get("tgt_id")):
+            if eid:
+                fact_scores[eid] = max(fact_scores.get(eid, 0.0), rel.get("distance", 0.0))
+
+    # --- Step 3: Independent min-max normalisation ---
+    norm_vdb = _min_max_norm({
+        nd["entity_id"]: nd.get("vdb_score", 0.0)
+        for nd in top_nodes if nd.get("entity_id")
+    })
+    norm_fact = _min_max_norm(fact_scores)
+
+    # --- Step 4: Build unified candidate list for difflib matching ---
+    entity_vdb_ids = [nd["entity_id"] for nd in top_nodes if nd.get("entity_id")]
+    triplet_eids = list(dict.fromkeys(
+        eid for rel in top_rels
+        for eid in (rel.get("src_id"), rel.get("tgt_id")) if eid
+    ))
+    all_candidate_ids = list(dict.fromkeys(entity_vdb_ids + triplet_eids))
+
+    if not all_candidate_ids:
+        return {}
+
+    # --- Step 5: Build LLM prompt ---
+    standalone_block = "\n".join(entity_vdb_ids) if entity_vdb_ids else "(none)"
+    triplet_block = "\n".join(
+        f"{r.get('src_id', '')} | {r.get('description', '')} | {r.get('tgt_id', '')}"
+        for r in top_rels
+    ) if top_rels else "(none)"
+
+    prompt = (
+        "You are an entity relevance judge.\n\n"
+        f"Query: {query}\n\n"
+        "Below are retrieved entities and facts. Select ONLY those directly relevant "
+        "to answering the query.\n"
+        "You MUST copy each entity identifier EXACTLY as it appears in the list below, "
+        'including any "|TYPE" suffixes and special characters. '
+        "Do not rephrase, abbreviate, or invent new identifiers.\n\n"
+        f"Standalone entities:\n{standalone_block}\n\n"
+        f"Retrieved facts:\n{triplet_block}\n\n"
+        "Return the relevant entity identifiers only, one per line. "
+        "If none are relevant, return an empty response."
+    )
+
+    # --- Step 6: LLM call ---
+    llm_output: str = await llm_model_func(prompt)
+
+    # --- Step 7: Difflib mapping ---
+    recognized_ids: set[str] = set()
+    for line in llm_output.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        matches = difflib.get_close_matches(line, all_candidate_ids, n=1, cutoff=0.85)
+        if matches:
+            recognized_ids.add(matches[0])
+
+    # --- Step 8: Merge weights ---
+    result: dict[str, float] = {}
+    for eid in recognized_ids:
+        w = max(norm_vdb.get(eid, 0.0), norm_fact.get(eid, 0.0))
+        if w > 0.0:
+            result[eid] = w
+
+    return result
+
+
 async def _ppr_rank_chunks_global(
     query: str,
     entity_seed_weights: dict[str, float],
