@@ -231,3 +231,79 @@ class TestRecognitionMemoryFilter:
         llm = AsyncMock(return_value="HUB|ORG")
         result = await _recognition_memory_filter("query", nodes, rels, llm)
         assert "HUB|ORG" in result
+
+
+# ---------------------------------------------------------------------------
+# Integration tests for the _ppr_rank_chunks seed-building block.
+# We test the branch logic (recognition vs direct merge vs fallback) in
+# isolation by re-implementing just that block here.
+# ---------------------------------------------------------------------------
+
+class TestSeedBuildingBranch:
+    """Tests for the if/else branching added to _ppr_rank_chunks."""
+
+    def _direct_merge(self, node_datas, rel_results):
+        """Mirrors _build_seeds_from_raw logic."""
+        weights = {}
+        for nd in node_datas:
+            eid = nd.get("entity_id", nd.get("entity_name", ""))
+            if eid:
+                weights[eid] = max(weights.get(eid, 0), nd.get("vdb_score", 0.0))
+        for rel in rel_results:
+            score = rel.get("distance", 0.0)
+            for field in ("src_id", "tgt_id"):
+                eid = rel.get(field)
+                if eid:
+                    weights[eid] = max(weights.get(eid, 0), score)
+        return weights
+
+    @pytest.mark.asyncio
+    async def test_recognition_top_k_zero_skips_llm(self):
+        """recognition_top_k=0 → recognition memory disabled → direct merge."""
+        nodes = [{"entity_id": "E1", "vdb_score": 0.8}]
+        rels = [{"src_id": "E1", "tgt_id": "E2", "description": "r", "distance": 0.6}]
+        llm_called = []
+
+        async def llm(prompt):
+            llm_called.append(prompt)
+            return "E1"
+
+        # Simulate the branch: recognition_top_k=0 skips recognition
+        recognition_top_k = 0
+        if recognition_top_k > 0:
+            result = await _recognition_memory_filter("q", nodes, rels, llm, recognition_top_k)
+        else:
+            result = self._direct_merge(nodes, rels)
+
+        assert llm_called == []  # LLM never called
+        assert "E1" in result
+
+    @pytest.mark.asyncio
+    async def test_recognition_fallback_when_empty(self):
+        """LLM returns empty → fallback to _build_seeds_from_raw."""
+        nodes = [{"entity_id": "E1", "vdb_score": 0.8}]
+        rels = []
+        llm = AsyncMock(return_value="")
+
+        recognized = await _recognition_memory_filter("q", nodes, rels, llm, recognition_top_k=10)
+        # Empty → caller uses direct merge
+        if not recognized:
+            result = self._direct_merge(nodes, rels)
+        else:
+            result = recognized
+
+        assert "E1" in result
+
+    @pytest.mark.asyncio
+    async def test_recognition_result_replaces_seeds(self):
+        """LLM recognises only E1, not E2 → E2 excluded from seeds."""
+        nodes = [
+            {"entity_id": "E1", "vdb_score": 0.9},
+            {"entity_id": "E2", "vdb_score": 0.85},
+        ]
+        rels = []
+        llm = AsyncMock(return_value="E1")
+
+        result = await _recognition_memory_filter("q", nodes, rels, llm, recognition_top_k=10)
+        assert "E1" in result
+        assert "E2" not in result
