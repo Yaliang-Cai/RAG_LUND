@@ -5591,6 +5591,29 @@ async def _recognition_memory_filter(
     return result
 
 
+def _direct_merge_seeds(
+    node_datas: list[dict],
+    rel_results: list[dict],
+) -> dict[str, float]:
+    """Direct max-merge of entity VDB + relation VDB scores into seed weights.
+
+    Used as the fallback when recognition memory is disabled, unavailable, or
+    returns an empty result.
+    """
+    weights: dict[str, float] = {}
+    for nd in node_datas:
+        eid = nd.get("entity_id", nd.get("entity_name", ""))
+        if eid:
+            weights[eid] = max(weights.get(eid, 0), nd.get("vdb_score", 0.0))
+    for rel in rel_results:
+        score = rel.get("distance", 0.0)
+        for field_name in ("src_id", "tgt_id"):
+            eid = rel.get(field_name)
+            if eid:
+                weights[eid] = max(weights.get(eid, 0), score)
+    return weights
+
+
 async def _ppr_rank_chunks_global(
     query: str,
     entity_seed_weights: dict[str, float],
@@ -5743,57 +5766,20 @@ async def _ppr_rank_chunks(
                 recognized = {}
             if recognized:
                 entity_seed_weights = recognized
+                logger.debug(
+                    f"PPR(global): recognition memory accepted {len(recognized)} seeds"
+                )
             else:
-                logger.warning(
+                logger.info(
                     "PPR(global): recognition memory returned empty; using direct seed merge"
                 )
-                # Fallback: direct max-merge (same as local path)
-                for nd in node_datas:
-                    eid = nd.get("entity_id", nd.get("entity_name", ""))
-                    if eid:
-                        entity_seed_weights[eid] = max(
-                            entity_seed_weights.get(eid, 0), nd.get("vdb_score", 0.0)
-                        )
-                for rel in rel_results:
-                    score = rel.get("distance", 0.0)
-                    for field_name in ("src_id", "tgt_id"):
-                        eid = rel.get(field_name)
-                        if eid:
-                            entity_seed_weights[eid] = max(
-                                entity_seed_weights.get(eid, 0), score
-                            )
+                entity_seed_weights = _direct_merge_seeds(node_datas, rel_results)
         else:
             # No LLM configured — direct merge
-            for nd in node_datas:
-                eid = nd.get("entity_id", nd.get("entity_name", ""))
-                if eid:
-                    entity_seed_weights[eid] = max(
-                        entity_seed_weights.get(eid, 0), nd.get("vdb_score", 0.0)
-                    )
-            for rel in rel_results:
-                score = rel.get("distance", 0.0)
-                for field_name in ("src_id", "tgt_id"):
-                    eid = rel.get(field_name)
-                    if eid:
-                        entity_seed_weights[eid] = max(
-                            entity_seed_weights.get(eid, 0), score
-                        )
+            entity_seed_weights = _direct_merge_seeds(node_datas, rel_results)
     else:
         # Local PPR path OR recognition_top_k=0 (disabled): direct max-merge
-        for nd in node_datas:
-            eid = nd.get("entity_id", nd.get("entity_name", ""))
-            if eid:
-                entity_seed_weights[eid] = max(
-                    entity_seed_weights.get(eid, 0), nd.get("vdb_score", 0.0)
-                )
-        for rel in rel_results:
-            score = rel.get("distance", 0.0)
-            for field_name in ("src_id", "tgt_id"):
-                eid = rel.get(field_name)
-                if eid:
-                    entity_seed_weights[eid] = max(
-                        entity_seed_weights.get(eid, 0), score
-                    )
+        entity_seed_weights = _direct_merge_seeds(node_datas, rel_results)
 
     if not entity_seed_weights:
         return []
