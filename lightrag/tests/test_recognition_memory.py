@@ -2,9 +2,7 @@
 
 All LLM calls are mocked — no real API calls in this suite.
 """
-import difflib
 import pytest
-from unittest.mock import AsyncMock
 
 
 # ---------------------------------------------------------------------------
@@ -12,6 +10,7 @@ from unittest.mock import AsyncMock
 # tests don't depend on operate.py import chain (which needs Neo4j/Qdrant).
 # ---------------------------------------------------------------------------
 
+# SYNC: keep identical to lightrag/lightrag/operate.py::_min_max_norm
 def _min_max_norm(scores: dict) -> dict:
     """Copied verbatim from operate.py for isolated testing."""
     if not scores:
