@@ -5470,6 +5470,22 @@ async def _build_query_context(
     return QueryContextResult(context=context, raw_data=raw_data)
 
 
+def _min_max_norm(scores: dict[str, float]) -> dict[str, float]:
+    """Normalise score dict to [0, 1].
+
+    Edge case: if all scores are identical and > 0, returns uniform 1.0 to
+    preserve seed signal rather than collapsing everything to 0.
+    """
+    if not scores:
+        return {}
+    lo, hi = min(scores.values()), max(scores.values())
+    if hi == lo:
+        uniform = 1.0 if hi > 0.0 else 0.0
+        return {k: uniform for k in scores}
+    span = hi - lo
+    return {k: (v - lo) / span for k, v in scores.items()}
+
+
 async def _ppr_rank_chunks_global(
     query: str,
     entity_seed_weights: dict[str, float],
@@ -5494,7 +5510,23 @@ async def _ppr_rank_chunks_global(
     if entity_total > 0:
         entity_seed_weights = {k: v / entity_total for k, v in entity_seed_weights.items()}
 
-    # Build chunk seed weights from VDB query
+    await engine._ensure_loaded()
+
+    # Primary chunk pool: derived from entity seeds via pre-loaded reverse mapping.
+    # This is always non-empty when entity seeds are valid, regardless of whether
+    # VDB chunk results happen to have entity mappings (solves the hard dependency).
+    chunk_to_entities: dict[str, list[str]] = {}
+    for eid in entity_seed_weights:
+        for cid in engine._entity_to_chunks.get(eid, []):
+            chunk_to_entities.setdefault(cid, []).append(eid)
+
+    if not chunk_to_entities:
+        logger.debug("PPR(global): seeded entities have no chunk mappings in graph")
+        return []
+
+    # Optional signal: VDB chunk scores weight chunks already in the pool.
+    # Chunks returned by VDB but not in the pool are ignored (they are orphans
+    # with no entity mapping and cannot participate in PPR propagation).
     chunk_seed_weights: dict[str, float] = {}
     try:
         chunk_results = await chunks_vdb.query(
@@ -5506,7 +5538,7 @@ async def _ppr_rank_chunks_global(
             range_s = max_s - min_s if max_s > min_s else 1.0
             for c in chunk_results:
                 cid = c.get("chunk_id") or c.get("id")
-                if cid:
+                if cid and cid in chunk_to_entities:
                     normalized = (c.get("distance", 0.0) - min_s) / range_s
                     chunk_seed_weights[cid] = normalized
     except Exception as e:
@@ -5519,19 +5551,6 @@ async def _ppr_rank_chunks_global(
             k: (v / chunk_total) * passage_node_weight
             for k, v in chunk_seed_weights.items()
         }
-
-    # Build chunk_to_entities from engine's pre-loaded mapping
-    # (restrict to chunks that have VDB scores for virtual node efficiency)
-    await engine._ensure_loaded()
-    chunk_to_entities = {
-        cid: engine._chunk_to_entities[cid]
-        for cid in chunk_seed_weights
-        if cid in engine._chunk_to_entities
-    }
-
-    if not chunk_to_entities:
-        logger.debug("PPR(global): no chunk-entity mappings for VDB result chunks")
-        return []
 
     ppr_ranked = await engine.run_ppr(
         entity_seed_weights=entity_seed_weights,
