@@ -101,35 +101,86 @@ async def _recognition_memory_filter(
 
 ### 5.1 Step-by-step
 
-**Step 1 — Separate normalisation**
+**Step 1 — Candidate pool sizing**
+
+```python
+# Relation triplets: cap at recognition_top_k (controls LLM context size)
+top_rels = rel_results[:recognition_top_k]
+
+# Entity VDB candidates: cap at recognition_top_k * 2 to keep prompt manageable
+# (entity count is governed by query_param.top_k; recognition_top_k only limits
+#  how many are sent to the LLM)
+top_nodes = node_datas[:recognition_top_k * 2]
+```
+
+> **Note on `recognition_top_k` scope:** This parameter controls only the number of
+> relation triplets presented to the LLM. The entity VDB candidate count is governed
+> by `query_param.top_k`; `recognition_top_k * 2` is an internal prompt-size cap,
+> not a retrieval limit.
+
+**Step 2 — fact_scores construction (explicit max-merge)**
+
+When the same entity appears as src/tgt in multiple triplets, take `max` across all occurrences:
+
+```python
+fact_scores: dict[str, float] = {}
+for rel in top_rels:
+    for eid in (rel.get("src_id"), rel.get("tgt_id")):
+        if eid:
+            fact_scores[eid] = max(fact_scores.get(eid, 0.0), rel.get("distance", 0.0))
+```
+
+**Step 3 — Separate normalisation**
 
 ```python
 def _min_max_norm(scores: dict[str, float]) -> dict[str, float]:
+    """Normalise to [0, 1]. If all scores are equal and > 0, return uniform 1.0
+    to preserve the seed signal rather than collapsing everything to 0."""
     if not scores:
         return {}
     lo, hi = min(scores.values()), max(scores.values())
-    span = hi - lo if hi > lo else 1.0
+    if hi == lo:
+        # All scores identical: uniform weight 1.0 if signal exists, else 0.0
+        uniform = 1.0 if hi > 0.0 else 0.0
+        return {k: uniform for k in scores}
+    span = hi - lo
     return {k: (v - lo) / span for k, v in scores.items()}
 
-norm_vdb  = _min_max_norm({nd["entity_id"]: nd["vdb_score"] for nd in node_datas if nd.get("entity_id")})
-norm_fact = _min_max_norm({...})   # see Step 2
+norm_vdb  = _min_max_norm({
+    nd["entity_id"]: nd.get("vdb_score", 0.0)
+    for nd in top_nodes if nd.get("entity_id")
+})
+norm_fact = _min_max_norm(fact_scores)
 ```
 
-**Step 2 — Candidate pool construction**
+**Step 4 — Candidate pool construction**
 
-Take top `recognition_top_k` relation results (already sorted by distance desc from VDB).
+`entity_id` in this system is the entity name string (e.g. `"苹果|ORGANIZATION"` when
+entity disambiguation is active). Pass entity_ids as-is — the LLM sees the raw id and
+is instructed to copy it exactly, including any `|TYPE` suffix.
 
 ```
-Standalone entity section:
-  "{entity_id}"           (one per line, from node_datas)
+Standalone entities:
+  "{entity_id}"    (one per line, from top_nodes — at most recognition_top_k * 2 entries)
 
-Triplet section:
-  "{src_id} | {description} | {tgt_id}"   (one per line, from rel_results[:recognition_top_k])
+Retrieved facts:
+  "{src_id} | {description} | {tgt_id}"   (one per line, from top_rels)
 ```
 
-Fact score mapping: `{src_id: distance, tgt_id: distance}` for each triplet.
+Build the difflib candidate list from the same entity_ids used in the prompt:
 
-**Step 3 — LLM prompt**
+```python
+import difflib
+
+entity_vdb_ids = [nd["entity_id"] for nd in top_nodes if nd.get("entity_id")]
+triplet_eids   = list(dict.fromkeys(
+    eid for rel in top_rels
+    for eid in (rel.get("src_id"), rel.get("tgt_id")) if eid
+))
+all_candidate_ids = list(dict.fromkeys(entity_vdb_ids + triplet_eids))
+```
+
+**Step 5 — LLM prompt**
 
 ```
 You are an entity relevance judge.
@@ -137,36 +188,33 @@ You are an entity relevance judge.
 Query: {query}
 
 Below are retrieved entities and facts. Select ONLY those directly relevant to answering the query.
-You MUST copy entity names EXACTLY as they appear in the list. Do not rephrase, abbreviate, or invent new entities.
+You MUST copy each entity identifier EXACTLY as it appears in the list below, including any
+"|TYPE" suffixes and special characters. Do not rephrase, abbreviate, or invent new identifiers.
 
 Standalone entities:
-{entity list, one per line}
+{entity_id, one per line}
 
 Retrieved facts:
-{triplet list, one per line}
+{src_id | description | tgt_id, one per line}
 
-Return the relevant entity names only, one per line. If none are relevant, return an empty response.
+Return the relevant entity identifiers only, one per line. If none are relevant, return an empty response.
 ```
 
-**Step 4 — Parse + Difflib mapping**
+**Step 6 — Parse + Difflib mapping**
 
 ```python
-import difflib
-
-all_candidate_ids = list(norm_vdb.keys()) + [src/tgt from rel_results[:recognition_top_k]]
-all_candidate_ids_dedup = list(dict.fromkeys(all_candidate_ids))
-
 recognized_ids = set()
 for line in llm_output.strip().splitlines():
     line = line.strip()
     if not line:
         continue
-    matches = difflib.get_close_matches(line, all_candidate_ids_dedup, n=1, cutoff=0.85)
+    matches = difflib.get_close_matches(line, all_candidate_ids, n=1, cutoff=0.85)
     if matches:
         recognized_ids.add(matches[0])
+    # No match → silently skip (never hallucinate an entity into seeds)
 ```
 
-**Step 5 — Merge weights**
+**Step 7 — Merge weights**
 
 ```python
 result = {}
@@ -206,26 +254,31 @@ try:
 except Exception as e:
     logger.warning(f"PPR: relation VDB query failed: {e}")
 
-if use_global:
+if use_global and query_param.recognition_top_k > 0:
     # --- Recognition Memory path ---
     llm_func = global_config.get("llm_model_func")
     if llm_func and (node_datas or rel_results):
-        recognized = await _recognition_memory_filter(
-            query=query,
-            node_datas=node_datas,
-            rel_results=rel_results,
-            llm_model_func=llm_func,
-            recognition_top_k=query_param.recognition_top_k,
-        )
+        try:
+            recognized = await _recognition_memory_filter(
+                query=query,
+                node_datas=node_datas,
+                rel_results=rel_results,
+                llm_model_func=llm_func,
+                recognition_top_k=query_param.recognition_top_k,
+            )
+        except Exception as e:
+            logger.warning(f"PPR(global): recognition memory failed, falling back: {e}")
+            recognized = {}
         if recognized:
             entity_seed_weights = recognized
         else:
-            # Fallback: build seeds the old way
+            # Empty result (LLM returned nothing useful) — fall back to direct merge
+            logger.warning("PPR(global): recognition memory returned empty; using direct seed merge")
             _build_seeds_from_raw(node_datas, rel_results, entity_seed_weights)
     else:
         _build_seeds_from_raw(node_datas, rel_results, entity_seed_weights)
 else:
-    # Local PPR path: existing direct extraction (unchanged)
+    # Local PPR path OR recognition_top_k=0 (disabled): existing direct extraction
     _build_seeds_from_raw(node_datas, rel_results, entity_seed_weights)
 ```
 
@@ -243,10 +296,12 @@ Add `global_config` forwarding — the function already uses `text_chunks_db.glo
 
 ```python
 recognition_top_k: int = 10
-"""HippoRAG2 Recognition Memory: max triplet candidates shown to LLM for entity seed filtering.
-Candidate pool = rel_results[:recognition_top_k] from relation VDB.
-Only active when mode="ppr". Default 10 matches HippoRAG2 link_top_k.
-Set to 0 to disable recognition memory (falls back to direct score merge)."""
+"""HippoRAG2 Recognition Memory: controls how many relation triplets are shown to the LLM.
+- Relation triplets sent to LLM: rel_results[:recognition_top_k]
+- Entity VDB candidates sent to LLM: node_datas[:recognition_top_k * 2]
+  (entity VDB retrieval size is still governed by query_param.top_k)
+- Only active when mode="ppr". Default 10 matches HippoRAG2 link_top_k.
+- Set to 0 to disable recognition memory (falls back to direct score merge)."""
 ```
 
 ---
@@ -279,8 +334,9 @@ Set to 0 to disable recognition memory (falls back to direct score merge)."""
 
 | File | Change |
 |------|--------|
-| `lightrag/lightrag/operate.py` | New `_recognition_memory_filter()` (~60 lines); refactor seed-building block in `_ppr_rank_chunks()` (~20 lines) |
+| `lightrag/lightrag/operate.py` | New `_recognition_memory_filter()` (~70 lines); refactor seed-building block in `_ppr_rank_chunks()` (~25 lines) |
 | `lightrag/lightrag/base.py` | `QueryParam.recognition_top_k: int = 10` |
+| `tests/test_recognition_memory.py` | Mock-LLM unit tests: difflib mapping, fallback path, hi==lo normalisation edge case, recognition_top_k=0 opt-out |
 
 ---
 
