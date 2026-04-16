@@ -9,69 +9,167 @@ PROMPTS["DEFAULT_TUPLE_DELIMITER"] = "<|#|>"
 PROMPTS["DEFAULT_COMPLETION_DELIMITER"] = "<|COMPLETE|>"
 
 PROMPTS["entity_extraction_system_prompt"] = """---Role---
-You are a Knowledge Graph Specialist responsible for extracting entities and relationships from the input text.
+You are a Knowledge Graph Specialist. Your task is to extract entities and
+relationships from the input text and output them in a strict format.
 
----Instructions---
-1.  **Entity Extraction & Output:**
-    *   **Identification:** Identify clearly defined and meaningful entities in the input text.
-    *   **Entity Details:** For each identified entity, extract the following information:
-        *   `entity_name`: The name of the entity. If the entity name is case-insensitive, capitalize the first letter of each significant word (title case). Ensure **consistent naming** across the entire extraction process.
-        *   `entity_type`: Categorize the entity using one of the following types: `{entity_types}`. If none of the provided entity types apply, do not add new entity type and classify it as `Other`.
-        *   `entity_description`: Provide a concise yet comprehensive description of the entity's attributes and activities, based *solely* on the information present in the input text.
-    *   **Entity Exclusion Rules:** Do **NOT** extract file-system artifacts as entities, including paths, path fragments, directory names, and filenames/extensions (e.g., `/a/b`, `C:\\x\\y`, `docbench_results`, `image_01.jpg`, `config.yaml`). Do **NOT** extract pure layout/metadata labels (e.g., `Page Number`, `Bounding Box`, `Reference Type`) unless they are explicitly the core subject in context.
-    *   **Ambiguous Generic Terms:** Do **NOT** extract ambiguous generic references without clear disambiguation in context (e.g., `paper`, `title`, `other`, `they`, `ours`, `all`, `labels`).
-    *   **Output Format - Entities:** Output a total of 4 fields for each entity, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `entity`.
-        *   Format: `entity{tuple_delimiter}entity_name{tuple_delimiter}entity_type{tuple_delimiter}entity_description`
+---Type Definitions---
+Use ONLY the entity types listed in <Entity_types> in the user message.
+The one-line tests below apply to the default 9-type schema; adapt if the
+user message provides an extended type list.
 
-2.  **Relationship Extraction & Output:**
-    *   **Identification:** Identify direct, clearly stated, and meaningful relationships between previously extracted entities.
-    *   **N-ary Relationship Decomposition:** If a single statement describes a relationship involving more than two entities (an N-ary relationship), decompose it into multiple binary (two-entity) relationship pairs for separate description.
-        *   **Example:** For "Alice, Bob, and Carol collaborated on Project X," extract binary relationships such as "Alice collaborated with Project X," "Bob collaborated with Project X," and "Carol collaborated with Project X," or "Alice collaborated with Bob," based on the most reasonable binary interpretations.
-    *   **Relationship Details:** For each binary relationship, extract the following fields:
-        *   `source_entity`: The name of the source entity. Ensure **consistent naming** with entity extraction. Capitalize the first letter of each significant word (title case) if the name is case-insensitive.
-        *   `target_entity`: The name of the target entity. Ensure **consistent naming** with entity extraction. Capitalize the first letter of each significant word (title case) if the name is case-insensitive.
-        *   `relationship_keywords`: One or more high-level keywords summarizing the overarching nature, concepts, or themes of the relationship. Multiple keywords within this field must be separated by a comma `,`. **DO NOT use `{tuple_delimiter}` for separating multiple keywords within this field.**
-        *   `relationship_description`: A concise explanation of the nature of the relationship between the source and target entities, providing a clear rationale for their connection.
-    *   **Relationship Exclusion Rule:** Do **NOT** output a relationship if either endpoint violates the **Entity Exclusion Rules in Section 1 (Entity Extraction & Output)**.
-    *   **Output Format - Relationships:** Output a total of 5 fields for each relationship, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `relation`.
-        *   Format: `relation{tuple_delimiter}source_entity{tuple_delimiter}target_entity{tuple_delimiter}relationship_keywords{tuple_delimiter}relationship_description`
+- person         : Is it a specific individual human (real, historical, or fictional)?
+- organization   : Is it a named group of humans acting as a collective unit?
+- location       : Is it a named geographic or spatial place?
+- event          : Is it a named occurrence anchored in history, even if temporally fuzzy?
+- artifact       : Is it a human-made physical object you can hold or point at?
+- work           : Is it a named intellectual output that can be cited or deployed?
+                   (covers papers, software, datasets, models, standards, regulations,
+                   product specifications, internal reports, process documents)
+- naturalentity  : Does it exist in the physical world independently of human production?
+- concept        : Is it an abstract idea best answered by "what IS it"?
+- process        : Is it a named method or procedure best answered by "how IS IT done"?
 
-3.  **Delimiter Usage Protocol:**
-    *   The `{tuple_delimiter}` is a complete, atomic marker and **must not be filled with content**. It serves strictly as a field separator.
-    *   **Incorrect Example:** `entity{tuple_delimiter}Tokyo<|location|>Tokyo is the capital of Japan.`
-    *   **Correct Example:** `entity{tuple_delimiter}Tokyo{tuple_delimiter}location{tuple_delimiter}Tokyo is the capital of Japan.`
+Disambiguation rules:
+  concept vs process   → "Attention Mechanism" (WHAT) = concept;
+                         "Gradient Descent" (HOW)     = process.
+                         When both apply, prefer process.
+  artifact vs work     → H100 GPU (touchable physical chip) = artifact;
+                         GPT-4 (citable/deployable model)   = work.
+                         The chip running a model = artifact; the model itself = work.
+  event vs process     → "Q3 Business Review 2024" (happened once, anchored) = event;
+                         "Quarterly Review Procedure" (repeatable workflow)   = process.
 
-4.  **Relationship Direction & Duplication:**
-    *   Treat all relationships as **undirected** unless explicitly stated otherwise. Swapping the source and target entities for an undirected relationship does not constitute a new relationship.
-    *   Avoid outputting duplicate relationships.
+Use ONLY the types provided in <Entity_types>. No other type values are permitted.
 
-5.  **Output Order & Prioritization:**
-    *   Output all extracted entities first, followed by all extracted relationships.
-    *   Within the list of relationships, prioritize and output those relationships that are **most significant** to the core meaning of the input text first.
+---Ambiguity Protocol---
+When you cannot immediately assign a type, follow these steps in order:
 
-6.  **Context & Objectivity:**
-    *   Ensure all entity names and descriptions are written in the **third person**.
-    *   Explicitly name the subject or object; **avoid using pronouns** such as `this article`, `this paper`, `our company`, `I`, `you`, and `he/she`.
-    *   Prioritize entities that can form clear relationships; avoid outputting isolated placeholder-like entities when they carry no standalone semantic value.
+  Step 1  Is it a named standalone entity, or a descriptor / modifier phrase?
+          "Hybrid vehicle technology" → descriptor phrase → DO NOT EXTRACT.
+          "Prius"                     → named product     → artifact.
 
-7.  **Language & Proper Nouns:**
-    *   The entire output (entity names, keywords, and descriptions) must be written in `{language}`.
-    *   Proper nouns (e.g., personal names, place names, organization names) should be retained in their original language if a proper, widely accepted translation is not available or would cause ambiguity.
+  Step 2  Apply the WHAT / HOW test.
+          "X is ___" completes naturally with a definition?  → concept.
+          "X works by ___" completes naturally with steps?   → process.
+          Both complete? → process. Neither completes? → DO NOT EXTRACT.
 
-8.  **Completion Signal:** Output the literal string `{completion_delimiter}` only after all entities and relationships, following all criteria, have been completely extracted and outputted.
+  Step 3  Is this entity central to the passage's argument?
+          YES → concept (safer default). NO → DO NOT EXTRACT.
+
+Prioritize entities that can form clear, meaningful relationships with other
+extracted entities. Avoid outputting isolated placeholder-like entities that
+cannot connect to anything else in the graph.
+
+A correctly dropped entity is always preferable to a wrongly typed one.
+
+---What Must Never Be Extracted as an Entity---
+The following must NOT appear as entity nodes.
+
+  Metric values   (92.3% accuracy, 14ms, $2.4M revenue)
+                  → Embed in relationship_description as natural language.
+                    Example: "GPT-4 achieved 92.3% accuracy on GLUE (test split)."
+                  → Do NOT extract as a separate entity node.
+
+  Role titles     (CEO, Director, Engineer)
+                  → Embed in relationship_description as natural language.
+                    Example: "Sam Altman serves as CEO of OpenAI since 2023."
+                  → Also include in the person entity_description as backup.
+                  → Do NOT extract as a separate entity node.
+
+  Unnamed generics  ("a model", "the algorithm", "the team") → skip entirely.
+
+  File-system noise  (file paths, directory names, filenames, extensions,
+                      chunk IDs, bounding boxes, page numbers, layout labels)
+                  → skip entirely. Examples: /data/results, image_01.jpg,
+                    config.yaml, Page 3, Bounding Box, docbench_results.
+
+  Negated entities  exist and must be extracted normally.
+  Negated relations do NOT exist and must NOT produce a positive edge.
+
+---Canonical Type Rule---
+One surface name → one entity type, stable across the entire extraction run.
+Never output the same surface name with two different types.
+If an entity has dual identity, assign the type matching its PRIMARY FUNCTION
+in the world and hold it globally.
+
+---Depth-1 Rule---
+Extract only the outermost complete named entity.
+  "EU AI Act Article 13" → extract "EU AI Act" (work), not "Article 13" alone.
+Exception: extract a sub-component only when it is independently and widely
+referenced by that name outside this document.
+
+---Negation Rule---
+  "GPT-3 was trained WITHOUT RLHF"
+  → Extract both GPT-3 (work) and RLHF (process) as entities.
+  → Do NOT create a GPT-3 –[trained_with]→ RLHF relationship edge.
+  → In the GPT-3 description, note: "[negated context: does not use RLHF here]"
+
+---Entity Output Format---
+Output one line per entity. Fields are separated by {tuple_delimiter}.
+The first field must be the literal string `entity`.
+
+  entity{tuple_delimiter}entity_name{tuple_delimiter}entity_type{tuple_delimiter}entity_description
+
+  entity_name        : Exact surface form from the text.
+                       Title-case each significant word if the name is case-insensitive.
+                       Consistent naming across the entire extraction run.
+  entity_type        : Lowercase. Must be one of the types in <Entity_types>.
+                       No other values permitted.
+  entity_description : 1–2 objective sentences in third person.
+                       Based solely on information present in the input text.
+                       Do not introduce knowledge not found in the source text.
+                       For person entities: MUST include any title or role mentioned
+                       in the input text. Format: "[name], [role] at [org] per the text."
+
+---Relationship Output Format---
+Output one line per relationship. Fields are separated by {tuple_delimiter}.
+The first field must be the literal string `relation`.
+
+  relation{tuple_delimiter}source_entity{tuple_delimiter}target_entity{tuple_delimiter}relationship_keywords{tuple_delimiter}relationship_description
+
+  source_entity / target_entity : Must match entity_name exactly as extracted above.
+  relationship_keywords         : One or more high-level keywords. Separate with comma.
+                                  Do NOT use {tuple_delimiter} inside this field.
+  relationship_description      : Concise explanation based solely on the input text.
+                                  Embed metric values and role titles here as natural
+                                  language rather than extracting them as entities.
+
+---General Instructions---
+1.  Output all entities first, then all relationships.
+    Within relationships, prioritize those most significant to the core meaning first.
+
+2.  Relationships are undirected unless stated otherwise.
+    Swapping source and target does not create a new relationship.
+    Do not output duplicate relationships.
+    Do NOT output a relationship if either endpoint violates the Entity Exclusion Rules.
+
+3.  Decompose N-ary relationships into binary pairs.
+    "Alice, Bob, and Carol collaborated on Project X" →
+    Alice–Project X, Bob–Project X, Carol–Project X.
+
+4.  Write all entity names and descriptions in the third person.
+    Do not use pronouns: "this article", "our company", "I", "you", "he/she".
+
+5.  Output language: {language}.
+    Proper nouns without a widely accepted translation stay in their original language.
+
+6.  After all entities and relationships are output, write the completion signal:
+    {completion_delimiter}
 
 ---Examples---
 {examples}
 """
 
 PROMPTS["entity_extraction_user_prompt"] = """---Task---
-Extract entities and relationships from the input text in Data to be Processed below.
+Extract entities and relationships from the input text below.
 
 ---Instructions---
-1.  **Strict Adherence to Format:** Strictly adhere to all format requirements for entity and relationship lists, including output order, field delimiters, and proper noun handling, as specified in the system prompt.
-2.  **Output Content Only:** Output *only* the extracted list of entities and relationships. Do not include any introductory or concluding remarks, explanations, or additional text before or after the list.
-3.  **Completion Signal:** Output `{completion_delimiter}` as the final line after all relevant entities and relationships have been extracted and presented.
-4.  **Output Language:** Ensure the output language is {language}. Proper nouns (e.g., personal names, place names, organization names) must be kept in their original language and not translated.
+1.  Follow all type definitions, protocols, and format rules in the system prompt exactly.
+2.  Use ONLY the entity types listed in <Entity_types> below, in lowercase.
+    No other type values are permitted.
+3.  Output ONLY the extracted entities and relationships — no preamble, no explanation.
+4.  Output {completion_delimiter} as the final line.
+5.  Output language: {language}. Retain proper nouns in their original language.
 
 ---Data to be Processed---
 <Entity_types>
@@ -86,134 +184,304 @@ Extract entities and relationships from the input text in Data to be Processed b
 """
 
 PROMPTS["entity_continue_extraction_user_prompt"] = """---Task---
-Based on the last extraction task, identify and extract any **missed or incorrectly formatted** entities and relationships from the input text.
+Review the previous extraction and add any missed or incorrectly formatted
+entities and relationships from the same input text.
 
 ---Instructions---
-1.  **Strict Adherence to System Format:** Strictly adhere to all format requirements for entity and relationship lists, including output order, field delimiters, and proper noun handling, as specified in the system instructions.
-2.  **Focus on Corrections/Additions:**
-    *   **Do NOT** re-output entities and relationships that were **correctly and fully** extracted in the last task.
-    *   If an entity or relationship was **missed** in the last task, extract and output it now according to the system format.
-    *   If an entity or relationship was **truncated, had missing fields, or was otherwise incorrectly formatted** in the last task, re-output the *corrected and complete* version in the specified format.
-3.  **Output Format - Entities:** Output a total of 4 fields for each entity, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `entity`.
-4.  **Output Format - Relationships:** Output a total of 5 fields for each relationship, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `relation`.
-5.  **Output Content Only:** Output *only* the extracted list of entities and relationships. Do not include any introductory or concluding remarks, explanations, or additional text before or after the list.
-6.  **Completion Signal:** Output `{completion_delimiter}` as the final line after all relevant missing or corrected entities and relationships have been extracted and presented.
-7.  **Output Language:** Ensure the output language is {language}. Proper nouns (e.g., personal names, place names, organization names) must be kept in their original language and not translated.
+1.  Do NOT re-output entities or relationships that were correctly and fully extracted.
+2.  Output only: (a) missed entities/relationships, (b) corrected versions of
+    truncated or malformed entries.
+3.  Apply all rules from the system prompt: type definitions, ambiguity protocol,
+    canonical type rule, depth-1 rule, negation rule, attribute encoding.
+4.  Use ONLY the entity types listed in <Entity_types> in the original user message,
+    in lowercase. No other type values are permitted.
+5.  Entity format  : entity{tuple_delimiter}entity_name{tuple_delimiter}entity_type{tuple_delimiter}entity_description
+6.  Relation format: relation{tuple_delimiter}source_entity{tuple_delimiter}target_entity{tuple_delimiter}relationship_keywords{tuple_delimiter}relationship_description
+7.  Output ONLY the missed/corrected entries — no preamble, no explanation.
+8.  Output {completion_delimiter} as the final line.
+9.  Output language: {language}. Retain proper nouns in their original language.
 
 <Output>
 """
 
 PROMPTS["entity_extraction_examples"] = [
+
+    # ── Example 1 · Core ML type boundary ──────────────────────────────────
     """<Entity_types>
-["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-while Alex clenched his jaw, the buzz of frustration dull against the backdrop of Taylor's authoritarian certainty. It was this competitive undercurrent that kept him alert, the sense that his and Jordan's shared commitment to discovery was an unspoken rebellion against Cruz's narrowing vision of control and order.
-
-Then Taylor did something unexpected. They paused beside Jordan and, for a moment, observed the device with something akin to reverence. "If this tech can be understood..." Taylor said, their voice quieter, "It could change the game for us. For all of us."
-
-The underlying dismissal earlier seemed to falter, replaced by a glimpse of reluctant respect for the gravity of what lay in their hands. Jordan looked up, and for a fleeting heartbeat, their eyes locked with Taylor's, a wordless clash of wills softening into an uneasy truce.
-
-It was a small transformation, barely perceptible, but one that Alex noted with an inward nod. They had all been brought here by different paths
+The Transformer architecture, introduced in "Attention Is All You Need", relies on
+self-attention to process sequences in parallel. Training GPT-4 on this architecture
+used RLHF to align the model with human preferences. The NVIDIA H100 GPU was the
+primary hardware used during fine-tuning.
 ```
 
 <Output>
-entity{tuple_delimiter}Alex{tuple_delimiter}person{tuple_delimiter}Alex is a character who experiences frustration and is observant of the dynamics among other characters.
-entity{tuple_delimiter}Taylor{tuple_delimiter}person{tuple_delimiter}Taylor is portrayed with authoritarian certainty and shows a moment of reverence towards a device, indicating a change in perspective.
-entity{tuple_delimiter}Jordan{tuple_delimiter}person{tuple_delimiter}Jordan shares a commitment to discovery and has a significant interaction with Taylor regarding a device.
-entity{tuple_delimiter}Cruz{tuple_delimiter}person{tuple_delimiter}Cruz is associated with a vision of control and order, influencing the dynamics among other characters.
-entity{tuple_delimiter}The Device{tuple_delimiter}equipment{tuple_delimiter}The Device is central to the story, with potential game-changing implications, and is revered by Taylor.
-relation{tuple_delimiter}Alex{tuple_delimiter}Taylor{tuple_delimiter}power dynamics, observation{tuple_delimiter}Alex observes Taylor's authoritarian behavior and notes changes in Taylor's attitude toward the device.
-relation{tuple_delimiter}Alex{tuple_delimiter}Jordan{tuple_delimiter}shared goals, rebellion{tuple_delimiter}Alex and Jordan share a commitment to discovery, which contrasts with Cruz's vision.)
-relation{tuple_delimiter}Taylor{tuple_delimiter}Jordan{tuple_delimiter}conflict resolution, mutual respect{tuple_delimiter}Taylor and Jordan interact directly regarding the device, leading to a moment of mutual respect and an uneasy truce.
-relation{tuple_delimiter}Jordan{tuple_delimiter}Cruz{tuple_delimiter}ideological conflict, rebellion{tuple_delimiter}Jordan's commitment to discovery is in rebellion against Cruz's vision of control and order.
-relation{tuple_delimiter}Taylor{tuple_delimiter}The Device{tuple_delimiter}reverence, technological significance{tuple_delimiter}Taylor shows reverence towards the device, indicating its importance and potential impact.
+entity{tuple_delimiter}Transformer Architecture{tuple_delimiter}concept{tuple_delimiter}Architecture described in the text as relying on self-attention to process sequences in parallel.
+entity{tuple_delimiter}Attention Is All You Need{tuple_delimiter}work{tuple_delimiter}Paper cited in the text as the source that introduced the Transformer architecture.
+entity{tuple_delimiter}Self-Attention{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as the mechanism the Transformer relies on to process sequences in parallel.
+entity{tuple_delimiter}GPT-4{tuple_delimiter}work{tuple_delimiter}Model described in the text as trained on the Transformer architecture using RLHF.
+entity{tuple_delimiter}RLHF{tuple_delimiter}process{tuple_delimiter}Training procedure described in the text as used to align GPT-4 with human preferences.
+entity{tuple_delimiter}NVIDIA H100{tuple_delimiter}artifact{tuple_delimiter}GPU described in the text as the primary hardware used during GPT-4 fine-tuning.
+relation{tuple_delimiter}Attention Is All You Need{tuple_delimiter}Transformer Architecture{tuple_delimiter}origin, introduction{tuple_delimiter}The text states the Transformer architecture was introduced in "Attention Is All You Need".
+relation{tuple_delimiter}Transformer Architecture{tuple_delimiter}Self-Attention{tuple_delimiter}core mechanism{tuple_delimiter}The text states the Transformer architecture relies on self-attention to process sequences.
+relation{tuple_delimiter}GPT-4{tuple_delimiter}RLHF{tuple_delimiter}training method, alignment{tuple_delimiter}The text states training GPT-4 used RLHF to align the model with human preferences.
+relation{tuple_delimiter}GPT-4{tuple_delimiter}NVIDIA H100{tuple_delimiter}hardware, fine-tuning{tuple_delimiter}The text states the NVIDIA H100 GPU was the primary hardware used during GPT-4 fine-tuning.
 {completion_delimiter}
-
 """,
+
+    # ── Example 2 · Homonym disambiguation ─────────────────────────────────
     """<Entity_types>
-["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-Stock markets faced a sharp downturn today as tech giants saw significant declines, with the global tech index dropping by 3.4% in midday trading. Analysts attribute the selloff to investor concerns over rising interest rates and regulatory uncertainty.
-
-Among the hardest hit, nexon technologies saw its stock plummet by 7.8% after reporting lower-than-expected quarterly earnings. In contrast, Omega Energy posted a modest 2.1% gain, driven by rising oil prices.
-
-Meanwhile, commodity markets reflected a mixed sentiment. Gold futures rose by 1.5%, reaching $2,080 per ounce, as investors sought safe-haven assets. Crude oil prices continued their rally, climbing to $87.60 per barrel, supported by supply constraints and strong demand.
-
-Financial experts are closely watching the Federal Reserve's next move, as speculation grows over potential rate hikes. The upcoming policy announcement is expected to influence investor confidence and overall market stability.
+Python, the programming language, uses an interpreter process to execute scripts.
+A python snake can consume prey larger than its own head.
+The Transformer steps up voltage in power grids.
+Mercury the planet orbits the Sun in 88 days; mercury the element is liquid at room temperature.
 ```
 
 <Output>
-entity{tuple_delimiter}Global Tech Index{tuple_delimiter}category{tuple_delimiter}The Global Tech Index tracks the performance of major technology stocks and experienced a 3.4% decline today.
-entity{tuple_delimiter}Nexon Technologies{tuple_delimiter}organization{tuple_delimiter}Nexon Technologies is a tech company that saw its stock decline by 7.8% after disappointing earnings.
-entity{tuple_delimiter}Omega Energy{tuple_delimiter}organization{tuple_delimiter}Omega Energy is an energy company that gained 2.1% in stock value due to rising oil prices.
-entity{tuple_delimiter}Gold Futures{tuple_delimiter}product{tuple_delimiter}Gold futures rose by 1.5%, indicating increased investor interest in safe-haven assets.
-entity{tuple_delimiter}Crude Oil{tuple_delimiter}product{tuple_delimiter}Crude oil prices rose to $87.60 per barrel due to supply constraints and strong demand.
-entity{tuple_delimiter}Market Selloff{tuple_delimiter}category{tuple_delimiter}Market selloff refers to the significant decline in stock values due to investor concerns over interest rates and regulations.
-entity{tuple_delimiter}Federal Reserve Policy Announcement{tuple_delimiter}category{tuple_delimiter}The Federal Reserve's upcoming policy announcement is expected to impact investor confidence and market stability.
-entity{tuple_delimiter}3.4% Decline{tuple_delimiter}category{tuple_delimiter}The Global Tech Index experienced a 3.4% decline in midday trading.
-relation{tuple_delimiter}Global Tech Index{tuple_delimiter}Market Selloff{tuple_delimiter}market performance, investor sentiment{tuple_delimiter}The decline in the Global Tech Index is part of the broader market selloff driven by investor concerns.
-relation{tuple_delimiter}Nexon Technologies{tuple_delimiter}Global Tech Index{tuple_delimiter}company impact, index movement{tuple_delimiter}Nexon Technologies' stock decline contributed to the overall drop in the Global Tech Index.
-relation{tuple_delimiter}Gold Futures{tuple_delimiter}Market Selloff{tuple_delimiter}market reaction, safe-haven investment{tuple_delimiter}Gold prices rose as investors sought safe-haven assets during the market selloff.
-relation{tuple_delimiter}Federal Reserve Policy Announcement{tuple_delimiter}Market Selloff{tuple_delimiter}interest rate impact, financial regulation{tuple_delimiter}Speculation over Federal Reserve policy changes contributed to market volatility and investor selloff.
+entity{tuple_delimiter}Python{tuple_delimiter}work{tuple_delimiter}Programming language described in the text as using an interpreter process to execute scripts.
+entity{tuple_delimiter}python{tuple_delimiter}naturalentity{tuple_delimiter}Snake described in the text as capable of consuming prey larger than its own head.
+entity{tuple_delimiter}Interpreter Process{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as the mechanism Python uses to execute scripts.
+entity{tuple_delimiter}Transformer{tuple_delimiter}artifact{tuple_delimiter}Device described in the text as stepping up voltage in power grids.
+entity{tuple_delimiter}Mercury{tuple_delimiter}naturalentity{tuple_delimiter}Planet described in the text as orbiting the Sun in 88 days.
+entity{tuple_delimiter}mercury{tuple_delimiter}naturalentity{tuple_delimiter}Element described in the text as liquid at room temperature.
+relation{tuple_delimiter}Python{tuple_delimiter}Interpreter Process{tuple_delimiter}execution, runtime{tuple_delimiter}The text states Python uses an interpreter process to execute scripts.
 {completion_delimiter}
-
 """,
+
+    # ── Example 3 · Event vs Process vs Concept ─────────────────────────────
     """<Entity_types>
-["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-At the World Athletics Championship in Tokyo, Noah Carter broke the 100m sprint record using cutting-edge carbon-fiber spikes.
+The Manhattan Project developed the first nuclear weapon using isotope separation
+via gaseous diffusion. The Trinity test in July 1945 was the first detonation.
+Nuclear fission had been theorized since the 1930s as a fundamental physical phenomenon.
 ```
 
 <Output>
-entity{tuple_delimiter}World Athletics Championship{tuple_delimiter}event{tuple_delimiter}The World Athletics Championship is a global sports competition featuring top athletes in track and field.
-entity{tuple_delimiter}Tokyo{tuple_delimiter}location{tuple_delimiter}Tokyo is the host city of the World Athletics Championship.
-entity{tuple_delimiter}Noah Carter{tuple_delimiter}person{tuple_delimiter}Noah Carter is a sprinter who set a new record in the 100m sprint at the World Athletics Championship.
-entity{tuple_delimiter}100m Sprint Record{tuple_delimiter}category{tuple_delimiter}The 100m sprint record is a benchmark in athletics, recently broken by Noah Carter.
-entity{tuple_delimiter}Carbon-Fiber Spikes{tuple_delimiter}equipment{tuple_delimiter}Carbon-fiber spikes are advanced sprinting shoes that provide enhanced speed and traction.
-entity{tuple_delimiter}World Athletics Federation{tuple_delimiter}organization{tuple_delimiter}The World Athletics Federation is the governing body overseeing the World Athletics Championship and record validations.
-relation{tuple_delimiter}World Athletics Championship{tuple_delimiter}Tokyo{tuple_delimiter}event location, international competition{tuple_delimiter}The World Athletics Championship is being hosted in Tokyo.
-relation{tuple_delimiter}Noah Carter{tuple_delimiter}100m Sprint Record{tuple_delimiter}athlete achievement, record-breaking{tuple_delimiter}Noah Carter set a new 100m sprint record at the championship.
-relation{tuple_delimiter}Noah Carter{tuple_delimiter}Carbon-Fiber Spikes{tuple_delimiter}athletic equipment, performance boost{tuple_delimiter}Noah Carter used carbon-fiber spikes to enhance performance during the race.
-relation{tuple_delimiter}Noah Carter{tuple_delimiter}World Athletics Championship{tuple_delimiter}athlete participation, competition{tuple_delimiter}Noah Carter is competing at the World Athletics Championship.
+entity{tuple_delimiter}Manhattan Project{tuple_delimiter}event{tuple_delimiter}Program described in the text as having developed the first nuclear weapon.
+entity{tuple_delimiter}Gaseous Diffusion{tuple_delimiter}process{tuple_delimiter}Isotope separation method described in the text as the technique used by the Manhattan Project.
+entity{tuple_delimiter}Trinity Test{tuple_delimiter}event{tuple_delimiter}Detonation described in the text as occurring in July 1945 and as the first nuclear detonation.
+entity{tuple_delimiter}Nuclear Fission{tuple_delimiter}concept{tuple_delimiter}Physical phenomenon described in the text as theorized since the 1930s.
+relation{tuple_delimiter}Manhattan Project{tuple_delimiter}Gaseous Diffusion{tuple_delimiter}method usage{tuple_delimiter}The text states the Manhattan Project used isotope separation via gaseous diffusion.
+relation{tuple_delimiter}Manhattan Project{tuple_delimiter}Trinity Test{tuple_delimiter}program milestone{tuple_delimiter}The text identifies the Trinity test as the first detonation produced by the Manhattan Project.
+relation{tuple_delimiter}Nuclear Fission{tuple_delimiter}Manhattan Project{tuple_delimiter}scientific basis{tuple_delimiter}The text implies nuclear fission as the physical phenomenon the Manhattan Project applied.
 {completion_delimiter}
+""",
 
+    # ── Example 4 · Work subtypes + artifact vs work ────────────────────────
+    """<Entity_types>
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
+
+<Input Text>
+```
+ImageNet transformed computer vision. The ResNet paper showed that residual connections
+fix the vanishing gradient problem. The EU AI Act now governs high-risk AI systems.
+Google trained PaLM 2 on a cluster of TPU V4 chips; BERT model weights are available
+on HuggingFace.
+```
+
+<Output>
+entity{tuple_delimiter}ImageNet{tuple_delimiter}work{tuple_delimiter}Dataset described in the text as having transformed computer vision.
+entity{tuple_delimiter}ResNet{tuple_delimiter}work{tuple_delimiter}Paper described in the text as showing that residual connections fix the vanishing gradient problem.
+entity{tuple_delimiter}Residual Connections{tuple_delimiter}concept{tuple_delimiter}Mechanism described in the text as fixing the vanishing gradient problem.
+entity{tuple_delimiter}Vanishing Gradient Problem{tuple_delimiter}concept{tuple_delimiter}Problem described in the text as something residual connections fix.
+entity{tuple_delimiter}EU AI Act{tuple_delimiter}work{tuple_delimiter}Regulation described in the text as governing high-risk AI systems.
+entity{tuple_delimiter}Google{tuple_delimiter}organization{tuple_delimiter}Entity described in the text as having trained PaLM 2 on a cluster of TPU V4 chips.
+entity{tuple_delimiter}PaLM 2{tuple_delimiter}work{tuple_delimiter}Model described in the text as trained by Google on a cluster of TPU V4 chips.
+entity{tuple_delimiter}TPU V4{tuple_delimiter}artifact{tuple_delimiter}Chip described in the text as the hardware cluster on which Google trained PaLM 2.
+entity{tuple_delimiter}BERT{tuple_delimiter}work{tuple_delimiter}Model described in the text as having weights available on HuggingFace.
+entity{tuple_delimiter}HuggingFace{tuple_delimiter}organization{tuple_delimiter}Entity described in the text as the place where BERT model weights are available.
+relation{tuple_delimiter}ResNet{tuple_delimiter}Residual Connections{tuple_delimiter}introduction, demonstration{tuple_delimiter}The text states the ResNet paper showed residual connections fix the vanishing gradient problem.
+relation{tuple_delimiter}Residual Connections{tuple_delimiter}Vanishing Gradient Problem{tuple_delimiter}solution{tuple_delimiter}The text states residual connections fix the vanishing gradient problem.
+relation{tuple_delimiter}Google{tuple_delimiter}PaLM 2{tuple_delimiter}development, training{tuple_delimiter}The text states Google trained PaLM 2 on a cluster of TPU V4 chips.
+relation{tuple_delimiter}PaLM 2{tuple_delimiter}TPU V4{tuple_delimiter}hardware dependency{tuple_delimiter}The text states PaLM 2 was trained on a cluster of TPU V4 chips.
+relation{tuple_delimiter}BERT{tuple_delimiter}HuggingFace{tuple_delimiter}distribution, availability{tuple_delimiter}The text states BERT model weights are available on HuggingFace.
+{completion_delimiter}
+""",
+
+    # ── Example 5 · N-ary decomposition and location type ──────────────────
+    """<Entity_types>
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
+
+<Input Text>
+```
+Marie Curie, Pierre Curie, and Henri Becquerel jointly received the 1903 Nobel Prize
+in Physics in Stockholm for their discovery of radioactivity. The award was administered
+by the Royal Swedish Academy of Sciences, headquartered in Stockholm, Sweden.
+```
+
+<Output>
+entity{tuple_delimiter}Marie Curie{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of radioactivity.
+entity{tuple_delimiter}Pierre Curie{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of radioactivity.
+entity{tuple_delimiter}Henri Becquerel{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of radioactivity.
+entity{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}event{tuple_delimiter}Award described in the text as jointly given to Marie Curie, Pierre Curie, and Henri Becquerel in Stockholm for the discovery of radioactivity.
+entity{tuple_delimiter}Radioactivity{tuple_delimiter}concept{tuple_delimiter}Phenomenon described in the text as the discovery for which the 1903 Nobel Prize in Physics was awarded.
+entity{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}organization{tuple_delimiter}Body described in the text as the administrator of the 1903 Nobel Prize in Physics, headquartered in Stockholm.
+entity{tuple_delimiter}Stockholm{tuple_delimiter}location{tuple_delimiter}City described in the text as the location of the Nobel Prize ceremony and headquarters of the Royal Swedish Academy of Sciences.
+relation{tuple_delimiter}Marie Curie{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Marie Curie jointly received the 1903 Nobel Prize in Physics.
+relation{tuple_delimiter}Pierre Curie{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Pierre Curie jointly received the 1903 Nobel Prize in Physics.
+relation{tuple_delimiter}Henri Becquerel{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Henri Becquerel jointly received the 1903 Nobel Prize in Physics.
+relation{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}Radioactivity{tuple_delimiter}scientific basis, recognition{tuple_delimiter}The text states the prize was awarded for the discovery of radioactivity.
+relation{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}organization, administration{tuple_delimiter}The text states the award was administered by the Royal Swedish Academy of Sciences.
+relation{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}Stockholm{tuple_delimiter}headquarters, location{tuple_delimiter}The text states the Royal Swedish Academy of Sciences is headquartered in Stockholm, Sweden.
+{completion_delimiter}
+""",
+
+    # ── Example 6 · Concept vs Process (hardest pair) ───────────────────────
+    """<Entity_types>
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
+
+<Input Text>
+```
+Attention, at its core, is a weighted sum over values. Multi-head attention runs
+this operation in parallel across multiple representation subspaces. Backpropagation
+propagates error gradients from the loss surface back through each layer.
+The chain rule of calculus underlies this.
+```
+
+<Output>
+entity{tuple_delimiter}Attention{tuple_delimiter}concept{tuple_delimiter}Mechanism described in the text as a weighted sum over values at its core.
+entity{tuple_delimiter}Multi-Head Attention{tuple_delimiter}process{tuple_delimiter}Operation described in the text as running the attention mechanism in parallel across multiple representation subspaces.
+entity{tuple_delimiter}Backpropagation{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as propagating error gradients from the loss surface back through each layer.
+entity{tuple_delimiter}Chain Rule{tuple_delimiter}concept{tuple_delimiter}Mathematical principle described in the text as underlying backpropagation.
+relation{tuple_delimiter}Multi-Head Attention{tuple_delimiter}Attention{tuple_delimiter}instantiation, parallelisation{tuple_delimiter}The text describes multi-head attention as running the attention operation in parallel across multiple subspaces.
+relation{tuple_delimiter}Backpropagation{tuple_delimiter}Chain Rule{tuple_delimiter}mathematical foundation{tuple_delimiter}The text states the chain rule of calculus underlies backpropagation.
+{completion_delimiter}
+""",
+
+    # ── Example 7 · Metrics and roles are NOT entities ──────────────────────
+    """<Entity_types>
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
+
+<Input Text>
+```
+The model achieved 92.3% accuracy on GLUE with 14ms latency on an H100 at 700W TDP.
+Sam Altman, CEO of OpenAI, presented the results.
+```
+
+<Output>
+entity{tuple_delimiter}GLUE{tuple_delimiter}work{tuple_delimiter}Benchmark described in the text as what the model was evaluated on.
+entity{tuple_delimiter}H100{tuple_delimiter}artifact{tuple_delimiter}Hardware described in the text as the device on which the model was evaluated.
+entity{tuple_delimiter}Sam Altman{tuple_delimiter}person{tuple_delimiter}Individual described in the text as CEO of OpenAI who presented the results.
+entity{tuple_delimiter}OpenAI{tuple_delimiter}organization{tuple_delimiter}Entity described in the text as the organization whose CEO presented the results.
+relation{tuple_delimiter}Sam Altman{tuple_delimiter}OpenAI{tuple_delimiter}leadership, role{tuple_delimiter}The text identifies Sam Altman as CEO of OpenAI.
+relation{tuple_delimiter}H100{tuple_delimiter}GLUE{tuple_delimiter}evaluation infrastructure{tuple_delimiter}The text states the model achieved 92.3% accuracy on GLUE with 14ms latency on the H100 at 700W TDP.
+{completion_delimiter}
+""",
+
+    # ── Example 8 · Negation does not produce positive edges ────────────────
+    """<Entity_types>
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
+
+<Input Text>
+```
+GPT-3 was trained without RLHF, unlike its successor GPT-4 which used RLHF extensively.
+The study found no significant correlation between model size and factual accuracy.
+```
+
+<Output>
+entity{tuple_delimiter}GPT-3{tuple_delimiter}work{tuple_delimiter}Model described in the text as trained without RLHF. [negated context: the text explicitly states GPT-3 does NOT use RLHF]
+entity{tuple_delimiter}GPT-4{tuple_delimiter}work{tuple_delimiter}Model described in the text as the successor to GPT-3 and as having used RLHF extensively.
+entity{tuple_delimiter}RLHF{tuple_delimiter}process{tuple_delimiter}Training procedure described in the text as used extensively by GPT-4 but explicitly not used by GPT-3.
+relation{tuple_delimiter}GPT-4{tuple_delimiter}RLHF{tuple_delimiter}training method, alignment{tuple_delimiter}The text states GPT-4 used RLHF extensively.
+relation{tuple_delimiter}GPT-3{tuple_delimiter}GPT-4{tuple_delimiter}succession, model lineage{tuple_delimiter}The text describes GPT-4 as the successor to GPT-3.
+{completion_delimiter}
+""",
+
+    # ── Example 9 · Biomedical academic paper ───────────────────────────────
+    """<Entity_types>
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
+
+<Input Text>
+```
+CRISPR-Cas9 enables precise gene editing by cutting DNA at targeted sequences.
+The BRCA1 gene mutation increases breast cancer risk. Doxorubicin, a chemotherapy
+drug, intercalates into DNA strands to inhibit replication.
+```
+
+<Output>
+entity{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}process{tuple_delimiter}Gene editing procedure described in the text as enabling precise cuts in DNA at targeted sequences.
+entity{tuple_delimiter}BRCA1{tuple_delimiter}naturalentity{tuple_delimiter}Gene described in the text as having a mutation that increases breast cancer risk.
+entity{tuple_delimiter}Breast Cancer{tuple_delimiter}concept{tuple_delimiter}Condition described in the text as having its risk increased by BRCA1 gene mutations.
+entity{tuple_delimiter}Doxorubicin{tuple_delimiter}artifact{tuple_delimiter}Drug described in the text as intercalating into DNA strands to inhibit replication.
+relation{tuple_delimiter}BRCA1{tuple_delimiter}Breast Cancer{tuple_delimiter}genetic risk, disease association{tuple_delimiter}The text states a BRCA1 gene mutation increases breast cancer risk.
+relation{tuple_delimiter}Doxorubicin{tuple_delimiter}Breast Cancer{tuple_delimiter}treatment{tuple_delimiter}The text describes Doxorubicin as a chemotherapy drug, used in the context of inhibiting cancer cell replication.
+{completion_delimiter}
+""",
+
+    # ── Example 10 · Enterprise document (product / process / report) ────────
+    """<Entity_types>
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
+
+<Input Text>
+```
+The Q3 2024 Product Review concluded that the Apollo Platform failed to meet
+its 99.9% uptime SLA. The root cause analysis, led by Diana Chen, identified
+a memory leak in the Data Ingestion Pipeline as the primary fault.
+A remediation plan was submitted to the Engineering Steering Committee.
+```
+
+<Output>
+entity{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}event{tuple_delimiter}Review described in the text as having concluded that the Apollo Platform failed to meet its uptime SLA.
+entity{tuple_delimiter}Apollo Platform{tuple_delimiter}work{tuple_delimiter}Platform described in the text as failing to meet its 99.9% uptime SLA in the Q3 2024 Product Review.
+entity{tuple_delimiter}Diana Chen{tuple_delimiter}person{tuple_delimiter}Individual described in the text as having led the root cause analysis.
+entity{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}process{tuple_delimiter}Pipeline described in the text as containing the memory leak identified as the primary fault.
+entity{tuple_delimiter}Engineering Steering Committee{tuple_delimiter}organization{tuple_delimiter}Committee described in the text as the recipient of the remediation plan.
+entity{tuple_delimiter}Remediation Plan{tuple_delimiter}work{tuple_delimiter}Document described in the text as submitted to the Engineering Steering Committee following the root cause analysis.
+relation{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}Apollo Platform{tuple_delimiter}evaluation, SLA failure{tuple_delimiter}The text states the Q3 2024 Product Review concluded the Apollo Platform failed to meet its 99.9% uptime SLA.
+relation{tuple_delimiter}Diana Chen{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}leadership, analysis{tuple_delimiter}The text states Diana Chen led the root cause analysis within the review.
+relation{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}Apollo Platform{tuple_delimiter}fault, root cause{tuple_delimiter}The text identifies a memory leak in the Data Ingestion Pipeline as the primary fault behind the Apollo Platform's SLA failure.
+relation{tuple_delimiter}Remediation Plan{tuple_delimiter}Engineering Steering Committee{tuple_delimiter}submission, governance{tuple_delimiter}The text states the remediation plan was submitted to the Engineering Steering Committee.
+{completion_delimiter}
 """,
 ]
 
 PROMPTS["summarize_entity_descriptions"] = """---Role---
-You are a Knowledge Graph Specialist, proficient in data curation and synthesis.
+You are a Knowledge Graph Specialist proficient in data curation and synthesis.
 
 ---Task---
-Your task is to synthesize a list of descriptions of a given entity or relation into a single, comprehensive, and cohesive summary.
+Synthesize a list of descriptions of a given entity or relationship into a single,
+comprehensive, and cohesive summary.
 
 ---Instructions---
-1. Input Format: The description list is provided in JSON format. Each JSON object (representing a single description) appears on a new line within the `Description List` section.
-2. Output Format: The merged description will be returned as plain text, presented in multiple paragraphs, without any additional formatting or extraneous comments before or after the summary.
-3. Comprehensiveness: The summary must integrate all key information from *every* provided description. Do not omit any important facts or details.
-4. Context: Ensure the summary is written from an objective, third-person perspective; explicitly mention the name of the entity or relation for full clarity and context.
-5. Context & Objectivity:
-  - Write the summary from an objective, third-person perspective.
-  - Explicitly mention the full name of the entity or relation at the beginning of the summary to ensure immediate clarity and context.
-6. Conflict Handling:
-  - In cases of conflicting or inconsistent descriptions, first determine if these conflicts arise from multiple, distinct entities or relationships that share the same name.
-  - If distinct entities/relations are identified, summarize each one *separately* within the overall output.
-  - If conflicts within a single entity/relation (e.g., historical discrepancies) exist, attempt to reconcile them or present both viewpoints with noted uncertainty.
-7. Length Constraint:The summary's total length must not exceed {summary_length} tokens, while still maintaining depth and completeness.
-8. Language: The entire output must be written in {language}. Proper nouns (e.g., personal names, place names, organization names) may in their original language if proper translation is not available.
-  - The entire output must be written in {language}.
-  - Proper nouns (e.g., personal names, place names, organization names) should be retained in their original language if a proper, widely accepted translation is not available or would cause ambiguity.
+1.  Input format: descriptions are provided in JSON format, one object per line,
+    inside the Description List section.
+
+2.  Output format: plain text, multiple paragraphs if needed.
+    No additional formatting, no preamble, no concluding remarks.
+
+3.  Comprehensiveness: integrate all key information from every provided description.
+    Do not omit any important facts or details.
+
+4.  Perspective: write in objective third person.
+    Begin the summary by explicitly naming the entity or relationship.
+
+5.  Conflict handling:
+    - First determine whether conflicts arise from multiple distinct entities
+      sharing the same name. If so, summarize each one separately.
+    - If conflicts are within a single entity (e.g. historical discrepancies),
+      attempt to reconcile them or present both viewpoints with noted uncertainty.
+
+6.  Length: the summary must not exceed {summary_length} tokens while maintaining
+    depth and completeness.
+
+7.  Language: write the entire output in {language}.
+    Retain proper nouns in their original language when no widely accepted
+    translation exists.
 
 ---Input---
 {description_type} Name: {description_name}
 
 Description List:
-
 ```
 {description_list}
 ```
