@@ -4,6 +4,7 @@ from pathlib import Path
 import unicodedata
 import hashlib
 import os
+import math
 
 import asyncio
 import json
@@ -125,6 +126,33 @@ def _is_factual_or_legacy_edge(edge_data: dict[str, Any] | None) -> bool:
 
     # Legacy edges without explicit typing are considered factual.
     return True
+
+
+def _to_non_negative_float(value: Any, default: float = 1.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if not math.isfinite(parsed):
+        parsed = default
+    if parsed < 0.0:
+        return 0.0
+    return parsed
+
+
+def _extract_existing_factual_weight_raw(edge_data: dict[str, Any] | None) -> float:
+    """Read factual raw weight from edge; fallback to historical `weight` if needed."""
+    if not _is_factual_or_legacy_edge(edge_data):
+        return 0.0
+    if not isinstance(edge_data, dict):
+        return 0.0
+    if edge_data.get("weight_raw") is not None:
+        return _to_non_negative_float(edge_data.get("weight_raw"), default=0.0)
+    return _to_non_negative_float(edge_data.get("weight"), default=1.0)
+
+
+def _factual_weight_from_raw(weight_raw: float) -> float:
+    return math.log1p(max(0.0, _to_non_negative_float(weight_raw, default=0.0)))
 
 try:
     from transformers import AutoImageProcessor
@@ -1397,13 +1425,14 @@ async def rebuild_knowledge_from_chunks(
     )
 
     if not cached_results:
-        status_message = "No cached extraction results found, cannot rebuild"
+        status_message = (
+            "No cached extraction results found, falling back to source-only rebuild"
+        )
         logger.warning(status_message)
         if pipeline_status is not None and pipeline_status_lock is not None:
             async with pipeline_status_lock:
                 pipeline_status["latest_message"] = status_message
                 pipeline_status["history_messages"].append(status_message)
-        return
 
     # Process cached results to get entities and relationships for each chunk
     chunk_entities = {}  # chunk_id -> {entity_name: [entity_data]}
@@ -2195,9 +2224,12 @@ async def _rebuild_single_relationship(
                         chunk_relationships[chunk_id][edge_key]
                     )
 
-    if not all_relationship_data:
-        logger.warning(f"No relation data found for `{src}-{tgt}`")
-        return
+    current_is_factual = _is_factual_or_legacy_edge(current_relationship)
+    fallback_without_cache = not all_relationship_data
+    if fallback_without_cache:
+        logger.warning(
+            f"No relation data found for `{src}-{tgt}`, falling back to source-only rebuild"
+        )
 
     # Merge descriptions and keywords
     descriptions = []
@@ -2211,13 +2243,13 @@ async def _rebuild_single_relationship(
             descriptions.append(rel_data["description"])
         if rel_data.get("keywords"):
             keywords.append(rel_data["keywords"])
-        if rel_data.get("weight"):
-            weights.append(rel_data["weight"])
+        if "weight" in rel_data and rel_data.get("weight") is not None:
+            weights.append(rel_data.get("weight"))
         if rel_data.get("file_path"):
-            file_path = rel_data["file_path"]
-            if file_path and file_path not in seen_paths:
-                file_paths_list.append(file_path)
-                seen_paths.add(file_path)
+                file_path = rel_data["file_path"]
+                if file_path and file_path not in seen_paths:
+                    file_paths_list.append(file_path)
+                    seen_paths.add(file_path)
 
     # Apply count limit
     max_file_paths = global_config.get("max_file_paths")
@@ -2245,7 +2277,6 @@ async def _rebuild_single_relationship(
     # Remove duplicates while preserving order
     description_list = list(dict.fromkeys(descriptions))
     keywords = list(dict.fromkeys(keywords))
-    current_is_factual = _is_factual_or_legacy_edge(current_relationship)
 
     combined_keywords = (
         ", ".join(set(keywords))
@@ -2253,11 +2284,29 @@ async def _rebuild_single_relationship(
         else (current_relationship.get("keywords", "") if current_is_factual else "")
     )
 
-    weight = (
-        sum(weights)
-        if weights
-        else (current_relationship.get("weight", 1.0) if current_is_factual else 1.0)
-    )
+    if weights:
+        weight_raw = sum(_to_non_negative_float(weight, default=1.0) for weight in weights)
+    else:
+        current_raw = (
+            _extract_existing_factual_weight_raw(current_relationship)
+            if current_is_factual
+            else 1.0
+        )
+        if fallback_without_cache and current_is_factual:
+            current_source_ids = split_string_by_multi_markers(
+                str(current_relationship.get("source_id", "") or ""), [GRAPH_FIELD_SEP]
+            )
+            current_source_count = len([chunk_id for chunk_id in current_source_ids if chunk_id])
+            remaining_source_count = len([chunk_id for chunk_id in limited_chunk_ids if chunk_id])
+            if current_source_count > 0 and remaining_source_count > 0:
+                weight_raw = current_raw * (remaining_source_count / current_source_count)
+            elif remaining_source_count > 0:
+                weight_raw = float(remaining_source_count)
+            else:
+                weight_raw = current_raw
+        else:
+            weight_raw = current_raw
+    weight = _factual_weight_from_raw(weight_raw)
 
     # Generate final description from relations or fallback to current
     if description_list:
@@ -2290,6 +2339,7 @@ async def _rebuild_single_relationship(
         "description": final_description,
         "keywords": combined_keywords,
         "weight": weight,
+        "weight_raw": weight_raw,
         "source_id": GRAPH_FIELD_SEP.join(limited_chunk_ids),
         "file_path": GRAPH_FIELD_SEP.join([fp for fp in file_paths_list if fp])
         if file_paths_list
@@ -2392,6 +2442,7 @@ async def _rebuild_single_relationship(
                 "keywords": combined_keywords,
                 "description": final_description,
                 "weight": weight,
+                "weight_raw": weight_raw,
                 "file_path": updated_relationship_data["file_path"],
                 "edge_type": FACTUAL_EDGE_TYPE,
                 "provenance": FACTUAL_EDGE_PROVENANCE,
@@ -2793,7 +2844,7 @@ async def _merge_edges_then_upsert(
         return None
 
     already_edge = None
-    already_weights = []
+    already_weight_raw = 0.0
     already_source_ids = []
     already_description = []
     already_keywords = []
@@ -2807,7 +2858,7 @@ async def _merge_edges_then_upsert(
             if _is_factual_or_legacy_edge(already_edge):
                 # Only factual history participates in factual merge.
                 # Existing synonym metadata must not leak into factual updates.
-                already_weights.append(already_edge.get("weight", 1.0))
+                already_weight_raw = _extract_existing_factual_weight_raw(already_edge)
 
                 if already_edge.get("source_id") is not None:
                     already_source_ids.extend(
@@ -2907,10 +2958,7 @@ async def _merge_edges_then_upsert(
 
         if source_id_value:
             edge_weight = edge_data.get("weight", 1.0)
-            try:
-                parsed_weight = float(edge_weight)
-            except (TypeError, ValueError):
-                parsed_weight = 1.0
+            parsed_weight = _to_non_negative_float(edge_weight, default=1.0)
             source_weight_increments[source_id_value] = max(
                 source_weight_increments.get(source_id_value, 0.0),
                 parsed_weight,
@@ -2941,24 +2989,19 @@ async def _merge_edges_then_upsert(
     # 6.1 Finalize source_id
     source_id = GRAPH_FIELD_SEP.join(source_ids)
 
-    # 6.2 Finalize weight: existing weight + one increment per new source_id.
-    # This keeps retries and cache replays idempotent for the same chunk.
-    already_weight_sum = sum(already_weights)
+    # 6.2 Finalize factual weight:
+    # raw evidence is additive; retrieval weight uses log1p scaling.
     source_less_weight_sum = 0.0
     for edge_data in edges_data:
         source_id_value = str(edge_data.get("source_id", "") or "").strip()
         if source_id_value:
             continue
         edge_weight = edge_data.get("weight", 1.0)
-        try:
-            source_less_weight_sum += float(edge_weight)
-        except (TypeError, ValueError):
-            source_less_weight_sum += 1.0
-    weight = (
-        already_weight_sum
-        + sum(source_weight_increments.values())
-        + source_less_weight_sum
+        source_less_weight_sum += _to_non_negative_float(edge_weight, default=1.0)
+    weight_raw = (
+        already_weight_raw + sum(source_weight_increments.values()) + source_less_weight_sum
     )
+    weight = _factual_weight_from_raw(weight_raw)
 
     # 6.2 Finalize keywords by merging existing and new keywords
     all_keywords = set()
@@ -3321,6 +3364,7 @@ async def _merge_edges_then_upsert(
         tgt_id,
         edge_data=dict(
             weight=weight,
+            weight_raw=weight_raw,
             description=description,
             keywords=keywords,
             source_id=source_id,
@@ -3342,6 +3386,7 @@ async def _merge_edges_then_upsert(
         created_at=edge_created_at,
         truncate=truncation_info,
         weight=weight,
+        weight_raw=weight_raw,
         edge_type=FACTUAL_EDGE_TYPE,
         provenance=FACTUAL_EDGE_PROVENANCE,
     )
@@ -3369,6 +3414,7 @@ async def _merge_edges_then_upsert(
                 "keywords": keywords,
                 "description": description,
                 "weight": weight,
+                "weight_raw": weight_raw,
                 "file_path": file_path,
                 "edge_type": FACTUAL_EDGE_TYPE,
                 "provenance": FACTUAL_EDGE_PROVENANCE,
@@ -5791,6 +5837,7 @@ async def _ppr_rank_chunks_global(
         chunk_to_entities=chunk_to_entities,
         damping=query_param.ppr_damping,
         top_k=query_param.ppr_top_k,
+        ppr_synonym_weight_mode=query_param.ppr_synonym_weight_mode,
     )
 
     if not ppr_ranked:
@@ -5889,9 +5936,8 @@ async def _ppr_rank_chunks(
     if not entity_seed_weights:
         return []
 
-    # Step 1b: Hub penalty — down-weight high-degree generic entities
+    # Step 1b: Hub penalty – down-weight high-degree generic entities
     if query_param.hub_penalty_threshold > 0:
-        import math
         seed_ids_for_degree = list(entity_seed_weights.keys())
         try:
             degrees = await knowledge_graph_inst.node_degrees_batch(seed_ids_for_degree)
@@ -6007,6 +6053,7 @@ async def _ppr_rank_chunks(
         chunk_seed_weights=chunk_seed_weights,
         damping=query_param.ppr_damping,
         top_k=query_param.ppr_top_k,
+        ppr_synonym_weight_mode=query_param.ppr_synonym_weight_mode,
     )
 
     if not ppr_ranked:

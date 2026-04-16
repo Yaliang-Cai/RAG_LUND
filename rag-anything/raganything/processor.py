@@ -2379,7 +2379,7 @@ class ProcessorMixin:
                             "description": f"Entity {entity_name} belongs to {modal_entity_name}",
                             "keywords": "belongs_to,part_of,contained_in",
                             "source_id": chunk_id,
-                            "weight": 10.0,
+                            "weight": 1.0,
                             "file_path": file_path,
                         }
 

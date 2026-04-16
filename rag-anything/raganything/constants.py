@@ -227,6 +227,7 @@ DEFAULT_MULTI_HOP_DEPTH = 2                     # PPR graph search depth
 DEFAULT_PPR_DAMPING = 0.5                       # PPR damping factor (alpha)
 DEFAULT_PPR_TOP_K = 50                          # Number of chunks returned by PPR
 DEFAULT_PASSAGE_NODE_WEIGHT = 0.05              # HippoRAG2 param: DPR chunk score scaling in PPR seed
+DEFAULT_PPR_SYNONYM_WEIGHT_MODE = "raw"         # "raw" | "plus_one" (retrieval-time mapping only)
 # Resilience & callback (service-level optional controls)
 # =============================================================================
 # 是否在 LocalRagService 层启用重试与熔断机制。

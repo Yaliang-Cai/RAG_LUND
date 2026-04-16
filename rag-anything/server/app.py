@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Literal, Optional, Set
 
 import json as _json
 
@@ -37,6 +37,7 @@ from raganything.constants import (
     DEFAULT_PPR_DAMPING,
     DEFAULT_PPR_TOP_K,
     DEFAULT_PASSAGE_NODE_WEIGHT,
+    DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
 )
 
 VALID_CHUNKING_STRATEGIES: Set[str] = set(CHUNKING_STRATEGIES.keys())
@@ -176,6 +177,7 @@ class QueryRequest(BaseModel):
     ppr_damping: float = DEFAULT_PPR_DAMPING
     ppr_top_k: int = DEFAULT_PPR_TOP_K
     passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
+    ppr_synonym_weight_mode: Literal["raw", "plus_one"] = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
 
 # =========================================================================
 # 路由
@@ -492,6 +494,7 @@ async def query_endpoint(
         ppr_damping=payload.ppr_damping,
         ppr_top_k=payload.ppr_top_k,
         passage_node_weight=payload.passage_node_weight,
+        ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
     )
     retrieval = {}
     try:
@@ -513,6 +516,7 @@ async def query_endpoint(
         ppr_damping=payload.ppr_damping,
         ppr_top_k=payload.ppr_top_k,
         passage_node_weight=payload.passage_node_weight,
+        ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
     )
 
     # Step 3: 可选获取子图数据
@@ -552,6 +556,7 @@ async def query_stream_endpoint(
                 ppr_damping=payload.ppr_damping,
                 ppr_top_k=payload.ppr_top_k,
                 passage_node_weight=payload.passage_node_weight,
+                ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
             ):
                 if event["type"] == "meta":
                     retrieval_data = event  # keep for graph subquery

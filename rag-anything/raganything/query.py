@@ -188,6 +188,7 @@ class QueryMixin:
                 "ppr_damping",
                 "ppr_top_k",
                 "passage_node_weight",
+                "ppr_synonym_weight_mode",
             ]
         }
         cache_data.update(relevant_kwargs)

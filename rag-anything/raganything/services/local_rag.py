@@ -92,6 +92,7 @@ from raganything.constants import (
     DEFAULT_PPR_DAMPING,
     DEFAULT_PPR_TOP_K,
     DEFAULT_PASSAGE_NODE_WEIGHT,
+    DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
     DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID,
     DEFAULT_MAX_ASYNC_INGEST,
     DEFAULT_ENABLE_RESILIENCE,
@@ -199,6 +200,7 @@ class LocalRagSettings:
     ppr_damping: float = DEFAULT_PPR_DAMPING
     ppr_top_k: int = DEFAULT_PPR_TOP_K
     passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
+    ppr_synonym_weight_mode: str = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -413,6 +415,12 @@ class LocalRagSettings:
                 os.getenv(
                     "RAGANYTHING_PASSAGE_NODE_WEIGHT",
                     str(DEFAULT_PASSAGE_NODE_WEIGHT),
+                )
+            ),
+            ppr_synonym_weight_mode=_normalize_ppr_synonym_weight_mode(
+                os.getenv(
+                    "RAGANYTHING_PPR_SYNONYM_WEIGHT_MODE",
+                    DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
                 )
             ),
         )
@@ -1186,6 +1194,13 @@ def _normalize_qwen_image_token_method(method: str | None) -> str:
     )
 
 
+def _normalize_ppr_synonym_weight_mode(mode: str | None) -> str:
+    normalized = (mode or "").strip().lower()
+    if normalized in {"raw", "plus_one"}:
+        return normalized
+    return DEFAULT_PPR_SYNONYM_WEIGHT_MODE
+
+
 class LocalRagService:
     def __init__(self, settings: Optional[LocalRagSettings] = None):
         # 初始化双客户端：text/vision 可同端口也可分离部署。
@@ -1193,6 +1208,9 @@ class LocalRagService:
         self.logger = configure_logging(self.settings)
         self.settings.image_token_estimate_method = _normalize_qwen_image_token_method(
             self.settings.image_token_estimate_method
+        )
+        self.settings.ppr_synonym_weight_mode = _normalize_ppr_synonym_weight_mode(
+            self.settings.ppr_synonym_weight_mode
         )
         if not self.settings.image_token_model_name_or_path:
             self.settings.image_token_model_name_or_path = (
@@ -1711,6 +1729,12 @@ class LocalRagService:
         normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
         normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
         normalized_kwargs.setdefault(
+            "ppr_synonym_weight_mode", self.settings.ppr_synonym_weight_mode
+        )
+        normalized_kwargs["ppr_synonym_weight_mode"] = _normalize_ppr_synonym_weight_mode(
+            str(normalized_kwargs.get("ppr_synonym_weight_mode", ""))
+        )
+        normalized_kwargs.setdefault(
             "user_prompt",
             _INLINE_CITATION_INSTRUCTION if _INLINE_CITATIONS_ENABLED else "",
         )
@@ -1745,6 +1769,12 @@ class LocalRagService:
         normalized_kwargs.setdefault("ppr_damping", self.settings.ppr_damping)
         normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
         normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
+        normalized_kwargs.setdefault(
+            "ppr_synonym_weight_mode", self.settings.ppr_synonym_weight_mode
+        )
+        normalized_kwargs["ppr_synonym_weight_mode"] = _normalize_ppr_synonym_weight_mode(
+            str(normalized_kwargs.get("ppr_synonym_weight_mode", ""))
+        )
         normalized_kwargs["return_trace"] = True
 
         async def _run_query_with_trace() -> dict[str, Any]:
@@ -1771,6 +1801,7 @@ class LocalRagService:
         ppr_damping: float | None = None,
         ppr_top_k: int | None = None,
         passage_node_weight: float | None = None,
+        ppr_synonym_weight_mode: str | None = None,
     ):
         """Async generator — yields structured events via LightRAG aquery_llm().
 
@@ -1799,6 +1830,11 @@ class LocalRagService:
                 passage_node_weight=passage_node_weight
                 if passage_node_weight is not None
                 else self.settings.passage_node_weight,
+                ppr_synonym_weight_mode=_normalize_ppr_synonym_weight_mode(
+                    ppr_synonym_weight_mode
+                    if ppr_synonym_weight_mode is not None
+                    else self.settings.ppr_synonym_weight_mode
+                ),
             )
             result = await rag_instance.lightrag.aquery_llm(query, param=param)
 

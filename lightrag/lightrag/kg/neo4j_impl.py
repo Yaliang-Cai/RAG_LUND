@@ -1208,11 +1208,28 @@ class Neo4JStorage(BaseGraphStorage):
                         if edge_key not in seen_edges:
                             seen_edges.add(edge_key)
                             rprops = record.get("rprops", {})
+                            raw_weight = rprops.get("weight", 1.0)
+                            try:
+                                parsed_weight = float(raw_weight)
+                            except (TypeError, ValueError):
+                                parsed_weight = 1.0
+                            raw_weight_raw = rprops.get("weight_raw")
+                            try:
+                                parsed_weight_raw = (
+                                    float(raw_weight_raw)
+                                    if raw_weight_raw is not None
+                                    else None
+                                )
+                            except (TypeError, ValueError):
+                                parsed_weight_raw = None
                             edges.append({
                                 "src": src,
                                 "tgt": tgt,
-                                "weight": float(rprops.get("weight", 1.0)),
+                                "weight": parsed_weight,
+                                "weight_raw": parsed_weight_raw,
                                 "source_id": rprops.get("source_id", ""),
+                                "edge_type": rprops.get("edge_type", ""),
+                                "provenance": rprops.get("provenance", ""),
                             })
             except Exception as e:
                 logger.error(f"[{self.workspace}] PPR subgraph extraction error: {e}")
@@ -1224,7 +1241,7 @@ class Neo4JStorage(BaseGraphStorage):
 
         Returns:
             nodes: list of dicts with entity_id, source_id, embedding (may be None).
-            edges: list of dicts with src, tgt, weight (default 1.0).
+            edges: list of dicts with src, tgt, weight, source_id, and edge metadata.
         """
         workspace_label = self._get_workspace_label()
         nodes: list[dict] = []
@@ -1262,18 +1279,30 @@ class Neo4JStorage(BaseGraphStorage):
                 edge_result = await session.run(
                     f"MATCH (a:`{workspace_label}`)-[r]->(b:`{workspace_label}`) "
                     f"RETURN a.entity_id AS src, b.entity_id AS tgt, "
-                    f"       r.weight AS weight, r.source_id AS source_id"
+                    f"       r.weight AS weight, r.weight_raw AS weight_raw, "
+                    f"       r.source_id AS source_id, "
+                    f"       r.edge_type AS edge_type, r.provenance AS provenance"
                 )
                 for record in await edge_result.data():
                     src, tgt = record.get("src"), record.get("tgt")
                     if src and tgt:
                         w = record.get("weight")
+                        w_raw = record.get("weight_raw")
+                        try:
+                            parsed_weight_raw = (
+                                float(w_raw) if w_raw is not None else None
+                            )
+                        except (TypeError, ValueError):
+                            parsed_weight_raw = None
                         edges.append(
                             {
                                 "src": src,
                                 "tgt": tgt,
                                 "weight": float(w) if w is not None else 1.0,
+                                "weight_raw": parsed_weight_raw,
                                 "source_id": record.get("source_id") or "",
+                                "edge_type": record.get("edge_type") or "",
+                                "provenance": record.get("provenance") or "",
                             }
                         )
             except Exception as e:

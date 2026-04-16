@@ -12,8 +12,47 @@ in PPR propagation.
 
 from __future__ import annotations
 
+import math
+from typing import Any, Literal
+
 import networkx as nx
 from lightrag.utils import logger
+
+
+def _is_synonym_edge(edge_data: dict[str, Any]) -> bool:
+    """Best-effort synonym edge detection (works for typed and legacy edges)."""
+    edge_type = str(edge_data.get("edge_type", "")).upper()
+    if edge_type == "SYNONYM":
+        return True
+
+    provenance = str(edge_data.get("provenance", "")).strip().lower()
+    if provenance == "synonym_detection":
+        return True
+
+    source_id = str(edge_data.get("source_id", "") or "").strip()
+    keywords = str(edge_data.get("keywords", "") or "").lower()
+    return not source_id and ("synonym" in keywords or "alias" in keywords)
+
+
+def _map_entity_edge_weight(
+    edge_data: dict[str, Any],
+    synonym_weight_mode: Literal["raw", "plus_one"],
+) -> float:
+    """Map stored graph edge weights to retrieval-time PPR weights."""
+    raw_weight = edge_data.get("weight", 1.0)
+    try:
+        weight = float(raw_weight)
+    except (TypeError, ValueError):
+        weight = 1.0
+
+    if not math.isfinite(weight):
+        weight = 1.0
+    if weight < 0.0:
+        weight = 0.0
+
+    if _is_synonym_edge(edge_data) and synonym_weight_mode == "plus_one":
+        return 1.0 + weight
+    return weight
 
 
 def personalized_pagerank(
@@ -25,6 +64,7 @@ def personalized_pagerank(
     chunk_seed_weights: dict[str, float],
     damping: float = 0.5,
     top_k: int = 50,
+    ppr_synonym_weight_mode: Literal["raw", "plus_one"] = "raw",
 ) -> list[tuple[str, float]]:
     """HippoRAG2-style PPR on entity + virtual chunk graph.
 
@@ -60,7 +100,8 @@ def personalized_pagerank(
     for edge in entity_edges:
         src, tgt = edge.get("src"), edge.get("tgt")
         if src and tgt:
-            G.add_edge(src, tgt, weight=float(edge.get("weight", 1.0)))
+            edge_weight = _map_entity_edge_weight(edge, ppr_synonym_weight_mode)
+            G.add_edge(src, tgt, weight=edge_weight)
 
     # Add virtual chunk nodes
     for chunk in chunk_nodes:

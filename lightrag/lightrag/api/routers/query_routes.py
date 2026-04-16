@@ -135,6 +135,11 @@ class QueryRequest(BaseModel):
         description="Scaling factor for passage-node prior in PPR ranking.",
     )
 
+    ppr_synonym_weight_mode: Optional[Literal["raw", "plus_one"]] = Field(
+        default=None,
+        description='Synonym edge mapping mode in PPR: "raw" (cos) or "plus_one" (1+cos).',
+    )
+
     include_references: Optional[bool] = Field(
         default=True,
         description="If True, includes reference list in responses. Affects /query and /query/stream endpoints. /query/data always includes references.",

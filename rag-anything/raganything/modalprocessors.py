@@ -805,7 +805,10 @@ class BaseModalProcessor:
                         "description": f"Entity {entity_name} belongs to {modal_entity_name}",
                         "keywords": "belongs_to,part_of,contained_in",
                         "source_id": chunk_id,
-                        "weight": 10.0,
+                        "weight": 1.0,
+                        "weight_raw": 1.0,
+                        "edge_type": "FACTUAL",
+                        "provenance": "relation_extraction",
                         "file_path": chunk_data.get("file_path", "manual_creation"),
                     }
                     await self.knowledge_graph_inst.upsert_edge(
@@ -821,6 +824,11 @@ class BaseModalProcessor:
                             "tgt_id": modal_entity_name,
                             "keywords": relation_data["keywords"],
                             "content": f"{relation_data['keywords']}\t{entity_name}\n{modal_entity_name}\n{relation_data['description']}",
+                            "description": relation_data["description"],
+                            "weight": relation_data["weight"],
+                            "weight_raw": relation_data["weight_raw"],
+                            "edge_type": relation_data["edge_type"],
+                            "provenance": relation_data["provenance"],
                             "source_id": chunk_id,
                             "file_path": chunk_data.get("file_path", "manual_creation"),
                         }

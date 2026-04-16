@@ -235,6 +235,12 @@ class QueryParam:
     passage_node_weight: float = 0.05
     """HippoRAG2 parameter: scaling factor for DPR chunk scores in PPR seed weights."""
 
+    ppr_synonym_weight_mode: Literal["raw", "plus_one"] = "raw"
+    """Retrieval-time synonym edge mapping in PPR.
+    - "raw": synonym edge weight = stored cosine similarity
+    - "plus_one": synonym edge weight = 1 + stored cosine similarity
+    """
+
     hub_penalty_threshold: int = 50
     """Degree threshold above which entity seed weights are penalised by log(1 + degree).
     Set to 0 to disable. Reduces subgraph bloat caused by high-degree generic entities."""
@@ -805,6 +811,9 @@ class BaseGraphStorage(StorageNameSpace, ABC):
                         "tgt": tgt,
                         "weight": float(edge_data.get("weight", 1.0)) if edge_data else 1.0,
                         "source_id": edge_data.get("source_id", "") if edge_data else "",
+                        "weight_raw": edge_data.get("weight_raw") if edge_data else None,
+                        "edge_type": edge_data.get("edge_type", "") if edge_data else "",
+                        "provenance": edge_data.get("provenance", "") if edge_data else "",
                     })
                     if src not in visited_nodes:
                         next_frontier.append(src)
