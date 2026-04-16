@@ -76,6 +76,7 @@ lightrag_kwargs={
 | `ppr_top_k`             | `50`    | PPR 返回的最高分 chunk 数                                    |
 | `passage_node_weight`   | `0.05`  | chunk seed 总权重相对于 entity seed 总权重的比例             |
 | `hub_penalty_threshold` | `50`    | 度数超过此值的实体 seed 权重除以 log(1+degree)；0 = 禁用惩罚 |
+| `recognition_top_k`     | `10`    | HippoRAG2 Recognition Memory：发送给 LLM 的关系三元组数上限；0 = 禁用（仅 `mode="ppr"` 生效） |
 
 ### 0.5 版本总览
 
@@ -86,6 +87,7 @@ lightrag_kwargs={
 | V2   | Synonym Linking（同义词边）       | `enable_synonym_linking`                     | `False`                      |
 | V3   | PPR Multi-hop Reasoning（局部）   | `mode="ppr_local"`                           | —                            |
 | V3b  | PPR Global（全图传播）            | `mode="ppr"`                                 | —                            |
+| V3c  | Recognition Memory（LLM 实体过滤）| `recognition_top_k` > 0（`mode="ppr"` 时自动生效）| `recognition_top_k=10`  |
 
 **关键原则**：全部开关设为 `False` 时，代码物理执行路径与 main 分支 100% 一致。
 
@@ -103,8 +105,10 @@ rag = LightRAG(
 )
 await rag.ainsert_file("document.pdf", doc_id="doc1")
 
-# V3b 全图 PPR（推荐）
+# V3b+V3c 全图 PPR + Recognition Memory（推荐）
 result = await rag.aquery("问题", param=QueryParam(mode="ppr", ppr_top_k=50))
+# recognition_top_k 默认 10，禁用可设为 0：
+result = await rag.aquery("问题", param=QueryParam(mode="ppr", ppr_top_k=50, recognition_top_k=0))
 
 # 消融 baseline（与 main 100% 一致）
 result = await rag.aquery("问题", param=QueryParam(mode="hybrid"))
@@ -193,6 +197,42 @@ vdb_id    = md5(entity_id + "ent-")            # VDB hash
 
 ---
 
+### 1.5 V3c：Recognition Memory（LLM 实体过滤）
+
+**问题**：V3b 全图 PPR 的 entity seeds 仅靠向量相似度选取，高相似但语义无关的实体污染 personalisation vector，多跳检索质量下降。
+
+**解法**（HippoRAG2 Recognition Memory 对齐）：三阶段混合过滤，在 PPR 传播前对 entity seeds 做 LLM 语义验证：
+
+1. **Numpy / argsort**（向量检索）：entity VDB 和 relation VDB 各自取 top-K 候选  
+2. **LLM（DSPy 对齐）**：模型判断候选实体/三元组是否真正与 query 相关，返回精确 entity_id 字符串  
+3. **Difflib**（`cutoff=0.85`）：将 LLM 文本输出安全映射回图内 entity_id，拒绝幻觉实体
+
+**评分归一化**（保证两路信号在同一尺度）：
+- entity VDB 分数和 relation VDB fact 分数分别独立 min-max 归一化至 [0, 1]
+- 同一实体在多条三元组出现时取 max（不重复累加）
+- 过滤后对每个 recognized entity 取 `max(norm_vdb, norm_fact)` 作为 seed 权重
+
+**Fallback 策略**（保证零退化）：
+
+| 情形 | 行为 |
+| --- | --- |
+| LLM 调用失败（异常）| Warning log，回退 `_direct_merge_seeds` |
+| LLM 返回空（无相关实体）| Info log，回退 `_direct_merge_seeds` |
+| `recognition_top_k=0` | 直接跳过，等价于 V3b 原始行为 |
+| LLM 未配置 | 直接跳过 |
+
+**集成点**：
+
+| 位置                                            | 说明                                      |
+| ----------------------------------------------- | ----------------------------------------- |
+| `operate.py: _min_max_norm()`                   | 辅助归一化函数                            |
+| `operate.py: _recognition_memory_filter()`      | 核心三阶段过滤（~70 行）                  |
+| `operate.py: _direct_merge_seeds()`             | 直接 max-merge fallback（原始 V3b 逻辑）  |
+| `operate.py: _ppr_rank_chunks()` global 路径    | 调用 recognition filter，再传入 hub 惩罚  |
+| `base.py: QueryParam.recognition_top_k`         | 控制开关（默认 10，0 = 禁用）             |
+
+---
+
 ### 1.5 RRF 查询模式
 
 `mix` 以 round-robin 合并三路 chunk，忽略排名信号。RRF 公式：
@@ -219,9 +259,9 @@ score(chunk) = Σ_{source i}  1 / (k + rank_i)
 | 文件                                             | 涉及版本  | 说明                                                                                          |
 | ------------------------------------------------ | --------- | --------------------------------------------------------------------------------------------- |
 | `lightrag/lightrag/utils.py`                     | V1        | 工厂函数 `compute_entity_id`, `compute_entity_vdb_id`                                         |
-| `lightrag/lightrag/base.py`                      | V1/V3/RRF | `QueryParam` 扩展（V3 字段 + `rrf_k` + mode Literal 新增 `ppr`/`ppr_local`）                  |
+| `lightrag/lightrag/base.py`                      | V1/V3/RRF/V3c | `QueryParam` 扩展（V3 字段 + `rrf_k` + mode Literal 新增 `ppr`/`ppr_local` + `recognition_top_k`） |
 | `lightrag/lightrag/lightrag.py`                  | V0/V1/V2  | Feature Toggles + synonym linking 集成                                                        |
-| `lightrag/lightrag/operate.py`                   | V1/V3/RRF | 实体 ID 替换 + 分组守卫 + `_ppr_rank_chunks()` + `_ppr_rank_chunks_global()` + `_rrf_merge()` |
+| `lightrag/lightrag/operate.py`                   | V1/V3/RRF/V3c | 实体 ID 替换 + 分组守卫 + `_ppr_rank_chunks()` + `_ppr_rank_chunks_global()` + `_rrf_merge()` + `_min_max_norm()` + `_recognition_memory_filter()` + `_direct_merge_seeds()` |
 | `lightrag/lightrag/kg/neo4j_impl.py`             | V0/V3/V3b | pipmaster 移除 + PPR 子图 Cypher + `get_all_nodes_and_edges()`                                |
 | `lightrag/lightrag/kg/qdrant_impl.py`            | V1        | `delete_entity` 改用 `compute_entity_vdb_id`                                                  |
 | `lightrag/lightrag/kg/postgres_impl.py`          | V1        | 消歧模式下 `WHERE entity_name=$2 AND entity_type=$3`                                          |
@@ -263,10 +303,16 @@ score(chunk) = Σ_{source i}  1 / (k + rank_i)
 | Seed 归一化         | 分离归一化                            | 分离归一化                              | 对齐 ✅        |
 | PPR 图范围          | 全图传播                              | 全图传播（mode=ppr）                    | 对齐 ✅        |
 | chunk→entity 边权重 | embedding cosine                      | embedding cosine（fallback 1.0）        | 基本对齐 ✅    |
-| Recognition Memory  | LLM fact reranking                    | 无                                      | **最大差距**  |
+| Recognition Memory  | LLM fact reranking (DSPyFilter)       | Numpy→LLM→Difflib 三阶段过滤（V3c）     | 基本对齐 ✅   |
 
 ---
 
 ## 五、已知局限
 
-1. **Recognition Memory 缺失**：HippoRAG2 最核心创新（LLM 对候选三元组重排序），当前无法在不引入独立 fact 存储的情况下实现。
+1. **HyDE 的收益在 PPR 框架里会被放大**
+
+- 当前：
+短 query → entity VDB → seed entities → PPR传播
+
+- 加 HyDE：
+短 query → LLM生成假设答案 → entity VDB → 更准的 seed entities → PPR传播

@@ -84,6 +84,7 @@ class GlobalPPREngine:
         self._adj: csr_matrix | None = None  # N×N entity adjacency
         self._entity_embeddings: dict[str, list[float]] = {}
         self._chunk_to_entities: dict[str, list[str]] = {}
+        self._entity_to_chunks: dict[str, list[str]] = {}  # inverse of _chunk_to_entities
 
         self._lock = asyncio.Lock()
 
@@ -98,6 +99,7 @@ class GlobalPPREngine:
         self._adj = None
         self._entity_embeddings = {}
         self._chunk_to_entities = {}
+        self._entity_to_chunks = {}
 
     async def _ensure_loaded(self) -> None:
         if self._adj is not None:
@@ -187,15 +189,23 @@ class GlobalPPREngine:
             (data_vals, (rows, cols)), shape=(N, N), dtype=np.float32
         )
 
+        # Build reverse mapping: entity_id → [chunk_id, ...]
+        entity_to_chunks: dict[str, list[str]] = {}
+        for cid, eids in chunk_to_entities.items():
+            for eid in eids:
+                entity_to_chunks.setdefault(eid, []).append(cid)
+
         self.node_index = node_index
         self.index_node = index_node
         self._adj = adj
         self._entity_embeddings = entity_embeddings
         self._chunk_to_entities = chunk_to_entities
+        self._entity_to_chunks = entity_to_chunks
 
         logger.info(
             f"GlobalPPREngine: loaded {N} entity nodes, {len(edges)} edges, "
-            f"{len(chunk_to_entities)} chunk mappings"
+            f"{len(chunk_to_entities)} chunk mappings, "
+            f"{len(entity_to_chunks)} entity→chunk mappings"
         )
 
     # ------------------------------------------------------------------
