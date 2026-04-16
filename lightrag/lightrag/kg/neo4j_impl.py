@@ -1086,6 +1086,7 @@ class Neo4JStorage(BaseGraphStorage):
                     WITH source
                     MATCH (target:`{workspace_label}` {{entity_id: $target_entity_id}})
                     MERGE (source)-[r:DIRECTED]-(target)
+                    SET r = {{}}
                     SET r += $properties
                     RETURN r, source, target
                     """
@@ -1146,6 +1147,7 @@ class Neo4JStorage(BaseGraphStorage):
         MATCH (source:`{workspace_label}` {{entity_id: row.src}})
         MATCH (target:`{workspace_label}` {{entity_id: row.tgt}})
         MERGE (source)-[r:DIRECTED]-(target)
+        SET r = {{}}
         SET r += row.properties
         RETURN count(r) AS affected
         """

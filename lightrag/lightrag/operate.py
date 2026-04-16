@@ -76,10 +76,55 @@ from lightrag.kg.shared_storage import get_storage_keyed_lock
 import time
 from dotenv import load_dotenv
 
+FACTUAL_EDGE_TYPE = "FACTUAL"
+FACTUAL_EDGE_PROVENANCE = "relation_extraction"
+SYNONYM_EDGE_TYPE = "SYNONYM"
+SYNONYM_EDGE_PROVENANCE = "synonym_detection"
+
 try:
     from PIL import Image as PILImage
 except Exception:  # pragma: no cover - optional dependency
     PILImage = None
+
+
+def _is_synonym_edge(edge_data: dict[str, Any] | None) -> bool:
+    """Best-effort synonym edge detection for compatibility with legacy records."""
+    if not isinstance(edge_data, dict):
+        return False
+
+    edge_type = str(edge_data.get("edge_type", "")).upper()
+    if edge_type == SYNONYM_EDGE_TYPE:
+        return True
+
+    provenance = str(edge_data.get("provenance", "")).strip().lower()
+    if provenance == SYNONYM_EDGE_PROVENANCE:
+        return True
+
+    # Legacy fallback: synonym edges often have no real source_id and synonym keywords.
+    source_id = str(edge_data.get("source_id", "") or "").strip()
+    keywords = str(edge_data.get("keywords", "") or "").lower()
+    if not source_id and ("synonym" in keywords or "alias" in keywords):
+        return True
+
+    return False
+
+
+def _is_factual_or_legacy_edge(edge_data: dict[str, Any] | None) -> bool:
+    """Treat untyped historical extraction edges as factual unless recognized as synonym."""
+    if not isinstance(edge_data, dict):
+        return False
+
+    edge_type = str(edge_data.get("edge_type", "")).upper()
+    if edge_type == FACTUAL_EDGE_TYPE:
+        return True
+    if edge_type == SYNONYM_EDGE_TYPE:
+        return False
+
+    if _is_synonym_edge(edge_data):
+        return False
+
+    # Legacy edges without explicit typing are considered factual.
+    return True
 
 try:
     from transformers import AutoImageProcessor
@@ -2200,14 +2245,19 @@ async def _rebuild_single_relationship(
     # Remove duplicates while preserving order
     description_list = list(dict.fromkeys(descriptions))
     keywords = list(dict.fromkeys(keywords))
+    current_is_factual = _is_factual_or_legacy_edge(current_relationship)
 
     combined_keywords = (
         ", ".join(set(keywords))
         if keywords
-        else current_relationship.get("keywords", "")
+        else (current_relationship.get("keywords", "") if current_is_factual else "")
     )
 
-    weight = sum(weights) if weights else current_relationship.get("weight", 1.0)
+    weight = (
+        sum(weights)
+        if weights
+        else (current_relationship.get("weight", 1.0) if current_is_factual else 1.0)
+    )
 
     # Generate final description from relations or fallback to current
     if description_list:
@@ -2220,8 +2270,9 @@ async def _rebuild_single_relationship(
             llm_response_cache=llm_response_cache,
         )
     else:
-        # fallback to keep current(unchanged)
-        final_description = current_relationship.get("description", "")
+        final_description = (
+            current_relationship.get("description", "") if current_is_factual else ""
+        )
 
     if len(limited_chunk_ids) < len(normalized_chunk_ids):
         truncation_info = (
@@ -2230,19 +2281,27 @@ async def _rebuild_single_relationship(
     else:
         truncation_info = ""
 
-    # Update relationship in graph storage
+    edge_created_at = current_relationship.get("created_at")
+    if edge_created_at is None:
+        edge_created_at = int(time.time())
+
+    # Update relationship in graph storage with a factual full template.
     updated_relationship_data = {
-        **current_relationship,
-        "description": final_description
-        if final_description
-        else current_relationship.get("description", ""),
+        "description": final_description,
         "keywords": combined_keywords,
         "weight": weight,
         "source_id": GRAPH_FIELD_SEP.join(limited_chunk_ids),
         "file_path": GRAPH_FIELD_SEP.join([fp for fp in file_paths_list if fp])
         if file_paths_list
-        else current_relationship.get("file_path", "unknown_source"),
+        else (
+            current_relationship.get("file_path", "unknown_source")
+            if current_is_factual
+            else "unknown_source"
+        ),
         "truncate": truncation_info,
+        "created_at": edge_created_at,
+        "edge_type": FACTUAL_EDGE_TYPE,
+        "provenance": FACTUAL_EDGE_PROVENANCE,
     }
 
     # Ensure both endpoint nodes exist before writing the edge back
@@ -2250,7 +2309,7 @@ async def _rebuild_single_relationship(
     node_description = (
         updated_relationship_data["description"]
         if updated_relationship_data.get("description")
-        else current_relationship.get("description", "")
+        else (current_relationship.get("description", "") if current_is_factual else "")
     )
     node_source_id = updated_relationship_data.get("source_id", "")
     node_file_path = updated_relationship_data.get("file_path", "unknown_source")
@@ -2334,6 +2393,8 @@ async def _rebuild_single_relationship(
                 "description": final_description,
                 "weight": weight,
                 "file_path": updated_relationship_data["file_path"],
+                "edge_type": FACTUAL_EDGE_TYPE,
+                "provenance": FACTUAL_EDGE_PROVENANCE,
             }
         }
 
@@ -2743,34 +2804,32 @@ async def _merge_edges_then_upsert(
         already_edge = await knowledge_graph_inst.get_edge(src_id, tgt_id)
         # Handle the case where get_edge returns None or missing fields
         if already_edge:
-            # Get weight with default 1.0 if missing
-            already_weights.append(already_edge.get("weight", 1.0))
+            if _is_factual_or_legacy_edge(already_edge):
+                # Only factual history participates in factual merge.
+                # Existing synonym metadata must not leak into factual updates.
+                already_weights.append(already_edge.get("weight", 1.0))
 
-            # Get source_id with empty string default if missing or None
-            if already_edge.get("source_id") is not None:
-                already_source_ids.extend(
-                    already_edge["source_id"].split(GRAPH_FIELD_SEP)
-                )
-
-            # Get file_path with empty string default if missing or None
-            if already_edge.get("file_path") is not None:
-                already_file_paths.extend(
-                    already_edge["file_path"].split(GRAPH_FIELD_SEP)
-                )
-
-            # Get description with empty string default if missing or None
-            if already_edge.get("description") is not None:
-                already_description.extend(
-                    already_edge["description"].split(GRAPH_FIELD_SEP)
-                )
-
-            # Get keywords with empty string default if missing or None
-            if already_edge.get("keywords") is not None:
-                already_keywords.extend(
-                    split_string_by_multi_markers(
-                        already_edge["keywords"], [GRAPH_FIELD_SEP]
+                if already_edge.get("source_id") is not None:
+                    already_source_ids.extend(
+                        already_edge["source_id"].split(GRAPH_FIELD_SEP)
                     )
-                )
+
+                if already_edge.get("file_path") is not None:
+                    already_file_paths.extend(
+                        already_edge["file_path"].split(GRAPH_FIELD_SEP)
+                    )
+
+                if already_edge.get("description") is not None:
+                    already_description.extend(
+                        already_edge["description"].split(GRAPH_FIELD_SEP)
+                    )
+
+                if already_edge.get("keywords") is not None:
+                    already_keywords.extend(
+                        split_string_by_multi_markers(
+                            already_edge["keywords"], [GRAPH_FIELD_SEP]
+                        )
+                    )
 
     new_source_ids = [dp["source_id"] for dp in edges_data if dp.get("source_id")]
 
@@ -3268,6 +3327,8 @@ async def _merge_edges_then_upsert(
             file_path=file_path,
             created_at=edge_created_at,
             truncate=truncation_info,
+            edge_type=FACTUAL_EDGE_TYPE,
+            provenance=FACTUAL_EDGE_PROVENANCE,
         ),
     )
 
@@ -3281,6 +3342,8 @@ async def _merge_edges_then_upsert(
         created_at=edge_created_at,
         truncate=truncation_info,
         weight=weight,
+        edge_type=FACTUAL_EDGE_TYPE,
+        provenance=FACTUAL_EDGE_PROVENANCE,
     )
 
     # Sort src_id and tgt_id to ensure consistent ordering (smaller string first)
@@ -3307,6 +3370,8 @@ async def _merge_edges_then_upsert(
                 "description": description,
                 "weight": weight,
                 "file_path": file_path,
+                "edge_type": FACTUAL_EDGE_TYPE,
+                "provenance": FACTUAL_EDGE_PROVENANCE,
             }
         }
         await safe_vdb_operation_with_exception(
@@ -3673,10 +3738,8 @@ async def merge_nodes_and_edges(
     # ===== Phase 3: Update full_entities and full_relations storage =====
     if full_entities_storage and full_relations_storage and doc_id:
         try:
-            # Merge all entities: original entities + entities added during edge processing
+            # Collect entities produced in this merge call.
             final_entity_names = set()
-
-            # Add original processed entities
             for entity_data in processed_entities:
                 if not entity_data:
                     continue
@@ -3685,8 +3748,6 @@ async def merge_nodes_and_edges(
                 )
                 if entity_id:
                     final_entity_names.add(entity_id)
-
-            # Add entities that were added during relationship processing
             for added_entity in all_added_entities:
                 if not added_entity:
                     continue
@@ -3696,47 +3757,91 @@ async def merge_nodes_and_edges(
                 if entity_id:
                     final_entity_names.add(entity_id)
 
-            # Collect all relation pairs
+            # Collect relation pairs produced in this merge call.
             final_relation_pairs = set()
             for edge_data in processed_edges:
-                if edge_data:
-                    src_id = edge_data.get("src_id")
-                    tgt_id = edge_data.get("tgt_id")
-                    if src_id and tgt_id:
-                        relation_pair = tuple(sorted([src_id, tgt_id]))
-                        final_relation_pairs.add(relation_pair)
+                if not edge_data:
+                    continue
+                src_id = edge_data.get("src_id")
+                tgt_id = edge_data.get("tgt_id")
+                if src_id and tgt_id:
+                    final_relation_pairs.add(tuple(sorted([src_id, tgt_id])))
 
-            log_message = f"Phase 3: Updating final {len(final_entity_names)}({len(processed_entities)}+{len(all_added_entities)}) entities and  {len(final_relation_pairs)} relations from {doc_id}"
+            # Merge with existing doc-level indexes instead of overwrite.
+            existing_entities_data = await full_entities_storage.get_by_id(doc_id)
+            existing_relations_data = await full_relations_storage.get_by_id(doc_id)
+
+            merged_entity_names: list[str] = []
+            seen_entity_names: set[str] = set()
+            if isinstance(existing_entities_data, dict):
+                for existing_entity in existing_entities_data.get("entity_names", []):
+                    entity_key = str(existing_entity).strip()
+                    if entity_key and entity_key not in seen_entity_names:
+                        seen_entity_names.add(entity_key)
+                        merged_entity_names.append(entity_key)
+            for entity_id in sorted(final_entity_names):
+                if entity_id not in seen_entity_names:
+                    seen_entity_names.add(entity_id)
+                    merged_entity_names.append(entity_id)
+
+            merged_relation_pairs: list[list[str]] = []
+            seen_relation_pairs: set[tuple[str, str]] = set()
+
+            def _append_relation_pair(raw_pair: Any) -> None:
+                if not isinstance(raw_pair, (list, tuple)) or len(raw_pair) < 2:
+                    return
+                src_value = str(raw_pair[0]).strip()
+                tgt_value = str(raw_pair[1]).strip()
+                if not src_value or not tgt_value:
+                    return
+                normalized_pair = tuple(sorted((src_value, tgt_value)))
+                if normalized_pair in seen_relation_pairs:
+                    return
+                seen_relation_pairs.add(normalized_pair)
+                merged_relation_pairs.append([normalized_pair[0], normalized_pair[1]])
+
+            if isinstance(existing_relations_data, dict):
+                for existing_pair in existing_relations_data.get("relation_pairs", []):
+                    _append_relation_pair(existing_pair)
+            for relation_pair in sorted(final_relation_pairs):
+                _append_relation_pair(relation_pair)
+
+            log_message = (
+                f"Phase 3: Updating final "
+                f"{len(merged_entity_names)} entities "
+                f"({len(processed_entities)}+{len(all_added_entities)} new candidates) "
+                f"and {len(merged_relation_pairs)} relations from {doc_id}"
+            )
             logger.info(log_message)
             async with pipeline_status_lock:
                 pipeline_status["latest_message"] = log_message
                 pipeline_status["history_messages"].append(log_message)
 
-            # Update storage
-            if final_entity_names:
-                await full_entities_storage.upsert(
-                    {
-                        doc_id: {
-                            "entity_names": list(final_entity_names),
-                            "count": len(final_entity_names),
-                        }
-                    }
-                )
+            if merged_entity_names:
+                entity_payload = {
+                    "entity_names": merged_entity_names,
+                    "count": len(merged_entity_names),
+                }
+                if isinstance(existing_entities_data, dict):
+                    for key, value in existing_entities_data.items():
+                        if key not in {"entity_names", "count"}:
+                            entity_payload[key] = value
+                await full_entities_storage.upsert({doc_id: entity_payload})
 
-            if final_relation_pairs:
-                await full_relations_storage.upsert(
-                    {
-                        doc_id: {
-                            "relation_pairs": [
-                                list(pair) for pair in final_relation_pairs
-                            ],
-                            "count": len(final_relation_pairs),
-                        }
-                    }
-                )
+            if merged_relation_pairs:
+                relation_payload = {
+                    "relation_pairs": merged_relation_pairs,
+                    "count": len(merged_relation_pairs),
+                }
+                if isinstance(existing_relations_data, dict):
+                    for key, value in existing_relations_data.items():
+                        if key not in {"relation_pairs", "count"}:
+                            relation_payload[key] = value
+                await full_relations_storage.upsert({doc_id: relation_payload})
 
             logger.debug(
-                f"Updated entity-relation index for document {doc_id}: {len(final_entity_names)} entities (original: {len(processed_entities)}, added: {len(all_added_entities)}), {len(final_relation_pairs)} relations"
+                f"Updated entity-relation index for document {doc_id}: "
+                f"{len(merged_entity_names)} entities, {len(merged_relation_pairs)} relations"
             )
 
         except Exception as e:

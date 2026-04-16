@@ -24,6 +24,30 @@ from lightrag.utils import logger, compute_entity_vdb_id
 # Reduce if memory is constrained; increase for throughput on large corpora.
 _MATMUL_BATCH = 1_000
 
+SYNONYM_EDGE_TYPE = "SYNONYM"
+SYNONYM_EDGE_PROVENANCE = "synonym_detection"
+
+
+def _is_synonym_edge(edge_data: dict[str, Any] | None) -> bool:
+    """Best-effort synonym edge detection for compatibility with legacy records."""
+    if not isinstance(edge_data, dict):
+        return False
+
+    edge_type = str(edge_data.get("edge_type", "")).upper()
+    if edge_type == SYNONYM_EDGE_TYPE:
+        return True
+
+    provenance = str(edge_data.get("provenance", "")).strip().lower()
+    if provenance == SYNONYM_EDGE_PROVENANCE:
+        return True
+
+    source_id = str(edge_data.get("source_id", "") or "").strip()
+    keywords = str(edge_data.get("keywords", "") or "").lower()
+    if not source_id and ("synonym" in keywords or "alias" in keywords):
+        return True
+
+    return False
+
 
 def _graph_id_to_vdb_id(graph_id: str, enable_disambiguation: bool) -> str:
     """Convert a graph node ID to its corresponding VDB hash ID.
@@ -226,12 +250,17 @@ async def build_synonym_edges(
             "keywords": "synonym,alias",
             # Keep source_id reserved for real chunk IDs only.
             # Synthetic edge provenance is tracked separately.
-            "provenance": "synonym_detection",
-            "edge_type": "SYNONYM",
+            "provenance": SYNONYM_EDGE_PROVENANCE,
+            "edge_type": SYNONYM_EDGE_TYPE,
         }
 
         existing = existing_edges.get((src_id, tgt_id))
-        if existing and existing.get("edge_type") == "SYNONYM":
+        if existing:
+            # FACTUAL > SYNONYM: never overwrite factual edges.
+            # Untyped legacy extraction edges are also treated as factual.
+            if not _is_synonym_edge(existing):
+                continue
+
             existing_weight = existing.get("weight")
             try:
                 existing_weight_float = float(existing_weight)
