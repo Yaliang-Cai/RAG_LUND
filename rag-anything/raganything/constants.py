@@ -180,6 +180,41 @@ DEFAULT_EMBEDDING_BATCH_NUM = 32
 DEFAULT_EMBEDDING_FUNC_MAX_ASYNC = 8
 
 # =============================================================================
+# Entity surface normalization (ingest-time, optional)
+# =============================================================================
+DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION = False
+DEFAULT_ENTITY_UPPERCASE_ALLOWLIST = [
+    "AI",
+    "API",
+    "ASR",
+    "BERT",
+    "CNN",
+    "CPU",
+    "GPU",
+    "GPT",
+    "HTTP",
+    "HTTPS",
+    "JSON",
+    "LLM",
+    "LSTM",
+    "ML",
+    "NLP",
+    "OCR",
+    "RAG",
+    "RNN",
+    "SDK",
+    "SQL",
+    "TTS",
+    "XML",
+    "YAML",
+    "3G",
+    "4G",
+    "5G",
+    "6G",
+]
+DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH = False
+
+# =============================================================================
 # Chunking strategy
 # =============================================================================
 DEFAULT_CHUNKING_STRATEGY = "token"   # "token" | "recursive" | "sentence" | "paragraph" | "semantic"

@@ -72,6 +72,9 @@ from lightrag.constants import (
     DEFAULT_FILE_PATH_MORE_PLACEHOLDER,
     DEFAULT_MAX_FILE_PATHS,
     DEFAULT_ENTITY_NAME_MAX_LENGTH,
+    DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
+    DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
+    DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
 )
 from lightrag.kg.shared_storage import get_storage_keyed_lock
 import time
@@ -153,6 +156,42 @@ def _extract_existing_factual_weight_raw(edge_data: dict[str, Any] | None) -> fl
 
 def _factual_weight_from_raw(weight_raw: float) -> float:
     return math.log1p(max(0.0, _to_non_negative_float(weight_raw, default=0.0)))
+
+
+async def _remove_relation_edge_and_vector(
+    knowledge_graph_inst: BaseGraphStorage,
+    relationships_vdb: BaseVectorStorage | None,
+    src_id: str,
+    tgt_id: str,
+) -> None:
+    try:
+        await knowledge_graph_inst.remove_edges([(src_id, tgt_id)])
+    except Exception as exc:
+        logger.debug(
+            "Failed to remove graph edge `%s`~`%s` during strict endpoint cleanup: %s",
+            src_id,
+            tgt_id,
+            exc,
+        )
+
+    if relationships_vdb is None:
+        return
+
+    rel_src, rel_tgt = (src_id, tgt_id)
+    if rel_src > rel_tgt:
+        rel_src, rel_tgt = rel_tgt, rel_src
+
+    rel_vdb_id = compute_mdhash_id(rel_src + rel_tgt, prefix="rel-")
+    rel_vdb_id_reverse = compute_mdhash_id(rel_tgt + rel_src, prefix="rel-")
+    try:
+        await relationships_vdb.delete([rel_vdb_id, rel_vdb_id_reverse])
+    except Exception as exc:
+        logger.debug(
+            "Failed to remove relationship vectors `%s`/`%s` during strict endpoint cleanup: %s",
+            rel_vdb_id,
+            rel_vdb_id_reverse,
+            exc,
+        )
 
 try:
     from transformers import AutoImageProcessor
@@ -492,7 +531,69 @@ def _looks_like_acronym(word: str) -> bool:
     return vowels == 0
 
 
-def _normalize_entity_surface(name: str) -> str:
+def _normalize_uppercase_allowlist(raw_allowlist: Any) -> set[str]:
+    if raw_allowlist is None:
+        return set()
+
+    allowlist_items: list[str] = []
+    if isinstance(raw_allowlist, str):
+        raw_text = raw_allowlist.strip()
+        if not raw_text:
+            return set()
+        if raw_text.startswith("[") and raw_text.endswith("]"):
+            try:
+                parsed = json.loads(raw_text)
+                if isinstance(parsed, list):
+                    allowlist_items = [str(item) for item in parsed]
+                else:
+                    allowlist_items = [raw_text]
+            except json.JSONDecodeError:
+                allowlist_items = [item.strip() for item in raw_text.split(",")]
+        else:
+            allowlist_items = [item.strip() for item in raw_text.split(",")]
+    elif isinstance(raw_allowlist, (list, tuple, set)):
+        allowlist_items = [str(item) for item in raw_allowlist]
+    else:
+        return set()
+
+    normalized = set()
+    for item in allowlist_items:
+        cleaned = str(item).strip()
+        if cleaned:
+            normalized.add(cleaned.lower())
+    return normalized
+
+
+def _normalize_word_case(word: str, uppercase_allowlist: set[str]) -> str:
+    if not word:
+        return word
+
+    pieces = _re.split(r"([\-_/])", word)
+    normalized_pieces: list[str] = []
+    for piece in pieces:
+        if piece in {"-", "_", "/"}:
+            normalized_pieces.append(piece)
+            continue
+        if not piece:
+            continue
+
+        lowered_piece = piece.lower()
+        alnum_key = _re.sub(r"[^a-z0-9]", "", lowered_piece)
+        if alnum_key and alnum_key in uppercase_allowlist:
+            normalized_pieces.append(piece.upper())
+            continue
+        if _looks_like_acronym(lowered_piece):
+            normalized_pieces.append(piece.upper())
+            continue
+        normalized_pieces.append(piece.capitalize())
+
+    return "".join(normalized_pieces)
+
+
+def _normalize_entity_surface(
+    name: str,
+    uppercase_allowlist: set[str] | None = None,
+) -> str:
     # Normalize Unicode and separator artifacts first.
     normalized = unicodedata.normalize("NFKC", name or "")
     normalized = _re.sub(r"(?<=\w)_(?=\w)", " ", normalized.strip())
@@ -505,17 +606,11 @@ def _normalize_entity_surface(name: str) -> str:
     # - all-lower acronym-like tokens => uppercase (e.g., kglm -> KGLM)
     # - all-lower phrases => title-case words
     if normalized.islower():
+        normalized_allowlist = uppercase_allowlist or set()
         words = normalized.split(" ")
-        if len(words) == 1 and _looks_like_acronym(words[0]):
-            normalized = words[0].upper()
-        else:
-            titled_words = []
-            for w in words:
-                if _looks_like_acronym(w):
-                    titled_words.append(w.upper())
-                else:
-                    titled_words.append(w.capitalize())
-            normalized = " ".join(titled_words)
+        normalized = " ".join(
+            _normalize_word_case(word, normalized_allowlist) for word in words
+        )
 
     if _MODAL_ENTITY_SUFFIX_RE.search(normalized):
         return normalized
@@ -1154,6 +1249,8 @@ async def _handle_single_entity_extraction(
     timestamp: int,
     file_path: str = "unknown_source",
     path_fragment_keys: set[str] | None = None,
+    enable_entity_surface_normalization: bool = False,
+    entity_uppercase_allowlist: set[str] | None = None,
 ):
     if len(record_attributes) != 4 or "entity" not in record_attributes[0]:
         if len(record_attributes) > 1 and "entity" in record_attributes[0]:
@@ -1167,8 +1264,6 @@ async def _handle_single_entity_extraction(
         entity_name = sanitize_and_normalize_extracted_text(
             record_attributes[1], remove_inner_quotes=True
         )
-        # Disabled by request: surface normalization stage.
-        # entity_name = _normalize_entity_surface(entity_name)
 
         # Validate entity name after all cleaning steps
         if not entity_name or not entity_name.strip():
@@ -1190,6 +1285,16 @@ async def _handle_single_entity_extraction(
                 f"Filtered path fragment entity [reason=path_fragment_from_source]: '{entity_name}'"
             )
             return None
+
+        if enable_entity_surface_normalization:
+            entity_name = _normalize_entity_surface(
+                entity_name, entity_uppercase_allowlist
+            )
+            if not entity_name:
+                logger.info(
+                    f"Empty entity name after normalization. Original: '{record_attributes[1]}'"
+                )
+                return None
 
         # Process entity type with same cleaning pipeline
         entity_type = sanitize_and_normalize_extracted_text(
@@ -1258,6 +1363,8 @@ async def _handle_single_relationship_extraction(
     timestamp: int,
     file_path: str = "unknown_source",
     path_fragment_keys: set[str] | None = None,
+    enable_entity_surface_normalization: bool = False,
+    entity_uppercase_allowlist: set[str] | None = None,
 ):
     if (
         len(record_attributes) != 5 or "relation" not in record_attributes[0]
@@ -1276,9 +1383,6 @@ async def _handle_single_relationship_extraction(
         target = sanitize_and_normalize_extracted_text(
             record_attributes[2], remove_inner_quotes=True
         )
-        # Disabled by request: surface normalization stage.
-        # source = _normalize_entity_surface(source)
-        # target = _normalize_entity_surface(target)
 
         # Validate entity names after all cleaning steps
         if not source:
@@ -1319,6 +1423,15 @@ async def _handle_single_relationship_extraction(
                 f"Filtered relationship with path-fragment entity [reason={', '.join(reason_parts)}]: '{source}' -> '{target}'"
             )
             return None
+
+        if enable_entity_surface_normalization:
+            source = _normalize_entity_surface(source, entity_uppercase_allowlist)
+            target = _normalize_entity_surface(target, entity_uppercase_allowlist)
+            if not source or not target:
+                logger.info(
+                    f"Empty relation endpoint after normalization in chunk {chunk_key}"
+                )
+                return None
 
         if source == target:
             logger.debug(
@@ -1451,6 +1564,7 @@ async def rebuild_knowledge_from_chunks(
                     chunk_id=chunk_id,
                     extraction_result=result[0],
                     timestamp=result[1],
+                    global_config=global_config,
                 )
 
                 # Merge entities and relationships from this extraction result
@@ -1751,6 +1865,8 @@ async def _process_extraction_result(
     source_text: str = "",
     tuple_delimiter: str = "<|#|>",
     completion_delimiter: str = "<|COMPLETE|>",
+    enable_entity_surface_normalization: bool = DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
+    entity_uppercase_allowlist: Any = None,
 ) -> tuple[dict, dict]:
     """Process a single extraction result (either initial or gleaning)
     Args:
@@ -1766,6 +1882,11 @@ async def _process_extraction_result(
     maybe_nodes = defaultdict(list)
     maybe_edges = defaultdict(list)
     path_fragment_keys = _collect_path_fragment_keys(source_text)
+    normalized_allowlist = _normalize_uppercase_allowlist(
+        entity_uppercase_allowlist
+        if entity_uppercase_allowlist is not None
+        else DEFAULT_ENTITY_UPPERCASE_ALLOWLIST
+    )
 
     if completion_delimiter not in result:
         logger.warning(
@@ -1838,6 +1959,8 @@ async def _process_extraction_result(
             timestamp,
             file_path,
             path_fragment_keys,
+            enable_entity_surface_normalization=enable_entity_surface_normalization,
+            entity_uppercase_allowlist=normalized_allowlist,
         )
         if entity_data is not None:
             truncated_name = _truncate_entity_identifier(
@@ -1857,6 +1980,8 @@ async def _process_extraction_result(
             timestamp,
             file_path,
             path_fragment_keys,
+            enable_entity_surface_normalization=enable_entity_surface_normalization,
+            entity_uppercase_allowlist=normalized_allowlist,
         )
         if relationship_data is not None:
             truncated_source = _truncate_entity_identifier(
@@ -1883,6 +2008,7 @@ async def _rebuild_from_extraction_result(
     extraction_result: str,
     chunk_id: str,
     timestamp: int,
+    global_config: dict[str, Any],
 ) -> tuple[dict, dict]:
     """Parse cached extraction result using the same logic as extract_entities
 
@@ -1913,6 +2039,16 @@ async def _rebuild_from_extraction_result(
         source_text=chunk_content,
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
+        enable_entity_surface_normalization=bool(
+            global_config.get(
+                "enable_entity_surface_normalization",
+                DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
+            )
+        ),
+        entity_uppercase_allowlist=global_config.get(
+            "entity_uppercase_allowlist",
+            DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
+        ),
     )
 
 
@@ -2188,6 +2324,36 @@ async def _rebuild_single_relationship(
     current_relationship = await knowledge_graph_inst.get_edge(src, tgt)
     if not current_relationship:
         return
+
+    strict_endpoint_match = bool(
+        global_config.get(
+            "strict_relation_endpoint_entity_match",
+            DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
+        )
+    )
+    if strict_endpoint_match:
+        missing_endpoints: list[str] = []
+        if not await knowledge_graph_inst.has_node(src):
+            missing_endpoints.append(src)
+        if not await knowledge_graph_inst.has_node(tgt):
+            missing_endpoints.append(tgt)
+        if missing_endpoints:
+            await _remove_relation_edge_and_vector(
+                knowledge_graph_inst=knowledge_graph_inst,
+                relationships_vdb=relationships_vdb,
+                src_id=src,
+                tgt_id=tgt,
+            )
+            status_message = (
+                f"Skipped rebuild `{src}`~`{tgt}`: strict endpoint match enabled, "
+                f"missing endpoints={','.join(sorted(set(missing_endpoints)))}"
+            )
+            logger.info(status_message)
+            if pipeline_status is not None and pipeline_status_lock is not None:
+                async with pipeline_status_lock:
+                    pipeline_status["latest_message"] = status_message
+                    pipeline_status["history_messages"].append(status_message)
+            return
 
     # normalized_chunk_ids = merge_source_ids([], chunk_ids)
     normalized_chunk_ids = chunk_ids
@@ -2842,6 +3008,33 @@ async def _merge_edges_then_upsert(
 ):
     if src_id == tgt_id:
         return None
+
+    strict_endpoint_match = bool(
+        global_config.get(
+            "strict_relation_endpoint_entity_match",
+            DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
+        )
+    )
+    if strict_endpoint_match:
+        missing_endpoints: list[str] = []
+        if not await knowledge_graph_inst.has_node(src_id):
+            missing_endpoints.append(src_id)
+        if not await knowledge_graph_inst.has_node(tgt_id):
+            missing_endpoints.append(tgt_id)
+        if missing_endpoints:
+            await _remove_relation_edge_and_vector(
+                knowledge_graph_inst=knowledge_graph_inst,
+                relationships_vdb=relationships_vdb,
+                src_id=src_id,
+                tgt_id=tgt_id,
+            )
+            logger.info(
+                "Skipped relation `%s`~`%s`: strict endpoint match enabled, missing endpoints=%s",
+                src_id,
+                tgt_id,
+                ",".join(sorted(set(missing_endpoints))),
+            )
+            return None
 
     already_edge = None
     already_weight_raw = 0.0
@@ -3930,8 +4123,23 @@ async def extract_entities(
     entity_types = global_config["addon_params"].get(
         "entity_types", DEFAULT_ENTITY_TYPES
     )
+    enable_surface_normalization = bool(
+        global_config.get(
+            "enable_entity_surface_normalization",
+            DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
+        )
+    )
+    entity_uppercase_allowlist = global_config.get(
+        "entity_uppercase_allowlist",
+        DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
+    )
+    extraction_examples: list[str] = list(PROMPTS["entity_extraction_examples"])
+    if enable_surface_normalization:
+        extraction_examples.extend(
+            PROMPTS.get("entity_extraction_normalization_examples", [])
+        )
 
-    examples = "\n".join(PROMPTS["entity_extraction_examples"])
+    examples = "\n".join(extraction_examples)
 
     example_context_base = dict(
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
@@ -3948,6 +4156,16 @@ async def extract_entities(
         entity_types=",".join(entity_types),
         examples=examples,
         language=language,
+        entity_name_case_rule=(
+            PROMPTS["ENTITY_NAME_CASE_RULE_NORMALIZED"]
+            if enable_surface_normalization
+            else PROMPTS["ENTITY_NAME_CASE_RULE_DEFAULT"]
+        ),
+        relation_endpoint_case_rule=(
+            PROMPTS["RELATION_ENDPOINT_CASE_RULE_NORMALIZED"]
+            if enable_surface_normalization
+            else PROMPTS["RELATION_ENDPOINT_CASE_RULE_DEFAULT"]
+        ),
     )
 
     processed_chunks = 0
@@ -4007,6 +4225,8 @@ async def extract_entities(
             source_text=content,
             tuple_delimiter=context_base["tuple_delimiter"],
             completion_delimiter=context_base["completion_delimiter"],
+            enable_entity_surface_normalization=enable_surface_normalization,
+            entity_uppercase_allowlist=entity_uppercase_allowlist,
         )
 
         # Process additional gleaning results only 1 time when entity_extract_max_gleaning is greater than zero.
@@ -4031,6 +4251,8 @@ async def extract_entities(
                 source_text=content,
                 tuple_delimiter=context_base["tuple_delimiter"],
                 completion_delimiter=context_base["completion_delimiter"],
+                enable_entity_surface_normalization=enable_surface_normalization,
+                entity_uppercase_allowlist=entity_uppercase_allowlist,
             )
 
             # Merge results - compare description lengths to choose better version

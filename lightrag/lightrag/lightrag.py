@@ -53,6 +53,9 @@ from lightrag.constants import (
     DEFAULT_SOURCE_IDS_LIMIT_METHOD,
     DEFAULT_MAX_FILE_PATHS,
     DEFAULT_FILE_PATH_MORE_PLACEHOLDER,
+    DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
+    DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
+    DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
 )
 from lightrag.utils import get_env_value
 
@@ -203,6 +206,36 @@ class LightRAG:
 
     synonymy_min_entity_len: int = field(default=2)
     """Minimum alphanumeric/CJK character count in entity name for synonym detection."""
+
+    enable_entity_surface_normalization: bool = field(
+        default=get_env_value(
+            "ENABLE_ENTITY_SURFACE_NORMALIZATION",
+            DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
+            bool,
+        )
+    )
+    """Enable entity/relation endpoint surface-name normalization during extraction."""
+
+    entity_uppercase_allowlist: list[str] = field(
+        default_factory=lambda: _normalize_string_list(
+            get_env_value(
+                "ENTITY_UPPERCASE_ALLOWLIST",
+                DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
+                list,
+            ),
+            context="ENTITY_UPPERCASE_ALLOWLIST",
+        )
+    )
+    """Uppercase token allowlist used by entity surface normalization."""
+
+    strict_relation_endpoint_entity_match: bool = field(
+        default=get_env_value(
+            "STRICT_RELATION_ENDPOINT_ENTITY_MATCH",
+            DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
+            bool,
+        )
+    )
+    """If True, drop relation writes whose endpoints are missing graph entities."""
 
     # Query parameters
     # ---
@@ -509,6 +542,20 @@ class LightRAG:
             delattr(self, "log_file_path")
 
         initialize_share_data()
+
+        # Normalize allowlist config once so downstream consumers can rely on a
+        # stable, deduplicated list of non-empty strings.
+        self.entity_uppercase_allowlist = sorted(
+            {
+                item.strip()
+                for item in _normalize_string_list(
+                    self.entity_uppercase_allowlist,
+                    context="entity_uppercase_allowlist",
+                )
+                if item.strip()
+            },
+            key=str.lower,
+        )
 
         if not os.path.exists(self.working_dir):
             logger.info(f"Creating working directory {self.working_dir}")

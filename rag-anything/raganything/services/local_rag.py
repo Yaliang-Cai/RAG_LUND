@@ -20,7 +20,7 @@ import os
 import argparse
 import ipaddress
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -93,6 +93,9 @@ from raganything.constants import (
     DEFAULT_PPR_TOP_K,
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
+    DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
+    DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
+    DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
     DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID,
     DEFAULT_MAX_ASYNC_INGEST,
     DEFAULT_ENABLE_RESILIENCE,
@@ -201,6 +204,15 @@ class LocalRagSettings:
     ppr_top_k: int = DEFAULT_PPR_TOP_K
     passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
     ppr_synonym_weight_mode: str = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
+    enable_entity_surface_normalization: bool = (
+        DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION
+    )
+    entity_uppercase_allowlist: list[str] = field(
+        default_factory=lambda: list(DEFAULT_ENTITY_UPPERCASE_ALLOWLIST)
+    )
+    strict_relation_endpoint_entity_match: bool = (
+        DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH
+    )
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -423,6 +435,19 @@ class LocalRagSettings:
                     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
                 )
             ),
+            enable_entity_surface_normalization=os.getenv(
+                "RAGANYTHING_ENABLE_ENTITY_SURFACE_NORMALIZATION",
+                str(DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            entity_uppercase_allowlist=_parse_uppercase_allowlist(
+                os.getenv("RAGANYTHING_ENTITY_UPPERCASE_ALLOWLIST")
+            ),
+            strict_relation_endpoint_entity_match=os.getenv(
+                "RAGANYTHING_STRICT_RELATION_ENDPOINT_ENTITY_MATCH",
+                str(DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
         )
 
 
@@ -1201,6 +1226,41 @@ def _normalize_ppr_synonym_weight_mode(mode: str | None) -> str:
     return DEFAULT_PPR_SYNONYM_WEIGHT_MODE
 
 
+def _parse_uppercase_allowlist(raw_value: str | None) -> list[str]:
+    if raw_value is None:
+        return list(DEFAULT_ENTITY_UPPERCASE_ALLOWLIST)
+
+    stripped = raw_value.strip()
+    if not stripped:
+        return []
+
+    parsed_items: list[str] = []
+    if stripped.startswith("[") and stripped.endswith("]"):
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                parsed_items = [str(item) for item in parsed]
+            else:
+                parsed_items = [stripped]
+        except json.JSONDecodeError:
+            parsed_items = [item.strip() for item in stripped.split(",")]
+    else:
+        parsed_items = [item.strip() for item in stripped.split(",")]
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in parsed_items:
+        cleaned = str(item).strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+    return deduped
+
+
 class LocalRagService:
     def __init__(self, settings: Optional[LocalRagSettings] = None):
         # 初始化双客户端：text/vision 可同端口也可分离部署。
@@ -1212,6 +1272,18 @@ class LocalRagService:
         self.settings.ppr_synonym_weight_mode = _normalize_ppr_synonym_weight_mode(
             self.settings.ppr_synonym_weight_mode
         )
+        normalized_allowlist: list[str] = []
+        seen_allowlist: set[str] = set()
+        for item in (self.settings.entity_uppercase_allowlist or []):
+            cleaned = str(item).strip()
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen_allowlist:
+                continue
+            seen_allowlist.add(key)
+            normalized_allowlist.append(cleaned)
+        self.settings.entity_uppercase_allowlist = normalized_allowlist
         if not self.settings.image_token_model_name_or_path:
             self.settings.image_token_model_name_or_path = (
                 self.settings.vision_model_path
@@ -1520,6 +1592,9 @@ class LocalRagService:
                 "synonymy_threshold": self.settings.synonymy_threshold,
                 "synonymy_topk": self.settings.synonymy_topk,
                 "synonymy_min_entity_len": self.settings.synonymy_min_entity_len,
+                "enable_entity_surface_normalization": self.settings.enable_entity_surface_normalization,
+                "entity_uppercase_allowlist": self.settings.entity_uppercase_allowlist,
+                "strict_relation_endpoint_entity_match": self.settings.strict_relation_endpoint_entity_match,
                 # V3 knobs are query-time only (QueryParam) and should not be
                 # passed into LightRAG.__init__ for compatibility.
                 "graph_storage": "Neo4JStorage",

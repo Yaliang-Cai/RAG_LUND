@@ -7,6 +7,20 @@ PROMPTS: dict[str, Any] = {}
 # All delimiters must be formatted as "<|UPPER_CASE_STRING|>"
 PROMPTS["DEFAULT_TUPLE_DELIMITER"] = "<|#|>"
 PROMPTS["DEFAULT_COMPLETION_DELIMITER"] = "<|COMPLETE|>"
+PROMPTS["ENTITY_NAME_CASE_RULE_DEFAULT"] = (
+    "Title-case each significant word if the name is case-insensitive."
+)
+PROMPTS["ENTITY_NAME_CASE_RULE_NORMALIZED"] = (
+    "If the full name is all-lowercase, normalize it to title case.\n"
+    "                       In that lowercase-only case, preserve known acronyms in uppercase\n"
+    '                       (example: "llm application" -> "LLM Application").\n'
+    '                       If any uppercase letter already exists (for example "OpenAI API", "BERT"),\n'
+    "                       keep the original casing unchanged."
+)
+PROMPTS["RELATION_ENDPOINT_CASE_RULE_DEFAULT"] = ""
+PROMPTS["RELATION_ENDPOINT_CASE_RULE_NORMALIZED"] = (
+    "Apply the same casing rule as entity_name before deciding equality."
+)
 
 PROMPTS["entity_extraction_system_prompt"] = """---Role---
 You are a Knowledge Graph Specialist. Your task is to extract entities and
@@ -111,7 +125,7 @@ The first field must be the literal string `entity`.
   entity{tuple_delimiter}entity_name{tuple_delimiter}entity_type{tuple_delimiter}entity_description
 
   entity_name        : Exact surface form from the text.
-                       Title-case each significant word if the name is case-insensitive.
+                       {entity_name_case_rule}
                        Consistent naming across the entire extraction run.
   entity_type        : Lowercase. Must be one of the types in <Entity_types>.
                        No other values permitted.
@@ -128,6 +142,7 @@ The first field must be the literal string `relation`.
   relation{tuple_delimiter}source_entity{tuple_delimiter}target_entity{tuple_delimiter}relationship_keywords{tuple_delimiter}relationship_description
 
   source_entity / target_entity : Must match entity_name exactly as extracted above.
+                                  {relation_endpoint_case_rule}
   relationship_keywords         : One or more high-level keywords. Separate with comma.
                                   Do NOT use {tuple_delimiter} inside this field.
   relationship_description      : Concise explanation based solely on the input text.
@@ -441,6 +456,39 @@ relation{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}Apollo Platform{
 relation{tuple_delimiter}Diana Chen{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}leadership, analysis{tuple_delimiter}The text states Diana Chen led the root cause analysis within the review.
 relation{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}Apollo Platform{tuple_delimiter}fault, root cause{tuple_delimiter}The text identifies a memory leak in the Data Ingestion Pipeline as the primary fault behind the Apollo Platform's SLA failure.
 relation{tuple_delimiter}Remediation Plan{tuple_delimiter}Engineering Steering Committee{tuple_delimiter}submission, governance{tuple_delimiter}The text states the remediation plan was submitted to the Engineering Steering Committee.
+{completion_delimiter}
+""",
+]
+
+PROMPTS["entity_extraction_normalization_examples"] = [
+    # ── Example 11 · Lowercase-only names are normalized ─────────────────────
+    """<Entity_types>
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
+
+<Input Text>
+```
+The llm application integrates a rag pipeline for customer support.
+```
+
+<Output>
+entity{tuple_delimiter}LLM Application{tuple_delimiter}work{tuple_delimiter}System described in the text as integrating a RAG pipeline for customer support.
+entity{tuple_delimiter}RAG Pipeline{tuple_delimiter}process{tuple_delimiter}Pipeline described in the text as integrated into the LLM Application for customer support.
+relation{tuple_delimiter}LLM Application{tuple_delimiter}RAG Pipeline{tuple_delimiter}integration, retrieval architecture{tuple_delimiter}The text states the LLM Application integrates a RAG pipeline for customer support.
+{completion_delimiter}
+""",
+    # ── Example 12 · Existing uppercase names are preserved ───────────────────
+    """<Entity_types>
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
+
+<Input Text>
+```
+OpenAI API documentation explains how BERT can be used for semantic search.
+```
+
+<Output>
+entity{tuple_delimiter}OpenAI API{tuple_delimiter}work{tuple_delimiter}Documentation described in the text as explaining how BERT can be used for semantic search.
+entity{tuple_delimiter}BERT{tuple_delimiter}work{tuple_delimiter}Model described in the text as usable for semantic search according to the OpenAI API documentation.
+relation{tuple_delimiter}OpenAI API{tuple_delimiter}BERT{tuple_delimiter}usage guidance, semantic search{tuple_delimiter}The text states the OpenAI API documentation explains how BERT can be used for semantic search.
 {completion_delimiter}
 """,
 ]

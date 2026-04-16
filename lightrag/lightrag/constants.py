@@ -14,6 +14,37 @@ DEFAULT_MAX_GRAPH_NODES = 1000
 DEFAULT_SUMMARY_LANGUAGE = "English"  # Default language for document processing
 DEFAULT_MAX_GLEANING = 1
 DEFAULT_ENTITY_NAME_MAX_LENGTH = 256
+DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION = False
+DEFAULT_ENTITY_UPPERCASE_ALLOWLIST = [
+    "AI",
+    "API",
+    "ASR",
+    "BERT",
+    "CNN",
+    "CPU",
+    "GPU",
+    "GPT",
+    "HTTP",
+    "HTTPS",
+    "JSON",
+    "LLM",
+    "LSTM",
+    "ML",
+    "NLP",
+    "OCR",
+    "RAG",
+    "RNN",
+    "SDK",
+    "SQL",
+    "TTS",
+    "XML",
+    "YAML",
+    "3G",
+    "4G",
+    "5G",
+    "6G",
+]
+DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH = False
 
 # Number of description fragments to trigger LLM summary
 DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE = 8
