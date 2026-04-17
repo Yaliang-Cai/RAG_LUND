@@ -2234,7 +2234,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--workspace-id", default=DEFAULT_WORKSPACE)
     p.add_argument(
         "--query-mode",
-        choices=["local", "global", "hybrid", "naive", "mix", "bypass"],
+        choices=["local", "global", "hybrid", "naive", "mix", "bypass", "ppr_local", "ppr"],
         default="hybrid",
     )
     p.add_argument("--top-k", type=int, default=40)

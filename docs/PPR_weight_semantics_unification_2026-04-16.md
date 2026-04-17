@@ -105,6 +105,7 @@
   - `recognition_prompt_reserved_tokens`（默认 `4096`）
 - 实际可用预算：`max_tokens - reserved_tokens`。
 - 当候选内容超预算时，构造器会按预算裁剪 entity 行 / fact 行，并保持顺序优先级（不裁剪 query）。
+- 发生裁剪时会记录 `warning` 日志，便于在实验日志中直接定位是否触发了 token 保护。
 - 目标：避免 recognition prompt 超出模型上下文窗口，保证 PPR seed filtering 稳定执行。
 - 配置入口：
   - LightRAG：`RECOGNITION_PROMPT_MAX_TOKENS`、`RECOGNITION_PROMPT_RESERVED_TOKENS`

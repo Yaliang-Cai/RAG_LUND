@@ -63,6 +63,7 @@
   - 仅影响 `mode="ppr"` 下的 global recognition-memory LLM prompt；
   - 生效预算为 `max_tokens - reserved_tokens`；
   - 超预算时自动裁剪候选实体/候选关系行（不裁剪 query），避免 prompt 触发模型上下文超限。
+  - 发生裁剪会打印 `warning` 日志，便于实验时定位是否触发 token 保护。
 
 ## 环境变量映射
 

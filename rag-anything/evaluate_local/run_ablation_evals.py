@@ -67,6 +67,17 @@ PROFILE_ALIASES: dict[str, str] = {
     "db+v1+v2": "v0_v1_v2",
     "db+v1+v2+v3": "v0_v1_v2_v3",
 }
+SHARED_QUERY_MODE_CHOICES = (
+    "local",
+    "global",
+    "hybrid",
+    "naive",
+    "mix",
+    "bypass",
+    "rrf",
+    "ppr_local",
+    "ppr",
+)
 
 
 def _now_iso() -> str:
@@ -209,6 +220,11 @@ def _build_shared_base_command(
     shared_workspace_id: str,
     args: argparse.Namespace,
 ) -> list[str]:
+    query_mode = (
+        str(args.shared_query_mode_v3)
+        if bool(profile.enable_multi_hop)
+        else str(args.shared_query_mode)
+    )
     cmd = [
         python_exe,
         "-m",
@@ -240,6 +256,10 @@ def _build_shared_base_command(
         str(args.ppr_top_k),
         "--passage-node-weight",
         str(args.passage_node_weight),
+        "--query_mode",
+        query_mode,
+        "--recognition_top_k",
+        str(args.shared_recognition_top_k),
     ]
     if not args.resume:
         cmd.append("--no_resume")
@@ -468,6 +488,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-async-ingest", type=int, default=4)
     parser.add_argument("--max-async-generate", type=int, default=6)
     parser.add_argument("--max-async-judge", type=int, default=32)
+    parser.add_argument(
+        "--shared-query-mode",
+        type=str,
+        choices=SHARED_QUERY_MODE_CHOICES,
+        default="hybrid",
+        help="Default DocBench retrieval mode for non-V3 profiles.",
+    )
+    parser.add_argument(
+        "--shared-query-mode-v3",
+        type=str,
+        choices=SHARED_QUERY_MODE_CHOICES,
+        default="ppr",
+        help="DocBench retrieval mode for V3 profile (default global PPR).",
+    )
+    parser.add_argument(
+        "--shared-recognition-top-k",
+        type=int,
+        default=10,
+        help="Recognition-memory top-k passed to evaluate_shared when query_mode='ppr'.",
+    )
 
     parser.add_argument(
         "--surge-data-root",
@@ -481,7 +521,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--surge-corpus-file", type=str, default="subset_corpus.json")
     parser.add_argument(
         "--query-mode",
-        choices=["local", "global", "hybrid", "naive", "mix", "bypass"],
+        choices=["local", "global", "hybrid", "naive", "mix", "bypass", "ppr_local", "ppr"],
         default="hybrid",
     )
     parser.add_argument("--top-k", type=int, default=40)
@@ -578,6 +618,9 @@ def main() -> int:
             ),
             "shared_workspace_prefix": shared_workspace_prefix,
             "surge_workspace_prefix": surge_workspace_prefix,
+            "shared_query_mode": args.shared_query_mode,
+            "shared_query_mode_v3": args.shared_query_mode_v3,
+            "shared_recognition_top_k": args.shared_recognition_top_k,
         },
     )
 
@@ -602,6 +645,12 @@ def main() -> int:
             "enable_entity_disambiguation": profile.enable_entity_disambiguation,
             "enable_synonym_linking": profile.enable_synonym_linking,
             "enable_multi_hop": profile.enable_multi_hop,
+            "shared_query_mode": (
+                args.shared_query_mode_v3
+                if bool(profile.enable_multi_hop)
+                else args.shared_query_mode
+            ),
+            "shared_recognition_top_k": args.shared_recognition_top_k,
             "shared_output_dir": str(shared_output_dir),
             "surge_output_dir": str(surge_output_dir),
             "shared_mineru_output_dir": (

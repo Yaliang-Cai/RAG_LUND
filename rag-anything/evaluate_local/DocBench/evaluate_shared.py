@@ -103,6 +103,17 @@ DOCBENCH_QUERY_PARAMS = {
     "image_token_model_name_or_path": RAG_VISION_MODEL_PATH,
     "image_wrapper_tokens_per_image": 2,
 }
+DOCBENCH_QUERY_MODE_CHOICES = (
+    "local",
+    "global",
+    "hybrid",
+    "naive",
+    "mix",
+    "bypass",
+    "rrf",
+    "ppr_local",
+    "ppr",
+)
 
 ONE_SENTENCE_USER_PROMPT = (
     "Provide the final answer in exactly one sentence. "
@@ -280,10 +291,20 @@ def _build_query_params(
     one_sentence: bool = False,
     *,
     ablation_flags: AblationFlags | None = None,
+    query_mode: str | None = None,
+    recognition_top_k: int = 10,
 ) -> dict[str, Any]:
     flags = ablation_flags or AblationFlags()
     params = dict(DOCBENCH_QUERY_PARAMS)
     params.update(flags.to_query_kwargs())
+    if query_mode is not None:
+        normalized_mode = str(query_mode).strip()
+        if normalized_mode:
+            params["mode"] = normalized_mode
+    if str(params.get("mode", "")).strip() == "ppr":
+        params["recognition_top_k"] = max(0, int(recognition_top_k))
+    else:
+        params.pop("recognition_top_k", None)
     if one_sentence:
         params["user_prompt"] = ONE_SENTENCE_USER_PROMPT
         params["response_type"] = "Single Sentence"
@@ -1793,6 +1814,22 @@ async def main() -> None:
     parser.add_argument("--max_async_ingest", type=int, default=4)
     parser.add_argument("--max_async_generate", type=int, default=6)
     parser.add_argument("--max_async_judge", type=int, default=32)
+    parser.add_argument(
+        "--query_mode",
+        type=str,
+        choices=DOCBENCH_QUERY_MODE_CHOICES,
+        default=DOCBENCH_QUERY_PARAMS["mode"],
+        help=(
+            "Retrieval mode for answer generation. "
+            "Use 'ppr' to enable global PPR (and recognition memory if recognition_top_k>0)."
+        ),
+    )
+    parser.add_argument(
+        "--recognition_top_k",
+        type=int,
+        default=10,
+        help="Recognition-memory relation top-k when query_mode='ppr'. Set 0 to disable.",
+    )
     add_ablation_arguments(parser)
     parser.add_argument(
         "--allow_legacy_index_profile_adoption",
@@ -1834,6 +1871,8 @@ async def main() -> None:
     query_params = _build_query_params(
         one_sentence=one_sentence,
         ablation_flags=ablation_flags,
+        query_mode=args.query_mode,
+        recognition_top_k=args.recognition_top_k,
     )
     experiment_id = _build_experiment_id(
         shared_workspace_id=args.shared_workspace_id,

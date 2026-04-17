@@ -6183,9 +6183,9 @@ async def _recognition_memory_filter(
             len(selected_entities) < len(entity_vdb_ids)
             or len(selected_facts) < len(triplet_lines)
         ):
-            logger.info(
-                "PPR(global): recognition prompt truncated to %d tokens "
-                "(budget=%d, entities=%d/%d, facts=%d/%d)",
+            logger.warning(
+                "PPR(global): recognition prompt truncated by token budget "
+                "(prompt_tokens=%d, budget=%d, entities=%d/%d, facts=%d/%d)",
                 prompt_tokens,
                 token_budget,
                 len(selected_entities),

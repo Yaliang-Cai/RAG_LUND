@@ -316,3 +316,36 @@ score(chunk) = Σ_{source i}  1 / (k + rank_i)
 
 - 加 HyDE：
 短 query → LLM生成假设答案 → entity VDB → 更准的 seed entities → PPR传播
+
+---
+
+## 2026-04-17 增补：DocBench 消融执行与图谱复用口径
+
+### 1) 消融分组（与你当前实验口径一致）
+
+- `v0`：`enable_entity_disambiguation=false`，`enable_synonym_linking=false`，`V3=off`
+- `v0_v1`：在 `v0` 基础上开启 `enable_entity_disambiguation=true`
+- `v0_v1_v2`：在 `v0_v1` 基础上开启 `enable_synonym_linking=true`
+- `v0_v1_v2_v3`：在 `v0_v1_v2` 基础上仅增加检索侧 `V3`（推荐 `mode="ppr"`）
+
+### 2) 图谱是否需要重建
+
+- 需要重建：`V1/V2`（索引物化差异，影响图谱与向量）
+- 不需要重建：`V3`（查询期检索策略）
+- 因此 `v0_v1_v2_v3` 应复用 `v0_v1_v2` 的 workspace/index，这是当前 `run_ablation_evals.py` 的默认行为。
+
+### 3) DocBench 评测脚本新增检索参数
+
+- `evaluate_local/DocBench/evaluate_shared.py` 新增：
+  - `--query_mode`（支持 `ppr` / `ppr_local`）
+  - `--recognition_top_k`（仅 `query_mode="ppr"` 时参与 recognition-memory）
+- `evaluate_local/run_ablation_evals.py` 新增：
+  - `--shared-query-mode`（非 V3 默认模式，默认 `hybrid`）
+  - `--shared-query-mode-v3`（V3 模式，默认 `ppr`）
+  - `--shared-recognition-top-k`（默认 `10`）
+
+### 4) Recognition-Memory token 裁剪可观测性
+
+- 在 `mode="ppr"` 且 `recognition_top_k>0` 时，若 recognition prompt 超预算被裁剪，会输出 `warning` 日志：
+  - `PPR(global): recognition prompt truncated by token budget (...)`
+- 该日志用于判定本轮实验是否触发了 token 保护机制。
