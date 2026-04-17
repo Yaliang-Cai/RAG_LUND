@@ -93,6 +93,8 @@ from raganything.constants import (
     DEFAULT_PPR_TOP_K,
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
+    DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+    DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
     DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
     DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
     DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
@@ -205,6 +207,10 @@ class LocalRagSettings:
     ppr_top_k: int = DEFAULT_PPR_TOP_K
     passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
     ppr_synonym_weight_mode: str = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
+    recognition_prompt_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS
+    recognition_prompt_reserved_tokens: int = (
+        DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS
+    )
     enable_entity_surface_normalization: bool = (
         DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION
     )
@@ -437,6 +443,18 @@ class LocalRagSettings:
                 os.getenv(
                     "RAGANYTHING_PPR_SYNONYM_WEIGHT_MODE",
                     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
+                )
+            ),
+            recognition_prompt_max_tokens=int(
+                os.getenv(
+                    "RAGANYTHING_RECOGNITION_PROMPT_MAX_TOKENS",
+                    str(DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS),
+                )
+            ),
+            recognition_prompt_reserved_tokens=int(
+                os.getenv(
+                    "RAGANYTHING_RECOGNITION_PROMPT_RESERVED_TOKENS",
+                    str(DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS),
                 )
             ),
             enable_entity_surface_normalization=os.getenv(
@@ -1605,6 +1623,8 @@ class LocalRagService:
                 "enable_keyword_case_normalization": self.settings.enable_keyword_case_normalization,
                 "entity_uppercase_allowlist": self.settings.entity_uppercase_allowlist,
                 "strict_relation_endpoint_entity_match": self.settings.strict_relation_endpoint_entity_match,
+                "recognition_prompt_max_tokens": self.settings.recognition_prompt_max_tokens,
+                "recognition_prompt_reserved_tokens": self.settings.recognition_prompt_reserved_tokens,
                 # V3 knobs are query-time only (QueryParam) and should not be
                 # passed into LightRAG.__init__ for compatibility.
                 "graph_storage": "Neo4JStorage",

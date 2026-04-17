@@ -1,4 +1,4 @@
-# RRF v2 Upgrade Plan
+# RRF v2 升级方案
 
 ## 目标
 
@@ -80,7 +80,7 @@ relation → chunks      ─┘
 ### 5. QueryParam 新增字段
 
 ```python
-# RRF v2
+# RRF v2 实现
 hyde_n: int = 3                  # HyDE 假设文档数量
 hyde_enabled: bool = True        # 是否启用 HyDE 路
 sparse_enabled: bool = True      # 是否启用 sparse 路

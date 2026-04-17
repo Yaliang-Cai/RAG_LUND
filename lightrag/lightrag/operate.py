@@ -76,6 +76,8 @@ from lightrag.constants import (
     DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
     DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
     DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
+    DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+    DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
 )
 from lightrag.kg.shared_storage import get_storage_keyed_lock
 import time
@@ -141,6 +143,16 @@ def _to_non_negative_float(value: Any, default: float = 1.0) -> float:
         parsed = default
     if parsed < 0.0:
         return 0.0
+    return parsed
+
+
+def _to_non_negative_int(value: Any, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if parsed < 0:
+        return 0
     return parsed
 
 
@@ -6035,6 +6047,9 @@ async def _recognition_memory_filter(
     rel_results: list[dict],
     llm_model_func: Callable,
     recognition_top_k: int = 10,
+    tokenizer: Tokenizer | None = None,
+    recognition_prompt_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+    recognition_prompt_reserved_tokens: int = DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
 ) -> dict[str, float]:
     """HippoRAG2-style recognition memory filter for global PPR entity seeds.
 
@@ -6050,6 +6065,9 @@ async def _recognition_memory_filter(
                            "description", "distance").
         llm_model_func:    Async callable — global_config["llm_model_func"].
         recognition_top_k: Max triplets to show LLM. Entity cap = recognition_top_k * 2.
+        tokenizer:         Tokenizer for prompt token budgeting. If None, no budget guard.
+        recognition_prompt_max_tokens: Hard cap for recognition prompt token length.
+        recognition_prompt_reserved_tokens: Safety reserve subtracted from hard cap.
 
     Returns:
         {entity_id: normalised_weight} for LLM-recognised entities.
@@ -6086,26 +6104,102 @@ async def _recognition_memory_filter(
     if not all_candidate_ids:
         return {}
 
-    # --- Step 5: Build LLM prompt ---
-    standalone_block = "\n".join(entity_vdb_ids) if entity_vdb_ids else "(none)"
-    triplet_block = "\n".join(
-        f"{r.get('src_id', '')} | {r.get('description', '')} | {r.get('tgt_id', '')}"
-        for r in top_rels
-    ) if top_rels else "(none)"
-
-    prompt = (
-        "You are an entity relevance judge.\n\n"
-        f"Query: {query}\n\n"
-        "Below are retrieved entities and facts. Select ONLY those directly relevant "
-        "to answering the query.\n"
-        "You MUST copy each entity identifier EXACTLY as it appears in the list below, "
-        'including any "|TYPE" suffixes and special characters. '
-        "Do not rephrase, abbreviate, or invent new identifiers.\n\n"
-        f"Standalone entities:\n{standalone_block}\n\n"
-        f"Retrieved facts:\n{triplet_block}\n\n"
-        "Return the relevant entity identifiers only, one per line. "
+    # --- Step 5: Build LLM prompt (with token budget guard) ---
+    prompt_middle = "\n\nRetrieved facts:\n"
+    prompt_suffix = (
+        "\n\nReturn the relevant entity identifiers only, one per line. "
         "If none are relevant, return an empty response."
     )
+
+    triplet_lines = [
+        f"{r.get('src_id', '')} | {r.get('description', '')} | {r.get('tgt_id', '')}"
+        for r in top_rels
+    ]
+
+    def _compose_prompt(entity_lines: list[str], fact_lines: list[str]) -> str:
+        prompt_prefix = (
+            "You are an entity relevance judge.\n\n"
+            f"Query: {query}\n\n"
+            "Below are retrieved entities and facts. Select ONLY those directly relevant "
+            "to answering the query.\n"
+            "You MUST copy each entity identifier EXACTLY as it appears in the list below, "
+            'including any "|TYPE" suffixes and special characters. '
+            "Do not rephrase, abbreviate, or invent new identifiers.\n\n"
+            "Standalone entities:\n"
+        )
+        standalone_block = "\n".join(entity_lines) if entity_lines else "(none)"
+        triplet_block = "\n".join(fact_lines) if fact_lines else "(none)"
+        return (
+            prompt_prefix
+            + standalone_block
+            + prompt_middle
+            + triplet_block
+            + prompt_suffix
+        )
+
+    prompt: str
+    if tokenizer is None:
+        prompt = _compose_prompt(entity_vdb_ids, triplet_lines)
+    else:
+        max_tokens = max(
+            256,
+            _to_non_negative_int(
+                recognition_prompt_max_tokens,
+                default=DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+            ),
+        )
+        reserved_tokens = _to_non_negative_int(
+            recognition_prompt_reserved_tokens,
+            default=DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
+        )
+        token_budget = max(256, max_tokens - reserved_tokens)
+
+        selected_entities: list[str] = []
+        selected_facts: list[str] = []
+
+        def _fits_budget(candidate_entities: list[str], candidate_facts: list[str]) -> bool:
+            candidate_prompt = _compose_prompt(candidate_entities, candidate_facts)
+            return len(tokenizer.encode(candidate_prompt)) <= token_budget
+
+        # Ensure both sections have a chance to contribute before filling remaining budget.
+        if entity_vdb_ids and _fits_budget([entity_vdb_ids[0]], []):
+            selected_entities.append(entity_vdb_ids[0])
+        if triplet_lines and _fits_budget(selected_entities, [triplet_lines[0]]):
+            selected_facts.append(triplet_lines[0])
+
+        for entity_id in entity_vdb_ids[1:] if selected_entities else entity_vdb_ids:
+            candidate_entities = selected_entities + [entity_id]
+            if _fits_budget(candidate_entities, selected_facts):
+                selected_entities = candidate_entities
+
+        for fact_line in triplet_lines[1:] if selected_facts else triplet_lines:
+            candidate_facts = selected_facts + [fact_line]
+            if _fits_budget(selected_entities, candidate_facts):
+                selected_facts = candidate_facts
+
+        prompt = _compose_prompt(selected_entities, selected_facts)
+        prompt_tokens = len(tokenizer.encode(prompt))
+        if (
+            len(selected_entities) < len(entity_vdb_ids)
+            or len(selected_facts) < len(triplet_lines)
+        ):
+            logger.info(
+                "PPR(global): recognition prompt truncated to %d tokens "
+                "(budget=%d, entities=%d/%d, facts=%d/%d)",
+                prompt_tokens,
+                token_budget,
+                len(selected_entities),
+                len(entity_vdb_ids),
+                len(selected_facts),
+                len(triplet_lines),
+            )
+        if prompt_tokens > token_budget:
+            logger.warning(
+                "PPR(global): recognition prompt still exceeds budget after truncation "
+                "(prompt_tokens=%d, budget=%d)",
+                prompt_tokens,
+                token_budget,
+            )
 
     # --- Step 6: LLM call ---
     try:
@@ -6294,6 +6388,21 @@ async def _ppr_rank_chunks(
     if use_global and query_param.recognition_top_k > 0:
         # --- Recognition Memory path (global PPR only) ---
         llm_func = text_chunks_db.global_config.get("llm_model_func")
+        tokenizer = text_chunks_db.global_config.get("tokenizer")
+        recognition_prompt_max_tokens = _to_non_negative_int(
+            text_chunks_db.global_config.get(
+                "recognition_prompt_max_tokens",
+                DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+            ),
+            default=DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+        )
+        recognition_prompt_reserved_tokens = _to_non_negative_int(
+            text_chunks_db.global_config.get(
+                "recognition_prompt_reserved_tokens",
+                DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
+            ),
+            default=DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
+        )
         if llm_func and (node_datas or rel_results):
             try:
                 recognized = await _recognition_memory_filter(
@@ -6302,6 +6411,9 @@ async def _ppr_rank_chunks(
                     rel_results=rel_results,
                     llm_model_func=llm_func,
                     recognition_top_k=query_param.recognition_top_k,
+                    tokenizer=tokenizer,
+                    recognition_prompt_max_tokens=recognition_prompt_max_tokens,
+                    recognition_prompt_reserved_tokens=recognition_prompt_reserved_tokens,
                 )
             except Exception as e:
                 logger.warning(

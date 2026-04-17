@@ -264,6 +264,8 @@ DEFAULT_PPR_DAMPING = 0.5                       # PPR damping factor (alpha)
 DEFAULT_PPR_TOP_K = 50                          # Number of chunks returned by PPR
 DEFAULT_PASSAGE_NODE_WEIGHT = 0.05              # HippoRAG2 param: DPR chunk score scaling in PPR seed
 DEFAULT_PPR_SYNONYM_WEIGHT_MODE = "raw"         # "raw" | "plus_one" (retrieval-time mapping only)
+DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS = 65536   # LLM recognition prompt hard cap for global PPR
+DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS = 4096  # Safety reserve for model-side wrappers/output
 # Resilience & callback (service-level optional controls)
 # =============================================================================
 # 是否在 LocalRagService 层启用重试与熔断机制。

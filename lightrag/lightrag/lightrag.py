@@ -57,6 +57,8 @@ from lightrag.constants import (
     DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
     DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
     DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
+    DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+    DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
 )
 from lightrag.utils import get_env_value
 
@@ -246,6 +248,24 @@ class LightRAG:
         )
     )
     """If True, drop relation writes whose endpoints are missing graph entities."""
+
+    recognition_prompt_max_tokens: int = field(
+        default=get_env_value(
+            "RECOGNITION_PROMPT_MAX_TOKENS",
+            DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+            int,
+        )
+    )
+    """Hard token cap for global-PPR recognition-memory LLM prompt."""
+
+    recognition_prompt_reserved_tokens: int = field(
+        default=get_env_value(
+            "RECOGNITION_PROMPT_RESERVED_TOKENS",
+            DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
+            int,
+        )
+    )
+    """Safety reserve subtracted from recognition prompt cap for wrappers/output."""
 
     # Query parameters
     # ---

@@ -97,3 +97,15 @@
 ## 备注
 - `custom_kg` 关系权重未做自动缩放，保持原语义。
 - 你当前会重建图谱，因此本次不包含历史边回填工具。
+
+## 2026-04-17 更新：Recognition-Memory 提示词 Token 保护
+- 作用范围：global PPR 的 recognition-memory LLM 步骤（`_recognition_memory_filter`）。
+- 新增硬性 token 上限参数：
+  - `recognition_prompt_max_tokens`（默认 `65536`）
+  - `recognition_prompt_reserved_tokens`（默认 `4096`）
+- 实际可用预算：`max_tokens - reserved_tokens`。
+- 当候选内容超预算时，构造器会按预算裁剪 entity 行 / fact 行，并保持顺序优先级（不裁剪 query）。
+- 目标：避免 recognition prompt 超出模型上下文窗口，保证 PPR seed filtering 稳定执行。
+- 配置入口：
+  - LightRAG：`RECOGNITION_PROMPT_MAX_TOKENS`、`RECOGNITION_PROMPT_RESERVED_TOKENS`
+  - LocalRAG 环境变量：`RAGANYTHING_RECOGNITION_PROMPT_MAX_TOKENS`、`RAGANYTHING_RECOGNITION_PROMPT_RESERVED_TOKENS`
