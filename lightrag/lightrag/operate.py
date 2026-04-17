@@ -76,7 +76,9 @@ from lightrag.constants import (
     DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
     DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
     DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
+    DEFAULT_RECOGNITION_TOP_K,
     DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+    DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
     DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
 )
 from lightrag.kg.shared_storage import get_storage_keyed_lock
@@ -5938,9 +5940,13 @@ async def _build_query_context(
             if not search_result["chunk_tracking"] and not search_result.get("ppr_chunks"):
                 return None
 
-    # Stage 1.5 (optional): Rerank entities and relations by query relevance
-    if query_param.enable_rerank and text_chunks_db.global_config.get(
-        "rerank_model_func"
+    # Stage 1.5 (optional): Rerank entities and relations by query relevance.
+    # PPR modes surface chunk-only context after graph propagation, so KG rerank
+    # here is unnecessary overhead for mode="ppr"/"ppr_local".
+    if (
+        query_param.mode not in ("ppr", "ppr_local")
+        and query_param.enable_rerank
+        and text_chunks_db.global_config.get("rerank_model_func")
     ):
         search_result = await _rerank_kg_results(
             query, search_result, query_param, text_chunks_db.global_config
@@ -6046,9 +6052,10 @@ async def _recognition_memory_filter(
     node_datas: list[dict],
     rel_results: list[dict],
     llm_model_func: Callable,
-    recognition_top_k: int = 10,
+    recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K,
     tokenizer: Tokenizer | None = None,
     recognition_prompt_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+    recognition_prompt_output_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
     recognition_prompt_reserved_tokens: int = DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
 ) -> dict[str, float]:
     """HippoRAG2-style recognition memory filter for global PPR entity seeds.
@@ -6067,6 +6074,7 @@ async def _recognition_memory_filter(
         recognition_top_k: Max triplets to show LLM. Entity cap = recognition_top_k * 2.
         tokenizer:         Tokenizer for prompt token budgeting. If None, no budget guard.
         recognition_prompt_max_tokens: Hard cap for recognition prompt token length.
+        recognition_prompt_output_max_tokens: LLM output token upper bound for recognition step.
         recognition_prompt_reserved_tokens: Safety reserve subtracted from hard cap.
 
     Returns:
@@ -6140,19 +6148,42 @@ async def _recognition_memory_filter(
     prompt: str
     if tokenizer is None:
         prompt = _compose_prompt(entity_vdb_ids, triplet_lines)
+        completion_max_tokens = max(
+            1,
+            _to_non_negative_int(
+                recognition_prompt_output_max_tokens,
+                default=DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
+            ),
+        )
     else:
-        max_tokens = max(
-            256,
+        max_context_tokens = max(
+            512,
             _to_non_negative_int(
                 recognition_prompt_max_tokens,
                 default=DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+            ),
+        )
+        completion_max_tokens = max(
+            1,
+            _to_non_negative_int(
+                recognition_prompt_output_max_tokens,
+                default=DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
             ),
         )
         reserved_tokens = _to_non_negative_int(
             recognition_prompt_reserved_tokens,
             default=DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
         )
-        token_budget = max(256, max_tokens - reserved_tokens)
+        # Keep a guaranteed prompt floor while respecting model context limits.
+        min_prompt_tokens = 256
+        max_completion_tokens = max(1, max_context_tokens - min_prompt_tokens)
+        completion_max_tokens = min(completion_max_tokens, max_completion_tokens)
+        max_reserved_tokens = max(0, max_context_tokens - completion_max_tokens - min_prompt_tokens)
+        reserved_tokens = min(reserved_tokens, max_reserved_tokens)
+        token_budget = max(
+            min_prompt_tokens,
+            max_context_tokens - completion_max_tokens - reserved_tokens,
+        )
 
         selected_entities: list[str] = []
         selected_facts: list[str] = []
@@ -6185,9 +6216,11 @@ async def _recognition_memory_filter(
         ):
             logger.warning(
                 "PPR(global): recognition prompt truncated by token budget "
-                "(prompt_tokens=%d, budget=%d, entities=%d/%d, facts=%d/%d)",
+                "(prompt_tokens=%d, budget=%d, completion_max_tokens=%d, reserved_tokens=%d, entities=%d/%d, facts=%d/%d)",
                 prompt_tokens,
                 token_budget,
+                completion_max_tokens,
+                reserved_tokens,
                 len(selected_entities),
                 len(entity_vdb_ids),
                 len(selected_facts),
@@ -6196,14 +6229,21 @@ async def _recognition_memory_filter(
         if prompt_tokens > token_budget:
             logger.warning(
                 "PPR(global): recognition prompt still exceeds budget after truncation "
-                "(prompt_tokens=%d, budget=%d)",
+                "(prompt_tokens=%d, budget=%d, completion_max_tokens=%d, reserved_tokens=%d)",
                 prompt_tokens,
                 token_budget,
+                completion_max_tokens,
+                reserved_tokens,
             )
 
     # --- Step 6: LLM call ---
     try:
-        llm_output: str = await llm_model_func(prompt)
+        llm_output: str = await llm_model_func(
+            prompt, max_tokens=completion_max_tokens
+        )
+    except TypeError:
+        # Backward compatibility for custom llm_model_func without max_tokens kwarg.
+        llm_output = await llm_model_func(prompt)
     except Exception as e:
         logger.warning(f"PPR: recognition memory LLM call failed: {e}")
         return {}
@@ -6396,6 +6436,13 @@ async def _ppr_rank_chunks(
             ),
             default=DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
         )
+        recognition_prompt_output_max_tokens = _to_non_negative_int(
+            text_chunks_db.global_config.get(
+                "recognition_prompt_output_max_tokens",
+                DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
+            ),
+            default=DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
+        )
         recognition_prompt_reserved_tokens = _to_non_negative_int(
             text_chunks_db.global_config.get(
                 "recognition_prompt_reserved_tokens",
@@ -6413,6 +6460,7 @@ async def _ppr_rank_chunks(
                     recognition_top_k=query_param.recognition_top_k,
                     tokenizer=tokenizer,
                     recognition_prompt_max_tokens=recognition_prompt_max_tokens,
+                    recognition_prompt_output_max_tokens=recognition_prompt_output_max_tokens,
                     recognition_prompt_reserved_tokens=recognition_prompt_reserved_tokens,
                 )
             except Exception as e:

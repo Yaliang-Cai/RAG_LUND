@@ -205,6 +205,8 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
             include_headers=self.config.include_headers,
             include_captions=self.config.include_captions,
             filter_content_types=self.config.context_filter_content_types,
+            enable_type_based_window_override=self.config.enable_type_based_context_window_override,
+            zero_window_content_types=self.config.context_zero_window_content_types,
         )
 
     def _create_context_extractor(self) -> ContextExtractor:
@@ -562,6 +564,8 @@ class RAGAnything(QueryMixin, ProcessorMixin, BatchMixin):
                 "include_headers": self.config.include_headers,
                 "include_captions": self.config.include_captions,
                 "filter_content_types": self.config.context_filter_content_types,
+                "enable_type_based_context_window_override": self.config.enable_type_based_context_window_override,
+                "zero_window_content_types": self.config.context_zero_window_content_types,
             },
             "batch_processing": {
                 "max_concurrent_files": self.config.max_concurrent_files,

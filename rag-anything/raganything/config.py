@@ -26,6 +26,8 @@ from raganything.constants import (
     DEFAULT_INCLUDE_HEADERS,
     DEFAULT_INCLUDE_CAPTIONS,
     DEFAULT_CONTEXT_FILTER_CONTENT_TYPES,
+    DEFAULT_ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE,
+    DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
     DEFAULT_CONTENT_FORMAT,
     DEFAULT_USE_FULL_PATH,
 )
@@ -122,6 +124,24 @@ class RAGAnythingConfig:
     )
     """Content types to include in context extraction (e.g., 'text', 'image', 'table')."""
 
+    enable_type_based_context_window_override: bool = field(
+        default=get_env_value(
+            "ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE",
+            DEFAULT_ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE,
+            bool,
+        )
+    )
+    """Whether to force context_window=0 for selected content types."""
+
+    context_zero_window_content_types: List[str] = field(
+        default_factory=lambda: get_env_value(
+            "CONTEXT_ZERO_WINDOW_CONTENT_TYPES",
+            DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
+            str,
+        ).split(",")
+    )
+    """Content types forced to use context_window=0 (e.g., page_number/footer)."""
+
     content_format: str = field(default=get_env_value("CONTENT_FORMAT", DEFAULT_CONTENT_FORMAT, str))
     """Default content format for context extraction when processing documents."""
 
@@ -132,6 +152,18 @@ class RAGAnythingConfig:
 
     def __post_init__(self):
         """Post-initialization setup for backward compatibility"""
+        # Normalize list-like context settings.
+        self.context_filter_content_types = [
+            str(t).strip()
+            for t in self.context_filter_content_types
+            if str(t).strip()
+        ]
+        self.context_zero_window_content_types = [
+            str(t).strip()
+            for t in self.context_zero_window_content_types
+            if str(t).strip()
+        ]
+
         # Support legacy environment variable names for backward compatibility
         legacy_parse_method = get_env_value("MINERU_PARSE_METHOD", None, str)
         if legacy_parse_method and not get_env_value("PARSE_METHOD", None, str):

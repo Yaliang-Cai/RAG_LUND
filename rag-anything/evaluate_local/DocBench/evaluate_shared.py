@@ -45,7 +45,14 @@ if _local_lightrag_root.exists():
     sys.path.insert(0, str(_local_lightrag_root))
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
-from raganything.constants import DEFAULT_EVAL_RETRY_FAILED_ONLY
+from raganything.constants import (
+    DEFAULT_EVAL_RETRY_FAILED_ONLY,
+    DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
+    DEFAULT_RECOGNITION_TOP_K,
+    DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+    DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
+    DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
+)
 
 
 DEFAULT_SCRIPT_DIR = "/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/DocBench"
@@ -292,7 +299,7 @@ def _build_query_params(
     *,
     ablation_flags: AblationFlags | None = None,
     query_mode: str | None = None,
-    recognition_top_k: int = 10,
+    recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K,
 ) -> dict[str, Any]:
     flags = ablation_flags or AblationFlags()
     params = dict(DOCBENCH_QUERY_PARAMS)
@@ -924,6 +931,12 @@ def _build_shared_settings(
     *,
     ablation_flags: AblationFlags,
 ) -> LocalRagSettings:
+    # Pin RAGAnything context extraction switches to avoid env-drift across runs.
+    os.environ["ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE"] = "true"
+    os.environ["CONTEXT_ZERO_WINDOW_CONTENT_TYPES"] = str(
+        DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES
+    )
+
     settings = LocalRagSettings.from_env()
     settings.working_dir_root = str(WORKING_DIR_ROOT)
     settings.output_dir = str(OUTPUT_MD_DIR)
@@ -941,6 +954,18 @@ def _build_shared_settings(
     settings.query_max_tokens = 2048
     settings.ingest_max_tokens = 8192
     settings.vlm_enable_json_schema = True
+    # Keep non-ablation switches stable and enabled across runs.
+    settings.enable_entity_surface_normalization = True
+    settings.enable_keyword_case_normalization = True
+    settings.strict_relation_endpoint_entity_match = True
+    settings.recognition_top_k = DEFAULT_RECOGNITION_TOP_K
+    settings.recognition_prompt_max_tokens = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS
+    settings.recognition_prompt_output_max_tokens = (
+        DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS
+    )
+    settings.recognition_prompt_reserved_tokens = (
+        DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS
+    )
     apply_ablation_flags_to_settings(settings, ablation_flags)
     return settings
 
@@ -1827,7 +1852,7 @@ async def main() -> None:
     parser.add_argument(
         "--recognition_top_k",
         type=int,
-        default=10,
+        default=DEFAULT_RECOGNITION_TOP_K,
         help="Recognition-memory relation top-k when query_mode='ppr'. Set 0 to disable.",
     )
     add_ablation_arguments(parser)

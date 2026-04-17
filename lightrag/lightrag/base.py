@@ -21,6 +21,7 @@ from .types import KnowledgeGraph
 from .constants import (
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
+    DEFAULT_RECOGNITION_TOP_K,
     DEFAULT_MAX_ENTITY_TOKENS,
     DEFAULT_MAX_RELATION_TOKENS,
     DEFAULT_MAX_TOTAL_TOKENS,
@@ -245,13 +246,15 @@ class QueryParam:
     """Degree threshold above which entity seed weights are penalised by log(1 + degree).
     Set to 0 to disable. Reduces subgraph bloat caused by high-degree generic entities."""
 
-    recognition_top_k: int = 10
+    recognition_top_k: int = int(
+        os.getenv("RECOGNITION_TOP_K", str(DEFAULT_RECOGNITION_TOP_K))
+    )
     """HippoRAG2 Recognition Memory: controls how many candidates are shown to the LLM
     for entity seed filtering when mode="ppr".
     - Relation triplets sent to LLM  : rel_results[:recognition_top_k]
     - Entity VDB candidates sent to LLM: node_datas[:recognition_top_k * 2]
       (entity VDB retrieval size is still governed by query_param.top_k)
-    - Default 10 matches HippoRAG2 link_top_k.
+    - Default 20 keeps more recall headroom when top_k=40.
     - Set to 0 to disable recognition memory (falls back to direct score merge)."""
 
     # RRF mode

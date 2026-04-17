@@ -93,7 +93,9 @@ from raganything.constants import (
     DEFAULT_PPR_TOP_K,
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
+    DEFAULT_RECOGNITION_TOP_K,
     DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+    DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
     DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
     DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
     DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
@@ -207,7 +209,11 @@ class LocalRagSettings:
     ppr_top_k: int = DEFAULT_PPR_TOP_K
     passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
     ppr_synonym_weight_mode: str = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
+    recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K
     recognition_prompt_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS
+    recognition_prompt_output_max_tokens: int = (
+        DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS
+    )
     recognition_prompt_reserved_tokens: int = (
         DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS
     )
@@ -445,10 +451,22 @@ class LocalRagSettings:
                     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
                 )
             ),
+            recognition_top_k=int(
+                os.getenv(
+                    "RAGANYTHING_RECOGNITION_TOP_K",
+                    str(DEFAULT_RECOGNITION_TOP_K),
+                )
+            ),
             recognition_prompt_max_tokens=int(
                 os.getenv(
                     "RAGANYTHING_RECOGNITION_PROMPT_MAX_TOKENS",
                     str(DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS),
+                )
+            ),
+            recognition_prompt_output_max_tokens=int(
+                os.getenv(
+                    "RAGANYTHING_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS",
+                    str(DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS),
                 )
             ),
             recognition_prompt_reserved_tokens=int(
@@ -824,12 +842,23 @@ def build_llm_model_func(
         history_messages = history_messages or []
         keyword_extraction = bool(kwargs.pop("keyword_extraction", False))
         is_streaming = bool(kwargs.pop("stream", False))
+        max_tokens_override_raw = kwargs.pop("max_tokens", None)
         cleaned_kwargs = _strip_internal_openai_kwargs(kwargs)
         is_ingest_call = _is_entity_extraction_call(system_prompt, prompt)
         if is_ingest_call:
             max_tokens = settings.ingest_max_tokens
         else:
             max_tokens = settings.query_max_tokens
+        if max_tokens_override_raw is not None:
+            try:
+                parsed_override = int(max_tokens_override_raw)
+                if parsed_override > 0:
+                    max_tokens = parsed_override
+            except Exception:
+                logger.warning(
+                    "Ignoring invalid max_tokens override in llm_model_func: %r",
+                    max_tokens_override_raw,
+                )
         retry_attempts, retry_base_delay, retry_max_delay = _resolve_llm_retry_policy(
             settings,
             ingest_path=is_ingest_call,
@@ -1363,6 +1392,13 @@ class LocalRagService:
             self.settings.vlm_enable_json_schema,
         )
         self.logger.info(
+            "Recognition caps configured: top_k=%s, prompt_max=%s, output_max=%s, reserved=%s",
+            self.settings.recognition_top_k,
+            self.settings.recognition_prompt_max_tokens,
+            self.settings.recognition_prompt_output_max_tokens,
+            self.settings.recognition_prompt_reserved_tokens,
+        )
+        self.logger.info(
             "Text request timeout configured: %.1fs",
             self.settings.text_request_timeout_seconds,
         )
@@ -1624,6 +1660,7 @@ class LocalRagService:
                 "entity_uppercase_allowlist": self.settings.entity_uppercase_allowlist,
                 "strict_relation_endpoint_entity_match": self.settings.strict_relation_endpoint_entity_match,
                 "recognition_prompt_max_tokens": self.settings.recognition_prompt_max_tokens,
+                "recognition_prompt_output_max_tokens": self.settings.recognition_prompt_output_max_tokens,
                 "recognition_prompt_reserved_tokens": self.settings.recognition_prompt_reserved_tokens,
                 # V3 knobs are query-time only (QueryParam) and should not be
                 # passed into LightRAG.__init__ for compatibility.
@@ -1833,6 +1870,7 @@ class LocalRagService:
         normalized_kwargs.setdefault("ppr_damping", self.settings.ppr_damping)
         normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
         normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
+        normalized_kwargs.setdefault("recognition_top_k", self.settings.recognition_top_k)
         normalized_kwargs.setdefault(
             "ppr_synonym_weight_mode", self.settings.ppr_synonym_weight_mode
         )
@@ -1874,6 +1912,7 @@ class LocalRagService:
         normalized_kwargs.setdefault("ppr_damping", self.settings.ppr_damping)
         normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
         normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
+        normalized_kwargs.setdefault("recognition_top_k", self.settings.recognition_top_k)
         normalized_kwargs.setdefault(
             "ppr_synonym_weight_mode", self.settings.ppr_synonym_weight_mode
         )
@@ -1906,6 +1945,7 @@ class LocalRagService:
         ppr_damping: float | None = None,
         ppr_top_k: int | None = None,
         passage_node_weight: float | None = None,
+        recognition_top_k: int | None = None,
         ppr_synonym_weight_mode: str | None = None,
     ):
         """Async generator — yields structured events via LightRAG aquery_llm().
@@ -1935,6 +1975,11 @@ class LocalRagService:
                 passage_node_weight=passage_node_weight
                 if passage_node_weight is not None
                 else self.settings.passage_node_weight,
+                recognition_top_k=(
+                    recognition_top_k
+                    if recognition_top_k is not None
+                    else self.settings.recognition_top_k
+                ),
                 ppr_synonym_weight_mode=_normalize_ppr_synonym_weight_mode(
                     ppr_synonym_weight_mode
                     if ppr_synonym_weight_mode is not None

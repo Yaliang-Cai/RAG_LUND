@@ -50,6 +50,10 @@ max_context_tokens: int = 2000             # Maximum context tokens
 include_headers: bool = True               # Include document headers
 include_captions: bool = True              # Include image/table captions
 context_filter_content_types: List[str] = ["text"]  # Content types to include
+enable_type_based_context_window_override: bool = True  # Enable per-type window override
+context_zero_window_content_types: List[str] = [
+    "page_number", "page_footnote", "footer", "header", "ref_text"
+]  # Force window=0 for noisy layout-like types
 content_format: str = "minerU"             # Default content format for context extraction
 ```
 
@@ -63,6 +67,8 @@ MAX_CONTEXT_TOKENS=3000
 INCLUDE_HEADERS=true
 INCLUDE_CAPTIONS=true
 CONTEXT_FILTER_CONTENT_TYPES=text,image
+ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE=true
+CONTEXT_ZERO_WINDOW_CONTENT_TYPES=page_number,page_footnote,footer,header,ref_text
 CONTENT_FORMAT=minerU
 ```
 

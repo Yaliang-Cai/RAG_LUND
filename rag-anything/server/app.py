@@ -38,6 +38,7 @@ from raganything.constants import (
     DEFAULT_PPR_TOP_K,
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
+    DEFAULT_RECOGNITION_TOP_K,
 )
 
 VALID_CHUNKING_STRATEGIES: Set[str] = set(CHUNKING_STRATEGIES.keys())
@@ -177,6 +178,7 @@ class QueryRequest(BaseModel):
     ppr_damping: float = DEFAULT_PPR_DAMPING
     ppr_top_k: int = DEFAULT_PPR_TOP_K
     passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
+    recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K
     ppr_synonym_weight_mode: Literal["raw", "plus_one"] = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
 
 # =========================================================================
@@ -494,6 +496,7 @@ async def query_endpoint(
         ppr_damping=payload.ppr_damping,
         ppr_top_k=payload.ppr_top_k,
         passage_node_weight=payload.passage_node_weight,
+        recognition_top_k=payload.recognition_top_k,
         ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
     )
     retrieval = {}
@@ -516,6 +519,7 @@ async def query_endpoint(
         ppr_damping=payload.ppr_damping,
         ppr_top_k=payload.ppr_top_k,
         passage_node_weight=payload.passage_node_weight,
+        recognition_top_k=payload.recognition_top_k,
         ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
     )
 
@@ -556,6 +560,7 @@ async def query_stream_endpoint(
                 ppr_damping=payload.ppr_damping,
                 ppr_top_k=payload.ppr_top_k,
                 passage_node_weight=payload.passage_node_weight,
+                recognition_top_k=payload.recognition_top_k,
                 ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
             ):
                 if event["type"] == "meta":

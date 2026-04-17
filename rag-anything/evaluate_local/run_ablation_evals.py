@@ -14,6 +14,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_project_root = Path(__file__).resolve().parent.parent
+_projects_root = _project_root.parent
+_local_lightrag_root = _projects_root / "lightrag"
+if _project_root.exists():
+    sys.path.insert(0, str(_project_root))
+if _local_lightrag_root.exists():
+    sys.path.insert(0, str(_local_lightrag_root))
+
+from raganything.constants import DEFAULT_RECOGNITION_TOP_K
+
 
 @dataclass(frozen=True)
 class ProfileSpec:
@@ -505,7 +515,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--shared-recognition-top-k",
         type=int,
-        default=10,
+        default=DEFAULT_RECOGNITION_TOP_K,
         help="Recognition-memory top-k passed to evaluate_shared when query_mode='ppr'.",
     )
 

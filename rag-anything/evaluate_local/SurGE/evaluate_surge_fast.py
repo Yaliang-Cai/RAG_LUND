@@ -36,6 +36,13 @@ from evaluate_local.ablation_flags import (
     validate_ablation_flags,
     validate_workspace_env_isolation,
 )
+from raganything.constants import (
+    DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
+    DEFAULT_RECOGNITION_TOP_K,
+    DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+    DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
+    DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 _output_dir_override = str(os.getenv("SURGE_FAST_OUTPUT_DIR", "")).strip()
@@ -237,10 +244,24 @@ def refresh_logging(mode: str) -> None:
 
 def settings_for_surge(args: argparse.Namespace) -> LocalRagSettings:
     _, _, LocalRagSettings = import_rag_dependencies()
+    # Pin RAGAnything context extraction switches to avoid env-drift across runs.
+    os.environ["ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE"] = "true"
+    os.environ["CONTEXT_ZERO_WINDOW_CONTENT_TYPES"] = str(
+        DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES
+    )
+
     s = LocalRagSettings.from_env()
     s.working_dir_root = str(RAG_STORAGE_DIR)
     s.output_dir = str(RAG_OUTPUT_DIR)
     s.log_dir = str(LOG_DIR)
+    # Keep non-ablation switches stable and enabled across runs.
+    s.enable_entity_surface_normalization = True
+    s.enable_keyword_case_normalization = True
+    s.strict_relation_endpoint_entity_match = True
+    s.recognition_top_k = DEFAULT_RECOGNITION_TOP_K
+    s.recognition_prompt_max_tokens = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS
+    s.recognition_prompt_output_max_tokens = DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS
+    s.recognition_prompt_reserved_tokens = DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS
     apply_ablation_flags_to_settings(s, get_ablation_flags(args))
     return s
 

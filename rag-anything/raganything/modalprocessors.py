@@ -38,6 +38,8 @@ from raganything.constants import (
     DEFAULT_INCLUDE_HEADERS,
     DEFAULT_INCLUDE_CAPTIONS,
     DEFAULT_CONTEXT_FILTER_CONTENT_TYPES,
+    DEFAULT_ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE,
+    DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
 )
 
 _BACKSPACE_CHAR = "\x08"
@@ -54,11 +56,30 @@ class ContextConfig:
     include_headers: bool = DEFAULT_INCLUDE_HEADERS
     include_captions: bool = DEFAULT_INCLUDE_CAPTIONS
     filter_content_types: List[str] = None  # defaults to DEFAULT_CONTEXT_FILTER_CONTENT_TYPES
+    enable_type_based_window_override: bool = (
+        DEFAULT_ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE
+    )
+    zero_window_content_types: List[str] = None  # defaults to DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES
 
     def __post_init__(self):
         if self.filter_content_types is None:
             self.filter_content_types = [
                 t.strip() for t in DEFAULT_CONTEXT_FILTER_CONTENT_TYPES.split(",")
+            ]
+        else:
+            self.filter_content_types = [str(t).strip() for t in self.filter_content_types if str(t).strip()]
+
+        if self.zero_window_content_types is None:
+            self.zero_window_content_types = [
+                t.strip().lower()
+                for t in DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES.split(",")
+                if t.strip()
+            ]
+        else:
+            self.zero_window_content_types = [
+                str(t).strip().lower()
+                for t in self.zero_window_content_types
+                if str(t).strip()
             ]
 
 
@@ -95,20 +116,24 @@ class ContextExtractor:
             return ""
 
         try:
+            effective_window = self._resolve_context_window(current_item_info)
+
             # Use format hint if provided, otherwise auto-detect
             if content_format == "minerU" and isinstance(content_source, list):
                 return self._extract_from_content_list(
-                    content_source, current_item_info
+                    content_source, current_item_info, window_size=effective_window
                 )
             elif content_format == "text_chunks" and isinstance(content_source, list):
-                return self._extract_from_text_chunks(content_source, current_item_info)
+                return self._extract_from_text_chunks(
+                    content_source, current_item_info, window_size=effective_window
+                )
             elif content_format == "text" and isinstance(content_source, str):
                 return self._extract_from_text_source(content_source, current_item_info)
             else:
                 # Auto-detect content source format
                 if isinstance(content_source, list):
                     return self._extract_from_content_list(
-                        content_source, current_item_info
+                        content_source, current_item_info, window_size=effective_window
                     )
                 elif isinstance(content_source, dict):
                     return self._extract_from_dict_source(
@@ -127,8 +152,27 @@ class ContextExtractor:
             logger.error(f"Error extracting context: {e}")
             return ""
 
+    def _resolve_context_window(self, current_item_info: Dict[str, Any]) -> int:
+        """Resolve effective context window for current item with optional type override."""
+        try:
+            base_window = max(0, int(self.config.context_window))
+        except (TypeError, ValueError):
+            base_window = 0
+
+        if not self.config.enable_type_based_window_override:
+            return base_window
+
+        item_type = str((current_item_info or {}).get("type", "")).strip().lower()
+        if item_type and item_type in self.config.zero_window_content_types:
+            return 0
+
+        return base_window
+
     def _extract_from_content_list(
-        self, content_list: List[Dict], current_item_info: Dict
+        self,
+        content_list: List[Dict],
+        current_item_info: Dict,
+        window_size: int | None = None,
     ) -> str:
         """Extract context from MinerU-style content list
 
@@ -140,14 +184,23 @@ class ContextExtractor:
             Context text from surrounding pages/chunks
         """
         if self.config.context_mode == "page":
-            return self._extract_page_context(content_list, current_item_info)
+            return self._extract_page_context(
+                content_list, current_item_info, window_size=window_size
+            )
         elif self.config.context_mode == "chunk":
-            return self._extract_chunk_context(content_list, current_item_info)
+            return self._extract_chunk_context(
+                content_list, current_item_info, window_size=window_size
+            )
         else:
-            return self._extract_page_context(content_list, current_item_info)
+            return self._extract_page_context(
+                content_list, current_item_info, window_size=window_size
+            )
 
     def _extract_page_context(
-        self, content_list: List[Dict], current_item_info: Dict
+        self,
+        content_list: List[Dict],
+        current_item_info: Dict,
+        window_size: int | None = None,
     ) -> str:
         """Extract context based on page boundaries
 
@@ -159,7 +212,9 @@ class ContextExtractor:
             Context text from surrounding pages
         """
         current_page = current_item_info.get("page_idx", 0)
-        window_size = self.config.context_window
+        if window_size is None:
+            window_size = self.config.context_window
+        window_size = max(0, int(window_size))
 
         start_page = max(0, current_page - window_size)
         end_page = current_page + window_size + 1
@@ -187,7 +242,10 @@ class ContextExtractor:
         return self._truncate_context(context)
 
     def _extract_chunk_context(
-        self, content_list: List[Dict], current_item_info: Dict
+        self,
+        content_list: List[Dict],
+        current_item_info: Dict,
+        window_size: int | None = None,
     ) -> str:
         """Extract context based on content chunks
 
@@ -199,7 +257,9 @@ class ContextExtractor:
             Context text from surrounding chunks
         """
         current_index = current_item_info.get("index", 0)
-        window_size = self.config.context_window
+        if window_size is None:
+            window_size = self.config.context_window
+        window_size = max(0, int(window_size))
 
         start_idx = max(0, current_index - window_size)
         end_idx = min(len(content_list), current_index + window_size + 1)
@@ -293,7 +353,10 @@ class ContextExtractor:
         return self._truncate_context(text_source)
 
     def _extract_from_text_chunks(
-        self, text_chunks: List[str], current_item_info: Dict
+        self,
+        text_chunks: List[str],
+        current_item_info: Dict,
+        window_size: int | None = None,
     ) -> str:
         """Extract context from simple text chunks list
 
@@ -305,7 +368,9 @@ class ContextExtractor:
             Context text from surrounding chunks
         """
         current_index = current_item_info.get("index", 0)
-        window_size = self.config.context_window
+        if window_size is None:
+            window_size = self.config.context_window
+        window_size = max(0, int(window_size))
 
         start_idx = max(0, current_index - window_size)
         end_idx = min(len(text_chunks), current_index + window_size + 1)

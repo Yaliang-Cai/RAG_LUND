@@ -58,6 +58,7 @@ from lightrag.constants import (
     DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
     DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
     DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
+    DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
     DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
 )
 from lightrag.utils import get_env_value
@@ -257,6 +258,15 @@ class LightRAG:
         )
     )
     """Hard token cap for global-PPR recognition-memory LLM prompt."""
+
+    recognition_prompt_output_max_tokens: int = field(
+        default=get_env_value(
+            "RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS",
+            DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
+            int,
+        )
+    )
+    """Max completion tokens for recognition-memory LLM response."""
 
     recognition_prompt_reserved_tokens: int = field(
         default=get_env_value(
