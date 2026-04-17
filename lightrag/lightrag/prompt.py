@@ -11,11 +11,10 @@ PROMPTS["ENTITY_NAME_CASE_RULE_DEFAULT"] = (
     "Title-case each significant word if the name is case-insensitive."
 )
 PROMPTS["ENTITY_NAME_CASE_RULE_NORMALIZED"] = (
-    "If the full name is all-lowercase, normalize it to title case.\n"
-    "                       In that lowercase-only case, preserve known acronyms in uppercase\n"
-    '                       (example: "llm application" -> "LLM Application").\n'
-    '                       If any uppercase letter already exists (for example "OpenAI API", "BERT"),\n'
-    "                       keep the original casing unchanged."
+    "Normalize each word to canonical casing unless the phrase is already canonical.\n"
+    "                       Preserve known acronyms in uppercase (example: llm -> LLM).\n"
+    "                       Preserve words with meaningful internal capitals (for example OpenAI, iPhone).\n"
+    '                       Apply title case to remaining case-insensitive words (example: "Machine learning" -> "Machine Learning").'
 )
 PROMPTS["RELATION_ENDPOINT_CASE_RULE_DEFAULT"] = ""
 PROMPTS["RELATION_ENDPOINT_CASE_RULE_NORMALIZED"] = (
@@ -132,6 +131,8 @@ The first field must be the literal string `entity`.
   entity_description : 1–2 objective sentences in third person.
                        Based solely on information present in the input text.
                        Do not introduce knowledge not found in the source text.
+                       If context is limited, use neutral wording such as
+                       "Entity mentioned in text with limited context."
                        For person entities: MUST include any title or role mentioned
                        in the input text. Format: "[name], [role] at [org] per the text."
 
@@ -145,7 +146,11 @@ The first field must be the literal string `relation`.
                                   {relation_endpoint_case_rule}
   relationship_keywords         : One or more high-level keywords. Separate with comma.
                                   Do NOT use {tuple_delimiter} inside this field.
+                                  Use the same casing style as query high-level keywords:
+                                  lowercase by default; preserve meaningful mixed/uppercase
+                                  proper nouns and acronyms.
   relationship_description      : Concise explanation based solely on the input text.
+                                  Do not add external background knowledge.
                                   Embed metric values and role titles here as natural
                                   language rather than extracting them as entities.
 
@@ -253,20 +258,20 @@ relation{tuple_delimiter}GPT-4{tuple_delimiter}NVIDIA H100{tuple_delimiter}hardw
 
 <Input Text>
 ```
-Python, the programming language, uses an interpreter process to execute scripts.
-A python snake can consume prey larger than its own head.
-The Transformer steps up voltage in power grids.
-Mercury the planet orbits the Sun in 88 days; mercury the element is liquid at room temperature.
+Python Programming Language uses an interpreter process to execute scripts.
+Ball Python can consume prey larger than its own head.
+Mercury Planet orbits the Sun in 88 days; Mercury Element is liquid at room temperature.
 ```
 
 <Output>
-entity{tuple_delimiter}Python{tuple_delimiter}work{tuple_delimiter}Programming language described in the text as using an interpreter process to execute scripts.
-entity{tuple_delimiter}python{tuple_delimiter}naturalentity{tuple_delimiter}Snake described in the text as capable of consuming prey larger than its own head.
-entity{tuple_delimiter}Interpreter Process{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as the mechanism Python uses to execute scripts.
-entity{tuple_delimiter}Transformer{tuple_delimiter}artifact{tuple_delimiter}Device described in the text as stepping up voltage in power grids.
-entity{tuple_delimiter}Mercury{tuple_delimiter}naturalentity{tuple_delimiter}Planet described in the text as orbiting the Sun in 88 days.
-entity{tuple_delimiter}mercury{tuple_delimiter}naturalentity{tuple_delimiter}Element described in the text as liquid at room temperature.
-relation{tuple_delimiter}Python{tuple_delimiter}Interpreter Process{tuple_delimiter}execution, runtime{tuple_delimiter}The text states Python uses an interpreter process to execute scripts.
+entity{tuple_delimiter}Python Programming Language{tuple_delimiter}work{tuple_delimiter}Programming language described in the text as using an interpreter process to execute scripts.
+entity{tuple_delimiter}Ball Python{tuple_delimiter}naturalentity{tuple_delimiter}Snake described in the text as capable of consuming prey larger than its own head.
+entity{tuple_delimiter}Interpreter Process{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as the mechanism Python Programming Language uses to execute scripts.
+entity{tuple_delimiter}Mercury Planet{tuple_delimiter}naturalentity{tuple_delimiter}Planet described in the text as orbiting the Sun in 88 days.
+entity{tuple_delimiter}Mercury Element{tuple_delimiter}naturalentity{tuple_delimiter}Element described in the text as liquid at room temperature.
+relation{tuple_delimiter}Python Programming Language{tuple_delimiter}Interpreter Process{tuple_delimiter}execution, runtime{tuple_delimiter}The text states Python Programming Language uses an interpreter process to execute scripts.
+relation{tuple_delimiter}Python Programming Language{tuple_delimiter}Ball Python{tuple_delimiter}name ambiguity, distinct referents{tuple_delimiter}The text uses Python in distinct contexts by naming Python Programming Language and Ball Python.
+relation{tuple_delimiter}Mercury Planet{tuple_delimiter}Mercury Element{tuple_delimiter}name ambiguity, distinct referents{tuple_delimiter}The text distinguishes Mercury Planet from Mercury Element.
 {completion_delimiter}
 """,
 
@@ -706,6 +711,8 @@ Given a user query, your task is to extract two distinct types of keywords:
 3. **Concise & Meaningful**: Keywords should be concise words or meaningful phrases. Prioritize multi-word phrases when they represent a single concept. For example, from "latest financial report of Apple Inc.", you should extract "latest financial report" and "Apple Inc." rather than "latest", "financial", "report", and "Apple".
 4. **Handle Edge Cases**: For queries that are too simple, vague, or nonsensical (e.g., "hello", "ok", "asdfghjkl"), you must return a JSON object with empty lists for both keyword types.
 5. **Language**: All extracted keywords MUST be in {language}. Proper nouns (e.g., personal names, place names, organization names) should be kept in their original language.
+6. **Casing (high_level_keywords)**: Use lowercase phrases by default. Preserve meaningful uppercase or mixed-case proper nouns/acronyms (e.g., OpenAI, BERT, API, 6G).
+7. **Casing (low_level_keywords)**: Use entity-style casing. Preserve mixed-case proper nouns/acronyms; otherwise normalize case-insensitive phrases to canonical title-style wording.
 
 ---Examples---
 {examples}
@@ -723,8 +730,8 @@ Query: "How does international trade influence global economic stability?"
 
 Output:
 {
-  "high_level_keywords": ["International trade", "Global economic stability", "Economic impact"],
-  "low_level_keywords": ["Trade agreements", "Tariffs", "Currency exchange", "Imports", "Exports"]
+  "high_level_keywords": ["international trade", "global economic stability", "economic impact"],
+  "low_level_keywords": ["trade agreements", "tariffs", "currency exchange", "imports", "exports"]
 }
 
 """,
@@ -734,8 +741,8 @@ Query: "What are the environmental consequences of deforestation on biodiversity
 
 Output:
 {
-  "high_level_keywords": ["Environmental consequences", "Deforestation", "Biodiversity loss"],
-  "low_level_keywords": ["Species extinction", "Habitat destruction", "Carbon emissions", "Rainforest", "Ecosystem"]
+  "high_level_keywords": ["environmental consequences", "deforestation", "biodiversity loss"],
+  "low_level_keywords": ["species extinction", "habitat destruction", "carbon emissions", "rainforest", "ecosystem"]
 }
 
 """,
@@ -745,8 +752,19 @@ Query: "What is the role of education in reducing poverty?"
 
 Output:
 {
-  "high_level_keywords": ["Education", "Poverty reduction", "Socioeconomic development"],
-  "low_level_keywords": ["School access", "Literacy rates", "Job training", "Income inequality"]
+  "high_level_keywords": ["education", "poverty reduction", "socioeconomic development"],
+  "low_level_keywords": ["school access", "literacy rates", "job training", "income inequality"]
+}
+
+""",
+    """Example 4:
+
+Query: "How can OpenAI API and BERT be used for semantic search in a 6G assistant?"
+
+Output:
+{
+  "high_level_keywords": ["semantic search", "assistant design", "6G application"],
+  "low_level_keywords": ["OpenAI API", "BERT", "6G assistant"]
 }
 
 """,

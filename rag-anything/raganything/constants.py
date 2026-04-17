@@ -182,7 +182,8 @@ DEFAULT_EMBEDDING_FUNC_MAX_ASYNC = 8
 # =============================================================================
 # Entity surface normalization (ingest-time, optional)
 # =============================================================================
-DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION = False
+DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION = True
+DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION = True
 DEFAULT_ENTITY_UPPERCASE_ALLOWLIST = [
     "AI",
     "API",
@@ -212,7 +213,7 @@ DEFAULT_ENTITY_UPPERCASE_ALLOWLIST = [
     "5G",
     "6G",
 ]
-DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH = False
+DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH = True
 
 # =============================================================================
 # Chunking strategy

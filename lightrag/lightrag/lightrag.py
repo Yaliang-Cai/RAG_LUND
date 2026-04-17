@@ -54,6 +54,7 @@ from lightrag.constants import (
     DEFAULT_MAX_FILE_PATHS,
     DEFAULT_FILE_PATH_MORE_PLACEHOLDER,
     DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
+    DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
     DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
     DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
 )
@@ -215,6 +216,15 @@ class LightRAG:
         )
     )
     """Enable entity/relation endpoint surface-name normalization during extraction."""
+
+    enable_keyword_case_normalization: bool = field(
+        default=get_env_value(
+            "ENABLE_KEYWORD_CASE_NORMALIZATION",
+            DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
+            bool,
+        )
+    )
+    """Enable keyword case normalization for query and relation keyword fields."""
 
     entity_uppercase_allowlist: list[str] = field(
         default_factory=lambda: _normalize_string_list(

@@ -94,6 +94,7 @@ from raganything.constants import (
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
     DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
+    DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
     DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
     DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
     DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID,
@@ -206,6 +207,9 @@ class LocalRagSettings:
     ppr_synonym_weight_mode: str = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
     enable_entity_surface_normalization: bool = (
         DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION
+    )
+    enable_keyword_case_normalization: bool = (
+        DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION
     )
     entity_uppercase_allowlist: list[str] = field(
         default_factory=lambda: list(DEFAULT_ENTITY_UPPERCASE_ALLOWLIST)
@@ -438,6 +442,11 @@ class LocalRagSettings:
             enable_entity_surface_normalization=os.getenv(
                 "RAGANYTHING_ENABLE_ENTITY_SURFACE_NORMALIZATION",
                 str(DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            enable_keyword_case_normalization=os.getenv(
+                "RAGANYTHING_ENABLE_KEYWORD_CASE_NORMALIZATION",
+                str(DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
             entity_uppercase_allowlist=_parse_uppercase_allowlist(
@@ -1593,6 +1602,7 @@ class LocalRagService:
                 "synonymy_topk": self.settings.synonymy_topk,
                 "synonymy_min_entity_len": self.settings.synonymy_min_entity_len,
                 "enable_entity_surface_normalization": self.settings.enable_entity_surface_normalization,
+                "enable_keyword_case_normalization": self.settings.enable_keyword_case_normalization,
                 "entity_uppercase_allowlist": self.settings.entity_uppercase_allowlist,
                 "strict_relation_endpoint_entity_match": self.settings.strict_relation_endpoint_entity_match,
                 # V3 knobs are query-time only (QueryParam) and should not be

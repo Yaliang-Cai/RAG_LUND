@@ -73,6 +73,7 @@ from lightrag.constants import (
     DEFAULT_MAX_FILE_PATHS,
     DEFAULT_ENTITY_NAME_MAX_LENGTH,
     DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
+    DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
     DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
     DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
 )
@@ -582,6 +583,17 @@ def _normalize_word_case(word: str, uppercase_allowlist: set[str]) -> str:
         if alnum_key and alnum_key in uppercase_allowlist:
             normalized_pieces.append(piece.upper())
             continue
+        # Preserve words with meaningful internal capitals (OpenAI, iPhone).
+        has_upper = any(ch.isupper() for ch in piece)
+        has_lower = any(ch.islower() for ch in piece)
+        if has_upper and has_lower and (
+            piece[:1].islower() or any(ch.isupper() for ch in piece[1:])
+        ):
+            normalized_pieces.append(piece)
+            continue
+        if piece.isupper() and any(ch.isalpha() for ch in piece):
+            normalized_pieces.append(piece)
+            continue
         if _looks_like_acronym(lowered_piece):
             normalized_pieces.append(piece.upper())
             continue
@@ -602,15 +614,15 @@ def _normalize_entity_surface(
     if not normalized:
         return ""
 
-    # Rule-based case normalization (non-dictionary):
-    # - all-lower acronym-like tokens => uppercase (e.g., kglm -> KGLM)
-    # - all-lower phrases => title-case words
-    if normalized.islower():
-        normalized_allowlist = uppercase_allowlist or set()
-        words = normalized.split(" ")
-        normalized = " ".join(
-            _normalize_word_case(word, normalized_allowlist) for word in words
-        )
+    # Rule-based canonical casing:
+    # - allowlist/acronym words => uppercase
+    # - words with meaningful internal capitals => preserved
+    # - otherwise => title-case word by word
+    normalized_allowlist = uppercase_allowlist or set()
+    words = normalized.split(" ")
+    normalized = " ".join(
+        _normalize_word_case(word, normalized_allowlist) for word in words
+    )
 
     if _MODAL_ENTITY_SUFFIX_RE.search(normalized):
         return normalized
@@ -622,6 +634,97 @@ def _normalize_entity_surface(
         return f"{normalized} (equation)"
 
     return normalized
+
+
+def _normalize_high_level_keyword(
+    keyword: str,
+    uppercase_allowlist: set[str],
+) -> str:
+    normalized = unicodedata.normalize("NFKC", keyword or "")
+    normalized = _re.sub(r"\s+", " ", normalized.strip())
+    if not normalized:
+        return ""
+
+    words = normalized.split(" ")
+    lowered_words: list[str] = []
+    for word in words:
+        canonical_word = _normalize_word_case(word, uppercase_allowlist)
+        # Keep explicit uppercase/mixed-case signals; lowercase the rest.
+        has_upper = any(ch.isupper() for ch in canonical_word)
+        has_lower = any(ch.islower() for ch in canonical_word)
+        if canonical_word.isupper() or (has_upper and has_lower and _re.search(r"[A-Z]", canonical_word[1:])):
+            lowered_words.append(canonical_word)
+        else:
+            lowered_words.append(canonical_word.lower())
+    return " ".join(lowered_words)
+
+
+def _normalize_keyword_list(
+    keywords: list[Any],
+    *,
+    keyword_kind: str,
+    uppercase_allowlist: set[str],
+) -> list[str]:
+    normalized_map: dict[str, str] = {}
+    for item in keywords or []:
+        raw_keyword = str(item).strip()
+        if not raw_keyword:
+            continue
+
+        if keyword_kind == "low_level":
+            normalized_keyword = _normalize_entity_surface(
+                raw_keyword, uppercase_allowlist
+            )
+        else:
+            normalized_keyword = _normalize_high_level_keyword(
+                raw_keyword,
+                uppercase_allowlist,
+            )
+        if not normalized_keyword:
+            continue
+
+        dedupe_key = normalized_keyword.casefold()
+        if dedupe_key not in normalized_map:
+            normalized_map[dedupe_key] = normalized_keyword
+    return list(normalized_map.values())
+
+
+def _merge_relation_keywords(
+    keyword_items: list[str],
+    *,
+    uppercase_allowlist: set[str],
+    enable_case_normalization: bool,
+) -> str:
+    normalized_map: dict[str, str] = {}
+    for keyword_str in keyword_items:
+        if not keyword_str:
+            continue
+        for raw_keyword in str(keyword_str).split(","):
+            keyword = raw_keyword.strip()
+            if not keyword:
+                continue
+
+            normalized_keyword = (
+                _normalize_high_level_keyword(keyword, uppercase_allowlist)
+                if enable_case_normalization
+                else keyword
+            )
+            dedupe_key = (
+                normalized_keyword.casefold()
+                if enable_case_normalization
+                else normalized_keyword
+            )
+            if dedupe_key not in normalized_map:
+                normalized_map[dedupe_key] = normalized_keyword
+
+    if not normalized_map:
+        return ""
+
+    sorted_items = sorted(
+        normalized_map.values(),
+        key=lambda item: item.casefold() if enable_case_normalization else item,
+    )
+    return ",".join(sorted_items)
 
 
 def _strip_modal_suffix(name: str) -> str:
@@ -2443,12 +2546,34 @@ async def _rebuild_single_relationship(
     # Remove duplicates while preserving order
     description_list = list(dict.fromkeys(descriptions))
     keywords = list(dict.fromkeys(keywords))
-
-    combined_keywords = (
-        ", ".join(set(keywords))
-        if keywords
-        else (current_relationship.get("keywords", "") if current_is_factual else "")
+    enable_keyword_case_normalization = bool(
+        global_config.get(
+            "enable_keyword_case_normalization",
+            DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
+        )
     )
+    uppercase_allowlist = _normalize_uppercase_allowlist(
+        global_config.get(
+            "entity_uppercase_allowlist",
+            DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
+        )
+    )
+    if keywords:
+        combined_keywords = _merge_relation_keywords(
+            keywords,
+            uppercase_allowlist=uppercase_allowlist,
+            enable_case_normalization=enable_keyword_case_normalization,
+        )
+    else:
+        combined_keywords = (
+            current_relationship.get("keywords", "") if current_is_factual else ""
+        )
+        if enable_keyword_case_normalization and combined_keywords:
+            combined_keywords = _merge_relation_keywords(
+                [combined_keywords],
+                uppercase_allowlist=uppercase_allowlist,
+                enable_case_normalization=True,
+            )
 
     if weights:
         weight_raw = sum(_to_non_negative_float(weight, default=1.0) for weight in weights)
@@ -3196,20 +3321,31 @@ async def _merge_edges_then_upsert(
     )
     weight = _factual_weight_from_raw(weight_raw)
 
-    # 6.2 Finalize keywords by merging existing and new keywords
-    all_keywords = set()
-    # Process already_keywords (which are comma-separated)
-    for keyword_str in already_keywords:
-        if keyword_str:  # Skip empty strings
-            all_keywords.update(k.strip() for k in keyword_str.split(",") if k.strip())
-    # Process new keywords from edges_data
-    for edge in edges_data:
-        if edge.get("keywords"):
-            all_keywords.update(
-                k.strip() for k in edge["keywords"].split(",") if k.strip()
-            )
-    # Join all unique keywords with commas
-    keywords = ",".join(sorted(all_keywords))
+    # 6.3 Finalize keywords by merging existing and new keywords.
+    # Optional case normalization keeps relation keyword style stable.
+    enable_keyword_case_normalization = bool(
+        global_config.get(
+            "enable_keyword_case_normalization",
+            DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
+        )
+    )
+    uppercase_allowlist = _normalize_uppercase_allowlist(
+        global_config.get(
+            "entity_uppercase_allowlist",
+            DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
+        )
+    )
+    raw_keyword_items = [keyword for keyword in already_keywords if keyword]
+    raw_keyword_items.extend(
+        str(edge.get("keywords", "") or "")
+        for edge in edges_data
+        if edge.get("keywords")
+    )
+    keywords = _merge_relation_keywords(
+        raw_keyword_items,
+        uppercase_allowlist=uppercase_allowlist,
+        enable_case_normalization=enable_keyword_case_normalization,
+    )
 
     # 7. Deduplicate by description, keeping first occurrence in the same document
     unique_edges = {}
@@ -4620,6 +4756,18 @@ async def extract_keywords_only(
     examples = "\n".join(PROMPTS["keywords_extraction_examples"])
 
     language = global_config["addon_params"].get("language", DEFAULT_SUMMARY_LANGUAGE)
+    enable_keyword_case_normalization = bool(
+        global_config.get(
+            "enable_keyword_case_normalization",
+            DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
+        )
+    )
+    uppercase_allowlist = _normalize_uppercase_allowlist(
+        global_config.get(
+            "entity_uppercase_allowlist",
+            DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
+        )
+    )
 
     # 2. Handle cache if needed - add cache type for keywords
     args_hash = compute_args_hash(
@@ -4634,9 +4782,20 @@ async def extract_keywords_only(
         cached_response, _ = cached_result  # Extract content, ignore timestamp
         try:
             keywords_data = json_repair.loads(cached_response)
-            return keywords_data.get("high_level_keywords", []), keywords_data.get(
-                "low_level_keywords", []
-            )
+            cached_hl_keywords = keywords_data.get("high_level_keywords", [])
+            cached_ll_keywords = keywords_data.get("low_level_keywords", [])
+            if enable_keyword_case_normalization:
+                cached_hl_keywords = _normalize_keyword_list(
+                    cached_hl_keywords,
+                    keyword_kind="high_level",
+                    uppercase_allowlist=uppercase_allowlist,
+                )
+                cached_ll_keywords = _normalize_keyword_list(
+                    cached_ll_keywords,
+                    keyword_kind="low_level",
+                    uppercase_allowlist=uppercase_allowlist,
+                )
+            return cached_hl_keywords, cached_ll_keywords
         except (json.JSONDecodeError, KeyError):
             logger.warning(
                 "Invalid cache format for keywords, proceeding with extraction"
@@ -4679,6 +4838,17 @@ async def extract_keywords_only(
 
     hl_keywords = keywords_data.get("high_level_keywords", [])
     ll_keywords = keywords_data.get("low_level_keywords", [])
+    if enable_keyword_case_normalization:
+        hl_keywords = _normalize_keyword_list(
+            hl_keywords,
+            keyword_kind="high_level",
+            uppercase_allowlist=uppercase_allowlist,
+        )
+        ll_keywords = _normalize_keyword_list(
+            ll_keywords,
+            keyword_kind="low_level",
+            uppercase_allowlist=uppercase_allowlist,
+        )
 
     # 6. Cache only the processed keywords with cache type
     if hl_keywords or ll_keywords:
