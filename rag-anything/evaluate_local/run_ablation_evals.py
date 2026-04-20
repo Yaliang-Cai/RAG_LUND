@@ -639,10 +639,22 @@ def main() -> int:
         workspace_key = profile.reuse_index_from or profile.key
         shared_workspace_id = f"{shared_workspace_prefix}_{workspace_key}"
         surge_workspace_id = f"{surge_workspace_prefix}_{workspace_key}"
+        legacy_shared_state_dir = run_root / workspace_key / "evaluate_shared"
+        legacy_surge_state_dir = run_root / workspace_key / "evaluate_surge_fast"
         shared_workspace_state_dir = (
             run_root / "_workspace_cache" / "docbench_shared" / workspace_key
         )
         surge_workspace_state_dir = run_root / "_workspace_cache" / "surge_fast" / workspace_key
+        if (
+            not (shared_workspace_state_dir / "rag_workspaces").exists()
+            and (legacy_shared_state_dir / "rag_workspaces").exists()
+        ):
+            shared_workspace_state_dir = legacy_shared_state_dir
+        if (
+            not (surge_workspace_state_dir / "rag_storage").exists()
+            and (legacy_surge_state_dir / "rag_storage").exists()
+        ):
+            surge_workspace_state_dir = legacy_surge_state_dir
 
         profile_dir = run_root / profile.key
         shared_output_dir = profile_dir / "evaluate_shared"
