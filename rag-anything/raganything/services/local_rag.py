@@ -1669,12 +1669,14 @@ class LocalRagService:
             },
         )
 
-    async def get_rag(self, workspace_id: str) -> RAGAnything:
+    async def get_rag(self, workspace_id: str, working_dir: str | None = None) -> RAGAnything:
         async with self._init_lock:
             if workspace_id in self._rag_instances:
                 return self._rag_instances[workspace_id]
-            working_dir = str(Path(self.settings.working_dir_root) / workspace_id)
-            rag = self._build_rag(working_dir, workspace_id)
+            effective_working_dir = working_dir or str(
+                Path(self.settings.working_dir_root) / workspace_id
+            )
+            rag = self._build_rag(effective_working_dir, workspace_id)
             self._register_callbacks_to_rag(rag)
             self._rag_instances[workspace_id] = rag
             return rag
@@ -1894,9 +1896,9 @@ class LocalRagService:
         return await self._safe_query_call(_run_query)
 
     async def query_with_trace(
-        self, workspace_id: str, query: str, **kwargs
+        self, workspace_id: str, query: str, working_dir: str | None = None, **kwargs
     ) -> dict[str, Any]:
-        rag = await self.get_rag(workspace_id)
+        rag = await self.get_rag(workspace_id, working_dir=working_dir)
         normalized_kwargs = dict(kwargs)
         normalized_kwargs.setdefault(
             "image_token_estimate_method",

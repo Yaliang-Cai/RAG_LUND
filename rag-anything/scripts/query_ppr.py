@@ -56,6 +56,13 @@ from raganything.constants import (
 def _parse_args():
     p = argparse.ArgumentParser(description="PPR global-mode query tester")
     p.add_argument("-w", "--workspace", required=True, help="Workspace ID (must already be indexed)")
+    p.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Writable directory for KV stores and LLM cache. "
+             "Useful when the workspace path is read-only (e.g. another user's directory). "
+             "Defaults to the workspace path.",
+    )
     p.add_argument("-q", "--query", required=True, help="Question to ask")
     p.add_argument(
         "--mode",
@@ -116,6 +123,7 @@ async def run(args):
     response = await service.query_with_trace(
         workspace_id=workspace_id,
         query=query,
+        working_dir=args.cache_dir or None,
         **query_kwargs,
     )
 
