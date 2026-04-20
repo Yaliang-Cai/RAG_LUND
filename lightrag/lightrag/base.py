@@ -21,6 +21,7 @@ from .types import KnowledgeGraph
 from .constants import (
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
+    DEFAULT_EXCLUDE_SYNONYM_EDGES,
     DEFAULT_RECOGNITION_TOP_K,
     DEFAULT_MAX_ENTITY_TOKENS,
     DEFAULT_MAX_RELATION_TOKENS,
@@ -240,6 +241,13 @@ class QueryParam:
     """Retrieval-time synonym edge mapping in PPR.
     - "raw": synonym edge weight = stored cosine similarity
     - "plus_one": synonym edge weight = 1 + stored cosine similarity
+    """
+
+    exclude_synonym_edges: bool | None = DEFAULT_EXCLUDE_SYNONYM_EDGES
+    """Hard-filter SYNONYM edges during retrieval.
+    - True: always exclude SYNONYM edges.
+    - False: never exclude SYNONYM edges.
+    - None: auto default (PPR modes: False, non-PPR modes: True).
     """
 
     hub_penalty_threshold: int = 50

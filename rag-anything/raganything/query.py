@@ -189,6 +189,7 @@ class QueryMixin:
                 "ppr_top_k",
                 "passage_node_weight",
                 "ppr_synonym_weight_mode",
+                "exclude_synonym_edges",
             ]
         }
         cache_data.update(relevant_kwargs)

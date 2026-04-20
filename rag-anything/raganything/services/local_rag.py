@@ -93,6 +93,7 @@ from raganything.constants import (
     DEFAULT_PPR_TOP_K,
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
+    DEFAULT_EXCLUDE_SYNONYM_EDGES,
     DEFAULT_RECOGNITION_TOP_K,
     DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
     DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
@@ -209,6 +210,7 @@ class LocalRagSettings:
     ppr_top_k: int = DEFAULT_PPR_TOP_K
     passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
     ppr_synonym_weight_mode: str = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
+    exclude_synonym_edges: bool | None = DEFAULT_EXCLUDE_SYNONYM_EDGES
     recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K
     recognition_prompt_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS
     recognition_prompt_output_max_tokens: int = (
@@ -452,6 +454,10 @@ class LocalRagSettings:
                     "RAGANYTHING_PPR_SYNONYM_WEIGHT_MODE",
                     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
                 )
+            ),
+            exclude_synonym_edges=_parse_optional_bool_env(
+                "RAGANYTHING_EXCLUDE_SYNONYM_EDGES",
+                DEFAULT_EXCLUDE_SYNONYM_EDGES,
             ),
             recognition_top_k=int(
                 os.getenv(
@@ -1284,6 +1290,19 @@ def _normalize_qwen_image_token_method(method: str | None) -> str:
     )
 
 
+def _parse_optional_bool_env(name: str, default: bool | None = None) -> bool | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def _normalize_ppr_synonym_weight_mode(mode: str | None) -> str:
     normalized = (mode or "").strip().lower()
     if normalized in {"raw", "plus_one"}:
@@ -1417,6 +1436,10 @@ class LocalRagService:
             self.settings.recognition_prompt_max_tokens,
             self.settings.recognition_prompt_output_max_tokens,
             self.settings.recognition_prompt_reserved_tokens,
+        )
+        self.logger.info(
+            "Query synonym-edge filter default: exclude_synonym_edges=%s (None=auto: PPR=False, non-PPR=True)",
+            self.settings.exclude_synonym_edges,
         )
         self.logger.info(
             "Text request timeout configured: %.1fs",
@@ -1900,6 +1923,9 @@ class LocalRagService:
         normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
         normalized_kwargs.setdefault("recognition_top_k", self.settings.recognition_top_k)
         normalized_kwargs.setdefault(
+            "exclude_synonym_edges", self.settings.exclude_synonym_edges
+        )
+        normalized_kwargs.setdefault(
             "ppr_synonym_weight_mode", self.settings.ppr_synonym_weight_mode
         )
         normalized_kwargs["ppr_synonym_weight_mode"] = _normalize_ppr_synonym_weight_mode(
@@ -1942,6 +1968,9 @@ class LocalRagService:
         normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
         normalized_kwargs.setdefault("recognition_top_k", self.settings.recognition_top_k)
         normalized_kwargs.setdefault(
+            "exclude_synonym_edges", self.settings.exclude_synonym_edges
+        )
+        normalized_kwargs.setdefault(
             "ppr_synonym_weight_mode", self.settings.ppr_synonym_weight_mode
         )
         normalized_kwargs["ppr_synonym_weight_mode"] = _normalize_ppr_synonym_weight_mode(
@@ -1975,6 +2004,7 @@ class LocalRagService:
         passage_node_weight: float | None = None,
         recognition_top_k: int | None = None,
         ppr_synonym_weight_mode: str | None = None,
+        exclude_synonym_edges: bool | None = None,
     ):
         """Async generator — yields structured events via LightRAG aquery_llm().
 
@@ -2007,6 +2037,11 @@ class LocalRagService:
                     recognition_top_k
                     if recognition_top_k is not None
                     else self.settings.recognition_top_k
+                ),
+                exclude_synonym_edges=(
+                    exclude_synonym_edges
+                    if exclude_synonym_edges is not None
+                    else self.settings.exclude_synonym_edges
                 ),
                 ppr_synonym_weight_mode=_normalize_ppr_synonym_weight_mode(
                     ppr_synonym_weight_mode

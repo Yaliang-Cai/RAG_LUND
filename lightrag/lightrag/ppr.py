@@ -65,6 +65,7 @@ def personalized_pagerank(
     damping: float = 0.5,
     top_k: int = 50,
     ppr_synonym_weight_mode: Literal["raw", "plus_one"] = "raw",
+    exclude_synonym_edges: bool = False,
 ) -> list[tuple[str, float]]:
     """HippoRAG2-style PPR on entity + virtual chunk graph.
 
@@ -82,6 +83,7 @@ def personalized_pagerank(
         chunk_seed_weights: Chunk node ID → seed weight (from chunks VDB × passage_weight).
         damping: PPR damping factor (alpha). Lower = more spread, higher = stay near seeds.
         top_k: Return the top-K chunk nodes by PPR score.
+        exclude_synonym_edges: If True, drop SYNONYM entity-entity edges before PPR.
 
     Returns:
         Sorted list of ``(chunk_id, ppr_score)`` tuples, descending by score.
@@ -100,6 +102,8 @@ def personalized_pagerank(
     for edge in entity_edges:
         src, tgt = edge.get("src"), edge.get("tgt")
         if src and tgt:
+            if exclude_synonym_edges and _is_synonym_edge(edge):
+                continue
             edge_weight = _map_entity_edge_weight(edge, ppr_synonym_weight_mode)
             G.add_edge(src, tgt, weight=edge_weight)
 

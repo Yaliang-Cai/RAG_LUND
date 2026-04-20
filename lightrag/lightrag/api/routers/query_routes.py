@@ -139,6 +139,13 @@ class QueryRequest(BaseModel):
         default=None,
         description='Synonym edge mapping mode in PPR: "raw" (cos) or "plus_one" (1+cos).',
     )
+    exclude_synonym_edges: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Hard-filter SYNONYM edges. "
+            "When omitted (null), auto default is: PPR modes=False, non-PPR modes=True."
+        ),
+    )
 
     include_references: Optional[bool] = Field(
         default=True,

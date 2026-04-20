@@ -8,10 +8,12 @@ PROMPTS: dict[str, Any] = {}
 PROMPTS["DEFAULT_TUPLE_DELIMITER"] = "<|#|>"
 PROMPTS["DEFAULT_COMPLETION_DELIMITER"] = "<|COMPLETE|>"
 PROMPTS["ENTITY_NAME_CASE_RULE_DEFAULT"] = (
-    "Title-case each significant word if the name is case-insensitive."
+    "Preserve source lexical content. If casing is case-insensitive or inconsistent, "
+    "title-case each significant word without changing words, aliases, or abbreviations."
 )
 PROMPTS["ENTITY_NAME_CASE_RULE_NORMALIZED"] = (
-    "Normalize each word to canonical casing unless the phrase is already canonical.\n"
+    "Preserve source lexical content. Normalize casing and separator artifacts only; do not rewrite aliases, abbreviations, or lexical meaning.\n"
+    "                       Normalize each word to canonical casing unless the phrase is already canonical.\n"
     "                       Preserve known acronyms in uppercase (example: llm -> LLM).\n"
     "                       Preserve words with meaningful internal capitals (for example OpenAI, iPhone).\n"
     '                       Apply title case to remaining case-insensitive words (example: "Machine learning" -> "Machine Learning").'
@@ -39,8 +41,10 @@ user message provides an extended type list.
                    (covers papers, software, datasets, models, standards, regulations,
                    product specifications, internal reports, process documents)
 - naturalentity  : Does it exist in the physical world independently of human production?
-- concept        : Is it an abstract idea best answered by "what IS it"?
-- process        : Is it a named method or procedure best answered by "how IS IT done"?
+- concept        : Is it a stable domain concept with a specific source-grounded referent,
+                   best answered by "what IS it"?
+- process        : Is it a named or stable domain method/procedure with a specific
+                   source-grounded referent, best answered by "how IS IT done"?
 
 Disambiguation rules:
   concept vs process   → "Attention Mechanism" (WHAT) = concept;
@@ -57,9 +61,12 @@ Use ONLY the types provided in <Entity_types>. No other type values are permitte
 ---Ambiguity Protocol---
 When you cannot immediately assign a type, follow these steps in order:
 
-  Step 1  Is it a named standalone entity, or a descriptor / modifier phrase?
-          "Hybrid vehicle technology" → descriptor phrase → DO NOT EXTRACT.
-          "Prius"                     → named product     → artifact.
+  Step 1  Is it a specific, stable, source-grounded referent, or only a
+          descriptor / modifier / placeholder phrase?
+          "Hybrid vehicle technology" -> descriptor phrase -> DO NOT EXTRACT.
+          "the query", "retrieved documents", "the generator" -> generic/filler -> DO NOT EXTRACT.
+          "Prius" -> named product -> artifact.
+          "Self-Attention" -> stable domain method -> process.
 
   Step 2  Apply the WHAT / HOW test.
           "X is ___" completes naturally with a definition?  → concept.
@@ -72,6 +79,10 @@ When you cannot immediately assign a type, follow these steps in order:
 Prioritize entities that can form clear, meaningful relationships with other
 extracted entities. Avoid outputting isolated placeholder-like entities that
 cannot connect to anything else in the graph.
+
+Generic mechanisms, roles, objects, or unnamed placeholders belong in
+relationship_keywords or relationship_description unless they are stable named
+concepts, named methods, or concrete named referents.
 
 A correctly dropped entity is always preferable to a wrongly typed one.
 
@@ -89,7 +100,10 @@ The following must NOT appear as entity nodes.
                   → Also include in the person entity_description as backup.
                   → Do NOT extract as a separate entity node.
 
-  Unnamed generics  ("a model", "the algorithm", "the team") → skip entirely.
+  Unnamed generics  ("a model", "the algorithm", "the team", "the query",
+                     "retrieved documents", "the generator", "the layer",
+                     "values", "inputs", "outputs", "results") -> skip entirely.
+                     Do NOT extract a generic placeholder just to satisfy endpoint closure.
 
   File-system noise  (file paths, directory names, filenames, extensions,
                       chunk IDs, bounding boxes, page numbers, layout labels)
@@ -123,8 +137,11 @@ The first field must be the literal string `entity`.
 
   entity{tuple_delimiter}entity_name{tuple_delimiter}entity_type{tuple_delimiter}entity_description
 
-  entity_name        : Exact surface form from the text.
+  entity_name        : Preserve source lexical content from the text.
                        {entity_name_case_rule}
+                       Do NOT rewrite aliases or abbreviations:
+                       "RAG" must not become "Retrieval-Augmented Generation"
+                       unless that full lexical form appears in the source text.
                        Consistent naming across the entire extraction run.
   entity_type        : Lowercase. Must be one of the types in <Entity_types>.
                        No other values permitted.
@@ -266,6 +283,13 @@ PROMPTS["entity_continue_extraction_user_prompt"] = """---Task---
 Review the previous extraction and add any missed or incorrectly formatted
 entities and relationships from the same input text.
 
+---Actual Input Shape---
+The chat history immediately before this message contains:
+1. the original extraction user prompt, including the source input text;
+2. the previous assistant extraction for that same input text.
+Treat the previous assistant extraction as the current extraction state.
+Your response must contain only missed or corrected entries, not a full rewrite.
+
 ---Instructions---
 1.  Do NOT re-output entities or relationships that were correctly and fully extracted.
 2.  Output only: (a) missed entities/relationships, (b) corrected versions of
@@ -287,259 +311,156 @@ entities and relationships from the same input text.
 9.  Output {completion_delimiter} as the final line.
 10. Output language: {language}. Retain proper nouns in their original language.
 
+---Continuation Example---
+Previous assistant extraction in chat history:
+entity{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}process{tuple_delimiter}Framework described in the text as using retrieval evaluation.
+entity{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}process{tuple_delimiter}Module described in the text as evaluating retrieval quality.
+relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}component, retrieval assessment{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation uses a Retrieval Evaluator.
+{completion_delimiter}
+
+If the same source text also states that Corrective Retrieval-Augmented Generation uses
+a Query Rewriter module, output only the missed endpoint and relation:
+entity{tuple_delimiter}Query Rewriter{tuple_delimiter}process{tuple_delimiter}Module described in the text as rewriting queries when retrieval quality is poor.
+relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Query Rewriter{tuple_delimiter}component, query rewriting{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation uses a Query Rewriter.
+{completion_delimiter}
+
+For casing or separator corrections, output the corrected normalized form for the same
+lexical content. Do not use continuation to claim that a different lexical referent
+supersedes an earlier entity; this prompt is additive/corrective, not a delete operation.
+
 <Output>
 """
 
 PROMPTS["entity_extraction_examples"] = [
 
-    # Example 1 - Relation-dense RAG extraction with closed endpoints
+    # Example 1 - RAG framework extraction without generic endpoint nodes
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-Corrective Retrieval-Augmented Generation uses a retrieval evaluator to judge whether
-retrieved documents are relevant to a user query. If retrieval is noisy, the system
-rewrites the query, searches an external web source, and uses a knowledge refinement
-module before the generator produces the final answer. The framework is evaluated on
-open-domain question answering benchmarks and is designed to reduce hallucination in
-large language models.
+Corrective Retrieval-Augmented Generation (CRAG) uses a Retrieval Evaluator module
+to score retrieval quality. When retrieval quality is poor, CRAG invokes a Query
+Rewriter module before passing evidence to a Knowledge Refinement Module. The
+Answer Composer module uses refined evidence to produce final answers. The paper
+evaluates CRAG on Natural Questions and HotpotQA and reports lower hallucination
+than a baseline RAG pipeline.
 ```
 
 <Output>
-entity{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}process{tuple_delimiter}Framework described in the text as using retrieval evaluation, query rewriting, external web search, knowledge refinement, and generation to reduce hallucination.
-entity{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}process{tuple_delimiter}Component described in the text as judging whether retrieved documents are relevant to a user query.
-entity{tuple_delimiter}Retrieved Documents{tuple_delimiter}work{tuple_delimiter}Documents described in the text as evaluated for relevance to a user query.
-entity{tuple_delimiter}User Query{tuple_delimiter}concept{tuple_delimiter}Query described in the text as the information need used for retrieval evaluation and rewriting.
-entity{tuple_delimiter}Query Rewriting{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as rewriting the user query when retrieval is noisy.
-entity{tuple_delimiter}External Web Source{tuple_delimiter}work{tuple_delimiter}External source described in the text as searched after query rewriting.
-entity{tuple_delimiter}Knowledge Refinement Module{tuple_delimiter}process{tuple_delimiter}Module described in the text as refining knowledge before final answer generation.
-entity{tuple_delimiter}Generator{tuple_delimiter}process{tuple_delimiter}Component described in the text as producing the final answer.
-entity{tuple_delimiter}Open-Domain Question Answering Benchmarks{tuple_delimiter}work{tuple_delimiter}Benchmarks described in the text as used to evaluate the framework.
-entity{tuple_delimiter}Large Language Models{tuple_delimiter}work{tuple_delimiter}Models described in the text as the systems for which the framework is designed to reduce hallucination.
-relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}component, retrieval assessment{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation uses a retrieval evaluator.
-relation{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}Retrieved Documents{tuple_delimiter}relevance judgment{tuple_delimiter}The text states the retrieval evaluator judges whether retrieved documents are relevant.
-relation{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}User Query{tuple_delimiter}query relevance{tuple_delimiter}The text states the retrieval evaluator judges relevance to a user query.
-relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Query Rewriting{tuple_delimiter}retrieval correction{tuple_delimiter}The text states the system rewrites the query if retrieval is noisy.
-relation{tuple_delimiter}Query Rewriting{tuple_delimiter}User Query{tuple_delimiter}query transformation{tuple_delimiter}The text states query rewriting rewrites the user query.
-relation{tuple_delimiter}Query Rewriting{tuple_delimiter}External Web Source{tuple_delimiter}search handoff{tuple_delimiter}The text states the system searches an external web source after rewriting the query.
-relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Knowledge Refinement Module{tuple_delimiter}component, knowledge refinement{tuple_delimiter}The text states the framework uses a knowledge refinement module.
-relation{tuple_delimiter}Knowledge Refinement Module{tuple_delimiter}Generator{tuple_delimiter}generation preparation{tuple_delimiter}The text states the knowledge refinement module is used before the generator produces the final answer.
-relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Open-Domain Question Answering Benchmarks{tuple_delimiter}evaluation{tuple_delimiter}The text states the framework is evaluated on open-domain question answering benchmarks.
-relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Large Language Models{tuple_delimiter}hallucination reduction{tuple_delimiter}The text states the framework is designed to reduce hallucination in large language models.
+entity{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}process{tuple_delimiter}Framework described in the text as using retrieval evaluation, query rewriting, knowledge refinement, answer composition, and benchmark evaluation.
+entity{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}process{tuple_delimiter}Module described in the text as scoring retrieval quality for Corrective Retrieval-Augmented Generation.
+entity{tuple_delimiter}Query Rewriter{tuple_delimiter}process{tuple_delimiter}Module described in the text as invoked by Corrective Retrieval-Augmented Generation when retrieval quality is poor.
+entity{tuple_delimiter}Knowledge Refinement Module{tuple_delimiter}process{tuple_delimiter}Module described in the text as receiving evidence before answer composition.
+entity{tuple_delimiter}Answer Composer{tuple_delimiter}process{tuple_delimiter}Module described in the text as using refined evidence to produce final answers.
+entity{tuple_delimiter}Natural Questions{tuple_delimiter}work{tuple_delimiter}Benchmark described in the text as used to evaluate Corrective Retrieval-Augmented Generation.
+entity{tuple_delimiter}HotpotQA{tuple_delimiter}work{tuple_delimiter}Benchmark described in the text as used to evaluate Corrective Retrieval-Augmented Generation.
+entity{tuple_delimiter}Hallucination{tuple_delimiter}concept{tuple_delimiter}Stable domain concept described in the text as reduced by Corrective Retrieval-Augmented Generation compared with a baseline RAG pipeline.
+relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}component, retrieval assessment{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation uses a Retrieval Evaluator module to score retrieval quality.
+relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Query Rewriter{tuple_delimiter}component, query rewriting{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation invokes a Query Rewriter when retrieval quality is poor.
+relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Knowledge Refinement Module{tuple_delimiter}component, knowledge refinement{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation passes evidence to a Knowledge Refinement Module.
+relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Answer Composer{tuple_delimiter}component, answer composition{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation uses an Answer Composer module to produce final answers.
+relation{tuple_delimiter}Knowledge Refinement Module{tuple_delimiter}Answer Composer{tuple_delimiter}evidence handoff, answer generation{tuple_delimiter}The text states refined evidence is used by the Answer Composer.
+relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Natural Questions{tuple_delimiter}evaluation benchmark{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation is evaluated on Natural Questions.
+relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}HotpotQA{tuple_delimiter}evaluation benchmark{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation is evaluated on HotpotQA.
+relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Hallucination{tuple_delimiter}hallucination reduction{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation reports lower hallucination than a baseline RAG pipeline.
 {completion_delimiter}
 """,
 
-    # ── Example 1 · Core ML type boundary ──────────────────────────────────
+    # Example 2 - Metrics and roles stay in descriptions, no shortcut edge
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-The Transformer architecture, introduced in "Attention Is All You Need", relies on
-self-attention to process sequences in parallel. Training GPT-4 on this architecture
-used RLHF to align the model with human preferences. The NVIDIA H100 GPU was the
-primary hardware used during fine-tuning.
+AtlasLM achieved 92.3% accuracy on GLUE with 14ms latency on an H100 accelerator
+at 700W TDP. Sam Altman, CEO of OpenAI, presented the AtlasLM results during the
+OpenAI Benchmark Review.
 ```
 
 <Output>
-entity{tuple_delimiter}Transformer Architecture{tuple_delimiter}concept{tuple_delimiter}Architecture described in the text as relying on self-attention to process sequences in parallel.
-entity{tuple_delimiter}Attention Is All You Need{tuple_delimiter}work{tuple_delimiter}Paper cited in the text as the source that introduced the Transformer architecture.
-entity{tuple_delimiter}Self-Attention{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as the mechanism the Transformer relies on to process sequences in parallel.
-entity{tuple_delimiter}GPT-4{tuple_delimiter}work{tuple_delimiter}Model described in the text as trained on the Transformer architecture using RLHF.
-entity{tuple_delimiter}RLHF{tuple_delimiter}process{tuple_delimiter}Training procedure described in the text as used to align GPT-4 with human preferences.
-entity{tuple_delimiter}Human Preferences{tuple_delimiter}concept{tuple_delimiter}Preference signal described in the text as the alignment target for GPT-4 training with RLHF.
-entity{tuple_delimiter}Fine-Tuning{tuple_delimiter}process{tuple_delimiter}Training procedure described in the text as the stage where the NVIDIA H100 GPU was the primary hardware.
-entity{tuple_delimiter}NVIDIA H100{tuple_delimiter}artifact{tuple_delimiter}GPU described in the text as the primary hardware used during GPT-4 fine-tuning.
-relation{tuple_delimiter}Attention Is All You Need{tuple_delimiter}Transformer Architecture{tuple_delimiter}origin, introduction{tuple_delimiter}The text states the Transformer architecture was introduced in "Attention Is All You Need".
-relation{tuple_delimiter}Transformer Architecture{tuple_delimiter}Self-Attention{tuple_delimiter}core mechanism{tuple_delimiter}The text states the Transformer architecture relies on self-attention to process sequences.
-relation{tuple_delimiter}GPT-4{tuple_delimiter}Transformer Architecture{tuple_delimiter}model architecture{tuple_delimiter}The text states GPT-4 was trained on the Transformer architecture.
-relation{tuple_delimiter}GPT-4{tuple_delimiter}RLHF{tuple_delimiter}training method, alignment{tuple_delimiter}The text states training GPT-4 used RLHF to align the model with human preferences.
-relation{tuple_delimiter}RLHF{tuple_delimiter}Human Preferences{tuple_delimiter}alignment target{tuple_delimiter}The text states RLHF was used to align GPT-4 with human preferences.
-relation{tuple_delimiter}GPT-4{tuple_delimiter}Fine-Tuning{tuple_delimiter}training stage{tuple_delimiter}The text states GPT-4 training involved fine-tuning.
-relation{tuple_delimiter}Fine-Tuning{tuple_delimiter}NVIDIA H100{tuple_delimiter}hardware, fine-tuning{tuple_delimiter}The text states the NVIDIA H100 GPU was the primary hardware used during fine-tuning.
+entity{tuple_delimiter}AtlasLM{tuple_delimiter}work{tuple_delimiter}Model described in the text as achieving 92.3% accuracy on GLUE with 14ms latency on an H100 accelerator.
+entity{tuple_delimiter}GLUE{tuple_delimiter}work{tuple_delimiter}Benchmark described in the text as used to evaluate AtlasLM accuracy.
+entity{tuple_delimiter}H100{tuple_delimiter}artifact{tuple_delimiter}Hardware accelerator described in the text as used for AtlasLM latency measurement at 700W TDP.
+entity{tuple_delimiter}Sam Altman{tuple_delimiter}person{tuple_delimiter}Sam Altman, CEO of OpenAI per the text, presented the AtlasLM results during the OpenAI Benchmark Review.
+entity{tuple_delimiter}OpenAI{tuple_delimiter}organization{tuple_delimiter}Organization described in the text as the organization where Sam Altman serves as CEO.
+entity{tuple_delimiter}OpenAI Benchmark Review{tuple_delimiter}event{tuple_delimiter}Event described in the text as where Sam Altman presented the AtlasLM results.
+relation{tuple_delimiter}AtlasLM{tuple_delimiter}GLUE{tuple_delimiter}benchmark evaluation, accuracy{tuple_delimiter}The text states AtlasLM achieved 92.3% accuracy on GLUE.
+relation{tuple_delimiter}AtlasLM{tuple_delimiter}H100{tuple_delimiter}evaluation hardware, latency{tuple_delimiter}The text states AtlasLM achieved 14ms latency on an H100 accelerator at 700W TDP.
+relation{tuple_delimiter}Sam Altman{tuple_delimiter}OpenAI{tuple_delimiter}leadership role{tuple_delimiter}The text identifies Sam Altman as CEO of OpenAI.
+relation{tuple_delimiter}Sam Altman{tuple_delimiter}OpenAI Benchmark Review{tuple_delimiter}presentation{tuple_delimiter}The text states Sam Altman presented the AtlasLM results during the OpenAI Benchmark Review.
+relation{tuple_delimiter}AtlasLM{tuple_delimiter}OpenAI Benchmark Review{tuple_delimiter}result presentation{tuple_delimiter}The text states the AtlasLM results were presented during the OpenAI Benchmark Review.
 {completion_delimiter}
 """,
 
-    # ── Example 2 · Homonym disambiguation ─────────────────────────────────
+    # Example 3 - Stable concepts and methods, no filler nodes
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-Python Programming Language uses an interpreter process to execute scripts.
-Ball Python can consume prey larger than its own head.
-Mercury Planet orbits the Sun in 88 days; Mercury Element is liquid at room temperature.
+Attention is a core mechanism in the Transformer Architecture. Self-Attention
+computes context-aware token representations, and Multi-Head Attention applies
+Self-Attention in parallel. Backpropagation updates model parameters using
+gradients, and the Chain Rule supplies its mathematical basis.
 ```
 
 <Output>
-entity{tuple_delimiter}Python Programming Language{tuple_delimiter}work{tuple_delimiter}Programming language described in the text as using an interpreter process to execute scripts.
-entity{tuple_delimiter}Ball Python{tuple_delimiter}naturalentity{tuple_delimiter}Snake described in the text as capable of consuming prey larger than its own head.
-entity{tuple_delimiter}Interpreter Process{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as the mechanism Python Programming Language uses to execute scripts.
-entity{tuple_delimiter}Mercury Planet{tuple_delimiter}naturalentity{tuple_delimiter}Planet described in the text as orbiting the Sun in 88 days.
-entity{tuple_delimiter}Sun{tuple_delimiter}naturalentity{tuple_delimiter}Star described in the text as the body that Mercury Planet orbits.
-entity{tuple_delimiter}Mercury Element{tuple_delimiter}naturalentity{tuple_delimiter}Element described in the text as liquid at room temperature.
-relation{tuple_delimiter}Python Programming Language{tuple_delimiter}Interpreter Process{tuple_delimiter}execution, runtime{tuple_delimiter}The text states Python Programming Language uses an interpreter process to execute scripts.
-relation{tuple_delimiter}Python Programming Language{tuple_delimiter}Ball Python{tuple_delimiter}name ambiguity, distinct referents{tuple_delimiter}The text uses Python in distinct contexts by naming Python Programming Language and Ball Python.
-relation{tuple_delimiter}Mercury Planet{tuple_delimiter}Mercury Element{tuple_delimiter}name ambiguity, distinct referents{tuple_delimiter}The text distinguishes Mercury Planet from Mercury Element.
-relation{tuple_delimiter}Mercury Planet{tuple_delimiter}Sun{tuple_delimiter}orbit, astronomy{tuple_delimiter}The text states Mercury Planet orbits the Sun in 88 days.
+entity{tuple_delimiter}Attention{tuple_delimiter}concept{tuple_delimiter}Stable mechanism described in the text as a core mechanism in the Transformer Architecture.
+entity{tuple_delimiter}Transformer Architecture{tuple_delimiter}concept{tuple_delimiter}Architecture described in the text as using Attention as a core mechanism.
+entity{tuple_delimiter}Self-Attention{tuple_delimiter}process{tuple_delimiter}Method described in the text as computing context-aware token representations.
+entity{tuple_delimiter}Multi-Head Attention{tuple_delimiter}process{tuple_delimiter}Method described in the text as applying Self-Attention in parallel.
+entity{tuple_delimiter}Backpropagation{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as updating model parameters using gradients.
+entity{tuple_delimiter}Chain Rule{tuple_delimiter}concept{tuple_delimiter}Mathematical principle described in the text as the basis for Backpropagation.
+relation{tuple_delimiter}Transformer Architecture{tuple_delimiter}Attention{tuple_delimiter}core mechanism{tuple_delimiter}The text states Attention is a core mechanism in the Transformer Architecture.
+relation{tuple_delimiter}Self-Attention{tuple_delimiter}Attention{tuple_delimiter}attention method{tuple_delimiter}The text describes Self-Attention as an attention method computing context-aware token representations.
+relation{tuple_delimiter}Multi-Head Attention{tuple_delimiter}Self-Attention{tuple_delimiter}parallel application{tuple_delimiter}The text states Multi-Head Attention applies Self-Attention in parallel.
+relation{tuple_delimiter}Backpropagation{tuple_delimiter}Chain Rule{tuple_delimiter}mathematical foundation{tuple_delimiter}The text states the Chain Rule supplies the mathematical basis for Backpropagation.
 {completion_delimiter}
 """,
 
-    # ── Example 3 · Event vs Process vs Concept ─────────────────────────────
+    # Example 4 - Enterprise source-grounded process and document mentions
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-The Manhattan Project developed the first nuclear weapon using isotope separation
-via gaseous diffusion. The Trinity test in July 1945 was the first detonation.
-Nuclear fission had been theorized since the 1930s as a fundamental physical phenomenon.
+The Q3 2024 Product Review concluded that the Apollo Platform failed the Apollo
+Uptime SLA. The Q3 2024 Root Cause Analysis, led by Diana Chen, identified a
+Memory Leak in the Data Ingestion Pipeline as the primary fault. The Apollo
+Remediation Plan was submitted to the Engineering Steering Committee.
 ```
 
 <Output>
-entity{tuple_delimiter}Manhattan Project{tuple_delimiter}event{tuple_delimiter}Program described in the text as having developed the first nuclear weapon.
-entity{tuple_delimiter}Nuclear Weapon{tuple_delimiter}artifact{tuple_delimiter}Weapon described in the text as the first nuclear weapon developed by the Manhattan Project.
-entity{tuple_delimiter}Isotope Separation{tuple_delimiter}process{tuple_delimiter}Process described in the text as used by the Manhattan Project via gaseous diffusion.
-entity{tuple_delimiter}Gaseous Diffusion{tuple_delimiter}process{tuple_delimiter}Isotope separation method described in the text as the technique used by the Manhattan Project.
-entity{tuple_delimiter}Trinity Test{tuple_delimiter}event{tuple_delimiter}Detonation described in the text as occurring in July 1945 and as the first nuclear detonation.
-entity{tuple_delimiter}Nuclear Fission{tuple_delimiter}concept{tuple_delimiter}Physical phenomenon described in the text as theorized since the 1930s.
-relation{tuple_delimiter}Manhattan Project{tuple_delimiter}Nuclear Weapon{tuple_delimiter}development{tuple_delimiter}The text states the Manhattan Project developed the first nuclear weapon.
-relation{tuple_delimiter}Manhattan Project{tuple_delimiter}Gaseous Diffusion{tuple_delimiter}method usage{tuple_delimiter}The text states the Manhattan Project used isotope separation via gaseous diffusion.
-relation{tuple_delimiter}Isotope Separation{tuple_delimiter}Gaseous Diffusion{tuple_delimiter}method specialization{tuple_delimiter}The text states isotope separation was performed via gaseous diffusion.
-relation{tuple_delimiter}Isotope Separation{tuple_delimiter}Nuclear Weapon{tuple_delimiter}development method{tuple_delimiter}The text states isotope separation was used in developing the first nuclear weapon.
-relation{tuple_delimiter}Manhattan Project{tuple_delimiter}Trinity Test{tuple_delimiter}program milestone{tuple_delimiter}The text identifies the Trinity test as the first detonation produced by the Manhattan Project.
-relation{tuple_delimiter}Nuclear Fission{tuple_delimiter}Manhattan Project{tuple_delimiter}scientific basis{tuple_delimiter}The text implies nuclear fission as the physical phenomenon the Manhattan Project applied.
+entity{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}event{tuple_delimiter}Review described in the text as concluding that the Apollo Platform failed the Apollo Uptime SLA.
+entity{tuple_delimiter}Apollo Platform{tuple_delimiter}work{tuple_delimiter}Platform described in the text as failing the Apollo Uptime SLA.
+entity{tuple_delimiter}Apollo Uptime SLA{tuple_delimiter}work{tuple_delimiter}Service-level agreement described in the text as failed by the Apollo Platform.
+entity{tuple_delimiter}Q3 2024 Root Cause Analysis{tuple_delimiter}process{tuple_delimiter}Analysis described in the text as led by Diana Chen and as identifying a Memory Leak in the Data Ingestion Pipeline.
+entity{tuple_delimiter}Diana Chen{tuple_delimiter}person{tuple_delimiter}Individual described in the text as leading the Q3 2024 Root Cause Analysis.
+entity{tuple_delimiter}Memory Leak{tuple_delimiter}concept{tuple_delimiter}Stable fault concept described in the text as the primary fault found in the Data Ingestion Pipeline.
+entity{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}process{tuple_delimiter}Pipeline described in the text as containing the Memory Leak identified as the primary fault.
+entity{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}work{tuple_delimiter}Plan described in the text as submitted to the Engineering Steering Committee.
+entity{tuple_delimiter}Engineering Steering Committee{tuple_delimiter}organization{tuple_delimiter}Committee described in the text as receiving the Apollo Remediation Plan.
+relation{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}Apollo Platform{tuple_delimiter}evaluation, SLA failure{tuple_delimiter}The text states the Q3 2024 Product Review concluded that the Apollo Platform failed the Apollo Uptime SLA.
+relation{tuple_delimiter}Apollo Platform{tuple_delimiter}Apollo Uptime SLA{tuple_delimiter}SLA failure{tuple_delimiter}The text states the Apollo Platform failed the Apollo Uptime SLA.
+relation{tuple_delimiter}Q3 2024 Root Cause Analysis{tuple_delimiter}Diana Chen{tuple_delimiter}analysis leadership{tuple_delimiter}The text states Diana Chen led the Q3 2024 Root Cause Analysis.
+relation{tuple_delimiter}Q3 2024 Root Cause Analysis{tuple_delimiter}Memory Leak{tuple_delimiter}fault identification{tuple_delimiter}The text states the Q3 2024 Root Cause Analysis identified a Memory Leak as the primary fault.
+relation{tuple_delimiter}Memory Leak{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}fault location{tuple_delimiter}The text states the Memory Leak was in the Data Ingestion Pipeline.
+relation{tuple_delimiter}Memory Leak{tuple_delimiter}Apollo Platform{tuple_delimiter}root cause, SLA failure{tuple_delimiter}The text identifies the Memory Leak as the primary fault behind the Apollo Platform SLA failure.
+relation{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}Q3 2024 Root Cause Analysis{tuple_delimiter}follow-up action{tuple_delimiter}The text presents the Apollo Remediation Plan after the Q3 2024 Root Cause Analysis.
+relation{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}Engineering Steering Committee{tuple_delimiter}submission, governance{tuple_delimiter}The text states the Apollo Remediation Plan was submitted to the Engineering Steering Committee.
 {completion_delimiter}
 """,
 
-    # ── Example 4 · Work subtypes + artifact vs work ────────────────────────
+    # Example 5 - Negated facts do not create positive edges
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-ImageNet transformed computer vision. The ResNet paper showed that residual connections
-fix the vanishing gradient problem. The EU AI Act now governs high-risk AI systems.
-Google trained PaLM 2 on a cluster of TPU V4 chips; BERT model weights are available
-on HuggingFace.
-```
-
-<Output>
-entity{tuple_delimiter}ImageNet{tuple_delimiter}work{tuple_delimiter}Dataset described in the text as having transformed computer vision.
-entity{tuple_delimiter}Computer Vision{tuple_delimiter}concept{tuple_delimiter}Research area described in the text as transformed by ImageNet.
-entity{tuple_delimiter}ResNet{tuple_delimiter}work{tuple_delimiter}Paper described in the text as showing that residual connections fix the vanishing gradient problem.
-entity{tuple_delimiter}Residual Connections{tuple_delimiter}concept{tuple_delimiter}Mechanism described in the text as fixing the vanishing gradient problem.
-entity{tuple_delimiter}Vanishing Gradient Problem{tuple_delimiter}concept{tuple_delimiter}Problem described in the text as something residual connections fix.
-entity{tuple_delimiter}EU AI Act{tuple_delimiter}work{tuple_delimiter}Regulation described in the text as governing high-risk AI systems.
-entity{tuple_delimiter}High-Risk AI Systems{tuple_delimiter}work{tuple_delimiter}AI systems described in the text as governed by the EU AI Act.
-entity{tuple_delimiter}Google{tuple_delimiter}organization{tuple_delimiter}Entity described in the text as having trained PaLM 2 on a cluster of TPU V4 chips.
-entity{tuple_delimiter}PaLM 2{tuple_delimiter}work{tuple_delimiter}Model described in the text as trained by Google on a cluster of TPU V4 chips.
-entity{tuple_delimiter}TPU V4{tuple_delimiter}artifact{tuple_delimiter}Chip described in the text as the hardware cluster on which Google trained PaLM 2.
-entity{tuple_delimiter}BERT{tuple_delimiter}work{tuple_delimiter}Model described in the text as having weights available on HuggingFace.
-entity{tuple_delimiter}BERT Model Weights{tuple_delimiter}work{tuple_delimiter}Model weights described in the text as available on HuggingFace.
-entity{tuple_delimiter}HuggingFace{tuple_delimiter}organization{tuple_delimiter}Entity described in the text as the place where BERT model weights are available.
-relation{tuple_delimiter}ImageNet{tuple_delimiter}Computer Vision{tuple_delimiter}field impact{tuple_delimiter}The text states ImageNet transformed computer vision.
-relation{tuple_delimiter}ResNet{tuple_delimiter}Residual Connections{tuple_delimiter}introduction, demonstration{tuple_delimiter}The text states the ResNet paper showed residual connections fix the vanishing gradient problem.
-relation{tuple_delimiter}Residual Connections{tuple_delimiter}Vanishing Gradient Problem{tuple_delimiter}solution{tuple_delimiter}The text states residual connections fix the vanishing gradient problem.
-relation{tuple_delimiter}EU AI Act{tuple_delimiter}High-Risk AI Systems{tuple_delimiter}governance, regulation{tuple_delimiter}The text states the EU AI Act governs high-risk AI systems.
-relation{tuple_delimiter}Google{tuple_delimiter}PaLM 2{tuple_delimiter}development, training{tuple_delimiter}The text states Google trained PaLM 2 on a cluster of TPU V4 chips.
-relation{tuple_delimiter}PaLM 2{tuple_delimiter}TPU V4{tuple_delimiter}hardware dependency{tuple_delimiter}The text states PaLM 2 was trained on a cluster of TPU V4 chips.
-relation{tuple_delimiter}BERT{tuple_delimiter}BERT Model Weights{tuple_delimiter}model artifact{tuple_delimiter}The text states BERT model weights are available on HuggingFace.
-relation{tuple_delimiter}BERT Model Weights{tuple_delimiter}HuggingFace{tuple_delimiter}distribution, availability{tuple_delimiter}The text states BERT model weights are available on HuggingFace.
-relation{tuple_delimiter}BERT{tuple_delimiter}HuggingFace{tuple_delimiter}distribution, availability{tuple_delimiter}The text states BERT model weights are available on HuggingFace.
-{completion_delimiter}
-""",
-
-    # ── Example 5 · N-ary decomposition and location type ──────────────────
-    """<Entity_types>
-["person","organization","location","event","artifact","work","naturalentity","concept","process"]
-
-<Input Text>
-```
-Marie Curie, Pierre Curie, and Henri Becquerel jointly received the 1903 Nobel Prize
-in Physics in Stockholm for their discovery of radioactivity. The award was administered
-by the Royal Swedish Academy of Sciences, headquartered in Stockholm, Sweden.
-```
-
-<Output>
-entity{tuple_delimiter}Marie Curie{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of radioactivity.
-entity{tuple_delimiter}Pierre Curie{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of radioactivity.
-entity{tuple_delimiter}Henri Becquerel{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of radioactivity.
-entity{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}event{tuple_delimiter}Award described in the text as jointly given to Marie Curie, Pierre Curie, and Henri Becquerel in Stockholm for the discovery of radioactivity.
-entity{tuple_delimiter}Radioactivity{tuple_delimiter}concept{tuple_delimiter}Phenomenon described in the text as the discovery for which the 1903 Nobel Prize in Physics was awarded.
-entity{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}organization{tuple_delimiter}Body described in the text as the administrator of the 1903 Nobel Prize in Physics, headquartered in Stockholm.
-entity{tuple_delimiter}Stockholm{tuple_delimiter}location{tuple_delimiter}City described in the text as the location of the Nobel Prize ceremony and headquarters of the Royal Swedish Academy of Sciences.
-relation{tuple_delimiter}Marie Curie{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Marie Curie jointly received the 1903 Nobel Prize in Physics.
-relation{tuple_delimiter}Pierre Curie{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Pierre Curie jointly received the 1903 Nobel Prize in Physics.
-relation{tuple_delimiter}Henri Becquerel{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Henri Becquerel jointly received the 1903 Nobel Prize in Physics.
-relation{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}Radioactivity{tuple_delimiter}scientific basis, recognition{tuple_delimiter}The text states the prize was awarded for the discovery of radioactivity.
-relation{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}Stockholm{tuple_delimiter}award location{tuple_delimiter}The text states the 1903 Nobel Prize in Physics was received in Stockholm.
-relation{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}organization, administration{tuple_delimiter}The text states the award was administered by the Royal Swedish Academy of Sciences.
-relation{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}Stockholm{tuple_delimiter}headquarters, location{tuple_delimiter}The text states the Royal Swedish Academy of Sciences is headquartered in Stockholm, Sweden.
-{completion_delimiter}
-""",
-
-    # ── Example 6 · Concept vs Process (hardest pair) ───────────────────────
-    """<Entity_types>
-["person","organization","location","event","artifact","work","naturalentity","concept","process"]
-
-<Input Text>
-```
-Attention, at its core, is a weighted sum over values. Multi-head attention runs
-this operation in parallel across multiple representation subspaces. Backpropagation
-propagates error gradients from the loss surface back through each layer.
-The chain rule of calculus underlies this.
-```
-
-<Output>
-entity{tuple_delimiter}Attention{tuple_delimiter}concept{tuple_delimiter}Mechanism described in the text as a weighted sum over values at its core.
-entity{tuple_delimiter}Values{tuple_delimiter}concept{tuple_delimiter}Elements described in the text as inputs over which attention computes a weighted sum.
-entity{tuple_delimiter}Multi-Head Attention{tuple_delimiter}process{tuple_delimiter}Operation described in the text as running the attention mechanism in parallel across multiple representation subspaces.
-entity{tuple_delimiter}Representation Subspaces{tuple_delimiter}concept{tuple_delimiter}Subspaces described in the text as the multiple spaces across which multi-head attention runs in parallel.
-entity{tuple_delimiter}Backpropagation{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as propagating error gradients from the loss surface back through each layer.
-entity{tuple_delimiter}Error Gradients{tuple_delimiter}concept{tuple_delimiter}Gradients described in the text as propagated by backpropagation.
-entity{tuple_delimiter}Loss Surface{tuple_delimiter}concept{tuple_delimiter}Surface described in the text as the starting context from which error gradients are propagated.
-entity{tuple_delimiter}Layer{tuple_delimiter}concept{tuple_delimiter}Model component described in the text as traversed by error gradients during backpropagation.
-entity{tuple_delimiter}Chain Rule{tuple_delimiter}concept{tuple_delimiter}Mathematical principle described in the text as underlying backpropagation.
-relation{tuple_delimiter}Multi-Head Attention{tuple_delimiter}Attention{tuple_delimiter}instantiation, parallelisation{tuple_delimiter}The text describes multi-head attention as running the attention operation in parallel across multiple subspaces.
-relation{tuple_delimiter}Attention{tuple_delimiter}Values{tuple_delimiter}weighted sum{tuple_delimiter}The text states attention is a weighted sum over values.
-relation{tuple_delimiter}Multi-Head Attention{tuple_delimiter}Representation Subspaces{tuple_delimiter}parallel execution{tuple_delimiter}The text states multi-head attention runs across multiple representation subspaces.
-relation{tuple_delimiter}Backpropagation{tuple_delimiter}Error Gradients{tuple_delimiter}gradient propagation{tuple_delimiter}The text states backpropagation propagates error gradients.
-relation{tuple_delimiter}Error Gradients{tuple_delimiter}Loss Surface{tuple_delimiter}origin context{tuple_delimiter}The text states error gradients are propagated from the loss surface.
-relation{tuple_delimiter}Error Gradients{tuple_delimiter}Layer{tuple_delimiter}layer traversal{tuple_delimiter}The text states error gradients are propagated back through each layer.
-relation{tuple_delimiter}Backpropagation{tuple_delimiter}Chain Rule{tuple_delimiter}mathematical foundation{tuple_delimiter}The text states the chain rule of calculus underlies backpropagation.
-{completion_delimiter}
-""",
-
-    # ── Example 7 · Metrics and roles are NOT entities ──────────────────────
-    """<Entity_types>
-["person","organization","location","event","artifact","work","naturalentity","concept","process"]
-
-<Input Text>
-```
-The model achieved 92.3% accuracy on GLUE with 14ms latency on an H100 at 700W TDP.
-Sam Altman, CEO of OpenAI, presented the results.
-```
-
-<Output>
-entity{tuple_delimiter}GLUE{tuple_delimiter}work{tuple_delimiter}Benchmark described in the text as what the model was evaluated on.
-entity{tuple_delimiter}H100{tuple_delimiter}artifact{tuple_delimiter}Hardware described in the text as the device on which the model was evaluated.
-entity{tuple_delimiter}Sam Altman{tuple_delimiter}person{tuple_delimiter}Individual described in the text as CEO of OpenAI who presented the results.
-entity{tuple_delimiter}OpenAI{tuple_delimiter}organization{tuple_delimiter}Entity described in the text as the organization whose CEO presented the results.
-relation{tuple_delimiter}Sam Altman{tuple_delimiter}OpenAI{tuple_delimiter}leadership, role{tuple_delimiter}The text identifies Sam Altman as CEO of OpenAI.
-relation{tuple_delimiter}H100{tuple_delimiter}GLUE{tuple_delimiter}evaluation infrastructure{tuple_delimiter}The text states the model achieved 92.3% accuracy on GLUE with 14ms latency on the H100 at 700W TDP.
-{completion_delimiter}
-""",
-
-    # ── Example 8 · Negation does not produce positive edges ────────────────
-    """<Entity_types>
-["person","organization","location","event","artifact","work","naturalentity","concept","process"]
-
-<Input Text>
-```
-GPT-3 was trained without RLHF, unlike its successor GPT-4 which used RLHF extensively.
-The study found no significant correlation between model size and factual accuracy.
+GPT-3 was trained without RLHF, unlike its successor GPT-4, which used RLHF
+extensively. The study found no significant correlation between model size and
+factual accuracy.
 ```
 
 <Output>
@@ -551,84 +472,55 @@ relation{tuple_delimiter}GPT-3{tuple_delimiter}GPT-4{tuple_delimiter}succession,
 {completion_delimiter}
 """,
 
-    # ── Example 9 · Biomedical academic paper ───────────────────────────────
+    # Example 6 - N-ary fact decomposition with stable entities
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-CRISPR-Cas9 enables precise gene editing by cutting DNA at targeted sequences.
-The BRCA1 gene mutation increases breast cancer risk. Doxorubicin, a chemotherapy
-drug, intercalates into DNA strands to inhibit replication.
+Marie Curie, Pierre Curie, and Henri Becquerel jointly received the 1903 Nobel
+Prize in Physics in Stockholm for their discovery of Radioactivity. The award was
+administered by the Royal Swedish Academy of Sciences, headquartered in Stockholm.
 ```
 
 <Output>
-entity{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}process{tuple_delimiter}Gene editing procedure described in the text as enabling precise cuts in DNA at targeted sequences.
-entity{tuple_delimiter}DNA{tuple_delimiter}naturalentity{tuple_delimiter}Biological molecule described in the text as cut by CRISPR-Cas9 and intercalated into by Doxorubicin.
-entity{tuple_delimiter}Targeted Sequences{tuple_delimiter}concept{tuple_delimiter}Sequences described in the text as the DNA locations cut by CRISPR-Cas9.
-entity{tuple_delimiter}BRCA1{tuple_delimiter}naturalentity{tuple_delimiter}Gene described in the text as having a mutation that increases breast cancer risk.
-entity{tuple_delimiter}Breast Cancer{tuple_delimiter}concept{tuple_delimiter}Condition described in the text as having its risk increased by BRCA1 gene mutations.
-entity{tuple_delimiter}Doxorubicin{tuple_delimiter}artifact{tuple_delimiter}Drug described in the text as intercalating into DNA strands to inhibit replication.
-entity{tuple_delimiter}DNA Replication{tuple_delimiter}process{tuple_delimiter}Replication process described in the text as inhibited by Doxorubicin after intercalating into DNA strands.
-relation{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}DNA{tuple_delimiter}gene editing, DNA cutting{tuple_delimiter}The text states CRISPR-Cas9 cuts DNA at targeted sequences.
-relation{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}Targeted Sequences{tuple_delimiter}targeting, sequence specificity{tuple_delimiter}The text states CRISPR-Cas9 cuts DNA at targeted sequences.
-relation{tuple_delimiter}BRCA1{tuple_delimiter}Breast Cancer{tuple_delimiter}genetic risk, disease association{tuple_delimiter}The text states a BRCA1 gene mutation increases breast cancer risk.
-relation{tuple_delimiter}Doxorubicin{tuple_delimiter}DNA{tuple_delimiter}drug mechanism, intercalation{tuple_delimiter}The text states Doxorubicin intercalates into DNA strands.
-relation{tuple_delimiter}Doxorubicin{tuple_delimiter}DNA Replication{tuple_delimiter}replication inhibition{tuple_delimiter}The text states Doxorubicin inhibits replication.
-{completion_delimiter}
-""",
-
-    # ── Example 10 · Enterprise document (product / process / report) ────────
-    """<Entity_types>
-["person","organization","location","event","artifact","work","naturalentity","concept","process"]
-
-<Input Text>
-```
-The Q3 2024 Product Review concluded that the Apollo Platform failed to meet
-its 99.9% uptime SLA. The root cause analysis, led by Diana Chen, identified
-a memory leak in the Data Ingestion Pipeline as the primary fault.
-A remediation plan was submitted to the Engineering Steering Committee.
-```
-
-<Output>
-entity{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}event{tuple_delimiter}Review described in the text as having concluded that the Apollo Platform failed to meet its uptime SLA.
-entity{tuple_delimiter}Apollo Platform{tuple_delimiter}work{tuple_delimiter}Platform described in the text as failing to meet its 99.9% uptime SLA in the Q3 2024 Product Review.
-entity{tuple_delimiter}Uptime SLA{tuple_delimiter}work{tuple_delimiter}Service-level agreement described in the text as the 99.9% uptime target the Apollo Platform failed to meet.
-entity{tuple_delimiter}Root Cause Analysis{tuple_delimiter}process{tuple_delimiter}Analysis described in the text as led by Diana Chen and as identifying a memory leak in the Data Ingestion Pipeline.
-entity{tuple_delimiter}Diana Chen{tuple_delimiter}person{tuple_delimiter}Individual described in the text as having led the root cause analysis.
-entity{tuple_delimiter}Memory Leak{tuple_delimiter}concept{tuple_delimiter}Fault described in the text as identified in the Data Ingestion Pipeline and as the primary fault.
-entity{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}process{tuple_delimiter}Pipeline described in the text as containing the memory leak identified as the primary fault.
-entity{tuple_delimiter}Engineering Steering Committee{tuple_delimiter}organization{tuple_delimiter}Committee described in the text as the recipient of the remediation plan.
-entity{tuple_delimiter}Remediation Plan{tuple_delimiter}work{tuple_delimiter}Document described in the text as submitted to the Engineering Steering Committee following the root cause analysis.
-relation{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}Apollo Platform{tuple_delimiter}evaluation, SLA failure{tuple_delimiter}The text states the Q3 2024 Product Review concluded the Apollo Platform failed to meet its 99.9% uptime SLA.
-relation{tuple_delimiter}Apollo Platform{tuple_delimiter}Uptime SLA{tuple_delimiter}SLA failure{tuple_delimiter}The text states the Apollo Platform failed to meet its 99.9% uptime SLA.
-relation{tuple_delimiter}Root Cause Analysis{tuple_delimiter}Diana Chen{tuple_delimiter}analysis leadership{tuple_delimiter}The text states Diana Chen led the root cause analysis.
-relation{tuple_delimiter}Root Cause Analysis{tuple_delimiter}Memory Leak{tuple_delimiter}fault identification{tuple_delimiter}The text states the root cause analysis identified a memory leak as the primary fault.
-relation{tuple_delimiter}Memory Leak{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}fault location{tuple_delimiter}The text states the memory leak was in the Data Ingestion Pipeline.
-relation{tuple_delimiter}Memory Leak{tuple_delimiter}Apollo Platform{tuple_delimiter}root cause, SLA failure{tuple_delimiter}The text identifies the memory leak as the primary fault behind the Apollo Platform's SLA failure.
-relation{tuple_delimiter}Remediation Plan{tuple_delimiter}Root Cause Analysis{tuple_delimiter}follow-up action{tuple_delimiter}The text states the remediation plan followed the root cause analysis.
-relation{tuple_delimiter}Remediation Plan{tuple_delimiter}Engineering Steering Committee{tuple_delimiter}submission, governance{tuple_delimiter}The text states the remediation plan was submitted to the Engineering Steering Committee.
+entity{tuple_delimiter}Marie Curie{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of Radioactivity.
+entity{tuple_delimiter}Pierre Curie{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of Radioactivity.
+entity{tuple_delimiter}Henri Becquerel{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of Radioactivity.
+entity{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}event{tuple_delimiter}Award described in the text as jointly received by Marie Curie, Pierre Curie, and Henri Becquerel in Stockholm.
+entity{tuple_delimiter}Radioactivity{tuple_delimiter}concept{tuple_delimiter}Stable scientific concept described in the text as the discovery recognized by the 1903 Nobel Prize in Physics.
+entity{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}organization{tuple_delimiter}Organization described in the text as administering the 1903 Nobel Prize in Physics and as headquartered in Stockholm.
+entity{tuple_delimiter}Stockholm{tuple_delimiter}location{tuple_delimiter}Location described in the text as where the prize was received and where the Royal Swedish Academy of Sciences is headquartered.
+relation{tuple_delimiter}Marie Curie{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Marie Curie jointly received the 1903 Nobel Prize in Physics.
+relation{tuple_delimiter}Pierre Curie{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Pierre Curie jointly received the 1903 Nobel Prize in Physics.
+relation{tuple_delimiter}Henri Becquerel{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Henri Becquerel jointly received the 1903 Nobel Prize in Physics.
+relation{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}Radioactivity{tuple_delimiter}scientific basis, recognition{tuple_delimiter}The text states the prize was awarded for the discovery of Radioactivity.
+relation{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}Stockholm{tuple_delimiter}award location{tuple_delimiter}The text states the 1903 Nobel Prize in Physics was received in Stockholm.
+relation{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}award administration{tuple_delimiter}The text states the award was administered by the Royal Swedish Academy of Sciences.
+relation{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}Stockholm{tuple_delimiter}headquarters, location{tuple_delimiter}The text states the Royal Swedish Academy of Sciences is headquartered in Stockholm.
 {completion_delimiter}
 """,
 ]
 
 PROMPTS["entity_extraction_normalization_examples"] = [
-    # ── Example 11 · Lowercase-only names are normalized ─────────────────────
+    # Example 7 - Lowercase source names canonicalized without lexical rewrite
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-The llm application integrates a rag pipeline for customer support.
+orion llm assistant integrates the zephyr rag pipeline for Acme Support.
 ```
 
 <Output>
-entity{tuple_delimiter}LLM Application{tuple_delimiter}work{tuple_delimiter}System described in the text as integrating a RAG pipeline for customer support.
-entity{tuple_delimiter}RAG Pipeline{tuple_delimiter}process{tuple_delimiter}Pipeline described in the text as integrated into the LLM Application for customer support.
-relation{tuple_delimiter}LLM Application{tuple_delimiter}RAG Pipeline{tuple_delimiter}integration, retrieval architecture{tuple_delimiter}The text states the LLM Application integrates a RAG pipeline for customer support.
+entity{tuple_delimiter}Orion LLM Assistant{tuple_delimiter}work{tuple_delimiter}System described in the text as integrating the Zephyr RAG Pipeline for Acme Support.
+entity{tuple_delimiter}Zephyr RAG Pipeline{tuple_delimiter}process{tuple_delimiter}Pipeline described in the text as integrated into Orion LLM Assistant.
+entity{tuple_delimiter}Acme Support{tuple_delimiter}organization{tuple_delimiter}Named support organization described in the text as the target context for Orion LLM Assistant.
+relation{tuple_delimiter}Orion LLM Assistant{tuple_delimiter}Zephyr RAG Pipeline{tuple_delimiter}integration, retrieval architecture{tuple_delimiter}The text states Orion LLM Assistant integrates the Zephyr RAG Pipeline.
+relation{tuple_delimiter}Orion LLM Assistant{tuple_delimiter}Acme Support{tuple_delimiter}support deployment{tuple_delimiter}The text states Orion LLM Assistant integrates the Zephyr RAG Pipeline for Acme Support.
 {completion_delimiter}
 """,
-    # ── Example 12 · Existing uppercase names are preserved ───────────────────
+    # Example 8 - Preserve documentation referent and uppercase names
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
@@ -638,10 +530,10 @@ OpenAI API documentation explains how BERT can be used for semantic search.
 ```
 
 <Output>
-entity{tuple_delimiter}OpenAI API{tuple_delimiter}work{tuple_delimiter}Documentation described in the text as explaining how BERT can be used for semantic search.
-entity{tuple_delimiter}BERT{tuple_delimiter}work{tuple_delimiter}Model described in the text as usable for semantic search according to the OpenAI API documentation.
-entity{tuple_delimiter}Semantic Search{tuple_delimiter}process{tuple_delimiter}Search procedure described in the text as a use case for BERT.
-relation{tuple_delimiter}OpenAI API{tuple_delimiter}BERT{tuple_delimiter}usage guidance, semantic search{tuple_delimiter}The text states the OpenAI API documentation explains how BERT can be used for semantic search.
+entity{tuple_delimiter}OpenAI API Documentation{tuple_delimiter}work{tuple_delimiter}Documentation described in the text as explaining how BERT can be used for semantic search.
+entity{tuple_delimiter}BERT{tuple_delimiter}work{tuple_delimiter}Model described in the text as usable for semantic search according to the OpenAI API Documentation.
+entity{tuple_delimiter}Semantic Search{tuple_delimiter}process{tuple_delimiter}Stable search procedure described in the text as a use case for BERT.
+relation{tuple_delimiter}OpenAI API Documentation{tuple_delimiter}BERT{tuple_delimiter}usage guidance, semantic search{tuple_delimiter}The text states the OpenAI API Documentation explains how BERT can be used for semantic search.
 relation{tuple_delimiter}BERT{tuple_delimiter}Semantic Search{tuple_delimiter}model usage{tuple_delimiter}The text states BERT can be used for semantic search.
 {completion_delimiter}
 """,

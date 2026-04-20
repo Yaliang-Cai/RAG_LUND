@@ -118,6 +118,20 @@ def _is_synonym_edge(edge_data: dict[str, Any] | None) -> bool:
     return False
 
 
+def _should_exclude_synonym_edges(query_param: QueryParam) -> bool:
+    """Resolve query-time synonym filtering with mode-aware defaults.
+
+    Auto default (exclude_synonym_edges is None):
+    - PPR mode (ppr/ppr_local or legacy enable_multi_hop): False
+    - Non-PPR modes: True
+    """
+    if query_param.exclude_synonym_edges is not None:
+        return bool(query_param.exclude_synonym_edges)
+
+    ppr_mode = query_param.mode in ("ppr", "ppr_local") or query_param.enable_multi_hop
+    return not ppr_mode
+
+
 def _is_factual_or_legacy_edge(edge_data: dict[str, Any] | None) -> bool:
     """Treat untyped historical extraction edges as factual unless recognized as synonym."""
     if not isinstance(edge_data, dict):
@@ -6446,6 +6460,7 @@ async def _ppr_rank_chunks_global(
             for k, v in chunk_seed_weights.items()
         }
 
+    exclude_synonym_edges = _should_exclude_synonym_edges(query_param)
     ppr_ranked = await engine.run_ppr(
         entity_seed_weights=entity_seed_weights,
         chunk_seed_weights=chunk_seed_weights,
@@ -6453,6 +6468,7 @@ async def _ppr_rank_chunks_global(
         damping=query_param.ppr_damping,
         top_k=query_param.ppr_top_k,
         ppr_synonym_weight_mode=query_param.ppr_synonym_weight_mode,
+        exclude_synonym_edges=exclude_synonym_edges,
     )
 
     if not ppr_ranked:
@@ -6513,6 +6529,14 @@ async def _ppr_rank_chunks(
         )
     except Exception as e:
         logger.warning(f"PPR: relation VDB query failed: {e}")
+
+    exclude_synonym_edges = _should_exclude_synonym_edges(query_param)
+    if exclude_synonym_edges and rel_results:
+        before = len(rel_results)
+        rel_results = [r for r in rel_results if not _is_synonym_edge(r)]
+        filtered = before - len(rel_results)
+        if filtered > 0:
+            logger.info(f"PPR: excluded {filtered} SYNONYM relation seeds by query flag")
 
     if use_global and query_param.recognition_top_k > 0:
         # --- Recognition Memory path (global PPR only) ---
@@ -6608,6 +6632,14 @@ async def _ppr_rank_chunks(
     subgraph_nodes, subgraph_edges = await knowledge_graph_inst.get_subgraph_for_ppr(
         seed_ids, max_depth=query_param.multi_hop_depth
     )
+    if exclude_synonym_edges and subgraph_edges:
+        before = len(subgraph_edges)
+        subgraph_edges = [e for e in subgraph_edges if not _is_synonym_edge(e)]
+        filtered = before - len(subgraph_edges)
+        if filtered > 0:
+            logger.info(
+                f"PPR(local): excluded {filtered} SYNONYM edges from subgraph by query flag"
+            )
 
     # Step 3: Build virtual chunk nodes + chunk-entity edges from source_id
     chunk_to_entities: dict[str, list[str]] = {}
@@ -6695,6 +6727,7 @@ async def _ppr_rank_chunks(
         damping=query_param.ppr_damping,
         top_k=query_param.ppr_top_k,
         ppr_synonym_weight_mode=query_param.ppr_synonym_weight_mode,
+        exclude_synonym_edges=exclude_synonym_edges,
     )
 
     if not ppr_ranked:
@@ -6838,6 +6871,15 @@ async def _find_most_related_edges_from_entities(
                 **edge_props,
             }
             all_edges_data.append(combined)
+
+    if _should_exclude_synonym_edges(query_param):
+        before = len(all_edges_data)
+        all_edges_data = [e for e in all_edges_data if not _is_synonym_edge(e)]
+        filtered = before - len(all_edges_data)
+        if filtered > 0:
+            logger.info(
+                f"Local query: excluded {filtered} SYNONYM relations by query flag"
+            )
 
     # Weight edges by endpoint entity VDB relevance scores (hub noise fix)
     entity_score_map: dict[str, float] = {}
@@ -7061,6 +7103,15 @@ async def _get_edge_data(
                 **edge_props,
             }
             edge_datas.append(combined)
+
+    if _should_exclude_synonym_edges(query_param):
+        before = len(edge_datas)
+        edge_datas = [e for e in edge_datas if not _is_synonym_edge(e)]
+        filtered = before - len(edge_datas)
+        if filtered > 0:
+            logger.info(
+                f"Global query: excluded {filtered} SYNONYM relations by query flag"
+            )
 
     # Relations maintain vector search order (sorted by similarity)
 

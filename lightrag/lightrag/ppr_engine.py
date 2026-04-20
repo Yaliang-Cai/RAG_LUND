@@ -87,7 +87,7 @@ class GlobalPPREngine:
         self.node_index: dict[str, int] | None = None
         self.index_node: list[str] | None = None
         self._adj: csr_matrix | None = None  # raw mode N x N entity adjacency
-        self._adj_by_mode: dict[str, csr_matrix] = {}
+        self._adj_by_mode: dict[tuple[str, bool], csr_matrix] = {}
         self._entity_edges_for_ppr: list[tuple[int, int, dict[str, Any]]] = []
         self._chunk_to_entities: dict[str, list[str]] = {}
         self._entity_to_chunks: dict[str, list[str]] = {}
@@ -113,7 +113,9 @@ class GlobalPPREngine:
             await self._load_graph()
 
     def _build_entity_adj(
-        self, synonym_weight_mode: Literal["raw", "plus_one"]
+        self,
+        synonym_weight_mode: Literal["raw", "plus_one"],
+        exclude_synonym_edges: bool = False,
     ) -> csr_matrix:
         index_node = self.index_node or []
         n_nodes = len(index_node)
@@ -124,6 +126,8 @@ class GlobalPPREngine:
         cols: list[int] = []
         data_vals: list[float] = []
         for i, j, edge_data in self._entity_edges_for_ppr:
+            if exclude_synonym_edges and _is_synonym_edge(edge_data):
+                continue
             mapped_weight = _map_entity_edge_weight(edge_data, synonym_weight_mode)
             rows.extend([i, j])
             cols.extend([j, i])
@@ -131,13 +135,18 @@ class GlobalPPREngine:
 
         return csr_matrix((data_vals, (rows, cols)), shape=(n_nodes, n_nodes), dtype=np.float32)
 
-    def _get_entity_adj(self, synonym_weight_mode: Literal["raw", "plus_one"]) -> csr_matrix:
-        cached = self._adj_by_mode.get(synonym_weight_mode)
+    def _get_entity_adj(
+        self,
+        synonym_weight_mode: Literal["raw", "plus_one"],
+        exclude_synonym_edges: bool = False,
+    ) -> csr_matrix:
+        cache_key = (synonym_weight_mode, exclude_synonym_edges)
+        cached = self._adj_by_mode.get(cache_key)
         if cached is not None:
             return cached
 
-        built = self._build_entity_adj(synonym_weight_mode)
-        self._adj_by_mode[synonym_weight_mode] = built
+        built = self._build_entity_adj(synonym_weight_mode, exclude_synonym_edges)
+        self._adj_by_mode[cache_key] = built
         return built
 
     async def _load_graph(self) -> None:
@@ -171,7 +180,7 @@ class GlobalPPREngine:
             self.node_index = {}
             self.index_node = []
             self._adj = csr_matrix((0, 0), dtype=np.float32)
-            self._adj_by_mode = {"raw": self._adj}
+            self._adj_by_mode = {("raw", False): self._adj}
             self._entity_edges_for_ppr = []
             self._chunk_to_entities = {}
             self._entity_to_chunks = {}
@@ -217,7 +226,7 @@ class GlobalPPREngine:
         self.index_node = index_node
         self._entity_edges_for_ppr = entity_edges_for_ppr
         self._adj = self._build_entity_adj("raw")
-        self._adj_by_mode = {"raw": self._adj}
+        self._adj_by_mode = {("raw", False): self._adj}
         self._chunk_to_entities = chunk_to_entities
         self._entity_to_chunks = entity_to_chunks
 
@@ -238,12 +247,14 @@ class GlobalPPREngine:
         top_k: int = 50,
         chunk_embeddings: dict[str, list[float]] | None = None,
         ppr_synonym_weight_mode: Literal["raw", "plus_one"] = "raw",
+        exclude_synonym_edges: bool = False,
     ) -> list[tuple[str, float]]:
         """Run PPR on the full entity graph extended with virtual chunk nodes.
 
         Notes:
             - chunk-entity virtual edges are fixed to weight=1.0.
             - chunk_embeddings is kept only for API compatibility and ignored.
+            - when exclude_synonym_edges=True, SYNONYM edges are removed before PPR.
         """
         if not _HAS_FAST_PAGERANK:
             raise RuntimeError(
@@ -260,7 +271,10 @@ class GlobalPPREngine:
 
         node_index = self.node_index or {}
         index_node = self.index_node or []
-        adj = self._get_entity_adj(ppr_synonym_weight_mode)
+        adj = self._get_entity_adj(
+            ppr_synonym_weight_mode,
+            exclude_synonym_edges=exclude_synonym_edges,
+        )
         n_nodes = len(index_node)
         if n_nodes == 0:
             return []
