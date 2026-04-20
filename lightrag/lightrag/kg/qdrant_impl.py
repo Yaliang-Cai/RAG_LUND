@@ -29,6 +29,9 @@ ID_FIELD = "id"
 config = configparser.ConfigParser()
 config.read("config.ini", "utf-8")
 
+DEFAULT_ENABLE_SPARSE_BM25 = True
+DEFAULT_SPARSE_BM25_MODEL = "Qdrant/bm25"
+
 
 def compute_mdhash_id_for_qdrant(
     content: str, prefix: str = "", style: str = "simple"
@@ -156,6 +159,7 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         model_suffix: str,
         quantization_config=None,
         index_relation_fields: bool = False,
+        sparse_vectors_config: dict[str, models.SparseVectorParams] | None = None,
     ):
         """
         Setup Qdrant collection with migration support from legacy collections.
@@ -190,6 +194,16 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         if (new_collection_exists and not legacy_collection) or (
             collection_name == legacy_collection
         ):
+            if sparse_vectors_config:
+                try:
+                    client.update_collection(
+                        collection_name=collection_name,
+                        sparse_vectors_config=sparse_vectors_config,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Qdrant: Failed to update sparse_vectors_config for existing collection '{collection_name}': {e}"
+                    )
             # create_payload_index return without error if index already exists
             client.create_payload_index(
                 collection_name=collection_name,
@@ -249,6 +263,7 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             client.create_collection(
                 collection_name,
                 vectors_config=vectors_config,
+                sparse_vectors_config=sparse_vectors_config,
                 hnsw_config=hnsw_config,
                 quantization_config=quantization_config,
             )
@@ -559,6 +574,16 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         self._index_relation_fields = (
             os.environ.get("QDRANT_INDEX_RELATION_FIELDS", "false").lower() == "true"
         )
+        self._enable_sparse_bm25 = (
+            os.environ.get(
+                "QDRANT_ENABLE_SPARSE_BM25", str(DEFAULT_ENABLE_SPARSE_BM25)
+            ).lower()
+            in {"1", "true", "yes", "y", "on"}
+        )
+        self._sparse_bm25_model = os.environ.get(
+            "QDRANT_SPARSE_BM25_MODEL", DEFAULT_SPARSE_BM25_MODEL
+        )
+        self._sparse_vector_name: str | None = None
 
     async def initialize(self):
         """Initialize Qdrant collection"""
@@ -584,6 +609,35 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                         f"[{self.workspace}] QdrantClient created successfully"
                     )
 
+                sparse_vectors_config: dict[str, models.SparseVectorParams] | None = None
+                if self._enable_sparse_bm25:
+                    try:
+                        if not pm.is_installed("fastembed"):
+                            pm.install("fastembed")
+                        self._client.set_sparse_model(self._sparse_bm25_model)
+                        self._sparse_vector_name = (
+                            self._client.get_sparse_vector_field_name()
+                        )
+                        sparse_vectors_config = (
+                            self._client.get_fastembed_sparse_vector_params(
+                                modifier=models.Modifier.IDF
+                            )
+                        )
+                        logger.info(
+                            "[%s] Enabled sparse BM25 indexing in Qdrant (model=%s, field=%s)",
+                            self.workspace,
+                            self._sparse_bm25_model,
+                            self._sparse_vector_name,
+                        )
+                    except Exception as e:
+                        self._enable_sparse_bm25 = False
+                        self._sparse_vector_name = None
+                        logger.warning(
+                            "[%s] Failed to enable sparse BM25 indexing; fallback to dense-only. reason=%s",
+                            self.workspace,
+                            e,
+                        )
+
                 # Setup collection (create if not exists and configure indexes)
                 # Pass namespace and workspace for backward-compatible migration support
                 QdrantVectorDBStorage.setup_collection(
@@ -604,6 +658,7 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                     model_suffix=self.model_suffix,
                     quantization_config=self._quantization_config,
                     index_relation_fields=self._index_relation_fields,
+                    sparse_vectors_config=sparse_vectors_config,
                 )
 
                 # Removed duplicate max batch size initialization
@@ -664,14 +719,40 @@ class QdrantVectorDBStorage(BaseVectorStorage):
 
         embeddings = np.concatenate(embeddings_list)
 
+        sparse_vectors: list[models.SparseVector] | None = None
+        if self._enable_sparse_bm25 and self._sparse_vector_name:
+            try:
+                sparse_vectors = list(
+                    self._client._sparse_embed_documents(
+                        contents,
+                        embedding_model_name=self._sparse_bm25_model,
+                        batch_size=self._max_batch_size,
+                    )
+                )
+            except Exception as e:
+                logger.warning(
+                    "[%s] Sparse BM25 embedding failed for this batch; fallback dense-only. reason=%s",
+                    self.workspace,
+                    e,
+                )
+                sparse_vectors = None
+
         list_points = []
         for i, d in enumerate(list_data):
+            point_vector: list[float] | dict[str, Any]
+            if sparse_vectors is not None and self._sparse_vector_name:
+                point_vector = {
+                    "": embeddings[i],
+                    self._sparse_vector_name: sparse_vectors[i],
+                }
+            else:
+                point_vector = embeddings[i]
             list_points.append(
                 models.PointStruct(
                     id=compute_mdhash_id_for_qdrant(
                         d[ID_FIELD], prefix=self.effective_workspace
                     ),
-                    vector=embeddings[i],
+                    vector=point_vector,
                     payload=d,
                 )
             )

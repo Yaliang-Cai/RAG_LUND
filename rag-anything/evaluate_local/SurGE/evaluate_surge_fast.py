@@ -262,8 +262,8 @@ def settings_for_surge(args: argparse.Namespace) -> LocalRagSettings:
     s.working_dir_root = str(RAG_STORAGE_DIR)
     s.output_dir = str(RAG_OUTPUT_DIR)
     s.log_dir = str(LOG_DIR)
-    # Stabilize Neo4j/Qdrant ingest for batch ainsert path by forcing per-workspace serialization.
-    s.serialize_ingest_by_workspace_id = True
+    # Keep SurGE ingest behavior aligned with user preference for workspace-level ingest serialization.
+    s.serialize_ingest_by_workspace_id = False
     # Keep non-ablation switches stable and enabled across runs.
     s.enable_entity_surface_normalization = True
     s.enable_keyword_case_normalization = True

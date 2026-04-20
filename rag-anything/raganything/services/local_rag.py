@@ -229,6 +229,8 @@ class LocalRagSettings:
     strict_relation_endpoint_entity_match: bool = (
         DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH
     )
+    qdrant_enable_sparse_bm25: bool = True
+    qdrant_sparse_bm25_model: str = "Qdrant/bm25"
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -493,6 +495,13 @@ class LocalRagSettings:
                 str(DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
+            qdrant_enable_sparse_bm25=os.getenv(
+                "QDRANT_ENABLE_SPARSE_BM25", "true"
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            qdrant_sparse_bm25_model=os.getenv(
+                "QDRANT_SPARSE_BM25_MODEL", "Qdrant/bm25"
+            ),
         )
 
 
@@ -1361,6 +1370,17 @@ class LocalRagService:
         )
         os.environ["MINERU_VLLM_GPU_MEMORY_UTILIZATION"] = str(
             self.settings.mineru_vllm_gpu_memory_utilization
+        )
+        os.environ["QDRANT_ENABLE_SPARSE_BM25"] = (
+            "true" if self.settings.qdrant_enable_sparse_bm25 else "false"
+        )
+        os.environ["QDRANT_SPARSE_BM25_MODEL"] = (
+            self.settings.qdrant_sparse_bm25_model
+        )
+        self.logger.info(
+            "Qdrant sparse indexing configured: enabled=%s, model=%s",
+            self.settings.qdrant_enable_sparse_bm25,
+            self.settings.qdrant_sparse_bm25_model,
         )
         self.lightrag_tokenizer = build_lightrag_tokenizer(
             self.settings.tokenizer_model_path,

@@ -599,6 +599,8 @@ def main() -> int:
 
     python_exe = str(args.python_exe)
     base_env = _make_base_env(project_root=project_root, lightrag_root=lightrag_root)
+    base_env.setdefault("QDRANT_ENABLE_SPARSE_BM25", "true")
+    base_env.setdefault("QDRANT_SPARSE_BM25_MODEL", "Qdrant/bm25")
     if str(args.docbench_data_root or "").strip():
         base_env["DOCBENCH_SHARED_DATA_ROOT"] = str(args.docbench_data_root).strip()
     shared_mineru_output_dir: Path | None = None
@@ -631,6 +633,8 @@ def main() -> int:
             "shared_query_mode": args.shared_query_mode,
             "shared_query_mode_v3": args.shared_query_mode_v3,
             "shared_recognition_top_k": args.shared_recognition_top_k,
+            "qdrant_enable_sparse_bm25": base_env.get("QDRANT_ENABLE_SPARSE_BM25", ""),
+            "qdrant_sparse_bm25_model": base_env.get("QDRANT_SPARSE_BM25_MODEL", ""),
         },
     )
 

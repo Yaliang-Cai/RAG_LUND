@@ -3144,6 +3144,8 @@ async def _merge_edges_then_upsert(
     added_entities: list = None,  # New parameter to track entities added during edge processing
     relation_chunks_storage: BaseKVStorage | None = None,
     entity_chunks_storage: BaseKVStorage | None = None,
+    relation_skip_stats: dict[str, Any] | None = None,
+    allowed_relation_endpoint_ids: set[str] | None = None,
 ):
     if src_id == tgt_id:
         return None
@@ -3156,21 +3158,46 @@ async def _merge_edges_then_upsert(
     )
     if strict_endpoint_match:
         missing_endpoints: list[str] = []
-        if not await knowledge_graph_inst.has_node(src_id):
-            missing_endpoints.append(src_id)
-        if not await knowledge_graph_inst.has_node(tgt_id):
-            missing_endpoints.append(tgt_id)
+        endpoint_scope = (
+            "doc-scope" if allowed_relation_endpoint_ids is not None else "graph"
+        )
+        if allowed_relation_endpoint_ids is not None:
+            if src_id not in allowed_relation_endpoint_ids:
+                missing_endpoints.append(src_id)
+            if tgt_id not in allowed_relation_endpoint_ids:
+                missing_endpoints.append(tgt_id)
+        else:
+            if not await knowledge_graph_inst.has_node(src_id):
+                missing_endpoints.append(src_id)
+            if not await knowledge_graph_inst.has_node(tgt_id):
+                missing_endpoints.append(tgt_id)
         if missing_endpoints:
-            await _remove_relation_edge_and_vector(
-                knowledge_graph_inst=knowledge_graph_inst,
-                relationships_vdb=relationships_vdb,
-                src_id=src_id,
-                tgt_id=tgt_id,
-            )
+            if allowed_relation_endpoint_ids is None:
+                await _remove_relation_edge_and_vector(
+                    knowledge_graph_inst=knowledge_graph_inst,
+                    relationships_vdb=relationships_vdb,
+                    src_id=src_id,
+                    tgt_id=tgt_id,
+                )
+            if relation_skip_stats is not None:
+                relation_skip_stats["doc_scope_missing_endpoint_relations"] = (
+                    int(
+                        relation_skip_stats.get(
+                            "doc_scope_missing_endpoint_relations", 0
+                        )
+                    )
+                    + 1
+                )
+                missing_counter = relation_skip_stats.get("missing_endpoints")
+                if not isinstance(missing_counter, Counter):
+                    missing_counter = Counter()
+                    relation_skip_stats["missing_endpoints"] = missing_counter
+                missing_counter.update(sorted(set(missing_endpoints)))
             logger.info(
-                "Skipped relation `%s`~`%s`: strict endpoint match enabled, missing endpoints=%s",
+                "Skipped relation `%s`~`%s`: strict %s endpoint match enabled, missing endpoints=%s",
                 src_id,
                 tgt_id,
+                endpoint_scope,
                 ",".join(sorted(set(missing_endpoints))),
             )
             return None
@@ -3857,6 +3884,7 @@ async def merge_nodes_and_edges(
 
     total_entities_count = len(all_nodes)
     total_relations_count = len(all_edges)
+    total_relation_records_count = sum(len(edges) for edges in all_edges.values())
 
     log_message = f"Merging stage {current_file_number}/{total_files}: {file_path}"
     logger.info(log_message)
@@ -3971,6 +3999,7 @@ async def merge_nodes_and_edges(
 
     # Build name→composite_id mapping for edge key resolution
     _entity_name_to_composite = {}
+    doc_relation_endpoint_ids: set[str] = set()
     if _disambig:
         for ent in processed_entities:
             if ent and isinstance(ent, dict):
@@ -3978,6 +4007,8 @@ async def merge_nodes_and_edges(
                 eid = ent.get("entity_id", ename)
                 if ename and eid:
                     _entity_name_to_composite[ename] = eid
+                if eid:
+                    doc_relation_endpoint_ids.add(eid)
 
         # Remap edge keys to use composite IDs
         remapped_edges = defaultdict(list)
@@ -3987,6 +4018,14 @@ async def merge_nodes_and_edges(
             new_key = tuple(sorted((new_src, new_tgt)))
             remapped_edges[new_key].extend(edges)
         all_edges = remapped_edges
+        total_relations_count = len(all_edges)
+        total_relation_records_count = sum(len(edges) for edges in all_edges.values())
+    else:
+        for ent in processed_entities:
+            if ent and isinstance(ent, dict):
+                eid = ent.get("entity_id") or ent.get("entity_name")
+                if eid:
+                    doc_relation_endpoint_ids.add(eid)
 
     # ===== Phase 2: Process all relationships concurrently =====
     log_message = f"Phase 2: Processing {total_relations_count} relations from {doc_id} (async: {graph_max_async})"
@@ -4032,6 +4071,8 @@ async def merge_nodes_and_edges(
                         added_entities,  # Pass list to collect added entities
                         relation_chunks_storage,
                         entity_chunks_storage,  # Add entity_chunks_storage parameter
+                        relation_skip_stats,
+                        doc_relation_endpoint_ids,
                     )
 
                     if edge_data is None:
@@ -4062,6 +4103,11 @@ async def merge_nodes_and_edges(
                         e, f"{sorted_edge_key}"
                     )
                     raise prefixed_exception from e
+
+    relation_skip_stats: dict[str, Any] = {
+        "doc_scope_missing_endpoint_relations": 0,
+        "missing_endpoints": Counter(),
+    }
 
     # Create relationship processing tasks
     edge_tasks = []
@@ -4107,6 +4153,40 @@ async def merge_nodes_and_edges(
 
         if first_exception is not None:
             raise first_exception
+
+    doc_scope_skipped_relations = int(
+        relation_skip_stats.get("doc_scope_missing_endpoint_relations", 0)
+    )
+    missing_endpoint_counter = relation_skip_stats.get("missing_endpoints")
+    if not isinstance(missing_endpoint_counter, Counter):
+        missing_endpoint_counter = Counter()
+    skip_rate = (
+        doc_scope_skipped_relations / total_relations_count
+        if total_relations_count
+        else 0.0
+    )
+    top_missing_endpoints = [
+        {"endpoint": endpoint, "count": count}
+        for endpoint, count in missing_endpoint_counter.most_common(10)
+    ]
+    strict_endpoint_match_enabled = bool(
+        global_config.get("strict_relation_endpoint_entity_match", False)
+    )
+    log_message = (
+        "Relation endpoint doc-scope strict-match summary: "
+        f"doc_id={doc_id}, "
+        f"strict_relation_endpoint_entity_match={strict_endpoint_match_enabled}, "
+        f"doc_entity_ids={len(doc_relation_endpoint_ids)}, "
+        f"extracted_relation_pairs={total_relations_count}, "
+        f"extracted_relation_records={total_relation_records_count}, "
+        f"skipped_relation_pairs={doc_scope_skipped_relations}, "
+        f"skip_rate={skip_rate:.2%}, "
+        f"missing_endpoint_top={json.dumps(top_missing_endpoints, ensure_ascii=False)}"
+    )
+    logger.info(log_message)
+    async with pipeline_status_lock:
+        pipeline_status["latest_message"] = log_message
+        pipeline_status["history_messages"].append(log_message)
 
     changed_entity_ids: set[str] = set()
     for entity_data in processed_entities:
@@ -4283,7 +4363,16 @@ async def extract_entities(
         "entity_uppercase_allowlist",
         DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
     )
-    extraction_examples: list[str] = list(PROMPTS["entity_extraction_examples"])
+    base_extraction_examples: list[str] = list(PROMPTS["entity_extraction_examples"])
+    example_limit_raw = global_config.get("entity_extraction_example_limit", 10)
+    try:
+        example_limit = int(example_limit_raw)
+    except (TypeError, ValueError):
+        example_limit = 10
+    if example_limit > 0:
+        base_extraction_examples = base_extraction_examples[:example_limit]
+
+    extraction_examples: list[str] = base_extraction_examples
     if enable_surface_normalization:
         extraction_examples.extend(
             PROMPTS.get("entity_extraction_normalization_examples", [])
