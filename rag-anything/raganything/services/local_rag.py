@@ -1808,6 +1808,12 @@ class LocalRagService:
                 split_by_character_only=split_by_character_only,
             )
 
+        if self.settings.serialize_ingest_by_workspace_id:
+            if workspace_id not in self._ingest_locks:
+                self._ingest_locks[workspace_id] = asyncio.Lock()
+            async with self._ingest_locks[workspace_id]:
+                return await self._safe_ingest_call(_run_insert)
+
         return await self._safe_ingest_call(_run_insert)
 
     async def lightrag_adelete_by_doc_id(

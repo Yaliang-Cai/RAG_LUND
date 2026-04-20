@@ -53,8 +53,16 @@ else:
 RETRIEVAL_DIR = OUTPUT_ROOT_DIR / "retrieval_results_fast"
 SURVEY_DIR = OUTPUT_ROOT_DIR / "survey_results_fast"
 LOG_DIR = OUTPUT_ROOT_DIR / "logs"
-RAG_STORAGE_DIR = OUTPUT_ROOT_DIR / "rag_storage"
-RAG_OUTPUT_DIR = OUTPUT_ROOT_DIR / "rag_outputs"
+_rag_storage_override = str(os.getenv("SURGE_FAST_RAG_STORAGE_DIR", "")).strip()
+if _rag_storage_override:
+    RAG_STORAGE_DIR = Path(_rag_storage_override)
+else:
+    RAG_STORAGE_DIR = OUTPUT_ROOT_DIR / "rag_storage"
+_rag_output_override = str(os.getenv("SURGE_FAST_RAG_OUTPUT_DIR", "")).strip()
+if _rag_output_override:
+    RAG_OUTPUT_DIR = Path(_rag_output_override)
+else:
+    RAG_OUTPUT_DIR = OUTPUT_ROOT_DIR / "rag_outputs"
 
 DEFAULT_DATA_ROOT = "/data/y50056788/Yaliang/datasets_for_eval/data_for_SurGE"
 DEFAULT_SUBSET_DIR = "subset_output"
@@ -254,6 +262,8 @@ def settings_for_surge(args: argparse.Namespace) -> LocalRagSettings:
     s.working_dir_root = str(RAG_STORAGE_DIR)
     s.output_dir = str(RAG_OUTPUT_DIR)
     s.log_dir = str(LOG_DIR)
+    # Stabilize Neo4j/Qdrant ingest for batch ainsert path by forcing per-workspace serialization.
+    s.serialize_ingest_by_workspace_id = True
     # Keep non-ablation switches stable and enabled across runs.
     s.enable_entity_surface_normalization = True
     s.enable_keyword_case_normalization = True

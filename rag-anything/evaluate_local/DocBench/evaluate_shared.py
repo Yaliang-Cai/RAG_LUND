@@ -67,7 +67,11 @@ if _output_dir_override:
 else:
     OUTPUT_DIR = SCRIPT_DIR / DEFAULT_OUTPUT_DIR_NAME
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-WORKING_DIR_ROOT = OUTPUT_DIR / "rag_workspaces"
+_working_dir_root_override = str(os.getenv("DOCBENCH_SHARED_WORKING_DIR_ROOT", "")).strip()
+if _working_dir_root_override:
+    WORKING_DIR_ROOT = Path(_working_dir_root_override)
+else:
+    WORKING_DIR_ROOT = OUTPUT_DIR / "rag_workspaces"
 WORKING_DIR_ROOT.mkdir(parents=True, exist_ok=True)
 _mineru_output_dir_override = str(os.getenv("DOCBENCH_SHARED_MINERU_OUTPUT_DIR", "")).strip()
 if _mineru_output_dir_override:
@@ -82,8 +86,18 @@ STATS_FILE = OUTPUT_DIR / "statistics.json"
 RERANK_CHUNK_STATS_FILE = OUTPUT_DIR / "rerank_chunk_stats.jsonl"
 RERANK_CHUNK_SUMMARY_FILE = OUTPUT_DIR / "rerank_chunk_summary.json"
 GENERATION_CONFIG_FILE = OUTPUT_DIR / "generation_config.json"
-INGEST_MANIFEST_FILE = OUTPUT_DIR / "shared_ingest_manifest.json"
-INGEST_FAILURES_FILE = OUTPUT_DIR / "shared_ingest_failures.jsonl"
+_ingest_manifest_override = str(os.getenv("DOCBENCH_SHARED_INGEST_MANIFEST_FILE", "")).strip()
+if _ingest_manifest_override:
+    INGEST_MANIFEST_FILE = Path(_ingest_manifest_override)
+else:
+    INGEST_MANIFEST_FILE = OUTPUT_DIR / "shared_ingest_manifest.json"
+_ingest_failures_override = str(os.getenv("DOCBENCH_SHARED_INGEST_FAILURES_FILE", "")).strip()
+if _ingest_failures_override:
+    INGEST_FAILURES_FILE = Path(_ingest_failures_override)
+else:
+    INGEST_FAILURES_FILE = OUTPUT_DIR / "shared_ingest_failures.jsonl"
+INGEST_MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+INGEST_FAILURES_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 RAG_API_BASE = "http://localhost:8001/v1"
 JUDGE_API_BASE = "http://localhost:8002/v1"

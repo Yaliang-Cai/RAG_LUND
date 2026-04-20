@@ -639,6 +639,10 @@ def main() -> int:
         workspace_key = profile.reuse_index_from or profile.key
         shared_workspace_id = f"{shared_workspace_prefix}_{workspace_key}"
         surge_workspace_id = f"{surge_workspace_prefix}_{workspace_key}"
+        shared_workspace_state_dir = (
+            run_root / "_workspace_cache" / "docbench_shared" / workspace_key
+        )
+        surge_workspace_state_dir = run_root / "_workspace_cache" / "surge_fast" / workspace_key
 
         profile_dir = run_root / profile.key
         shared_output_dir = profile_dir / "evaluate_shared"
@@ -663,6 +667,8 @@ def main() -> int:
             "shared_recognition_top_k": args.shared_recognition_top_k,
             "shared_output_dir": str(shared_output_dir),
             "surge_output_dir": str(surge_output_dir),
+            "shared_workspace_state_dir": str(shared_workspace_state_dir),
+            "surge_workspace_state_dir": str(surge_workspace_state_dir),
             "shared_mineru_output_dir": (
                 str(shared_mineru_output_dir) if shared_mineru_output_dir else ""
             ),
@@ -686,6 +692,15 @@ def main() -> int:
         if args.tasks in ("both", "shared"):
             env_shared = dict(base_env)
             env_shared["DOCBENCH_SHARED_OUTPUT_DIR"] = str(shared_output_dir)
+            env_shared["DOCBENCH_SHARED_WORKING_DIR_ROOT"] = str(
+                shared_workspace_state_dir / "rag_workspaces"
+            )
+            env_shared["DOCBENCH_SHARED_INGEST_MANIFEST_FILE"] = str(
+                shared_workspace_state_dir / "shared_ingest_manifest.json"
+            )
+            env_shared["DOCBENCH_SHARED_INGEST_FAILURES_FILE"] = str(
+                shared_workspace_state_dir / "shared_ingest_failures.jsonl"
+            )
             if shared_mineru_output_dir is not None:
                 env_shared["DOCBENCH_SHARED_MINERU_OUTPUT_DIR"] = str(shared_mineru_output_dir)
             env_shared["NEO4J_WORKSPACE"] = shared_workspace_id
@@ -767,6 +782,12 @@ def main() -> int:
         if profile_ok and args.tasks in ("both", "surge"):
             env_surge = dict(base_env)
             env_surge["SURGE_FAST_OUTPUT_DIR"] = str(surge_output_dir)
+            env_surge["SURGE_FAST_RAG_STORAGE_DIR"] = str(
+                surge_workspace_state_dir / "rag_storage"
+            )
+            env_surge["SURGE_FAST_RAG_OUTPUT_DIR"] = str(
+                surge_workspace_state_dir / "rag_outputs"
+            )
             env_surge["NEO4J_WORKSPACE"] = surge_workspace_id
             env_surge["QDRANT_WORKSPACE"] = surge_workspace_id
 
