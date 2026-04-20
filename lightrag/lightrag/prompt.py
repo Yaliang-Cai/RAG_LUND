@@ -46,6 +46,11 @@ user message provides an extended type list.
 - process        : Is it a named or stable domain method/procedure with a specific
                    source-grounded referent, best answered by "how IS IT done"?
 
+Stable/source-grounded does not mean globally famous. It means the phrase is
+explicitly supported by the source as a concrete named referent, named internal
+object, reusable domain concept, or reusable method/procedure, not merely a local
+role, filler, or modifier phrase.
+
 Disambiguation rules:
   concept vs process   → "Attention Mechanism" (WHAT) = concept;
                          "Gradient Descent" (HOW)     = process.
@@ -55,10 +60,17 @@ Disambiguation rules:
                          The chip running a model = artifact; the model itself = work.
   event vs process     → "Q3 Business Review 2024" (happened once, anchored) = event;
                          "Quarterly Review Procedure" (repeatable workflow)   = process.
+  work vs process      -> If the text refers to a document, report, plan,
+                         specification, runbook, postmortem, or written artifact,
+                         prefer work. If the text refers to an executed method,
+                         analysis activity, operational procedure, or workflow,
+                         prefer process.
 
 Use ONLY the types provided in <Entity_types>. No other type values are permitted.
 
 ---Ambiguity Protocol---
+Use this protocol only when a candidate mention is relevant but its validity or
+type is unclear. The Extraction Workflow below remains the main execution order.
 When you cannot immediately assign a type, follow these steps in order:
 
   Step 1  Is it a specific, stable, source-grounded referent, or only a
@@ -74,7 +86,9 @@ When you cannot immediately assign a type, follow these steps in order:
           Both complete? → process. Neither completes? → DO NOT EXTRACT.
 
   Step 3  Is this entity central to the passage's argument?
-          YES → concept (safer default). NO → DO NOT EXTRACT.
+          YES -> concept only if it is an abstract, stable, source-grounded
+                 referent. Otherwise -> DO NOT EXTRACT.
+          NO  -> DO NOT EXTRACT.
 
 Prioritize entities that can form clear, meaningful relationships with other
 extracted entities. Avoid outputting isolated placeholder-like entities that
@@ -104,6 +118,11 @@ The following must NOT appear as entity nodes.
                      "retrieved documents", "the generator", "the layer",
                      "values", "inputs", "outputs", "results") -> skip entirely.
                      Do NOT extract a generic placeholder just to satisfy endpoint closure.
+
+  Pure time labels  ("Q3 2024", "FY2023", "deadline", "launch date")
+                    -> skip as standalone entities. Use them as attributes in
+                    descriptions unless they are part of a complete named event
+                    or work, such as "Q3 2024 Product Review".
 
   File-system noise  (file paths, directory names, filenames, extensions,
                       chunk IDs, bounding boxes, page numbers, layout labels)
@@ -173,9 +192,8 @@ The first field must be the literal string `relation`.
                                   Rules; otherwise remove the relation.
   relationship_keywords         : One or more high-level keywords. Separate with comma.
                                   Do NOT use {tuple_delimiter} inside this field.
-                                  Use the same casing style as query high-level keywords:
-                                  lowercase by default; preserve meaningful mixed/uppercase
-                                  proper nouns and acronyms.
+                                  Use lowercase by default; preserve meaningful
+                                  mixed/uppercase proper nouns and acronyms.
   relationship_description      : Concise explanation based solely on the input text.
                                   Do not add external background knowledge.
                                   Embed metric values and role titles here as natural
@@ -188,6 +206,8 @@ Follow this process before writing the final output.
     Prefer entities that participate in the passage's main claims, methods,
     components, datasets, evaluations, causes, results, or comparisons.
     Do not extract a weak entity only because it appears once.
+    Use the Ambiguity Protocol above only when a candidate's validity or type is
+    unclear.
 
 2.  Build a candidate relation set from explicit statements and direct,
     source-supported implications in the input.
@@ -225,6 +245,9 @@ Follow this process before writing the final output.
 
 2.  Relationships are undirected unless stated otherwise.
     Swapping source and target does not create a new relationship.
+    Even for undirected relations, use consistent subject-like to object-like
+    ordering when possible, such as system -> component, person -> organization,
+    method -> target, cause -> effect, document -> subject, and event -> location.
     Do not output duplicate relationships.
     Do NOT output a relationship if either endpoint violates the Entity Exclusion Rules.
     Do NOT create a relationship just to connect isolated entities. Co-occurrence alone
@@ -311,15 +334,47 @@ Your response must contain only missed or corrected entries, not a full rewrite.
 9.  Output {completion_delimiter} as the final line.
 10. Output language: {language}. Retain proper nouns in their original language.
 
----Continuation Example---
-Previous assistant extraction in chat history:
+---Continuation Example: Actual Chat Shape---
+The continuation call is sent as chat messages in this shape:
+
+role=system:
+The entity extraction system prompt shown above.
+
+role=user:
+---Task---
+Extract entities and relationships from the input text below.
+
+---Instructions---
+1.  Follow all type definitions, protocols, and format rules in the system prompt exactly.
+2.  Use ONLY the entity types listed in <Entity_types> below, in lowercase.
+    No other type values are permitted.
+3.  Output ONLY the extracted entities and relationships — no preamble, no explanation.
+4.  Output {completion_delimiter} as the final line.
+5.  Output language: {language}. Retain proper nouns in their original language.
+
+---Data to be Processed---
+<Entity_types>
+[person,organization,location,event,artifact,work,naturalentity,concept,process]
+
+<Input Text>
+```
+Corrective Retrieval-Augmented Generation uses a Retrieval Evaluator module to
+score retrieval quality. When retrieval quality is poor, Corrective
+Retrieval-Augmented Generation uses a Query Rewriter module.
+```
+
+<Output>
+
+role=assistant:
 entity{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}process{tuple_delimiter}Framework described in the text as using retrieval evaluation.
 entity{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}process{tuple_delimiter}Module described in the text as evaluating retrieval quality.
 relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}component, retrieval assessment{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation uses a Retrieval Evaluator.
 {completion_delimiter}
 
-If the same source text also states that Corrective Retrieval-Augmented Generation uses
-a Query Rewriter module, output only the missed endpoint and relation:
+role=user:
+This continuation prompt.
+
+Correct role=assistant output:
 entity{tuple_delimiter}Query Rewriter{tuple_delimiter}process{tuple_delimiter}Module described in the text as rewriting queries when retrieval quality is poor.
 relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Query Rewriter{tuple_delimiter}component, query rewriting{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation uses a Query Rewriter.
 {completion_delimiter}
@@ -343,8 +398,11 @@ Corrective Retrieval-Augmented Generation (CRAG) uses a Retrieval Evaluator modu
 to score retrieval quality. When retrieval quality is poor, CRAG invokes a Query
 Rewriter module before passing evidence to a Knowledge Refinement Module. The
 Answer Composer module uses refined evidence to produce final answers. The paper
-evaluates CRAG on Natural Questions and HotpotQA and reports lower hallucination
-than a baseline RAG pipeline.
+describes the user query and retrieved documents only as ordinary inputs, not as
+named components. The authors evaluate CRAG on Natural Questions and HotpotQA and
+report lower hallucination than a baseline RAG pipeline. The abstract also notes
+that retrieval noise is handled through the evaluator and query rewriter rather
+than by adding a separate generator entity.
 ```
 
 <Output>
@@ -374,8 +432,12 @@ relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimit
 <Input Text>
 ```
 AtlasLM achieved 92.3% accuracy on GLUE with 14ms latency on an H100 accelerator
-at 700W TDP. Sam Altman, CEO of OpenAI, presented the AtlasLM results during the
-OpenAI Benchmark Review.
+at 700W TDP. The release note says the accuracy is a test-set metric and the
+latency excludes preprocessing, so neither number is a standalone entity. Sam
+Altman, CEO of OpenAI, presented the AtlasLM results during the OpenAI Benchmark
+Review. The CEO title is a role attribute of Sam Altman, not a separate node, and
+the hardware and benchmark should not be connected directly through a shortcut
+edge because the named model is the evaluated subject.
 ```
 
 <Output>
@@ -402,7 +464,10 @@ relation{tuple_delimiter}AtlasLM{tuple_delimiter}OpenAI Benchmark Review{tuple_d
 Attention is a core mechanism in the Transformer Architecture. Self-Attention
 computes context-aware token representations, and Multi-Head Attention applies
 Self-Attention in parallel. Backpropagation updates model parameters using
-gradients, and the Chain Rule supplies its mathematical basis.
+gradients, and the Chain Rule supplies its mathematical basis. The explanation
+mentions values, layers, inputs, outputs, and representation subspaces only as
+ordinary descriptive terms inside the mechanism. Those filler terms should remain
+in descriptions or relation keywords instead of becoming entity nodes.
 ```
 
 <Output>
@@ -425,10 +490,13 @@ relation{tuple_delimiter}Backpropagation{tuple_delimiter}Chain Rule{tuple_delimi
 
 <Input Text>
 ```
-The Q3 2024 Product Review concluded that the Apollo Platform failed the Apollo
-Uptime SLA. The Q3 2024 Root Cause Analysis, led by Diana Chen, identified a
-Memory Leak in the Data Ingestion Pipeline as the primary fault. The Apollo
-Remediation Plan was submitted to the Engineering Steering Committee.
+During Q3 2024, the Q3 2024 Product Review concluded that the Apollo Platform
+failed the Apollo Uptime SLA. The Q3 2024 Root Cause Analysis activity, led by
+Diana Chen, identified a Memory Leak in the Data Ingestion Pipeline as the
+primary fault. The Apollo Remediation Plan document was submitted to the
+Engineering Steering Committee. The Apollo Postmortem report cites the Apollo
+Remediation Plan and instructs teams to update the Canary Release Procedure.
+The standalone phrase Q3 2024 is only a time label in this passage.
 ```
 
 <Output>
@@ -441,6 +509,8 @@ entity{tuple_delimiter}Memory Leak{tuple_delimiter}concept{tuple_delimiter}Stabl
 entity{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}process{tuple_delimiter}Pipeline described in the text as containing the Memory Leak identified as the primary fault.
 entity{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}work{tuple_delimiter}Plan described in the text as submitted to the Engineering Steering Committee.
 entity{tuple_delimiter}Engineering Steering Committee{tuple_delimiter}organization{tuple_delimiter}Committee described in the text as receiving the Apollo Remediation Plan.
+entity{tuple_delimiter}Apollo Postmortem{tuple_delimiter}work{tuple_delimiter}Report described in the text as citing the Apollo Remediation Plan and instructing teams to update the Canary Release Procedure.
+entity{tuple_delimiter}Canary Release Procedure{tuple_delimiter}process{tuple_delimiter}Operational procedure described in the text as updated according to the Apollo Postmortem.
 relation{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}Apollo Platform{tuple_delimiter}evaluation, SLA failure{tuple_delimiter}The text states the Q3 2024 Product Review concluded that the Apollo Platform failed the Apollo Uptime SLA.
 relation{tuple_delimiter}Apollo Platform{tuple_delimiter}Apollo Uptime SLA{tuple_delimiter}SLA failure{tuple_delimiter}The text states the Apollo Platform failed the Apollo Uptime SLA.
 relation{tuple_delimiter}Q3 2024 Root Cause Analysis{tuple_delimiter}Diana Chen{tuple_delimiter}analysis leadership{tuple_delimiter}The text states Diana Chen led the Q3 2024 Root Cause Analysis.
@@ -449,6 +519,8 @@ relation{tuple_delimiter}Memory Leak{tuple_delimiter}Data Ingestion Pipeline{tup
 relation{tuple_delimiter}Memory Leak{tuple_delimiter}Apollo Platform{tuple_delimiter}root cause, SLA failure{tuple_delimiter}The text identifies the Memory Leak as the primary fault behind the Apollo Platform SLA failure.
 relation{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}Q3 2024 Root Cause Analysis{tuple_delimiter}follow-up action{tuple_delimiter}The text presents the Apollo Remediation Plan after the Q3 2024 Root Cause Analysis.
 relation{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}Engineering Steering Committee{tuple_delimiter}submission, governance{tuple_delimiter}The text states the Apollo Remediation Plan was submitted to the Engineering Steering Committee.
+relation{tuple_delimiter}Apollo Postmortem{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}citation, remediation tracking{tuple_delimiter}The text states the Apollo Postmortem cites the Apollo Remediation Plan.
+relation{tuple_delimiter}Apollo Postmortem{tuple_delimiter}Canary Release Procedure{tuple_delimiter}procedure update{tuple_delimiter}The text states the Apollo Postmortem instructs teams to update the Canary Release Procedure.
 {completion_delimiter}
 """,
 
@@ -460,7 +532,10 @@ relation{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}Engineering Ste
 ```
 GPT-3 was trained without RLHF, unlike its successor GPT-4, which used RLHF
 extensively. The study found no significant correlation between model size and
-factual accuracy.
+factual accuracy, and it reports parameter counts only as measurement attributes.
+The authors mention that factual accuracy was evaluated in a table, but the table
+number, model size value, and accuracy percentage are not named entities. The
+only positive training-method statement in the passage links GPT-4 to RLHF.
 ```
 
 <Output>
@@ -472,44 +547,92 @@ relation{tuple_delimiter}GPT-3{tuple_delimiter}GPT-4{tuple_delimiter}succession,
 {completion_delimiter}
 """,
 
-    # Example 6 - N-ary fact decomposition with stable entities
+    # Example 6 - Biomedical academic paper with scientific processes
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-Marie Curie, Pierre Curie, and Henri Becquerel jointly received the 1903 Nobel
-Prize in Physics in Stockholm for their discovery of Radioactivity. The award was
-administered by the Royal Swedish Academy of Sciences, headquartered in Stockholm.
+The CARDIO-RNA Trial studied RNX-41 for Myocardial Fibrosis and compared its
+effects with Doxorubicin in a controlled arm. In the mechanistic experiment,
+researchers used CRISPR-Cas9 to knock out BRCA1 in the MCF-7 Cell Line and then
+measured DNA Repair through Homologous Recombination. A separate assay reported
+that Doxorubicin induced Apoptosis in the MCF-7 Cell Line. The paper lists p<0.01
+and Week 12 follow-up as measurement details rather than named entities.
 ```
 
 <Output>
-entity{tuple_delimiter}Marie Curie{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of Radioactivity.
-entity{tuple_delimiter}Pierre Curie{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of Radioactivity.
-entity{tuple_delimiter}Henri Becquerel{tuple_delimiter}person{tuple_delimiter}Scientist described in the text as jointly receiving the 1903 Nobel Prize in Physics for the discovery of Radioactivity.
-entity{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}event{tuple_delimiter}Award described in the text as jointly received by Marie Curie, Pierre Curie, and Henri Becquerel in Stockholm.
-entity{tuple_delimiter}Radioactivity{tuple_delimiter}concept{tuple_delimiter}Stable scientific concept described in the text as the discovery recognized by the 1903 Nobel Prize in Physics.
-entity{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}organization{tuple_delimiter}Organization described in the text as administering the 1903 Nobel Prize in Physics and as headquartered in Stockholm.
-entity{tuple_delimiter}Stockholm{tuple_delimiter}location{tuple_delimiter}Location described in the text as where the prize was received and where the Royal Swedish Academy of Sciences is headquartered.
-relation{tuple_delimiter}Marie Curie{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Marie Curie jointly received the 1903 Nobel Prize in Physics.
-relation{tuple_delimiter}Pierre Curie{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Pierre Curie jointly received the 1903 Nobel Prize in Physics.
-relation{tuple_delimiter}Henri Becquerel{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}receipt, recognition{tuple_delimiter}The text states Henri Becquerel jointly received the 1903 Nobel Prize in Physics.
-relation{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}Radioactivity{tuple_delimiter}scientific basis, recognition{tuple_delimiter}The text states the prize was awarded for the discovery of Radioactivity.
-relation{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}Stockholm{tuple_delimiter}award location{tuple_delimiter}The text states the 1903 Nobel Prize in Physics was received in Stockholm.
-relation{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}1903 Nobel Prize in Physics{tuple_delimiter}award administration{tuple_delimiter}The text states the award was administered by the Royal Swedish Academy of Sciences.
-relation{tuple_delimiter}Royal Swedish Academy of Sciences{tuple_delimiter}Stockholm{tuple_delimiter}headquarters, location{tuple_delimiter}The text states the Royal Swedish Academy of Sciences is headquartered in Stockholm.
+entity{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}event{tuple_delimiter}Trial described in the text as studying RNX-41 for Myocardial Fibrosis and comparing effects with Doxorubicin.
+entity{tuple_delimiter}RNX-41{tuple_delimiter}artifact{tuple_delimiter}Therapeutic compound described in the text as studied in the CARDIO-RNA Trial for Myocardial Fibrosis.
+entity{tuple_delimiter}Myocardial Fibrosis{tuple_delimiter}concept{tuple_delimiter}Disease concept described in the text as the target condition in the CARDIO-RNA Trial.
+entity{tuple_delimiter}Doxorubicin{tuple_delimiter}artifact{tuple_delimiter}Drug described in the text as used in a controlled arm and as inducing Apoptosis in the MCF-7 Cell Line.
+entity{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}process{tuple_delimiter}Gene editing procedure described in the text as used to knock out BRCA1 in the MCF-7 Cell Line.
+entity{tuple_delimiter}BRCA1{tuple_delimiter}naturalentity{tuple_delimiter}Gene described in the text as knocked out by CRISPR-Cas9 in the MCF-7 Cell Line.
+entity{tuple_delimiter}MCF-7 Cell Line{tuple_delimiter}naturalentity{tuple_delimiter}Cell line described in the text as used in the CRISPR-Cas9 and Doxorubicin assays.
+entity{tuple_delimiter}DNA Repair{tuple_delimiter}process{tuple_delimiter}Biological process described in the text as measured through Homologous Recombination.
+entity{tuple_delimiter}Homologous Recombination{tuple_delimiter}process{tuple_delimiter}DNA repair process described in the text as the mechanism through which DNA Repair was measured.
+entity{tuple_delimiter}Apoptosis{tuple_delimiter}process{tuple_delimiter}Biological process described in the text as induced by Doxorubicin in the MCF-7 Cell Line.
+relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}RNX-41{tuple_delimiter}trial intervention{tuple_delimiter}The text states the CARDIO-RNA Trial studied RNX-41.
+relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}Myocardial Fibrosis{tuple_delimiter}target condition{tuple_delimiter}The text states the CARDIO-RNA Trial studied RNX-41 for Myocardial Fibrosis.
+relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}Doxorubicin{tuple_delimiter}controlled arm{tuple_delimiter}The text states the trial compared RNX-41 effects with Doxorubicin in a controlled arm.
+relation{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}BRCA1{tuple_delimiter}gene knockout{tuple_delimiter}The text states researchers used CRISPR-Cas9 to knock out BRCA1.
+relation{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}MCF-7 Cell Line{tuple_delimiter}experimental model{tuple_delimiter}The text states CRISPR-Cas9 was used in the MCF-7 Cell Line.
+relation{tuple_delimiter}DNA Repair{tuple_delimiter}Homologous Recombination{tuple_delimiter}measurement mechanism{tuple_delimiter}The text states DNA Repair was measured through Homologous Recombination.
+relation{tuple_delimiter}Doxorubicin{tuple_delimiter}Apoptosis{tuple_delimiter}drug effect{tuple_delimiter}The text states Doxorubicin induced Apoptosis.
+relation{tuple_delimiter}Doxorubicin{tuple_delimiter}MCF-7 Cell Line{tuple_delimiter}assay model{tuple_delimiter}The text states Doxorubicin induced Apoptosis in the MCF-7 Cell Line.
+{completion_delimiter}
+""",
+
+    # Example 7 - Enterprise migration plan with work/process boundary
+    """<Entity_types>
+["person","organization","location","event","artifact","work","naturalentity","concept","process"]
+
+<Input Text>
+```
+The Project Helios Migration Plan describes moving the Billing API from Legacy
+Queue to the Aurora Stream Processor. The Helios Migration Workflow ran during
+Change Window CW-2024-09 under Maya Patel. The Operations Runbook H-17 lists the
+Rollback Procedure and Cache Warmup Procedure that operators must follow if the
+Aurora Stream Processor reports backpressure. The September 2024 date is only a
+schedule label, while the runbook, migration plan, workflow, procedures, and
+named software systems are the source-grounded referents.
+```
+
+<Output>
+entity{tuple_delimiter}Project Helios Migration Plan{tuple_delimiter}work{tuple_delimiter}Migration plan described in the text as moving the Billing API from Legacy Queue to the Aurora Stream Processor.
+entity{tuple_delimiter}Billing API{tuple_delimiter}work{tuple_delimiter}Software API described in the text as moved from Legacy Queue to the Aurora Stream Processor.
+entity{tuple_delimiter}Legacy Queue{tuple_delimiter}work{tuple_delimiter}Software system described in the text as the source system for the Billing API migration.
+entity{tuple_delimiter}Aurora Stream Processor{tuple_delimiter}work{tuple_delimiter}Software system described in the text as the target system for the Billing API migration and as reporting backpressure.
+entity{tuple_delimiter}Helios Migration Workflow{tuple_delimiter}process{tuple_delimiter}Workflow described in the text as running during Change Window CW-2024-09 under Maya Patel.
+entity{tuple_delimiter}Change Window CW-2024-09{tuple_delimiter}event{tuple_delimiter}Named change window described in the text as when the Helios Migration Workflow ran.
+entity{tuple_delimiter}Maya Patel{tuple_delimiter}person{tuple_delimiter}Individual described in the text as overseeing the Helios Migration Workflow.
+entity{tuple_delimiter}Operations Runbook H-17{tuple_delimiter}work{tuple_delimiter}Runbook described in the text as listing the Rollback Procedure and Cache Warmup Procedure.
+entity{tuple_delimiter}Rollback Procedure{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as listed in Operations Runbook H-17 for operators to follow.
+entity{tuple_delimiter}Cache Warmup Procedure{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as listed in Operations Runbook H-17 for operators to follow.
+relation{tuple_delimiter}Project Helios Migration Plan{tuple_delimiter}Billing API{tuple_delimiter}migration subject{tuple_delimiter}The text states the Project Helios Migration Plan describes moving the Billing API.
+relation{tuple_delimiter}Project Helios Migration Plan{tuple_delimiter}Legacy Queue{tuple_delimiter}migration source{tuple_delimiter}The text states the Billing API is moved from Legacy Queue.
+relation{tuple_delimiter}Project Helios Migration Plan{tuple_delimiter}Aurora Stream Processor{tuple_delimiter}migration target{tuple_delimiter}The text states the Billing API is moved to the Aurora Stream Processor.
+relation{tuple_delimiter}Helios Migration Workflow{tuple_delimiter}Change Window CW-2024-09{tuple_delimiter}execution window{tuple_delimiter}The text states the Helios Migration Workflow ran during Change Window CW-2024-09.
+relation{tuple_delimiter}Helios Migration Workflow{tuple_delimiter}Maya Patel{tuple_delimiter}workflow ownership{tuple_delimiter}The text states the Helios Migration Workflow ran under Maya Patel.
+relation{tuple_delimiter}Operations Runbook H-17{tuple_delimiter}Rollback Procedure{tuple_delimiter}runbook procedure{tuple_delimiter}The text states Operations Runbook H-17 lists the Rollback Procedure.
+relation{tuple_delimiter}Operations Runbook H-17{tuple_delimiter}Cache Warmup Procedure{tuple_delimiter}runbook procedure{tuple_delimiter}The text states Operations Runbook H-17 lists the Cache Warmup Procedure.
+relation{tuple_delimiter}Aurora Stream Processor{tuple_delimiter}Rollback Procedure{tuple_delimiter}backpressure response{tuple_delimiter}The text states operators follow the Rollback Procedure if the Aurora Stream Processor reports backpressure.
+relation{tuple_delimiter}Aurora Stream Processor{tuple_delimiter}Cache Warmup Procedure{tuple_delimiter}backpressure response{tuple_delimiter}The text states operators follow the Cache Warmup Procedure if the Aurora Stream Processor reports backpressure.
 {completion_delimiter}
 """,
 ]
 
 PROMPTS["entity_extraction_normalization_examples"] = [
-    # Example 7 - Lowercase source names canonicalized without lexical rewrite
+    # Example 8 - Lowercase source names canonicalized without lexical rewrite
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-orion llm assistant integrates the zephyr rag pipeline for Acme Support.
+orion llm assistant integrates the zephyr rag pipeline for Acme Support. The
+implementation note writes llm and rag in lowercase, but they are abbreviations
+inside the named system and pipeline. The note also mentions support tickets and
+retrieved passages as ordinary inputs, not as standalone entities.
 ```
 
 <Output>
@@ -520,21 +643,26 @@ relation{tuple_delimiter}Orion LLM Assistant{tuple_delimiter}Zephyr RAG Pipeline
 relation{tuple_delimiter}Orion LLM Assistant{tuple_delimiter}Acme Support{tuple_delimiter}support deployment{tuple_delimiter}The text states Orion LLM Assistant integrates the Zephyr RAG Pipeline for Acme Support.
 {completion_delimiter}
 """,
-    # Example 8 - Preserve documentation referent and uppercase names
+    # Example 9 - Preserve documentation referent and uppercase names
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-OpenAI API documentation explains how BERT can be used for semantic search.
+OpenAI API documentation explains how BERT can be used for semantic search in
+the Atlas Help Center Guide. The documentation records latency in milliseconds
+as a performance attribute and refers to user questions as inputs. The referent
+is the documentation itself, not the OpenAI API service alone.
 ```
 
 <Output>
 entity{tuple_delimiter}OpenAI API Documentation{tuple_delimiter}work{tuple_delimiter}Documentation described in the text as explaining how BERT can be used for semantic search.
 entity{tuple_delimiter}BERT{tuple_delimiter}work{tuple_delimiter}Model described in the text as usable for semantic search according to the OpenAI API Documentation.
 entity{tuple_delimiter}Semantic Search{tuple_delimiter}process{tuple_delimiter}Stable search procedure described in the text as a use case for BERT.
+entity{tuple_delimiter}Atlas Help Center Guide{tuple_delimiter}work{tuple_delimiter}Guide described in the text as the context where the OpenAI API Documentation explains BERT usage for semantic search.
 relation{tuple_delimiter}OpenAI API Documentation{tuple_delimiter}BERT{tuple_delimiter}usage guidance, semantic search{tuple_delimiter}The text states the OpenAI API Documentation explains how BERT can be used for semantic search.
 relation{tuple_delimiter}BERT{tuple_delimiter}Semantic Search{tuple_delimiter}model usage{tuple_delimiter}The text states BERT can be used for semantic search.
+relation{tuple_delimiter}OpenAI API Documentation{tuple_delimiter}Atlas Help Center Guide{tuple_delimiter}documentation context{tuple_delimiter}The text states the OpenAI API Documentation explains BERT usage in the Atlas Help Center Guide.
 {completion_delimiter}
 """,
 ]
@@ -554,10 +682,13 @@ comprehensive, and cohesive summary.
     No additional formatting, no preamble, no concluding remarks.
 
 3.  Comprehensiveness: integrate all key information from every provided description.
-    Do not omit any important facts or details.
+    Do not omit any important facts or details. Merge semantically duplicate facts
+    rather than repeating them as separate claims.
 
 4.  Perspective: write in objective third person.
     Begin the summary by explicitly naming the entity or relationship.
+    For relationships, begin by explicitly naming both endpoints and the
+    relationship being summarized.
 
 5.  Conflict handling:
     - First determine whether conflicts arise from multiple distinct entities
