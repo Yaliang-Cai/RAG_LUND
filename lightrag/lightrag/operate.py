@@ -5495,6 +5495,12 @@ async def _merge_all_chunks(
     # V3: When PPR chunks are available, they replace entity/relation chunk selection.
     # PPR scores already encode the graph structure signal; vector_chunks supplement.
     if ppr_chunks:
+        # HippoRAG2 qa_top_k: slice PPR candidates to the LLM-context budget.
+        # ppr_top_k controls retrieval breadth; ppr_qa_top_k controls LLM input size.
+        ppr_qa_top_k = getattr(query_param, "ppr_qa_top_k", None) if query_param else None
+        if ppr_qa_top_k and ppr_qa_top_k > 0:
+            ppr_chunks = ppr_chunks[:ppr_qa_top_k]
+
         merged_chunks = []
         seen_chunk_ids = set()
 
@@ -5530,7 +5536,7 @@ async def _merge_all_chunks(
                 )
 
         logger.info(
-            f"PPR-priority merged chunks: {len(ppr_chunks)} PPR + {len(vector_chunks)} vector -> {len(merged_chunks)} (deduplicated)"
+            f"PPR-priority merged chunks: {len(ppr_chunks)} PPR (qa_top_k={ppr_qa_top_k}) + {len(vector_chunks)} vector -> {len(merged_chunks)} (deduplicated)"
         )
         return merged_chunks
 
@@ -6156,6 +6162,7 @@ async def _recognition_memory_filter(
     rel_results: list[dict],
     llm_model_func: Callable,
     recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K,
+    linking_top_k: int = 5,
     tokenizer: Tokenizer | None = None,
     recognition_prompt_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
     recognition_prompt_output_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
@@ -6175,6 +6182,7 @@ async def _recognition_memory_filter(
                            "description", "distance").
         llm_model_func:    Async callable — global_config["llm_model_func"].
         recognition_top_k: Max triplets to show LLM. Entity cap = recognition_top_k * 2.
+        linking_top_k:     Max entity seeds returned (HippoRAG2 link_top_k). 0 = no cap.
         tokenizer:         Tokenizer for prompt token budgeting. If None, no budget guard.
         recognition_prompt_max_tokens: Hard cap for recognition prompt token length.
         recognition_prompt_output_max_tokens: LLM output token upper bound for recognition step.
@@ -6368,6 +6376,15 @@ async def _recognition_memory_filter(
         if w > 0.0:
             result[eid] = w
 
+    # --- Step 9: Truncate to top linking_top_k (HippoRAG2 link_top_k) ---
+    if linking_top_k > 0 and len(result) > linking_top_k:
+        result = dict(
+            sorted(result.items(), key=lambda x: x[1], reverse=True)[:linking_top_k]
+        )
+        logger.debug(
+            f"PPR(global): recognition memory truncated to linking_top_k={linking_top_k} seeds"
+        )
+
     return result
 
 
@@ -6420,25 +6437,24 @@ async def _ppr_rank_chunks_global(
 
     await engine._ensure_loaded()
 
-    # Primary chunk pool: derived from entity seeds via pre-loaded reverse mapping.
-    # This is always non-empty when entity seeds are valid, regardless of whether
-    # VDB chunk results happen to have entity mappings (solves the hard dependency).
-    chunk_to_entities: dict[str, list[str]] = {}
-    for eid in entity_seed_weights:
-        for cid in engine._entity_to_chunks.get(eid, []):
-            chunk_to_entities.setdefault(cid, []).append(eid)
+    # HippoRAG2-aligned full-graph chunk pool: ALL chunks in the knowledge graph are
+    # included as PPR nodes, not just neighbours of seed entities.  This enables true
+    # multi-hop passage discovery: PPR energy propagates from entity seeds through the
+    # entity graph and can reach any passage node regardless of VDB similarity.
+    chunk_to_entities: dict[str, list[str]] = dict(engine._chunk_to_entities)
 
     if not chunk_to_entities:
-        logger.debug("PPR(global): seeded entities have no chunk mappings in graph")
+        logger.debug("PPR(global): no chunk mappings in graph")
         return []
 
-    # Optional signal: VDB chunk scores weight chunks already in the pool.
-    # Chunks returned by VDB but not in the pool are ignored (they are orphans
-    # with no entity mapping and cannot participate in PPR propagation).
+    # DPR chunk seeds: VDB scores over the full chunk pool.
+    # Chunks in the VDB result that exist in the graph receive an initial DPR weight;
+    # the remaining graph chunks start with zero DPR weight but still participate as
+    # PPR nodes and can accumulate score through entity-graph energy propagation.
     chunk_seed_weights: dict[str, float] = {}
     try:
         chunk_results = await chunks_vdb.query(
-            query, top_k=query_param.ppr_top_k * 2, query_embedding=query_embedding
+            query, top_k=query_param.ppr_top_k * 4, query_embedding=query_embedding
         )
         if chunk_results:
             scores = [c.get("distance", 0.0) for c in chunk_results]
@@ -6488,7 +6504,8 @@ async def _ppr_rank_chunks_global(
 
     logger.info(
         f"PPR(global): {len(result_chunks)} chunks ranked, "
-        f"{len(chunk_to_entities)} virtual chunk nodes"
+        f"{len(chunk_to_entities)} graph chunk nodes (full-graph pool), "
+        f"{len(chunk_seed_weights)} DPR seeds"
     )
     return result_chunks
 
@@ -6571,6 +6588,7 @@ async def _ppr_rank_chunks(
                     rel_results=rel_results,
                     llm_model_func=llm_func,
                     recognition_top_k=query_param.recognition_top_k,
+                    linking_top_k=getattr(query_param, "linking_top_k", 5),
                     tokenizer=tokenizer,
                     recognition_prompt_max_tokens=recognition_prompt_max_tokens,
                     recognition_prompt_output_max_tokens=recognition_prompt_output_max_tokens,

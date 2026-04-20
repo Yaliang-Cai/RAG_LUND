@@ -23,6 +23,8 @@ from .constants import (
     DEFAULT_CHUNK_TOP_K,
     DEFAULT_EXCLUDE_SYNONYM_EDGES,
     DEFAULT_RECOGNITION_TOP_K,
+    DEFAULT_LINKING_TOP_K,
+    DEFAULT_PPR_QA_TOP_K,
     DEFAULT_MAX_ENTITY_TOKENS,
     DEFAULT_MAX_RELATION_TOKENS,
     DEFAULT_MAX_TOTAL_TOKENS,
@@ -264,6 +266,21 @@ class QueryParam:
       (entity VDB retrieval size is still governed by query_param.top_k)
     - Default 20 keeps more recall headroom when top_k=40.
     - Set to 0 to disable recognition memory (falls back to direct score merge)."""
+
+    linking_top_k: int = int(
+        os.getenv("LINKING_TOP_K", str(DEFAULT_LINKING_TOP_K))
+    )
+    """HippoRAG2 link_top_k: max entity seeds produced by recognition memory.
+    After the LLM recognition step, candidate entities are scored and truncated to
+    this many (highest-weight) seeds before PPR.  Set to 0 to disable the cap.
+    Default 5 matches the HippoRAG2 paper."""
+
+    ppr_qa_top_k: int = int(
+        os.getenv("PPR_QA_TOP_K", str(DEFAULT_PPR_QA_TOP_K))
+    )
+    """HippoRAG2 qa_top_k: number of PPR-ranked chunks fed to the LLM for answering.
+    PPR retrieval still produces ppr_top_k candidates (retrieval_top_k), but only
+    the top ppr_qa_top_k are included in the LLM context.  Default 5 matches HippoRAG2."""
 
     # RRF mode
     rrf_k: int = int(os.getenv("RRF_K", "60"))

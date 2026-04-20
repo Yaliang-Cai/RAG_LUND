@@ -95,6 +95,8 @@ from raganything.constants import (
     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
     DEFAULT_EXCLUDE_SYNONYM_EDGES,
     DEFAULT_RECOGNITION_TOP_K,
+    DEFAULT_LINKING_TOP_K,
+    DEFAULT_PPR_QA_TOP_K,
     DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
     DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
     DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
@@ -212,6 +214,8 @@ class LocalRagSettings:
     ppr_synonym_weight_mode: str = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
     exclude_synonym_edges: bool | None = DEFAULT_EXCLUDE_SYNONYM_EDGES
     recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K
+    linking_top_k: int = DEFAULT_LINKING_TOP_K
+    ppr_qa_top_k: int = DEFAULT_PPR_QA_TOP_K
     recognition_prompt_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS
     recognition_prompt_output_max_tokens: int = (
         DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS
@@ -463,6 +467,18 @@ class LocalRagSettings:
                 os.getenv(
                     "RAGANYTHING_RECOGNITION_TOP_K",
                     str(DEFAULT_RECOGNITION_TOP_K),
+                )
+            ),
+            linking_top_k=int(
+                os.getenv(
+                    "RAGANYTHING_LINKING_TOP_K",
+                    str(DEFAULT_LINKING_TOP_K),
+                )
+            ),
+            ppr_qa_top_k=int(
+                os.getenv(
+                    "RAGANYTHING_PPR_QA_TOP_K",
+                    str(DEFAULT_PPR_QA_TOP_K),
                 )
             ),
             recognition_prompt_max_tokens=int(
@@ -1922,6 +1938,8 @@ class LocalRagService:
         normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
         normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
         normalized_kwargs.setdefault("recognition_top_k", self.settings.recognition_top_k)
+        normalized_kwargs.setdefault("linking_top_k", self.settings.linking_top_k)
+        normalized_kwargs.setdefault("ppr_qa_top_k", self.settings.ppr_qa_top_k)
         normalized_kwargs.setdefault(
             "exclude_synonym_edges", self.settings.exclude_synonym_edges
         )
@@ -1967,6 +1985,8 @@ class LocalRagService:
         normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
         normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
         normalized_kwargs.setdefault("recognition_top_k", self.settings.recognition_top_k)
+        normalized_kwargs.setdefault("linking_top_k", self.settings.linking_top_k)
+        normalized_kwargs.setdefault("ppr_qa_top_k", self.settings.ppr_qa_top_k)
         normalized_kwargs.setdefault(
             "exclude_synonym_edges", self.settings.exclude_synonym_edges
         )

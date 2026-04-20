@@ -4,7 +4,9 @@
 Quick interactive test for PPR global-mode queries on an existing workspace.
 
 Usage:
-  python scripts/query_ppr.py -w <workspace_id> -q "your question here"
+python scripts/query_ppr.py  -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode ppr
+
+
 
 Optional overrides:
   --mode ppr          # ppr (global PPR + recognition memory), global, hybrid, etc.
@@ -14,6 +16,8 @@ Optional overrides:
   --ppr-damping 0.5
   --passage-node-weight 1.0
   --recognition-top-k 20   # 0 = disable recognition memory
+  --linking-top-k 5        # max entity seeds from recognition memory (HippoRAG2 link_top_k)
+  --ppr-qa-top-k 5         # chunks fed to LLM (HippoRAG2 qa_top_k)
   --no-rerank
   --trace               # print full trace JSON
 
@@ -49,6 +53,8 @@ from raganything.constants import (
     DEFAULT_PPR_TOP_K,
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_RECOGNITION_TOP_K,
+    DEFAULT_LINKING_TOP_K,
+    DEFAULT_PPR_QA_TOP_K,
     DEFAULT_ENABLE_RERANK,
 )
 
@@ -81,6 +87,18 @@ def _parse_args():
         default=DEFAULT_RECOGNITION_TOP_K,
         help="Recognition memory relation top-k (0 = disabled)",
     )
+    p.add_argument(
+        "--linking-top-k",
+        type=int,
+        default=DEFAULT_LINKING_TOP_K,
+        help="Max entity seeds output by recognition memory (HippoRAG2 link_top_k, 0 = no cap)",
+    )
+    p.add_argument(
+        "--ppr-qa-top-k",
+        type=int,
+        default=DEFAULT_PPR_QA_TOP_K,
+        help="Chunks fed to LLM after PPR retrieval (HippoRAG2 qa_top_k)",
+    )
     p.add_argument("--no-rerank", action="store_true")
     p.add_argument("--no-multi-hop", action="store_true", help="Disable PPR multi-hop (V3 off)")
     p.add_argument("--trace", action="store_true", help="Print retrieval trace JSON")
@@ -109,6 +127,8 @@ async def run(args):
     )
     if args.mode == "ppr":
         query_kwargs["recognition_top_k"] = max(0, args.recognition_top_k)
+        query_kwargs["linking_top_k"] = max(0, args.linking_top_k)
+        query_kwargs["ppr_qa_top_k"] = max(1, args.ppr_qa_top_k)
 
     print(f"\n[Query] workspace={workspace_id}")
     print(f"        mode={args.mode}  multi_hop={enable_multi_hop}  rerank={not args.no_rerank}")
@@ -117,6 +137,7 @@ async def run(args):
     print(f"        passage_node_weight={args.passage_node_weight}")
     if args.mode == "ppr":
         print(f"        recognition_top_k={query_kwargs['recognition_top_k']}")
+        print(f"        linking_top_k={query_kwargs['linking_top_k']}  ppr_qa_top_k={query_kwargs['ppr_qa_top_k']}")
     print(f"\n[Question] {query}\n")
     print("-" * 72)
 
