@@ -2944,7 +2944,12 @@ class LightRAG:
             else:
                 raise ValueError(f"Unknown mode {param.mode}")
 
-            await self._query_done()
+            try:
+                await self._query_done()
+            except PermissionError as _cache_err:
+                logger.warning(
+                    "LLM response cache could not be saved (read-only path): %s", _cache_err
+                )
 
             # Check if query_result is None
             if query_result is None:

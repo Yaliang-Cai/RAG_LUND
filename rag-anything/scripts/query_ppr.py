@@ -134,9 +134,10 @@ async def run(args):
     print(answer)
 
     if trace:
-        chunks = trace.get("chunks", [])
-        entities = trace.get("entities", [])
-        relations = trace.get("relations", [])
+        trace_data = trace.get("data", trace)
+        chunks = trace_data.get("chunks", [])
+        entities = trace_data.get("entities", [])
+        relations = trace_data.get("relations", [])
         print(f"\n[Trace summary]  chunks={len(chunks)}  entities={len(entities)}  relations={len(relations)}")
         if chunks:
             print(f"  Top chunk score: {chunks[0].get('score', 'n/a') if isinstance(chunks[0], dict) else 'n/a'}")
