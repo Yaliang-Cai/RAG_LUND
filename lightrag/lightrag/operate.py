@@ -6601,8 +6601,9 @@ async def _ppr_rank_chunks(
                 recognized = {}
             if recognized:
                 entity_seed_weights = recognized
-                logger.debug(
-                    f"PPR(global): recognition memory accepted {len(recognized)} seeds"
+                seed_ids = list(recognized.keys())
+                logger.info(
+                    f"PPR(global): recognition memory accepted {len(recognized)} seeds: {seed_ids}"
                 )
             else:
                 logger.info(
@@ -6611,6 +6612,7 @@ async def _ppr_rank_chunks(
                 entity_seed_weights = _direct_merge_seeds(node_datas, rel_results)
         else:
             # No LLM configured — direct merge
+            logger.info("PPR(global): no LLM configured; using direct seed merge")
             entity_seed_weights = _direct_merge_seeds(node_datas, rel_results)
     else:
         # Local PPR path OR recognition_top_k=0 (disabled): direct max-merge
@@ -6821,11 +6823,16 @@ async def _get_node_data(
             }
         )
 
-    use_relations = await _find_most_related_edges_from_entities(
-        node_datas,
-        query_param,
-        knowledge_graph_inst,
-    )
+    # In PPR modes the top-k entity VDB results are the seed candidates; skip
+    # one-hop edge expansion to avoid flooding the seed pool with noisy neighbours.
+    if query_param.mode in ("ppr", "ppr_local"):
+        use_relations = []
+    else:
+        use_relations = await _find_most_related_edges_from_entities(
+            node_datas,
+            query_param,
+            knowledge_graph_inst,
+        )
 
     logger.info(
         f"Local query: {len(node_datas)} entites, {len(use_relations)} relations"

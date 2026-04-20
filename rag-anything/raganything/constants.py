@@ -108,9 +108,8 @@ DEFAULT_ENABLE_RERANK = True
 DEFAULT_VLM_ENHANCED = True
 
 # Reranker score 过滤阈值：rerank 完成后，得分低于此值的 chunk 会被丢弃。
-# 当前默认 0.0（不过滤），用于评测阶段保持召回完整性并避免
-# 因阈值过滤引入额外变量。需要更强精确率时可调高（如 0.3 / 0.5）。
-DEFAULT_MIN_RERANK_SCORE = 0.0
+# 0.3：过滤 rerank 分数断崖后的低质量 chunk，避免噪声 chunk 干扰 LLM。
+DEFAULT_MIN_RERANK_SCORE = 0.3
 
 # =============================================================================
 # Knowledge graph visualization defaults
