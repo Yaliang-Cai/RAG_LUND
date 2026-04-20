@@ -117,7 +117,10 @@ def _find_legacy_collection(
     ]
 
     for candidate in candidates:
-        if candidate and client.collection_exists(candidate):
+        # Skip candidates containing path separators — a workspace that is a
+        # filesystem path (e.g. "/data/foo/bar") would produce a name with "/"
+        # which makes the Qdrant REST URL malformed and returns 404.
+        if candidate and "/" not in candidate and "\\" not in candidate and client.collection_exists(candidate):
             logger.info(
                 f"Qdrant: Found legacy collection '{candidate}' "
                 f"(namespace={namespace}, workspace={workspace or 'none'})"
