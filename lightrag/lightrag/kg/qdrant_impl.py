@@ -493,15 +493,27 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         # Generate model suffix
         self.model_suffix = self._generate_collection_suffix()
 
+        # Read BM25 flag here so the collection name can include it.
+        # Collections built with and without BM25 are physically separate:
+        # BM25-enabled collections carry a _bm25 suffix, preventing schema
+        # conflicts when the same Qdrant server is used for both modes.
+        self._enable_sparse_bm25 = (
+            os.environ.get(
+                "QDRANT_ENABLE_SPARSE_BM25", str(DEFAULT_ENABLE_SPARSE_BM25)
+            ).lower()
+            in {"1", "true", "yes", "y", "on"}
+        )
+        _bm25_suffix = "_bm25" if self._enable_sparse_bm25 else ""
+
         # New naming scheme with model isolation
-        # Example: "lightrag_vdb_chunks_text_embedding_ada_002_1536d"
-        # Ensure model_suffix is not empty before appending
+        # BM25 off:  "lightrag_vdb_chunks_text_embedding_ada_002_1536d"
+        # BM25 on:   "lightrag_vdb_chunks_text_embedding_ada_002_1536d_bm25"
         if self.model_suffix:
-            self.final_namespace = f"lightrag_vdb_{self.namespace}_{self.model_suffix}"
+            self.final_namespace = f"lightrag_vdb_{self.namespace}_{self.model_suffix}{_bm25_suffix}"
             logger.info(f"Qdrant collection: {self.final_namespace}")
         else:
             # Fallback: use legacy namespace if model_suffix is unavailable
-            self.final_namespace = f"lightrag_vdb_{self.namespace}"
+            self.final_namespace = f"lightrag_vdb_{self.namespace}{_bm25_suffix}"
             logger.warning(
                 f"Qdrant collection: {self.final_namespace} missing suffix. Pls add model_name to embedding_func for proper workspace data isolation."
             )
@@ -573,12 +585,6 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         # Build keyword indexes on src_id / tgt_id for faster relation deletion
         self._index_relation_fields = (
             os.environ.get("QDRANT_INDEX_RELATION_FIELDS", "false").lower() == "true"
-        )
-        self._enable_sparse_bm25 = (
-            os.environ.get(
-                "QDRANT_ENABLE_SPARSE_BM25", str(DEFAULT_ENABLE_SPARSE_BM25)
-            ).lower()
-            in {"1", "true", "yes", "y", "on"}
         )
         self._sparse_bm25_model = os.environ.get(
             "QDRANT_SPARSE_BM25_MODEL", DEFAULT_SPARSE_BM25_MODEL
@@ -660,8 +666,6 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                     index_relation_fields=self._index_relation_fields,
                     sparse_vectors_config=sparse_vectors_config,
                 )
-
-                # Removed duplicate max batch size initialization
 
                 self._initialized = True
                 logger.info(
