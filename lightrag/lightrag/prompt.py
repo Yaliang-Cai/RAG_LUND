@@ -338,7 +338,7 @@ Your response must contain only missed or corrected entries, not a full rewrite.
 The continuation call is sent as chat messages in this shape:
 
 role=system:
-The entity extraction system prompt shown above.
+[entity extraction system prompt — the system message already present in this conversation]
 
 role=user:
 ---Task---
@@ -372,7 +372,12 @@ relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimit
 {completion_delimiter}
 
 role=user:
-This continuation prompt.
+---Task---
+Review the previous extraction and add any missed or incorrectly formatted
+entities and relationships from the same input text.
+[... — the full text of this continuation message ...]
+
+<Output>
 
 Correct role=assistant output:
 entity{tuple_delimiter}Query Rewriter{tuple_delimiter}process{tuple_delimiter}Module described in the text as rewriting queries when retrieval quality is poor.

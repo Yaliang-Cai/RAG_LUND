@@ -2312,7 +2312,12 @@ class ProcessorMixin:
             )
             chunk_id = compute_mdhash_id(formatted_chunk_content, prefix="chunk-")
 
-            chunk_to_modal_entity[chunk_id] = data["entity_info"]["entity_name"]
+            entity_info = data["entity_info"]
+            modal_entity_type = (
+                str(entity_info.get("entity_type", "multimodal") or "multimodal").strip()
+                or "multimodal"
+            )
+            chunk_to_modal_entity[chunk_id] = (entity_info["entity_name"], modal_entity_type)
             chunk_to_file_path[chunk_id] = data.get("file_path", "multimodal_content")
 
         return await self._batch_add_belongs_to_relations_by_chunk_mapping(
@@ -2324,7 +2329,7 @@ class ProcessorMixin:
     async def _batch_add_belongs_to_relations_from_stored_chunks(
         self, chunk_results: List[Tuple], lightrag_chunks: Dict[str, Any]
     ) -> List[Tuple]:
-        chunk_to_modal_entity: Dict[str, str] = {}
+        chunk_to_modal_entity: Dict[str, Tuple[str, str]] = {}
         chunk_to_file_path: Dict[str, str] = {}
         for chunk_id, chunk_data in lightrag_chunks.items():
             if not isinstance(chunk_data, dict):
@@ -2332,7 +2337,10 @@ class ProcessorMixin:
             modal_entity_name = str(chunk_data.get("modal_entity_name", "")).strip()
             if not modal_entity_name:
                 continue
-            chunk_to_modal_entity[chunk_id] = modal_entity_name
+            modal_entity_type = (
+                str(chunk_data.get("original_type", "multimodal")).strip() or "multimodal"
+            )
+            chunk_to_modal_entity[chunk_id] = (modal_entity_name, modal_entity_type)
             chunk_to_file_path[chunk_id] = str(
                 chunk_data.get("file_path", "multimodal_content")
             )
@@ -2346,7 +2354,7 @@ class ProcessorMixin:
     async def _batch_add_belongs_to_relations_by_chunk_mapping(
         self,
         chunk_results: List[Tuple],
-        chunk_to_modal_entity: Dict[str, str],
+        chunk_to_modal_entity: Dict[str, Tuple[str, str]],
         chunk_to_file_path: Dict[str, str],
     ) -> List[Tuple]:
         enhanced_chunk_results = []
@@ -2367,11 +2375,11 @@ class ProcessorMixin:
                             break
 
             if chunk_id and chunk_id in chunk_to_modal_entity:
-                modal_entity_name = chunk_to_modal_entity[chunk_id]
+                modal_entity_name, modal_entity_type = chunk_to_modal_entity[chunk_id]
                 file_path = chunk_to_file_path.get(chunk_id, "multimodal_content")
 
                 # Add belongs_to relations for all extracted entities
-                for entity_name in maybe_nodes.keys():
+                for entity_name in list(maybe_nodes.keys()):
                     if entity_name != modal_entity_name:  # Avoid self-relation
                         belongs_to_relation = {
                             "src_id": entity_name,
@@ -2389,6 +2397,22 @@ class ProcessorMixin:
                             maybe_edges[edge_key] = []
                         maybe_edges[edge_key].append(belongs_to_relation)
                         belongs_to_count += 1
+
+                # Inject a stub entry for the modal entity into maybe_nodes so that
+                # merge_nodes_and_edges includes its composite ID in
+                # doc_relation_endpoint_ids. Without this, strict endpoint matching
+                # drops every belongs_to edge because the modal entity was written to
+                # the graph in stage 3.5 (bypassing the normal extraction path) and
+                # therefore never appears in processed_entities.
+                if modal_entity_name not in maybe_nodes:
+                    maybe_nodes[modal_entity_name] = []
+                maybe_nodes[modal_entity_name].append({
+                    "entity_name": modal_entity_name,
+                    "entity_type": modal_entity_type,
+                    "description": "",
+                    "source_id": chunk_id,
+                    "file_path": file_path,
+                })
 
             enhanced_chunk_results.append((maybe_nodes, maybe_edges))
 
