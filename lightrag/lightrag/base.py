@@ -259,13 +259,12 @@ class QueryParam:
     recognition_top_k: int = int(
         os.getenv("RECOGNITION_TOP_K", str(DEFAULT_RECOGNITION_TOP_K))
     )
-    """HippoRAG2 Recognition Memory: controls how many candidates are shown to the LLM
-    for entity seed filtering when mode="ppr".
-    - Relation triplets sent to LLM  : rel_results[:recognition_top_k]
-    - Entity VDB candidates sent to LLM: node_datas[:recognition_top_k * 2]
-      (entity VDB retrieval size is still governed by query_param.top_k)
-    - Default 20 keeps more recall headroom when top_k=40.
-    - Set to 0 to disable recognition memory (falls back to direct score merge)."""
+    """HippoRAG2 Recognition Memory enable flag when mode="ppr".
+    All hybrid-retrieved entity/relation candidates (governed by query_param.top_k) are
+    sent to the LLM without additional truncation.
+    - Set to 0 to disable recognition memory entirely (falls back to direct score merge).
+    - Any positive value enables recognition memory; the actual candidate count is
+      determined by query_param.top_k (entity VDB) and query_param.top_k (relation VDB)."""
 
     linking_top_k: int = int(
         os.getenv("LINKING_TOP_K", str(DEFAULT_LINKING_TOP_K))

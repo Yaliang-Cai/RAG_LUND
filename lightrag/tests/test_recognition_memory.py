@@ -73,11 +73,11 @@ async def _recognition_memory_filter(
     node_datas: list[dict],
     rel_results: list[dict],
     llm_model_func: Callable,
-    recognition_top_k: int = 10,
 ) -> dict[str, float]:
     """Copied verbatim from operate.py for isolated testing."""
-    top_rels = rel_results[:recognition_top_k]
-    top_nodes = node_datas[:recognition_top_k * 2]
+    # All hybrid-retrieved candidates passed directly — no truncation.
+    top_rels = rel_results
+    top_nodes = node_datas
 
     # fact_scores: max across triplets for same entity
     fact_scores: dict[str, float] = {}
@@ -156,7 +156,7 @@ class TestRecognitionMemoryFilter:
         nodes = [self._make_node("华为|ORGANIZATION", 0.9)]
         rels = []
         llm = AsyncMock(return_value="华为|ORGANIZATION")
-        result = await _recognition_memory_filter("华为做了什么", nodes, rels, llm, recognition_top_k=10)
+        result = await _recognition_memory_filter("华为做了什么", nodes, rels, llm)
         assert "华为|ORGANIZATION" in result
         assert result["华为|ORGANIZATION"] == pytest.approx(1.0)
 
@@ -166,7 +166,7 @@ class TestRecognitionMemoryFilter:
         nodes = []
         rels = [self._make_rel("华为|ORGANIZATION", "5G|TECHNOLOGY", "开发了", 0.8)]
         llm = AsyncMock(return_value="华为|ORGANIZATION")
-        result = await _recognition_memory_filter("5G研发", nodes, rels, llm, recognition_top_k=10)
+        result = await _recognition_memory_filter("5G研发", nodes, rels, llm)
         assert "华为|ORGANIZATION" in result
 
     @pytest.mark.asyncio
@@ -195,21 +195,6 @@ class TestRecognitionMemoryFilter:
         llm = AsyncMock(return_value="华为|ORGANIZATON")  # typo in suffix
         result = await _recognition_memory_filter("query", nodes, rels, llm)
         assert isinstance(result, dict)
-
-    @pytest.mark.asyncio
-    async def test_recognition_top_k_limits_triplets_shown(self):
-        """Only top recognition_top_k triplets reach the LLM prompt."""
-        nodes = []
-        rels = [self._make_rel(f"E{i}|T", f"F{i}|T", "rel", 0.9 - i * 0.01) for i in range(20)]
-        captured_prompt = []
-        async def capture_llm(prompt):
-            captured_prompt.append(prompt)
-            return ""
-        await _recognition_memory_filter("query", nodes, rels, capture_llm, recognition_top_k=5)
-        # Only first 5 triplets in the prompt — check entity names for E0..E4 only
-        prompt_text = captured_prompt[0]
-        assert "E5|T" not in prompt_text
-        assert "E0|T" in prompt_text
 
     @pytest.mark.asyncio
     async def test_multi_source_entity_takes_max_weight(self):
@@ -259,7 +244,7 @@ class TestSeedBuildingBranch:
 
     @pytest.mark.asyncio
     async def test_recognition_top_k_zero_skips_llm(self):
-        """recognition_top_k=0 → recognition memory disabled → direct merge."""
+        """recognition_top_k=0 (caller flag) → recognition memory disabled → direct merge."""
         nodes = [{"entity_id": "E1", "vdb_score": 0.8}]
         rels = [{"src_id": "E1", "tgt_id": "E2", "description": "r", "distance": 0.6}]
         llm_called = []
@@ -271,7 +256,7 @@ class TestSeedBuildingBranch:
         # Simulate the branch: recognition_top_k=0 skips recognition
         recognition_top_k = 0
         if recognition_top_k > 0:
-            result = await _recognition_memory_filter("q", nodes, rels, llm, recognition_top_k)
+            result = await _recognition_memory_filter("q", nodes, rels, llm)
         else:
             result = self._direct_merge(nodes, rels)
 
@@ -285,7 +270,7 @@ class TestSeedBuildingBranch:
         rels = []
         llm = AsyncMock(return_value="")
 
-        recognized = await _recognition_memory_filter("q", nodes, rels, llm, recognition_top_k=10)
+        recognized = await _recognition_memory_filter("q", nodes, rels, llm)
         # Empty → caller uses direct merge
         if not recognized:
             result = self._direct_merge(nodes, rels)
@@ -304,6 +289,6 @@ class TestSeedBuildingBranch:
         rels = []
         llm = AsyncMock(return_value="E1")
 
-        result = await _recognition_memory_filter("q", nodes, rels, llm, recognition_top_k=10)
+        result = await _recognition_memory_filter("q", nodes, rels, llm)
         assert "E1" in result
         assert "E2" not in result

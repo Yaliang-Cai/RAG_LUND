@@ -6161,7 +6161,6 @@ async def _recognition_memory_filter(
     node_datas: list[dict],
     rel_results: list[dict],
     llm_model_func: Callable,
-    recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K,
     linking_top_k: int = 5,
     tokenizer: Tokenizer | None = None,
     recognition_prompt_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
@@ -6181,7 +6180,7 @@ async def _recognition_memory_filter(
         rel_results:       Relation VDB results (each dict has "src_id", "tgt_id",
                            "description", "distance").
         llm_model_func:    Async callable — global_config["llm_model_func"].
-        recognition_top_k: Max triplets to show LLM. Entity cap = recognition_top_k * 2.
+        (recognition_top_k removed — all hybrid candidates passed directly; caller guards with recognition_top_k > 0)
         linking_top_k:     Max entity seeds returned (HippoRAG2 link_top_k). 0 = no cap.
         tokenizer:         Tokenizer for prompt token budgeting. If None, no budget guard.
         recognition_prompt_max_tokens: Hard cap for recognition prompt token length.
@@ -6195,8 +6194,10 @@ async def _recognition_memory_filter(
     import difflib
 
     # --- Step 1: Candidate pool sizing ---
-    top_rels = rel_results[:recognition_top_k]
-    top_nodes = node_datas[:recognition_top_k * 2]
+    # Pass all hybrid-retrieved candidates directly to LLM (no recognition_top_k truncation).
+    # recognition_top_k is retained as an enable/disable flag only (checked by caller).
+    top_rels = rel_results
+    top_nodes = node_datas
 
     # --- Step 2: fact_scores — max across triplets for same entity ---
     fact_scores: dict[str, float] = {}
@@ -6587,7 +6588,6 @@ async def _ppr_rank_chunks(
                     node_datas=node_datas,
                     rel_results=rel_results,
                     llm_model_func=llm_func,
-                    recognition_top_k=query_param.recognition_top_k,
                     linking_top_k=getattr(query_param, "linking_top_k", 5),
                     tokenizer=tokenizer,
                     recognition_prompt_max_tokens=recognition_prompt_max_tokens,
