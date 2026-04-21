@@ -77,6 +77,8 @@ from raganything.constants import (
     DEFAULT_MAX_PARALLEL_INSERT,
     DEFAULT_EMBEDDING_BATCH_NUM,
     DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
+    DEFAULT_QDRANT_ENABLE_SPARSE_BM25,
+    DEFAULT_QDRANT_SPARSE_BM25_MODEL,
     DEFAULT_MIN_RERANK_SCORE,
     DEFAULT_ENABLE_INLINE_CITATIONS,
     DEFAULT_TOP_K,
@@ -104,6 +106,7 @@ from raganything.constants import (
     DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
     DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
     DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH,
+    DEFAULT_ENABLE_ENTITY_DISAMBIGUATION,
     DEFAULT_SERIALIZE_INGEST_BY_WORKSPACE_ID,
     DEFAULT_MAX_ASYNC_INGEST,
     DEFAULT_ENABLE_RESILIENCE,
@@ -201,7 +204,7 @@ class LocalRagSettings:
     breaker_reset_timeout_seconds: float = DEFAULT_BREAKER_RESET_TIMEOUT_SECONDS
     enable_metrics_callback: bool = DEFAULT_ENABLE_METRICS_CALLBACK
     enable_callback_event_log: bool = DEFAULT_ENABLE_CALLBACK_EVENT_LOG
-    enable_entity_disambiguation: bool = True
+    enable_entity_disambiguation: bool = DEFAULT_ENABLE_ENTITY_DISAMBIGUATION
     enable_synonym_linking: bool = DEFAULT_ENABLE_SYNONYM_LINKING
     synonymy_threshold: float = DEFAULT_SYNONYMY_THRESHOLD
     synonymy_topk: int = DEFAULT_SYNONYMY_TOPK
@@ -235,8 +238,8 @@ class LocalRagSettings:
     strict_relation_endpoint_entity_match: bool = (
         DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH
     )
-    qdrant_enable_sparse_bm25: bool = True
-    qdrant_sparse_bm25_model: str = "Qdrant/bm25"
+    qdrant_enable_sparse_bm25: bool = DEFAULT_QDRANT_ENABLE_SPARSE_BM25
+    qdrant_sparse_bm25_model: str = DEFAULT_QDRANT_SPARSE_BM25_MODEL
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -397,10 +400,7 @@ class LocalRagSettings:
                 str(DEFAULT_ENABLE_CALLBACK_EVENT_LOG),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
-            enable_entity_disambiguation=os.getenv(
-                "RAGANYTHING_ENABLE_ENTITY_DISAMBIGUATION", "true"
-            ).lower()
-            in {"1", "true", "yes", "y", "on"},
+            enable_entity_disambiguation=DEFAULT_ENABLE_ENTITY_DISAMBIGUATION,
             enable_synonym_linking=os.getenv(
                 "RAGANYTHING_ENABLE_SYNONYM_LINKING",
                 str(DEFAULT_ENABLE_SYNONYM_LINKING),
@@ -517,13 +517,8 @@ class LocalRagSettings:
                 str(DEFAULT_STRICT_RELATION_ENDPOINT_ENTITY_MATCH),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
-            qdrant_enable_sparse_bm25=os.getenv(
-                "QDRANT_ENABLE_SPARSE_BM25", "true"
-            ).lower()
-            in {"1", "true", "yes", "y", "on"},
-            qdrant_sparse_bm25_model=os.getenv(
-                "QDRANT_SPARSE_BM25_MODEL", "Qdrant/bm25"
-            ),
+            qdrant_enable_sparse_bm25=DEFAULT_QDRANT_ENABLE_SPARSE_BM25,
+            qdrant_sparse_bm25_model=DEFAULT_QDRANT_SPARSE_BM25_MODEL,
         )
 
 

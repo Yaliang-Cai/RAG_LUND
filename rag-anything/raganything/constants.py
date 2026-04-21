@@ -183,6 +183,20 @@ DEFAULT_EMBEDDING_BATCH_NUM = 32
 DEFAULT_EMBEDDING_FUNC_MAX_ASYNC = 8
 
 # =============================================================================
+# Qdrant vector storage defaults
+# =============================================================================
+# Controls whether RAG-Anything uses Qdrant hybrid dense+BM25 sparse collections
+# by default. When enabled, Qdrant collection names receive a "_bm25" suffix.
+# Set to False when querying or extending older dense-only Qdrant collections.
+DEFAULT_QDRANT_ENABLE_SPARSE_BM25 = True
+DEFAULT_QDRANT_SPARSE_BM25_MODEL = "Qdrant/bm25"
+
+# =============================================================================
+# V1: Entity disambiguation
+# =============================================================================
+DEFAULT_ENABLE_ENTITY_DISAMBIGUATION = True
+
+# =============================================================================
 # Entity surface normalization (ingest-time, optional)
 # =============================================================================
 DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION = True

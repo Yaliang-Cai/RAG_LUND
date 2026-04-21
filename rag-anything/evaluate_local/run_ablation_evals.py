@@ -22,7 +22,11 @@ if _project_root.exists():
 if _local_lightrag_root.exists():
     sys.path.insert(0, str(_local_lightrag_root))
 
-from raganything.constants import DEFAULT_RECOGNITION_TOP_K
+from raganything.constants import (
+    DEFAULT_QDRANT_ENABLE_SPARSE_BM25,
+    DEFAULT_QDRANT_SPARSE_BM25_MODEL,
+    DEFAULT_RECOGNITION_TOP_K,
+)
 
 
 @dataclass(frozen=True)
@@ -599,8 +603,10 @@ def main() -> int:
 
     python_exe = str(args.python_exe)
     base_env = _make_base_env(project_root=project_root, lightrag_root=lightrag_root)
-    base_env.setdefault("QDRANT_ENABLE_SPARSE_BM25", "true")
-    base_env.setdefault("QDRANT_SPARSE_BM25_MODEL", "Qdrant/bm25")
+    base_env["QDRANT_ENABLE_SPARSE_BM25"] = (
+        "true" if DEFAULT_QDRANT_ENABLE_SPARSE_BM25 else "false"
+    )
+    base_env["QDRANT_SPARSE_BM25_MODEL"] = DEFAULT_QDRANT_SPARSE_BM25_MODEL
     if str(args.docbench_data_root or "").strip():
         base_env["DOCBENCH_SHARED_DATA_ROOT"] = str(args.docbench_data_root).strip()
     shared_mineru_output_dir: Path | None = None

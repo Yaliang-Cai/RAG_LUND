@@ -5,17 +5,24 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-DEFAULT_ENABLE_ENTITY_DISAMBIGUATION = True
-DEFAULT_ENABLE_SYNONYM_LINKING = False
-DEFAULT_ENABLE_MULTI_HOP = False
-DEFAULT_MULTI_HOP_DEPTH = 2
-DEFAULT_PPR_DAMPING = 0.5
-DEFAULT_PPR_TOP_K = 50
-DEFAULT_PASSAGE_NODE_WEIGHT = 0.05
+_project_root = Path(__file__).resolve().parent.parent
+if _project_root.exists():
+    sys.path.insert(0, str(_project_root))
+
+from raganything.constants import (
+    DEFAULT_ENABLE_ENTITY_DISAMBIGUATION,
+    DEFAULT_ENABLE_MULTI_HOP,
+    DEFAULT_ENABLE_SYNONYM_LINKING,
+    DEFAULT_MULTI_HOP_DEPTH,
+    DEFAULT_PASSAGE_NODE_WEIGHT,
+    DEFAULT_PPR_DAMPING,
+    DEFAULT_PPR_TOP_K,
+)
 
 INDEX_PROFILE_FILE = ".ablation_index_profile.json"
 

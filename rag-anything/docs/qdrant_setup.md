@@ -92,6 +92,22 @@ lightrag_vdb_entities_{model_suffix}
 lightrag_vdb_relationships_{model_suffix}
 ```
 
+BM25 sparse indexing is controlled by `DEFAULT_QDRANT_ENABLE_SPARSE_BM25`
+in `raganything/constants.py`. When it is `True`, Qdrant collection names use
+the `_bm25` suffix, for example:
+
+```
+lightrag_vdb_chunks_{model_suffix}_bm25
+lightrag_vdb_entities_{model_suffix}_bm25
+lightrag_vdb_relationships_{model_suffix}_bm25
+```
+
+Set `DEFAULT_QDRANT_ENABLE_SPARSE_BM25 = False` before starting the process
+when querying or extending older dense-only Qdrant collections. RAG-Anything
+entry points write the corresponding LightRAG/Qdrant environment setting from
+this constant at startup, so changing the constant and restarting the process is
+the normal switch path.
+
 ---
 
 ## 五、迁移已有 Milvus 工作空间
