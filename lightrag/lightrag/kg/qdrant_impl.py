@@ -70,6 +70,39 @@ def workspace_filter_condition(workspace: str) -> models.FieldCondition:
     )
 
 
+def _coerce_qdrant_dense_vector(vector_data: Any) -> list[float] | None:
+    """Return the dense vector from Qdrant's vector payload.
+
+    Qdrant returns a plain vector for dense-only collections, but returns a
+    mapping for hybrid dense+sparse collections.  LightRAG's vector storage
+    interface expects get_vectors_by_ids() to expose only the dense vector.
+    """
+    if isinstance(vector_data, dict):
+        dense_vector = vector_data.get("")
+        if dense_vector is None:
+            for candidate in vector_data.values():
+                if isinstance(candidate, np.ndarray):
+                    dense_vector = candidate
+                    break
+                if isinstance(candidate, (list, tuple)):
+                    dense_vector = candidate
+                    break
+        vector_data = dense_vector
+
+    if isinstance(vector_data, np.ndarray):
+        vector_data = vector_data.tolist()
+    elif isinstance(vector_data, tuple):
+        vector_data = list(vector_data)
+
+    if not isinstance(vector_data, list):
+        return None
+
+    try:
+        return [float(value) for value in vector_data]
+    except (TypeError, ValueError):
+        return None
+
+
 def _normalize_timeout_seconds(raw_value: Any, env_name: str) -> int:
     """Parse timeout input and normalize to positive integer seconds."""
     try:
@@ -1093,10 +1126,16 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                     # Get original ID from payload
                     original_id = point.payload.get(ID_FIELD)
                     if original_id:
-                        # Convert numpy array to list if needed
-                        vector_data = point.vector
-                        if isinstance(vector_data, np.ndarray):
-                            vector_data = vector_data.tolist()
+                        vector_data = _coerce_qdrant_dense_vector(point.vector)
+                        if vector_data is None:
+                            logger.warning(
+                                "[%s] Skipping vector for ID %s from %s: no dense vector found in Qdrant payload type=%s",
+                                self.workspace,
+                                original_id,
+                                self.namespace,
+                                type(point.vector).__name__,
+                            )
+                            continue
                         vectors_dict[original_id] = vector_data
 
             return vectors_dict
