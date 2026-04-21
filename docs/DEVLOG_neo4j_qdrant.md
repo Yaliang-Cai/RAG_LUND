@@ -69,6 +69,7 @@ lightrag_kwargs={
 | 参数                    | 默认值  | 说明                                                         |
 | ----------------------- | ------- | ------------------------------------------------------------ |
 | `mode`                  | `"mix"` | `hybrid` / `mix` / `rrf` / `ppr_local` / `ppr`               |
+| `qdrant_retrieval_mode` | `"dense"` | Qdrant 查询期检索开关：`dense` 仅 dense vector，`bm25` 仅 BM25 sparse，`hybrid` 为 dense+BM25 的 RRF fusion；`bm25`/`hybrid` 需要 `_bm25` collection。 |
 | `rrf_k`                 | `60`    | RRF 平滑常数（仅 `mode="rrf"` 时生效）                       |
 | `enable_multi_hop`      | `False` | **已废弃**，请改用 `mode="ppr_local"`，保留仅为向后兼容      |
 | `multi_hop_depth`       | `2`     | 仅 `ppr_local`：BFS 子图提取深度                             |

@@ -39,6 +39,7 @@ from raganything.constants import (
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
     DEFAULT_RECOGNITION_TOP_K,
+    DEFAULT_QDRANT_RETRIEVAL_MODE,
 )
 
 VALID_CHUNKING_STRATEGIES: Set[str] = set(CHUNKING_STRATEGIES.keys())
@@ -180,6 +181,7 @@ class QueryRequest(BaseModel):
     passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
     recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K
     ppr_synonym_weight_mode: Literal["raw", "plus_one"] = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
+    qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] = DEFAULT_QDRANT_RETRIEVAL_MODE
 
 # =========================================================================
 # 路由
@@ -498,6 +500,7 @@ async def query_endpoint(
         passage_node_weight=payload.passage_node_weight,
         recognition_top_k=payload.recognition_top_k,
         ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
+        qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
     )
     retrieval = {}
     try:
@@ -521,6 +524,7 @@ async def query_endpoint(
         passage_node_weight=payload.passage_node_weight,
         recognition_top_k=payload.recognition_top_k,
         ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
+        qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
     )
 
     # Step 3: 可选获取子图数据
@@ -562,6 +566,7 @@ async def query_stream_endpoint(
                 passage_node_weight=payload.passage_node_weight,
                 recognition_top_k=payload.recognition_top_k,
                 ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
+                qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
             ):
                 if event["type"] == "meta":
                     retrieval_data = event  # keep for graph subquery
@@ -1122,6 +1127,7 @@ async def get_config(_auth: None = Depends(verify_api_key)):
         "query_mode": DEFAULT_QUERY_MODE,
         "enable_rerank": DEFAULT_ENABLE_RERANK,
         "vlm_enhanced": DEFAULT_VLM_ENHANCED,
+        "qdrant_retrieval_mode": DEFAULT_QDRANT_RETRIEVAL_MODE,
     }
 
 

@@ -79,6 +79,7 @@ from raganything.constants import (
     DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
     DEFAULT_QDRANT_ENABLE_SPARSE_BM25,
     DEFAULT_QDRANT_SPARSE_BM25_MODEL,
+    DEFAULT_QDRANT_RETRIEVAL_MODE,
     DEFAULT_MIN_RERANK_SCORE,
     DEFAULT_ENABLE_INLINE_CITATIONS,
     DEFAULT_TOP_K,
@@ -240,6 +241,7 @@ class LocalRagSettings:
     )
     qdrant_enable_sparse_bm25: bool = DEFAULT_QDRANT_ENABLE_SPARSE_BM25
     qdrant_sparse_bm25_model: str = DEFAULT_QDRANT_SPARSE_BM25_MODEL
+    qdrant_retrieval_mode: str = DEFAULT_QDRANT_RETRIEVAL_MODE
 
     @classmethod
     def from_env(cls) -> "LocalRagSettings":
@@ -519,6 +521,12 @@ class LocalRagSettings:
             in {"1", "true", "yes", "y", "on"},
             qdrant_enable_sparse_bm25=DEFAULT_QDRANT_ENABLE_SPARSE_BM25,
             qdrant_sparse_bm25_model=DEFAULT_QDRANT_SPARSE_BM25_MODEL,
+            qdrant_retrieval_mode=_normalize_qdrant_retrieval_mode(
+                os.getenv(
+                    "RAGANYTHING_QDRANT_RETRIEVAL_MODE",
+                    os.getenv("QDRANT_RETRIEVAL_MODE", DEFAULT_QDRANT_RETRIEVAL_MODE),
+                )
+            ),
         )
 
 
@@ -1321,6 +1329,13 @@ def _normalize_ppr_synonym_weight_mode(mode: str | None) -> str:
     return DEFAULT_PPR_SYNONYM_WEIGHT_MODE
 
 
+def _normalize_qdrant_retrieval_mode(mode: str | None) -> str:
+    normalized = (mode or "").strip().lower()
+    if normalized in {"dense", "bm25", "hybrid"}:
+        return normalized
+    return DEFAULT_QDRANT_RETRIEVAL_MODE
+
+
 def _parse_uppercase_allowlist(raw_value: str | None) -> list[str]:
     if raw_value is None:
         return list(DEFAULT_ENTITY_UPPERCASE_ALLOWLIST)
@@ -1367,6 +1382,9 @@ class LocalRagService:
         self.settings.ppr_synonym_weight_mode = _normalize_ppr_synonym_weight_mode(
             self.settings.ppr_synonym_weight_mode
         )
+        self.settings.qdrant_retrieval_mode = _normalize_qdrant_retrieval_mode(
+            self.settings.qdrant_retrieval_mode
+        )
         normalized_allowlist: list[str] = []
         seen_allowlist: set[str] = set()
         for item in (self.settings.entity_uppercase_allowlist or []):
@@ -1407,10 +1425,12 @@ class LocalRagService:
         os.environ["QDRANT_SPARSE_BM25_MODEL"] = (
             self.settings.qdrant_sparse_bm25_model
         )
+        os.environ["QDRANT_RETRIEVAL_MODE"] = self.settings.qdrant_retrieval_mode
         self.logger.info(
-            "Qdrant sparse indexing configured: enabled=%s, model=%s",
+            "Qdrant sparse indexing configured: enabled=%s, model=%s, retrieval_mode=%s",
             self.settings.qdrant_enable_sparse_bm25,
             self.settings.qdrant_sparse_bm25_model,
+            self.settings.qdrant_retrieval_mode,
         )
         self.lightrag_tokenizer = build_lightrag_tokenizer(
             self.settings.tokenizer_model_path,
@@ -1945,6 +1965,12 @@ class LocalRagService:
             str(normalized_kwargs.get("ppr_synonym_weight_mode", ""))
         )
         normalized_kwargs.setdefault(
+            "qdrant_retrieval_mode", self.settings.qdrant_retrieval_mode
+        )
+        normalized_kwargs["qdrant_retrieval_mode"] = _normalize_qdrant_retrieval_mode(
+            str(normalized_kwargs.get("qdrant_retrieval_mode", ""))
+        )
+        normalized_kwargs.setdefault(
             "user_prompt",
             _INLINE_CITATION_INSTRUCTION if _INLINE_CITATIONS_ENABLED else "",
         )
@@ -1991,6 +2017,12 @@ class LocalRagService:
         normalized_kwargs["ppr_synonym_weight_mode"] = _normalize_ppr_synonym_weight_mode(
             str(normalized_kwargs.get("ppr_synonym_weight_mode", ""))
         )
+        normalized_kwargs.setdefault(
+            "qdrant_retrieval_mode", self.settings.qdrant_retrieval_mode
+        )
+        normalized_kwargs["qdrant_retrieval_mode"] = _normalize_qdrant_retrieval_mode(
+            str(normalized_kwargs.get("qdrant_retrieval_mode", ""))
+        )
         normalized_kwargs["return_trace"] = True
 
         async def _run_query_with_trace() -> dict[str, Any]:
@@ -2020,6 +2052,7 @@ class LocalRagService:
         recognition_top_k: int | None = None,
         ppr_synonym_weight_mode: str | None = None,
         exclude_synonym_edges: bool | None = None,
+        qdrant_retrieval_mode: str | None = None,
     ):
         """Async generator — yields structured events via LightRAG aquery_llm().
 
@@ -2062,6 +2095,11 @@ class LocalRagService:
                     ppr_synonym_weight_mode
                     if ppr_synonym_weight_mode is not None
                     else self.settings.ppr_synonym_weight_mode
+                ),
+                qdrant_retrieval_mode=_normalize_qdrant_retrieval_mode(
+                    qdrant_retrieval_mode
+                    if qdrant_retrieval_mode is not None
+                    else self.settings.qdrant_retrieval_mode
                 ),
             )
             result = await rag_instance.lightrag.aquery_llm(query, param=param)

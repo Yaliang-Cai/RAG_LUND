@@ -393,7 +393,7 @@ supersedes an earlier entity; this prompt is additive/corrective, not a delete o
 
 PROMPTS["entity_extraction_examples"] = [
 
-    # Example 1 - RAG framework extraction without generic endpoint nodes
+    # Example 1 - ML system components with metric details embedded in relations
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
@@ -403,11 +403,8 @@ Corrective Retrieval-Augmented Generation (CRAG) uses a Retrieval Evaluator modu
 to score retrieval quality. When retrieval quality is poor, CRAG invokes a Query
 Rewriter module before passing evidence to a Knowledge Refinement Module. The
 Answer Composer module uses refined evidence to produce final answers. The paper
-describes the user query and retrieved documents only as ordinary inputs, not as
-named components. The authors evaluate CRAG on Natural Questions and HotpotQA and
-report lower hallucination than a baseline RAG pipeline. The abstract also notes
-that retrieval noise is handled through the evaluator and query rewriter rather
-than by adding a separate generator entity.
+evaluates CRAG on Natural Questions and HotpotQA. In the comparison section, CRAG
+reports lower hallucination than a baseline RAG Pipeline.
 ```
 
 <Output>
@@ -418,7 +415,7 @@ entity{tuple_delimiter}Knowledge Refinement Module{tuple_delimiter}process{tuple
 entity{tuple_delimiter}Answer Composer{tuple_delimiter}process{tuple_delimiter}Module described in the text as using refined evidence to produce final answers.
 entity{tuple_delimiter}Natural Questions{tuple_delimiter}work{tuple_delimiter}Benchmark described in the text as used to evaluate Corrective Retrieval-Augmented Generation.
 entity{tuple_delimiter}HotpotQA{tuple_delimiter}work{tuple_delimiter}Benchmark described in the text as used to evaluate Corrective Retrieval-Augmented Generation.
-entity{tuple_delimiter}Hallucination{tuple_delimiter}concept{tuple_delimiter}Stable domain concept described in the text as reduced by Corrective Retrieval-Augmented Generation compared with a baseline RAG pipeline.
+entity{tuple_delimiter}Baseline RAG Pipeline{tuple_delimiter}process{tuple_delimiter}Pipeline described in the text as the baseline used for comparison against Corrective Retrieval-Augmented Generation.
 relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}component, retrieval assessment{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation uses a Retrieval Evaluator module to score retrieval quality.
 relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Query Rewriter{tuple_delimiter}component, query rewriting{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation invokes a Query Rewriter when retrieval quality is poor.
 relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Knowledge Refinement Module{tuple_delimiter}component, knowledge refinement{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation passes evidence to a Knowledge Refinement Module.
@@ -426,70 +423,76 @@ relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimit
 relation{tuple_delimiter}Knowledge Refinement Module{tuple_delimiter}Answer Composer{tuple_delimiter}evidence handoff, answer generation{tuple_delimiter}The text states refined evidence is used by the Answer Composer.
 relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Natural Questions{tuple_delimiter}evaluation benchmark{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation is evaluated on Natural Questions.
 relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}HotpotQA{tuple_delimiter}evaluation benchmark{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation is evaluated on HotpotQA.
-relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Hallucination{tuple_delimiter}hallucination reduction{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation reports lower hallucination than a baseline RAG pipeline.
+relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Baseline RAG Pipeline{tuple_delimiter}comparative evaluation, hallucination reduction{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation reports lower hallucination than the baseline RAG Pipeline.
 {completion_delimiter}
 """,
 
-    # Example 2 - Metrics and roles stay in descriptions, no shortcut edge
+    # Example 2 - Enterprise KPI reporting with metrics and role attributes
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-AtlasLM achieved 92.3% accuracy on GLUE with 14ms latency on an H100 accelerator
-at 700W TDP. The release note says the accuracy is a test-set metric and the
-latency excludes preprocessing, so neither number is a standalone entity. Sam
-Altman, CEO of OpenAI, presented the AtlasLM results during the OpenAI Benchmark
-Review. The CEO title is a role attribute of Sam Altman, not a separate node, and
-the hardware and benchmark should not be connected directly through a shortcut
-edge because the named model is the evaluated subject.
+The Q2 Service Performance Report states that Orion Support Platform resolved
+98.7% of tickets within 24 hours and recorded an average response time of
+11 minutes. Elena Ruiz, VP of Customer Operations at Northstar Systems,
+presented the report during the Monthly Service Review. The review compared
+Orion Support Platform against Legacy Queue Desk on escalation rate and
+first-response speed.
 ```
 
 <Output>
-entity{tuple_delimiter}AtlasLM{tuple_delimiter}work{tuple_delimiter}Model described in the text as achieving 92.3% accuracy on GLUE with 14ms latency on an H100 accelerator.
-entity{tuple_delimiter}GLUE{tuple_delimiter}work{tuple_delimiter}Benchmark described in the text as used to evaluate AtlasLM accuracy.
-entity{tuple_delimiter}H100{tuple_delimiter}artifact{tuple_delimiter}Hardware accelerator described in the text as used for AtlasLM latency measurement at 700W TDP.
-entity{tuple_delimiter}Sam Altman{tuple_delimiter}person{tuple_delimiter}Sam Altman, CEO of OpenAI per the text, presented the AtlasLM results during the OpenAI Benchmark Review.
-entity{tuple_delimiter}OpenAI{tuple_delimiter}organization{tuple_delimiter}Organization described in the text as the organization where Sam Altman serves as CEO.
-entity{tuple_delimiter}OpenAI Benchmark Review{tuple_delimiter}event{tuple_delimiter}Event described in the text as where Sam Altman presented the AtlasLM results.
-relation{tuple_delimiter}AtlasLM{tuple_delimiter}GLUE{tuple_delimiter}benchmark evaluation, accuracy{tuple_delimiter}The text states AtlasLM achieved 92.3% accuracy on GLUE.
-relation{tuple_delimiter}AtlasLM{tuple_delimiter}H100{tuple_delimiter}evaluation hardware, latency{tuple_delimiter}The text states AtlasLM achieved 14ms latency on an H100 accelerator at 700W TDP.
-relation{tuple_delimiter}Sam Altman{tuple_delimiter}OpenAI{tuple_delimiter}leadership role{tuple_delimiter}The text identifies Sam Altman as CEO of OpenAI.
-relation{tuple_delimiter}Sam Altman{tuple_delimiter}OpenAI Benchmark Review{tuple_delimiter}presentation{tuple_delimiter}The text states Sam Altman presented the AtlasLM results during the OpenAI Benchmark Review.
-relation{tuple_delimiter}AtlasLM{tuple_delimiter}OpenAI Benchmark Review{tuple_delimiter}result presentation{tuple_delimiter}The text states the AtlasLM results were presented during the OpenAI Benchmark Review.
+entity{tuple_delimiter}Q2 Service Performance Report{tuple_delimiter}work{tuple_delimiter}Report described in the text as presenting Orion Support Platform ticket-resolution and response-time metrics.
+entity{tuple_delimiter}Orion Support Platform{tuple_delimiter}work{tuple_delimiter}Service platform described in the text as the evaluated subject in the Q2 Service Performance Report and Monthly Service Review.
+entity{tuple_delimiter}Elena Ruiz{tuple_delimiter}person{tuple_delimiter}Elena Ruiz, VP of Customer Operations at Northstar Systems per the text, presented the Q2 Service Performance Report during the Monthly Service Review.
+entity{tuple_delimiter}Northstar Systems{tuple_delimiter}organization{tuple_delimiter}Organization described in the text as the company where Elena Ruiz serves as VP of Customer Operations.
+entity{tuple_delimiter}Monthly Service Review{tuple_delimiter}event{tuple_delimiter}Event described in the text as the meeting where the Q2 Service Performance Report was presented and platform performance was compared.
+entity{tuple_delimiter}Legacy Queue Desk{tuple_delimiter}work{tuple_delimiter}System described in the text as the comparator against Orion Support Platform in the Monthly Service Review.
+relation{tuple_delimiter}Q2 Service Performance Report{tuple_delimiter}Orion Support Platform{tuple_delimiter}performance reporting, service metrics{tuple_delimiter}The text states the Q2 Service Performance Report presents Orion Support Platform ticket-resolution and response-time metrics.
+relation{tuple_delimiter}Elena Ruiz{tuple_delimiter}Northstar Systems{tuple_delimiter}leadership role{tuple_delimiter}The text identifies Elena Ruiz as VP of Customer Operations at Northstar Systems.
+relation{tuple_delimiter}Elena Ruiz{tuple_delimiter}Q2 Service Performance Report{tuple_delimiter}report presentation{tuple_delimiter}The text states Elena Ruiz presented the Q2 Service Performance Report.
+relation{tuple_delimiter}Elena Ruiz{tuple_delimiter}Monthly Service Review{tuple_delimiter}meeting presentation{tuple_delimiter}The text states Elena Ruiz presented during the Monthly Service Review.
+relation{tuple_delimiter}Q2 Service Performance Report{tuple_delimiter}Monthly Service Review{tuple_delimiter}report context{tuple_delimiter}The text states the Q2 Service Performance Report was presented during the Monthly Service Review.
+relation{tuple_delimiter}Monthly Service Review{tuple_delimiter}Orion Support Platform{tuple_delimiter}performance comparison{tuple_delimiter}The text states the Monthly Service Review compared Orion Support Platform on escalation rate and first-response speed.
+relation{tuple_delimiter}Monthly Service Review{tuple_delimiter}Legacy Queue Desk{tuple_delimiter}performance comparison{tuple_delimiter}The text states the Monthly Service Review compared Legacy Queue Desk on escalation rate and first-response speed.
+relation{tuple_delimiter}Orion Support Platform{tuple_delimiter}Legacy Queue Desk{tuple_delimiter}comparative evaluation{tuple_delimiter}The text states Orion Support Platform was compared against Legacy Queue Desk in the Monthly Service Review.
 {completion_delimiter}
 """,
 
-    # Example 3 - Stable concepts and methods, no filler nodes
+    # Example 3 - Cross-domain academic concept/process boundaries
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-Attention is a core mechanism in the Transformer Architecture. Self-Attention
-computes context-aware token representations, and Multi-Head Attention applies
-Self-Attention in parallel. Backpropagation updates model parameters using
-gradients, and the Chain Rule supplies its mathematical basis. The explanation
-mentions values, layers, inputs, outputs, and representation subspaces only as
-ordinary descriptive terms inside the mechanism. Those filler terms should remain
-in descriptions or relation keywords instead of becoming entity nodes.
+The Solid-State Electrolyte Design Framework paper defines Ionic Conductivity
+as a core material property for lithium interface performance. The paper
+describes a Grain Boundary Engineering Workflow that adjusts sintering profiles
+to improve Ionic Conductivity. Researchers use Impedance Spectroscopy to
+measure Ionic Conductivity, then apply Arrhenius Analysis to estimate activation
+energy trends. The framework cites the Lithium Interface Design Whitepaper for
+protocol background.
 ```
 
 <Output>
-entity{tuple_delimiter}Attention{tuple_delimiter}concept{tuple_delimiter}Stable mechanism described in the text as a core mechanism in the Transformer Architecture.
-entity{tuple_delimiter}Transformer Architecture{tuple_delimiter}concept{tuple_delimiter}Architecture described in the text as using Attention as a core mechanism.
-entity{tuple_delimiter}Self-Attention{tuple_delimiter}process{tuple_delimiter}Method described in the text as computing context-aware token representations.
-entity{tuple_delimiter}Multi-Head Attention{tuple_delimiter}process{tuple_delimiter}Method described in the text as applying Self-Attention in parallel.
-entity{tuple_delimiter}Backpropagation{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as updating model parameters using gradients.
-entity{tuple_delimiter}Chain Rule{tuple_delimiter}concept{tuple_delimiter}Mathematical principle described in the text as the basis for Backpropagation.
-relation{tuple_delimiter}Transformer Architecture{tuple_delimiter}Attention{tuple_delimiter}core mechanism{tuple_delimiter}The text states Attention is a core mechanism in the Transformer Architecture.
-relation{tuple_delimiter}Self-Attention{tuple_delimiter}Attention{tuple_delimiter}attention method{tuple_delimiter}The text describes Self-Attention as an attention method computing context-aware token representations.
-relation{tuple_delimiter}Multi-Head Attention{tuple_delimiter}Self-Attention{tuple_delimiter}parallel application{tuple_delimiter}The text states Multi-Head Attention applies Self-Attention in parallel.
-relation{tuple_delimiter}Backpropagation{tuple_delimiter}Chain Rule{tuple_delimiter}mathematical foundation{tuple_delimiter}The text states the Chain Rule supplies the mathematical basis for Backpropagation.
+entity{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}work{tuple_delimiter}Paper described in the text as defining Ionic Conductivity as a core property and documenting methods for electrolyte analysis.
+entity{tuple_delimiter}Ionic Conductivity{tuple_delimiter}concept{tuple_delimiter}Material property described in the text as a core target for lithium interface performance.
+entity{tuple_delimiter}Grain Boundary Engineering Workflow{tuple_delimiter}process{tuple_delimiter}Workflow described in the text as adjusting sintering profiles to improve Ionic Conductivity.
+entity{tuple_delimiter}Impedance Spectroscopy{tuple_delimiter}process{tuple_delimiter}Measurement method described in the text as used to measure Ionic Conductivity.
+entity{tuple_delimiter}Arrhenius Analysis{tuple_delimiter}process{tuple_delimiter}Analysis method described in the text as applied to estimate activation energy trends.
+entity{tuple_delimiter}Lithium Interface Design Whitepaper{tuple_delimiter}work{tuple_delimiter}Whitepaper described in the text as cited for protocol background by the Solid-State Electrolyte Design Framework.
+relation{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}Ionic Conductivity{tuple_delimiter}core property definition{tuple_delimiter}The text states the Solid-State Electrolyte Design Framework defines Ionic Conductivity as a core material property.
+relation{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}Grain Boundary Engineering Workflow{tuple_delimiter}documented workflow{tuple_delimiter}The text states the framework describes a Grain Boundary Engineering Workflow.
+relation{tuple_delimiter}Grain Boundary Engineering Workflow{tuple_delimiter}Ionic Conductivity{tuple_delimiter}property optimization{tuple_delimiter}The text states the Grain Boundary Engineering Workflow improves Ionic Conductivity.
+relation{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}Impedance Spectroscopy{tuple_delimiter}measurement method{tuple_delimiter}The text states the framework uses Impedance Spectroscopy to measure Ionic Conductivity.
+relation{tuple_delimiter}Impedance Spectroscopy{tuple_delimiter}Ionic Conductivity{tuple_delimiter}conductivity measurement{tuple_delimiter}The text states Impedance Spectroscopy measures Ionic Conductivity.
+relation{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}Arrhenius Analysis{tuple_delimiter}analysis method{tuple_delimiter}The text states the framework applies Arrhenius Analysis.
+relation{tuple_delimiter}Arrhenius Analysis{tuple_delimiter}Impedance Spectroscopy{tuple_delimiter}post-measurement analysis{tuple_delimiter}The text states Arrhenius Analysis is applied after Impedance Spectroscopy in the same study flow.
+relation{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}Lithium Interface Design Whitepaper{tuple_delimiter}citation, protocol background{tuple_delimiter}The text states the framework cites the Lithium Interface Design Whitepaper for protocol background.
 {completion_delimiter}
 """,
 
-    # Example 4 - Enterprise source-grounded process and document mentions
+    # Example 4 - Enterprise event/work/process extraction with time-label handling
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
@@ -498,10 +501,10 @@ relation{tuple_delimiter}Backpropagation{tuple_delimiter}Chain Rule{tuple_delimi
 During Q3 2024, the Q3 2024 Product Review concluded that the Apollo Platform
 failed the Apollo Uptime SLA. The Q3 2024 Root Cause Analysis activity, led by
 Diana Chen, identified a Memory Leak in the Data Ingestion Pipeline as the
-primary fault. The Apollo Remediation Plan document was submitted to the
-Engineering Steering Committee. The Apollo Postmortem report cites the Apollo
-Remediation Plan and instructs teams to update the Canary Release Procedure.
-The standalone phrase Q3 2024 is only a time label in this passage.
+primary fault. The Apollo Remediation Plan was submitted to the Engineering
+Steering Committee and requires teams to patch the Data Ingestion Pipeline and
+update the Canary Release Procedure. The Apollo Postmortem report cites both the
+Q3 2024 Root Cause Analysis and the Apollo Remediation Plan.
 ```
 
 <Output>
@@ -514,41 +517,52 @@ entity{tuple_delimiter}Memory Leak{tuple_delimiter}concept{tuple_delimiter}Stabl
 entity{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}process{tuple_delimiter}Pipeline described in the text as containing the Memory Leak identified as the primary fault.
 entity{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}work{tuple_delimiter}Plan described in the text as submitted to the Engineering Steering Committee.
 entity{tuple_delimiter}Engineering Steering Committee{tuple_delimiter}organization{tuple_delimiter}Committee described in the text as receiving the Apollo Remediation Plan.
-entity{tuple_delimiter}Apollo Postmortem{tuple_delimiter}work{tuple_delimiter}Report described in the text as citing the Apollo Remediation Plan and instructing teams to update the Canary Release Procedure.
-entity{tuple_delimiter}Canary Release Procedure{tuple_delimiter}process{tuple_delimiter}Operational procedure described in the text as updated according to the Apollo Postmortem.
+entity{tuple_delimiter}Apollo Postmortem{tuple_delimiter}work{tuple_delimiter}Report described in the text as citing both the Q3 2024 Root Cause Analysis and the Apollo Remediation Plan.
+entity{tuple_delimiter}Canary Release Procedure{tuple_delimiter}process{tuple_delimiter}Operational procedure described in the text as updated according to the Apollo Remediation Plan.
 relation{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}Apollo Platform{tuple_delimiter}evaluation, SLA failure{tuple_delimiter}The text states the Q3 2024 Product Review concluded that the Apollo Platform failed the Apollo Uptime SLA.
+relation{tuple_delimiter}Q3 2024 Product Review{tuple_delimiter}Apollo Uptime SLA{tuple_delimiter}evaluation criterion{tuple_delimiter}The text states the Q3 2024 Product Review concluded failure against the Apollo Uptime SLA.
 relation{tuple_delimiter}Apollo Platform{tuple_delimiter}Apollo Uptime SLA{tuple_delimiter}SLA failure{tuple_delimiter}The text states the Apollo Platform failed the Apollo Uptime SLA.
 relation{tuple_delimiter}Q3 2024 Root Cause Analysis{tuple_delimiter}Diana Chen{tuple_delimiter}analysis leadership{tuple_delimiter}The text states Diana Chen led the Q3 2024 Root Cause Analysis.
 relation{tuple_delimiter}Q3 2024 Root Cause Analysis{tuple_delimiter}Memory Leak{tuple_delimiter}fault identification{tuple_delimiter}The text states the Q3 2024 Root Cause Analysis identified a Memory Leak as the primary fault.
+relation{tuple_delimiter}Q3 2024 Root Cause Analysis{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}fault localization{tuple_delimiter}The text states the Q3 2024 Root Cause Analysis identified the primary fault in the Data Ingestion Pipeline.
 relation{tuple_delimiter}Memory Leak{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}fault location{tuple_delimiter}The text states the Memory Leak was in the Data Ingestion Pipeline.
-relation{tuple_delimiter}Memory Leak{tuple_delimiter}Apollo Platform{tuple_delimiter}root cause, SLA failure{tuple_delimiter}The text identifies the Memory Leak as the primary fault behind the Apollo Platform SLA failure.
-relation{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}Q3 2024 Root Cause Analysis{tuple_delimiter}follow-up action{tuple_delimiter}The text presents the Apollo Remediation Plan after the Q3 2024 Root Cause Analysis.
 relation{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}Engineering Steering Committee{tuple_delimiter}submission, governance{tuple_delimiter}The text states the Apollo Remediation Plan was submitted to the Engineering Steering Committee.
-relation{tuple_delimiter}Apollo Postmortem{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}citation, remediation tracking{tuple_delimiter}The text states the Apollo Postmortem cites the Apollo Remediation Plan.
-relation{tuple_delimiter}Apollo Postmortem{tuple_delimiter}Canary Release Procedure{tuple_delimiter}procedure update{tuple_delimiter}The text states the Apollo Postmortem instructs teams to update the Canary Release Procedure.
+relation{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}Data Ingestion Pipeline{tuple_delimiter}patch requirement{tuple_delimiter}The text states the Apollo Remediation Plan requires teams to patch the Data Ingestion Pipeline.
+relation{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}Canary Release Procedure{tuple_delimiter}procedure update requirement{tuple_delimiter}The text states the Apollo Remediation Plan requires teams to update the Canary Release Procedure.
+relation{tuple_delimiter}Apollo Postmortem{tuple_delimiter}Q3 2024 Root Cause Analysis{tuple_delimiter}citation{tuple_delimiter}The text states the Apollo Postmortem cites the Q3 2024 Root Cause Analysis.
+relation{tuple_delimiter}Apollo Postmortem{tuple_delimiter}Apollo Remediation Plan{tuple_delimiter}citation{tuple_delimiter}The text states the Apollo Postmortem cites the Apollo Remediation Plan.
 {completion_delimiter}
 """,
 
-    # Example 5 - Negated facts do not create positive edges
+    # Example 5 - Negated decisions do not create positive execution edges
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-GPT-3 was trained without RLHF, unlike its successor GPT-4, which used RLHF
-extensively. The study found no significant correlation between model size and
-factual accuracy, and it reports parameter counts only as measurement attributes.
-The authors mention that factual accuracy was evaluated in a table, but the table
-number, model size value, and accuracy percentage are not named entities. The
-only positive training-method statement in the passage links GPT-4 to RLHF.
+The FY2025 Cloud Budget Proposal examined migrating the Audit Service from
+Archive Cluster to Nimbus Object Store. In the April Decision Meeting, the
+Finance Committee did not approve the migration request. The committee approved
+a one-quarter support extension for Archive Cluster instead. Priya Nair
+presented the FY2025 Cloud Budget Proposal at the same meeting.
 ```
 
 <Output>
-entity{tuple_delimiter}GPT-3{tuple_delimiter}work{tuple_delimiter}Model described in the text as trained without RLHF. [negated context: the text explicitly states GPT-3 does NOT use RLHF]
-entity{tuple_delimiter}GPT-4{tuple_delimiter}work{tuple_delimiter}Model described in the text as the successor to GPT-3 and as having used RLHF extensively.
-entity{tuple_delimiter}RLHF{tuple_delimiter}process{tuple_delimiter}Training procedure described in the text as used extensively by GPT-4 but explicitly not used by GPT-3.
-relation{tuple_delimiter}GPT-4{tuple_delimiter}RLHF{tuple_delimiter}training method, alignment{tuple_delimiter}The text states GPT-4 used RLHF extensively.
-relation{tuple_delimiter}GPT-3{tuple_delimiter}GPT-4{tuple_delimiter}succession, model lineage{tuple_delimiter}The text describes GPT-4 as the successor to GPT-3.
+entity{tuple_delimiter}FY2025 Cloud Budget Proposal{tuple_delimiter}work{tuple_delimiter}Budget proposal described in the text as examining migration of the Audit Service from Archive Cluster to Nimbus Object Store. [negated context: the migration request was not approved in the April Decision Meeting]
+entity{tuple_delimiter}Audit Service{tuple_delimiter}work{tuple_delimiter}Service described in the text as the migration subject in the FY2025 Cloud Budget Proposal.
+entity{tuple_delimiter}Archive Cluster{tuple_delimiter}work{tuple_delimiter}Infrastructure system described in the text as the migration source and as receiving an approved one-quarter support extension.
+entity{tuple_delimiter}Nimbus Object Store{tuple_delimiter}work{tuple_delimiter}Target storage system described in the text as the proposed migration destination for the Audit Service.
+entity{tuple_delimiter}April Decision Meeting{tuple_delimiter}event{tuple_delimiter}Meeting described in the text as the event where the Finance Committee rejected the migration request and approved Archive Cluster support extension.
+entity{tuple_delimiter}Finance Committee{tuple_delimiter}organization{tuple_delimiter}Committee described in the text as making approval decisions in the April Decision Meeting.
+entity{tuple_delimiter}Priya Nair{tuple_delimiter}person{tuple_delimiter}Priya Nair per the text presented the FY2025 Cloud Budget Proposal at the April Decision Meeting.
+relation{tuple_delimiter}FY2025 Cloud Budget Proposal{tuple_delimiter}Audit Service{tuple_delimiter}migration subject{tuple_delimiter}The text states the FY2025 Cloud Budget Proposal examined migrating the Audit Service.
+relation{tuple_delimiter}FY2025 Cloud Budget Proposal{tuple_delimiter}Archive Cluster{tuple_delimiter}migration source{tuple_delimiter}The text states the FY2025 Cloud Budget Proposal examined migration from Archive Cluster.
+relation{tuple_delimiter}FY2025 Cloud Budget Proposal{tuple_delimiter}Nimbus Object Store{tuple_delimiter}migration target proposal{tuple_delimiter}The text states the FY2025 Cloud Budget Proposal examined migration to Nimbus Object Store.
+relation{tuple_delimiter}FY2025 Cloud Budget Proposal{tuple_delimiter}April Decision Meeting{tuple_delimiter}decision context{tuple_delimiter}The text states the FY2025 Cloud Budget Proposal was discussed in the April Decision Meeting.
+relation{tuple_delimiter}Finance Committee{tuple_delimiter}April Decision Meeting{tuple_delimiter}decision authority{tuple_delimiter}The text states the Finance Committee made decisions in the April Decision Meeting.
+relation{tuple_delimiter}Finance Committee{tuple_delimiter}Archive Cluster{tuple_delimiter}support extension approval{tuple_delimiter}The text states the Finance Committee approved a one-quarter support extension for Archive Cluster.
+relation{tuple_delimiter}Priya Nair{tuple_delimiter}FY2025 Cloud Budget Proposal{tuple_delimiter}proposal presentation{tuple_delimiter}The text states Priya Nair presented the FY2025 Cloud Budget Proposal.
+relation{tuple_delimiter}Priya Nair{tuple_delimiter}April Decision Meeting{tuple_delimiter}meeting presentation{tuple_delimiter}The text states Priya Nair presented at the April Decision Meeting.
 {completion_delimiter}
 """,
 
@@ -559,11 +573,11 @@ relation{tuple_delimiter}GPT-3{tuple_delimiter}GPT-4{tuple_delimiter}succession,
 <Input Text>
 ```
 The CARDIO-RNA Trial studied RNX-41 for Myocardial Fibrosis and compared its
-effects with Doxorubicin in a controlled arm. In the mechanistic experiment,
+effects with Doxorubicin in a controlled arm. In a mechanistic experiment,
 researchers used CRISPR-Cas9 to knock out BRCA1 in the MCF-7 Cell Line and then
 measured DNA Repair through Homologous Recombination. A separate assay reported
-that Doxorubicin induced Apoptosis in the MCF-7 Cell Line. The paper lists p<0.01
-and Week 12 follow-up as measurement details rather than named entities.
+that Doxorubicin induced Apoptosis in the MCF-7 Cell Line at Week 12 with p<0.01
+significance.
 ```
 
 <Output>
@@ -582,13 +596,14 @@ relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}Myocardial Fibrosis{tu
 relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}Doxorubicin{tuple_delimiter}controlled arm{tuple_delimiter}The text states the trial compared RNX-41 effects with Doxorubicin in a controlled arm.
 relation{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}BRCA1{tuple_delimiter}gene knockout{tuple_delimiter}The text states researchers used CRISPR-Cas9 to knock out BRCA1.
 relation{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}MCF-7 Cell Line{tuple_delimiter}experimental model{tuple_delimiter}The text states CRISPR-Cas9 was used in the MCF-7 Cell Line.
+relation{tuple_delimiter}BRCA1{tuple_delimiter}MCF-7 Cell Line{tuple_delimiter}knockout context{tuple_delimiter}The text states BRCA1 was knocked out in the MCF-7 Cell Line.
 relation{tuple_delimiter}DNA Repair{tuple_delimiter}Homologous Recombination{tuple_delimiter}measurement mechanism{tuple_delimiter}The text states DNA Repair was measured through Homologous Recombination.
 relation{tuple_delimiter}Doxorubicin{tuple_delimiter}Apoptosis{tuple_delimiter}drug effect{tuple_delimiter}The text states Doxorubicin induced Apoptosis.
 relation{tuple_delimiter}Doxorubicin{tuple_delimiter}MCF-7 Cell Line{tuple_delimiter}assay model{tuple_delimiter}The text states Doxorubicin induced Apoptosis in the MCF-7 Cell Line.
 {completion_delimiter}
 """,
 
-    # Example 7 - Enterprise migration plan with work/process boundary
+    # Example 7 - Enterprise migration plan with location coverage
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
@@ -596,11 +611,9 @@ relation{tuple_delimiter}Doxorubicin{tuple_delimiter}MCF-7 Cell Line{tuple_delim
 ```
 The Project Helios Migration Plan describes moving the Billing API from Legacy
 Queue to the Aurora Stream Processor. The Helios Migration Workflow ran during
-Change Window CW-2024-09 under Maya Patel. The Operations Runbook H-17 lists the
-Rollback Procedure and Cache Warmup Procedure that operators must follow if the
-Aurora Stream Processor reports backpressure. The September 2024 date is only a
-schedule label, while the runbook, migration plan, workflow, procedures, and
-named software systems are the source-grounded referents.
+Change Window CW-2024-09 in Berlin under Maya Patel. The Operations Runbook H-17
+lists the Rollback Procedure and Cache Warmup Procedure that operators must
+follow for backpressure incidents on the Aurora Stream Processor.
 ```
 
 <Output>
@@ -610,6 +623,7 @@ entity{tuple_delimiter}Legacy Queue{tuple_delimiter}work{tuple_delimiter}Softwar
 entity{tuple_delimiter}Aurora Stream Processor{tuple_delimiter}work{tuple_delimiter}Software system described in the text as the target system for the Billing API migration and as reporting backpressure.
 entity{tuple_delimiter}Helios Migration Workflow{tuple_delimiter}process{tuple_delimiter}Workflow described in the text as running during Change Window CW-2024-09 under Maya Patel.
 entity{tuple_delimiter}Change Window CW-2024-09{tuple_delimiter}event{tuple_delimiter}Named change window described in the text as when the Helios Migration Workflow ran.
+entity{tuple_delimiter}Berlin{tuple_delimiter}location{tuple_delimiter}Location described in the text as where the Helios Migration Workflow ran during Change Window CW-2024-09.
 entity{tuple_delimiter}Maya Patel{tuple_delimiter}person{tuple_delimiter}Individual described in the text as overseeing the Helios Migration Workflow.
 entity{tuple_delimiter}Operations Runbook H-17{tuple_delimiter}work{tuple_delimiter}Runbook described in the text as listing the Rollback Procedure and Cache Warmup Procedure.
 entity{tuple_delimiter}Rollback Procedure{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as listed in Operations Runbook H-17 for operators to follow.
@@ -618,6 +632,7 @@ relation{tuple_delimiter}Project Helios Migration Plan{tuple_delimiter}Billing A
 relation{tuple_delimiter}Project Helios Migration Plan{tuple_delimiter}Legacy Queue{tuple_delimiter}migration source{tuple_delimiter}The text states the Billing API is moved from Legacy Queue.
 relation{tuple_delimiter}Project Helios Migration Plan{tuple_delimiter}Aurora Stream Processor{tuple_delimiter}migration target{tuple_delimiter}The text states the Billing API is moved to the Aurora Stream Processor.
 relation{tuple_delimiter}Helios Migration Workflow{tuple_delimiter}Change Window CW-2024-09{tuple_delimiter}execution window{tuple_delimiter}The text states the Helios Migration Workflow ran during Change Window CW-2024-09.
+relation{tuple_delimiter}Helios Migration Workflow{tuple_delimiter}Berlin{tuple_delimiter}execution location{tuple_delimiter}The text states the Helios Migration Workflow ran in Berlin.
 relation{tuple_delimiter}Helios Migration Workflow{tuple_delimiter}Maya Patel{tuple_delimiter}workflow ownership{tuple_delimiter}The text states the Helios Migration Workflow ran under Maya Patel.
 relation{tuple_delimiter}Operations Runbook H-17{tuple_delimiter}Rollback Procedure{tuple_delimiter}runbook procedure{tuple_delimiter}The text states Operations Runbook H-17 lists the Rollback Procedure.
 relation{tuple_delimiter}Operations Runbook H-17{tuple_delimiter}Cache Warmup Procedure{tuple_delimiter}runbook procedure{tuple_delimiter}The text states Operations Runbook H-17 lists the Cache Warmup Procedure.
@@ -635,9 +650,8 @@ PROMPTS["entity_extraction_normalization_examples"] = [
 <Input Text>
 ```
 orion llm assistant integrates the zephyr rag pipeline for Acme Support. The
-implementation note writes llm and rag in lowercase, but they are abbreviations
-inside the named system and pipeline. The note also mentions support tickets and
-retrieved passages as ordinary inputs, not as standalone entities.
+implementation note records support tickets and retrieved passages as input
+records while describing the same named assistant and pipeline.
 ```
 
 <Output>
@@ -656,8 +670,7 @@ relation{tuple_delimiter}Orion LLM Assistant{tuple_delimiter}Acme Support{tuple_
 ```
 OpenAI API documentation explains how BERT can be used for semantic search in
 the Atlas Help Center Guide. The documentation records latency in milliseconds
-as a performance attribute and refers to user questions as inputs. The referent
-is the documentation itself, not the OpenAI API service alone.
+as a performance attribute and references user questions as query inputs.
 ```
 
 <Output>
@@ -669,8 +682,14 @@ relation{tuple_delimiter}OpenAI API Documentation{tuple_delimiter}BERT{tuple_del
 relation{tuple_delimiter}BERT{tuple_delimiter}Semantic Search{tuple_delimiter}model usage{tuple_delimiter}The text states BERT can be used for semantic search.
 relation{tuple_delimiter}OpenAI API Documentation{tuple_delimiter}Atlas Help Center Guide{tuple_delimiter}documentation context{tuple_delimiter}The text states the OpenAI API Documentation explains BERT usage in the Atlas Help Center Guide.
 {completion_delimiter}
-""",
+    """,
 ]
+
+# Fallback copy used when integrations accidentally omit the primary
+# normalization-example key during prompt assembly.
+PROMPTS["entity_extraction_normalization_examples_fallback"] = list(
+    PROMPTS["entity_extraction_normalization_examples"]
+)
 
 PROMPTS["summarize_entity_descriptions"] = """---Role---
 You are a Knowledge Graph Specialist proficient in data curation and synthesis.
@@ -829,7 +848,7 @@ Consider the conversation history if provided to maintain conversational flow an
 
 ---Context---
 
-{content_data}
+{context_data}
 """
 
 PROMPTS["kg_query_context"] = """
@@ -890,6 +909,7 @@ Given a user query, your task is to extract two distinct types of keywords:
 5. **Language**: All extracted keywords MUST be in {language}. Proper nouns (e.g., personal names, place names, organization names) should be kept in their original language.
 6. **Casing (high_level_keywords)**: Use lowercase phrases by default. Preserve meaningful uppercase or mixed-case proper nouns/acronyms (e.g., OpenAI, BERT, API, 6G).
 7. **Casing (low_level_keywords)**: Use entity-style casing. Preserve mixed-case proper nouns/acronyms; otherwise normalize case-insensitive phrases to canonical title-style wording.
+8. **Casing Alignment**: When a low_level keyword corresponds to an extractable entity mention, align its casing with the entity extraction `entity_name` rule (title-cased by default while preserving meaningful acronyms and internal capitals). This keeps `high_level_keywords` aligned with relationship keyword style and `low_level_keywords` aligned with entity naming.
 
 ---Examples---
 {examples}

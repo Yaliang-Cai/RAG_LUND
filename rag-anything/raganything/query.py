@@ -17,6 +17,7 @@ from raganything.constants import (
     DEFAULT_MULTIMODAL_TOP_K,
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
+    DEFAULT_QDRANT_RETRIEVAL_MODE,
     SUPPORTED_IMAGE_EXTENSIONS,
 )
 from raganything.query_message_repack import (
@@ -234,6 +235,7 @@ class QueryMixin:
         kwargs.setdefault("top_k", DEFAULT_TOP_K)
         kwargs.setdefault("chunk_top_k", DEFAULT_CHUNK_TOP_K)
         kwargs.setdefault("rerank_score_scope", "all")
+        kwargs.setdefault("qdrant_retrieval_mode", DEFAULT_QDRANT_RETRIEVAL_MODE)
 
         # Check if VLM enhanced query should be used
         vlm_enhanced = kwargs.pop("vlm_enhanced", None)
@@ -500,6 +502,7 @@ class QueryMixin:
         # Retrieval context itself remains strict rerank order.
         kwargs.setdefault("multimodal_top_k", DEFAULT_MULTIMODAL_TOP_K)
         kwargs.setdefault("rerank_score_scope", "all")
+        kwargs.setdefault("qdrant_retrieval_mode", DEFAULT_QDRANT_RETRIEVAL_MODE)
         query_param = QueryParam(mode=mode, only_need_prompt=True, **kwargs)
         image_cap = query_param.multimodal_top_k
         if image_cap is None:

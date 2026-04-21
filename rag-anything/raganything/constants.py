@@ -190,6 +190,9 @@ DEFAULT_EMBEDDING_FUNC_MAX_ASYNC = 8
 # Set to False when querying or extending older dense-only Qdrant collections.
 DEFAULT_QDRANT_ENABLE_SPARSE_BM25 = True
 DEFAULT_QDRANT_SPARSE_BM25_MODEL = "Qdrant/bm25"
+# Query-time retrieval mode for Qdrant collections that contain dense+BM25 vectors.
+# Supported: "dense", "bm25", "hybrid". Dense preserves the previous behavior.
+DEFAULT_QDRANT_RETRIEVAL_MODE = "dense"
 
 # =============================================================================
 # V1: Entity disambiguation

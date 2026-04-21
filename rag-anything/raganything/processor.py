@@ -517,6 +517,7 @@ class ProcessorMixin:
 
             node_data = {
                 "entity_id": composite_id,
+                "entity_name": entity_name,
                 "entity_type": entity_type,
                 "description": description,
                 "source_id": limited_source_id_str,

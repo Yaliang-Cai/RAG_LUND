@@ -108,6 +108,21 @@ entry points write the corresponding LightRAG/Qdrant environment setting from
 this constant at startup, so changing the constant and restarting the process is
 the normal switch path.
 
+Query-time retrieval over BM25-enabled collections is controlled by
+`DEFAULT_QDRANT_RETRIEVAL_MODE` in `raganything/constants.py`.
+
+Supported values:
+
+| Value | Behavior |
+| --- | --- |
+| `"dense"` | Dense embedding search only. This preserves the previous behavior. |
+| `"bm25"` | Qdrant BM25 sparse search only. Requires `_bm25` collections. |
+| `"hybrid"` | Qdrant RRF fusion over dense embedding search and BM25 sparse search. Requires `_bm25` collections. |
+
+This retrieval mode is a query-time switch. It does not change collection
+creation by itself; keep `DEFAULT_QDRANT_ENABLE_SPARSE_BM25 = True` when you
+want one collection to support all three retrieval modes.
+
 ---
 
 ## 五、迁移已有 Milvus 工作空间

@@ -126,6 +126,16 @@ class QueryParam:
     If None, defaults to top_k value.
     """
 
+    qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] = os.getenv(
+        "QDRANT_RETRIEVAL_MODE", "dense"
+    ).lower()
+    """Qdrant retrieval strategy when Qdrant sparse BM25 is enabled.
+    - "dense": use dense embedding search only.
+    - "bm25": use Qdrant BM25 sparse search only.
+    - "hybrid": use Qdrant RRF fusion over dense and BM25 sparse search.
+    Non-Qdrant vector stores ignore this option.
+    """
+
     max_entity_tokens: int = int(
         os.getenv("MAX_ENTITY_TOKENS", str(DEFAULT_MAX_ENTITY_TOKENS))
     )

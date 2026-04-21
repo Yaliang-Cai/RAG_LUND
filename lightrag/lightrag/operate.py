@@ -2814,6 +2814,13 @@ async def _merge_nodes_then_upsert(
     entity_chunks_storage: BaseKVStorage | None = None,
 ):
     """Get existing nodes from knowledge graph use name,if exists, merge data, else create, then upsert."""
+    incoming_entity_name = ""
+    for dp in nodes_data:
+        candidate_name = dp.get("entity_name") if isinstance(dp, dict) else None
+        if isinstance(candidate_name, str) and candidate_name.strip():
+            incoming_entity_name = candidate_name.strip()
+            break
+
     already_entity_types = []
     already_source_ids = []
     already_description = []
@@ -2943,6 +2950,8 @@ async def _merge_nodes_then_upsert(
                     f"Skipped `{entity_name}`: no new source evidence (idempotent replay)"
                 )
             unchanged_node = dict(already_node)
+            if incoming_entity_name and not unchanged_node.get("entity_name"):
+                unchanged_node["entity_name"] = incoming_entity_name
             unchanged_node["_changed"] = False
             return unchanged_node
         logger.error(f"Internal Error: already_node missing for `{entity_name}`")
@@ -4388,9 +4397,24 @@ async def extract_entities(
 
     extraction_examples: list[str] = base_extraction_examples
     if enable_surface_normalization:
-        extraction_examples.extend(
-            PROMPTS.get("entity_extraction_normalization_examples", [])
-        )
+        normalization_examples = PROMPTS.get("entity_extraction_normalization_examples")
+        if not normalization_examples:
+            normalization_examples = PROMPTS.get(
+                "entity_extraction_normalization_examples_fallback", []
+            )
+            if normalization_examples:
+                logger.warning(
+                    "Using fallback normalization examples because "
+                    "'entity_extraction_normalization_examples' is missing or empty."
+                )
+        if normalization_examples:
+            extraction_examples.extend(normalization_examples)
+        else:
+            logger.warning(
+                "Surface normalization is enabled but "
+                "normalization examples are unavailable; falling back to base "
+                "extraction examples only."
+            )
 
     examples = "\n".join(extraction_examples)
 
@@ -5001,6 +5025,27 @@ async def extract_keywords_only(
     return hl_keywords, ll_keywords
 
 
+async def _query_vector_storage(
+    vector_storage: BaseVectorStorage,
+    query: str,
+    top_k: int,
+    query_param: QueryParam,
+    query_embedding: list[float] = None,
+) -> list[dict[str, Any]]:
+    if vector_storage.__class__.__name__ == "QdrantVectorDBStorage":
+        return await vector_storage.query(
+            query,
+            top_k=top_k,
+            query_embedding=query_embedding,
+            qdrant_retrieval_mode=query_param.qdrant_retrieval_mode,
+        )
+    return await vector_storage.query(
+        query,
+        top_k=top_k,
+        query_embedding=query_embedding,
+    )
+
+
 async def _get_vector_context(
     query: str,
     chunks_vdb: BaseVectorStorage,
@@ -5027,8 +5072,12 @@ async def _get_vector_context(
         search_top_k = query_param.chunk_top_k or query_param.top_k
         cosine_threshold = chunks_vdb.cosine_better_than_threshold
 
-        results = await chunks_vdb.query(
-            query, top_k=search_top_k, query_embedding=query_embedding
+        results = await _query_vector_storage(
+            chunks_vdb,
+            query,
+            search_top_k,
+            query_param,
+            query_embedding,
         )
         if not results:
             logger.info(
@@ -6454,8 +6503,12 @@ async def _ppr_rank_chunks_global(
     # PPR nodes and can accumulate score through entity-graph energy propagation.
     chunk_seed_weights: dict[str, float] = {}
     try:
-        chunk_results = await chunks_vdb.query(
-            query, top_k=query_param.ppr_top_k * 4, query_embedding=query_embedding
+        chunk_results = await _query_vector_storage(
+            chunks_vdb,
+            query,
+            query_param.ppr_top_k * 4,
+            query_param,
+            query_embedding,
         )
         if chunk_results:
             scores = [c.get("distance", 0.0) for c in chunk_results]
@@ -6542,8 +6595,12 @@ async def _ppr_rank_chunks(
     # Always fetch relation VDB results — used by both paths
     rel_results: list[dict] = []
     try:
-        rel_results = await relationships_vdb.query(
-            query, top_k=query_param.top_k, query_embedding=query_embedding
+        rel_results = await _query_vector_storage(
+            relationships_vdb,
+            query,
+            query_param.top_k,
+            query_param,
+            query_embedding,
         )
     except Exception as e:
         logger.warning(f"PPR: relation VDB query failed: {e}")
@@ -6705,8 +6762,12 @@ async def _ppr_rank_chunks(
     passage_node_weight = query_param.passage_node_weight
 
     try:
-        chunk_results = await chunks_vdb.query(
-            query, top_k=query_param.ppr_top_k * 2, query_embedding=query_embedding
+        chunk_results = await _query_vector_storage(
+            chunks_vdb,
+            query,
+            query_param.ppr_top_k * 2,
+            query_param,
+            query_embedding,
         )
         if chunk_results:
             scores = [c.get("distance", 0.0) for c in chunk_results]
@@ -6785,7 +6846,12 @@ async def _get_node_data(
         f"Query nodes: {query} (top_k:{query_param.top_k}, cosine:{entities_vdb.cosine_better_than_threshold})"
     )
 
-    results = await entities_vdb.query(query, top_k=query_param.top_k)
+    results = await _query_vector_storage(
+        entities_vdb,
+        query,
+        query_param.top_k,
+        query_param,
+    )
 
     if not len(results):
         return [], []
@@ -7098,7 +7164,12 @@ async def _get_edge_data(
         f"Query edges: {keywords} (top_k:{query_param.top_k}, cosine:{relationships_vdb.cosine_better_than_threshold})"
     )
 
-    results = await relationships_vdb.query(keywords, top_k=query_param.top_k)
+    results = await _query_vector_storage(
+        relationships_vdb,
+        keywords,
+        query_param.top_k,
+        query_param,
+    )
 
     if not len(results):
         return [], []
@@ -7472,7 +7543,7 @@ async def naive_query(
         global_config.get("max_total_tokens", DEFAULT_MAX_TOTAL_TOKENS),
     )
 
-    # Calculate system prompt template tokens (excluding content_data)
+    # Calculate system prompt template tokens (excluding context payload fields)
     user_prompt = f"\n\n{query_param.user_prompt}" if query_param.user_prompt else "n/a"
     response_type = (
         query_param.response_type
@@ -7485,10 +7556,13 @@ async def naive_query(
         system_prompt if system_prompt else PROMPTS["naive_rag_response"]
     )
 
-    # Create a preliminary system prompt with empty content_data to calculate overhead
+    # Create a preliminary system prompt with empty context placeholders to
+    # calculate overhead. Keep both keys for backward compatibility with custom
+    # templates using either {context_data} or {content_data}.
     pre_sys_prompt = sys_prompt_template.format(
         response_type=response_type,
         user_prompt=user_prompt,
+        context_data="",  # Empty for overhead calculation
         content_data="",  # Empty for overhead calculation
     )
 
@@ -7671,6 +7745,7 @@ async def naive_query(
     sys_prompt = sys_prompt_template.format(
         response_type=query_param.response_type,
         user_prompt=user_prompt,
+        context_data=context_content,
         content_data=context_content,
     )
 

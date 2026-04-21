@@ -103,6 +103,48 @@ def _coerce_qdrant_dense_vector(vector_data: Any) -> list[float] | None:
         return None
 
 
+def _normalize_qdrant_retrieval_mode(mode: Any) -> str:
+    """Normalize Qdrant retrieval mode to a supported value."""
+    normalized = str(mode or os.environ.get("QDRANT_RETRIEVAL_MODE", "dense")).lower()
+    if normalized not in {"dense", "bm25", "hybrid"}:
+        logger.warning(
+            "Invalid Qdrant retrieval mode %r; falling back to dense", mode
+        )
+        return "dense"
+    return normalized
+
+
+def _coerce_dense_query_vector(vector_data: Any) -> list[float]:
+    """Convert dense query vectors to plain float lists for Qdrant models."""
+    if isinstance(vector_data, np.ndarray):
+        vector_data = vector_data.tolist()
+    elif isinstance(vector_data, tuple):
+        vector_data = list(vector_data)
+
+    return [float(value) for value in vector_data]
+
+
+def _coerce_qdrant_sparse_vector(vector_data: Any) -> models.SparseVector:
+    """Convert fastembed sparse output to Qdrant's SparseVector model."""
+    if isinstance(vector_data, models.SparseVector):
+        return vector_data
+
+    indices = getattr(vector_data, "indices", None)
+    values = getattr(vector_data, "values", None)
+    if indices is None or values is None:
+        raise ValueError(f"Unsupported sparse vector type: {type(vector_data).__name__}")
+
+    if hasattr(indices, "tolist"):
+        indices = indices.tolist()
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+
+    return models.SparseVector(
+        indices=[int(index) for index in indices],
+        values=[float(value) for value in values],
+    )
+
+
 def _normalize_timeout_seconds(raw_value: Any, env_name: str) -> int:
     """Parse timeout input and normalize to positive integer seconds."""
     try:
@@ -803,7 +845,11 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         return results
 
     async def query(
-        self, query: str, top_k: int, query_embedding: list[float] = None
+        self,
+        query: str,
+        top_k: int,
+        query_embedding: list[float] = None,
+        qdrant_retrieval_mode: str | None = None,
     ) -> list[dict[str, Any]]:
         if query_embedding is not None:
             embedding = query_embedding
@@ -813,20 +859,42 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             )  # higher priority for query
             embedding = embedding_result[0]
 
-        query_response = await self._run_client_call_with_timeout(
-            self._client.query_points,
-            collection_name=self.final_namespace,
-            query=embedding,
-            limit=top_k,
-            with_payload=True,
-            score_threshold=self.cosine_better_than_threshold,
-            query_filter=models.Filter(
-                must=[workspace_filter_condition(self.effective_workspace)]
-            ),
-            search_params=models.SearchParams(hnsw_ef=self._search_ef)
-            if self._search_ef
-            else None,
+        embedding = _coerce_dense_query_vector(embedding)
+        retrieval_mode = _normalize_qdrant_retrieval_mode(
+            qdrant_retrieval_mode
+            or self.global_config.get("qdrant_retrieval_mode")
         )
+        query_filter = models.Filter(
+            must=[workspace_filter_condition(self.effective_workspace)]
+        )
+        search_params = (
+            models.SearchParams(hnsw_ef=self._search_ef)
+            if self._search_ef
+            else None
+        )
+
+        if retrieval_mode == "bm25":
+            query_response = await self._query_sparse(
+                query=query,
+                top_k=top_k,
+                query_filter=query_filter,
+            )
+        elif retrieval_mode == "hybrid":
+            query_response = await self._query_hybrid(
+                query=query,
+                embedding=embedding,
+                top_k=top_k,
+                query_filter=query_filter,
+                search_params=search_params,
+            )
+        else:
+            query_response = await self._query_dense(
+                embedding=embedding,
+                top_k=top_k,
+                query_filter=query_filter,
+                search_params=search_params,
+            )
+
         results = query_response.points
 
         return [
@@ -837,6 +905,110 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             }
             for dp in results
         ]
+
+    async def _query_dense(
+        self,
+        embedding: list[float],
+        top_k: int,
+        query_filter: models.Filter,
+        search_params: models.SearchParams | None,
+    ):
+        return await self._run_client_call_with_timeout(
+            self._client.query_points,
+            collection_name=self.final_namespace,
+            query=embedding,
+            limit=top_k,
+            with_payload=True,
+            score_threshold=self.cosine_better_than_threshold,
+            query_filter=query_filter,
+            search_params=search_params,
+        )
+
+    async def _query_sparse(
+        self,
+        query: str,
+        top_k: int,
+        query_filter: models.Filter,
+    ):
+        if not self._enable_sparse_bm25 or not self._sparse_vector_name:
+            logger.warning(
+                "[%s] Qdrant BM25 retrieval requested but sparse BM25 is not enabled; falling back to dense retrieval is required by caller",
+                self.workspace,
+            )
+            raise ValueError("Qdrant BM25 retrieval requires sparse BM25 indexing")
+
+        sparse_query = self._embed_sparse_query(query)
+        return await self._run_client_call_with_timeout(
+            self._client.query_points,
+            collection_name=self.final_namespace,
+            query=sparse_query,
+            using=self._sparse_vector_name,
+            limit=top_k,
+            with_payload=True,
+            query_filter=query_filter,
+        )
+
+    async def _query_hybrid(
+        self,
+        query: str,
+        embedding: list[float],
+        top_k: int,
+        query_filter: models.Filter,
+        search_params: models.SearchParams | None,
+    ):
+        if not self._enable_sparse_bm25 or not self._sparse_vector_name:
+            logger.warning(
+                "[%s] Qdrant hybrid retrieval requested but sparse BM25 is not enabled; falling back to dense retrieval",
+                self.workspace,
+            )
+            return await self._query_dense(
+                embedding=embedding,
+                top_k=top_k,
+                query_filter=query_filter,
+                search_params=search_params,
+            )
+
+        sparse_query = self._embed_sparse_query(query)
+        prefetch = [
+            models.Prefetch(
+                query=embedding,
+                filter=query_filter,
+                params=search_params,
+                limit=top_k,
+            ),
+            models.Prefetch(
+                query=sparse_query,
+                using=self._sparse_vector_name,
+                filter=query_filter,
+                limit=top_k,
+            ),
+        ]
+        return await self._run_client_call_with_timeout(
+            self._client.query_points,
+            collection_name=self.final_namespace,
+            prefetch=prefetch,
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=top_k,
+            with_payload=True,
+            query_filter=query_filter,
+        )
+
+    def _embed_sparse_query(self, query: str) -> models.SparseVector:
+        try:
+            sparse_model = self._client._get_or_init_sparse_model(
+                model_name=self._sparse_bm25_model
+            )
+            sparse_vector = list(sparse_model.query_embed(query=query))[0]
+        except Exception:
+            sparse_vector = list(
+                self._client._sparse_embed_documents(
+                    [query],
+                    embedding_model_name=self._sparse_bm25_model,
+                    batch_size=1,
+                )
+            )[0]
+
+        return _coerce_qdrant_sparse_vector(sparse_vector)
 
     async def index_done_callback(self) -> None:
         # Qdrant handles persistence automatically

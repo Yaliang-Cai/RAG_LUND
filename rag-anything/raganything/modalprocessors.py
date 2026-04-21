@@ -631,6 +631,7 @@ class BaseModalProcessor:
         _composite_id = compute_entity_id(_ename, _etype, _disambig)
         node_data = {
             "entity_id": _composite_id,
+            "entity_name": _ename,
             "entity_type": _etype,
             "description": entity_info["summary"],
             "source_id": chunk_id,
