@@ -100,7 +100,7 @@ def _parse_args():
         help="Chunks fed to LLM after PPR retrieval (HippoRAG2 qa_top_k)",
     )
     p.add_argument("--no-rerank", action="store_true")
-    p.add_argument("--no-multi-hop", action="store_true", help="Disable PPR multi-hop (V3 off)")
+    p.add_argument("--multi-hop", action="store_true", help="Enable PPR multi-hop for non-PPR modes (V3)")
     p.add_argument("--trace", action="store_true", help="Print retrieval trace JSON")
     return p.parse_args()
 
@@ -112,7 +112,7 @@ async def run(args):
 
     workspace_id = args.workspace
     query = args.query
-    enable_multi_hop = not args.no_multi_hop
+    enable_multi_hop = args.multi_hop
 
     query_kwargs = dict(
         mode=args.mode,
