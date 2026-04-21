@@ -47,6 +47,20 @@ rag-anything/
 - `score_f1(pred, gold) -> float` — token-level F1 after normalization
 - `score_recall_at_k(chunks, supporting_facts, k) -> float` — fraction of supporting facts covered by at least one top-K chunk (substring match)
 
+**Dataset-specific prompt config:**
+- `get_eval_query_overrides(dataset) -> dict` — returns `{"response_type": ..., "user_prompt": ...}` for each dataset
+
+The `PROMPTS["rag_response"]` template in LightRAG produces verbose Markdown + References output by default, which breaks EM/F1 evaluation (gold answers are short phrases like `"yes"` or `"Berlin"`). We override two `QueryParam` fields at eval time:
+
+| Dataset | `response_type` | `user_prompt` instruction |
+|---|---|---|
+| HotpotQA | `"Short Answer"` | Answer with a short phrase or entity. For yes/no questions, reply only 'yes' or 'no'. No markdown, no citations. |
+| MuSIQue | `"Short Answer"` | Same as HotpotQA |
+| 2WikiMultiHopQA | `"Short Answer"` | Same as HotpotQA |
+| SimpleQA | `"Short Answer"` | Answer with a concise factual phrase. No markdown, no citations. |
+
+`evaluate_multihop.py` also post-processes LLM output to strip residual `### References` sections in case the model ignores the instruction.
+
 ### `evaluate_multihop.py`
 
 **CLI arguments:**
