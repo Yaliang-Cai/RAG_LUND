@@ -5068,8 +5068,13 @@ async def _get_vector_context(
         List of text chunks with metadata
     """
     try:
-        # Use chunk_top_k if specified, otherwise fall back to top_k
-        search_top_k = query_param.chunk_top_k or query_param.top_k
+        # naive_top_k controls VDB retrieval size; chunk_top_k controls post-rerank window.
+        # Fall back chain: naive_top_k → chunk_top_k → top_k
+        search_top_k = (
+            getattr(query_param, "naive_top_k", None)
+            or query_param.chunk_top_k
+            or query_param.top_k
+        )
         cosine_threshold = chunks_vdb.cosine_better_than_threshold
 
         results = await _query_vector_storage(
@@ -5081,7 +5086,7 @@ async def _get_vector_context(
         )
         if not results:
             logger.info(
-                f"Naive query: 0 chunks (chunk_top_k:{search_top_k} cosine:{cosine_threshold})"
+                f"Naive query: 0 chunks (naive_top_k:{search_top_k} cosine:{cosine_threshold})"
             )
             return []
 
@@ -5100,7 +5105,7 @@ async def _get_vector_context(
                 valid_chunks.append(chunk_with_metadata)
 
         logger.info(
-            f"Naive query: {len(valid_chunks)} chunks (chunk_top_k:{search_top_k} cosine:{cosine_threshold})"
+            f"Naive query: {len(valid_chunks)} chunks (naive_top_k:{search_top_k} cosine:{cosine_threshold})"
         )
         return valid_chunks
 
@@ -6101,9 +6106,11 @@ async def _build_query_context(
     # Stage 1.5 (optional): Rerank entities and relations by query relevance.
     # PPR modes surface chunk-only context after graph propagation, so KG rerank
     # here is unnecessary overhead for mode="ppr"/"ppr_local".
+    # enable_kg_rerank is independent of enable_rerank (chunk rerank).
+    _kg_rerank_enabled = getattr(query_param, "enable_kg_rerank", query_param.enable_rerank)
     if (
         query_param.mode not in ("ppr", "ppr_local")
-        and query_param.enable_rerank
+        and _kg_rerank_enabled
         and text_chunks_db.global_config.get("rerank_model_func")
     ):
         search_result = await _rerank_kg_results(
@@ -6263,7 +6270,19 @@ async def _recognition_memory_filter(
     norm_fact = _min_max_norm(fact_scores)
 
     # --- Step 4: Build unified candidate list for difflib matching ---
-    entity_vdb_ids = [nd["entity_id"] for nd in top_nodes if nd.get("entity_id")]
+    # entity_vdb_ids: bare IDs used for difflib matching and weight lookup
+    # entity_display_lines: "id: description" strings shown in the LLM prompt
+    entity_id_desc_pairs = [
+        (nd["entity_id"], (nd.get("description") or "").strip()[:120])
+        for nd in top_nodes if nd.get("entity_id")
+    ]
+    entity_vdb_ids = [eid for eid, _ in entity_id_desc_pairs]
+    entity_display_lines = [
+        f"{eid}: {desc}" if desc else eid
+        for eid, desc in entity_id_desc_pairs
+    ]
+
+    # triplet endpoints may include entities absent from entity VDB results
     triplet_eids = list(dict.fromkeys(
         eid for rel in top_rels
         for eid in (rel.get("src_id"), rel.get("tgt_id")) if eid
@@ -6274,9 +6293,11 @@ async def _recognition_memory_filter(
         return {}
 
     # --- Step 5: Build LLM prompt (with token budget guard) ---
-    prompt_middle = "\n\nRetrieved facts:\n"
+    prompt_middle = "\n\nRetrieved facts (src | relation | tgt):\n"
     prompt_suffix = (
         "\n\nReturn the relevant entity identifiers only, one per line. "
+        "Output ONLY the identifier (the part before ':' if a description follows). "
+        "Entities appearing as src or tgt endpoints in the facts section are also valid candidates. "
         "If none are relevant, return an empty response."
     )
 
@@ -6289,12 +6310,12 @@ async def _recognition_memory_filter(
         prompt_prefix = (
             "You are an entity relevance judge.\n\n"
             f"Query: {query}\n\n"
-            "Below are retrieved entities and facts. Select ONLY those directly relevant "
-            "to answering the query.\n"
-            "You MUST copy each entity identifier EXACTLY as it appears in the list below, "
-            'including any "|TYPE" suffixes and special characters. '
+            "Below are retrieved entities (with descriptions) and relational facts. "
+            "Select ONLY those entity identifiers directly relevant to answering the query.\n"
+            "You MUST copy each entity identifier EXACTLY as it appears "
+            '(including any "|TYPE" suffix). '
             "Do not rephrase, abbreviate, or invent new identifiers.\n\n"
-            "Standalone entities:\n"
+            "Entities:\n"
         )
         standalone_block = "\n".join(entity_lines) if entity_lines else "(none)"
         triplet_block = "\n".join(fact_lines) if fact_lines else "(none)"
@@ -6308,7 +6329,7 @@ async def _recognition_memory_filter(
 
     prompt: str
     if tokenizer is None:
-        prompt = _compose_prompt(entity_vdb_ids, triplet_lines)
+        prompt = _compose_prompt(entity_display_lines, triplet_lines)
         completion_max_tokens = max(
             1,
             _to_non_negative_int(
@@ -6354,13 +6375,13 @@ async def _recognition_memory_filter(
             return len(tokenizer.encode(candidate_prompt)) <= token_budget
 
         # Ensure both sections have a chance to contribute before filling remaining budget.
-        if entity_vdb_ids and _fits_budget([entity_vdb_ids[0]], []):
-            selected_entities.append(entity_vdb_ids[0])
+        if entity_display_lines and _fits_budget([entity_display_lines[0]], []):
+            selected_entities.append(entity_display_lines[0])
         if triplet_lines and _fits_budget(selected_entities, [triplet_lines[0]]):
             selected_facts.append(triplet_lines[0])
 
-        for entity_id in entity_vdb_ids[1:] if selected_entities else entity_vdb_ids:
-            candidate_entities = selected_entities + [entity_id]
+        for line in entity_display_lines[1:] if selected_entities else entity_display_lines:
+            candidate_entities = selected_entities + [line]
             if _fits_budget(candidate_entities, selected_facts):
                 selected_entities = candidate_entities
 
@@ -6410,12 +6431,17 @@ async def _recognition_memory_filter(
         return {}
 
     # --- Step 7: Difflib mapping ---
+    # Strip description suffix (": ...") the LLM may have echoed back, then fuzzy-match.
+    # cutoff=0.6 tolerates minor formatting drift (e.g. missing |TYPE suffix) while
+    # still rejecting clearly wrong identifiers.
     recognized_ids: set[str] = set()
     for line in llm_output.strip().splitlines():
         line = line.strip()
         if not line:
             continue
-        matches = difflib.get_close_matches(line, all_candidate_ids, n=1, cutoff=0.85)
+        # Remove anything after the first ": " that the LLM may have copied from the prompt
+        candidate_id = line.split(": ")[0].strip()
+        matches = difflib.get_close_matches(candidate_id, all_candidate_ids, n=1, cutoff=0.6)
         if matches:
             recognized_ids.add(matches[0])
 

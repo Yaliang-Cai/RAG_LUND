@@ -102,9 +102,11 @@ SUPPORTED_IMAGE_EXTENSIONS = [
 # Query defaults (used by server and QueryRequest)
 # =============================================================================
 DEFAULT_TOP_K = 20        # default and max allowed value for top_k
-DEFAULT_CHUNK_TOP_K = 10  # default and max allowed value for chunk_top_k
+DEFAULT_CHUNK_TOP_K = 10  # final window size after reranking (chunk_top_k)
+DEFAULT_NAIVE_TOP_K = 20  # naive VDB retrieval count (mix/naive modes); independent of chunk_top_k
 DEFAULT_QUERY_MODE = "hybrid"   # "naive" | "local" | "global" | "hybrid" | "mix" | "rrf"
 DEFAULT_ENABLE_RERANK = True
+DEFAULT_ENABLE_KG_RERANK = True  # rerank entity/relation KG results (hybrid/mix); independent of chunk rerank
 DEFAULT_VLM_ENHANCED = True
 
 # Reranker score 过滤阈值：rerank 完成后，得分低于此值的 chunk 会被丢弃。

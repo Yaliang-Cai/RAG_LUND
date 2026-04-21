@@ -11,7 +11,8 @@ python scripts/query_ppr.py  -w docbench_shared_ablation_20260417_v0_v1_v2 --cac
 Optional overrides:
   --mode ppr          # ppr (global PPR + recognition memory), global, hybrid, etc.
   --top-k 40
-  --chunk-top-k 20
+  --chunk-top-k 10
+  --naive-top-k 20
   --ppr-top-k 50
   --ppr-damping 0.5
   --passage-node-weight 1.0
@@ -49,6 +50,7 @@ from raganything.services.local_rag import LocalRagService, LocalRagSettings
 from raganything.constants import (
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
+    DEFAULT_NAIVE_TOP_K,
     DEFAULT_PPR_DAMPING,
     DEFAULT_PPR_TOP_K,
     DEFAULT_PASSAGE_NODE_WEIGHT,
@@ -56,6 +58,7 @@ from raganything.constants import (
     DEFAULT_LINKING_TOP_K,
     DEFAULT_PPR_QA_TOP_K,
     DEFAULT_ENABLE_RERANK,
+    DEFAULT_ENABLE_KG_RERANK,
 )
 
 
@@ -77,7 +80,10 @@ def _parse_args():
         help="Query mode (default: ppr = global PPR with recognition memory)",
     )
     p.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
-    p.add_argument("--chunk-top-k", type=int, default=DEFAULT_CHUNK_TOP_K)
+    p.add_argument("--chunk-top-k", type=int, default=DEFAULT_CHUNK_TOP_K,
+                   help="Final chunk window size after reranking (default: %(default)s)")
+    p.add_argument("--naive-top-k", type=int, default=DEFAULT_NAIVE_TOP_K,
+                   help="Naive VDB retrieval count for mix/naive modes (default: %(default)s)")
     p.add_argument("--ppr-damping", type=float, default=DEFAULT_PPR_DAMPING)
     p.add_argument("--ppr-top-k", type=int, default=DEFAULT_PPR_TOP_K)
     p.add_argument("--passage-node-weight", type=float, default=DEFAULT_PASSAGE_NODE_WEIGHT)
@@ -99,7 +105,9 @@ def _parse_args():
         default=DEFAULT_PPR_QA_TOP_K,
         help="Chunks fed to LLM after PPR retrieval (HippoRAG2 qa_top_k)",
     )
-    p.add_argument("--no-rerank", action="store_true")
+    p.add_argument("--no-rerank", action="store_true", help="Disable chunk reranking")
+    p.add_argument("--no-kg-rerank", action="store_true",
+                   help="Disable entity/relation KG reranking (independent of --no-rerank)")
     p.add_argument("--multi-hop", action="store_true", help="Enable PPR multi-hop for non-PPR modes (V3)")
     p.add_argument("--trace", action="store_true", help="Print retrieval trace JSON")
     return p.parse_args()
@@ -118,7 +126,9 @@ async def run(args):
         mode=args.mode,
         top_k=args.top_k,
         chunk_top_k=args.chunk_top_k,
+        naive_top_k=args.naive_top_k,
         enable_rerank=not args.no_rerank,
+        enable_kg_rerank=not args.no_kg_rerank,
         rerank_score_scope="all",
         enable_multi_hop=enable_multi_hop,
         ppr_damping=args.ppr_damping,
@@ -131,8 +141,8 @@ async def run(args):
         query_kwargs["ppr_qa_top_k"] = max(1, args.ppr_qa_top_k)
 
     print(f"\n[Query] workspace={workspace_id}")
-    print(f"        mode={args.mode}  multi_hop={enable_multi_hop}  rerank={not args.no_rerank}")
-    print(f"        top_k={args.top_k}  chunk_top_k={args.chunk_top_k}")
+    print(f"        mode={args.mode}  multi_hop={enable_multi_hop}  rerank={not args.no_rerank}  kg_rerank={not args.no_kg_rerank}")
+    print(f"        top_k={args.top_k}  chunk_top_k={args.chunk_top_k}  naive_top_k={args.naive_top_k}")
     print(f"        ppr_damping={args.ppr_damping}  ppr_top_k={args.ppr_top_k}")
     print(f"        passage_node_weight={args.passage_node_weight}")
     if args.mode == "ppr":

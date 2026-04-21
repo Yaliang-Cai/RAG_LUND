@@ -122,9 +122,12 @@ class QueryParam:
     """Number of top items to retrieve. Represents entities in 'local' mode and relationships in 'global' mode."""
 
     chunk_top_k: int = int(os.getenv("CHUNK_TOP_K", str(DEFAULT_CHUNK_TOP_K)))
-    """Number of text chunks to retrieve initially from vector search and keep after reranking.
-    If None, defaults to top_k value.
-    """
+    """Final chunk window size: max chunks kept after reranking and score filtering."""
+
+    naive_top_k: int | None = None
+    """Naive VDB retrieval count for mix/naive modes. Decoupled from chunk_top_k so callers
+    can retrieve a larger candidate pool (e.g. 20) before reranking down to chunk_top_k (e.g. 10).
+    None means fall back to chunk_top_k, then top_k."""
 
     qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] = os.getenv(
         "QDRANT_RETRIEVAL_MODE", "dense"
@@ -183,9 +186,13 @@ class QueryParam:
     """
 
     enable_rerank: bool = os.getenv("RERANK_BY_DEFAULT", "true").lower() == "true"
-    """Enable reranking for retrieved text chunks. If True but no rerank model is configured, a warning will be issued.
-    Default is True to enable reranking when rerank model is available.
-    """
+    """Enable reranking for retrieved text chunks."""
+
+    enable_kg_rerank: bool = os.getenv("KG_RERANK_BY_DEFAULT", "true").lower() == "true"
+    """Enable CrossEncoder reranking of KG entities and relations (hybrid/mix modes).
+    Decoupled from enable_rerank so chunk rerank and KG rerank can be toggled independently.
+    Has no effect in ppr/ppr_local modes (which skip KG rerank by design).
+    Default controlled by DEFAULT_ENABLE_KG_RERANK in raganything/constants.py."""
 
     rerank_score_scope: Literal["top_k", "all"] = "all"
     """Controls how many chunk candidates are scored by reranker.
