@@ -29,108 +29,46 @@ relationships from the input text and output them in a strict format.
 
 ---Type Definitions---
 Use ONLY the entity types listed in <Entity_types> in the user message.
-The one-line tests below apply to the default 9-type schema; adapt if the
-user message provides an extended type list.
+Source-grounded means explicitly named in the source as a concrete referent—not a
+local role, filler, or modifier phrase.
 
-- person         : Is it a specific individual human (real, historical, or fictional)?
-- organization   : Is it a named group of humans acting as a collective unit?
-- location       : Is it a named geographic or spatial place?
-- event          : Is it a named occurrence anchored in history, even if temporally fuzzy?
-- artifact       : Is it a human-made physical object you can hold or point at?
-- work           : Is it a named intellectual output that can be cited or deployed?
-                   (covers papers, software, datasets, models, standards, regulations,
-                   product specifications, internal reports, process documents)
-- naturalentity  : Does it exist in the physical world independently of human production?
-- concept        : Is it a stable domain concept with a specific source-grounded referent,
-                   best answered by "what IS it"?
-- process        : Is it a named or stable domain method/procedure with a specific
-                   source-grounded referent, best answered by "how IS IT done"?
-
-Stable/source-grounded does not mean globally famous. It means the phrase is
-explicitly supported by the source as a concrete named referent, named internal
-object, reusable domain concept, or reusable method/procedure, not merely a local
-role, filler, or modifier phrase.
-
-Disambiguation rules:
-  concept vs process   → "Attention Mechanism" (WHAT) = concept;
-                         "Gradient Descent" (HOW)     = process.
-                         When both apply, prefer process.
-  artifact vs work     → H100 GPU (touchable physical chip) = artifact;
-                         GPT-4 (citable/deployable model)   = work.
-                         The chip running a model = artifact; the model itself = work.
-  event vs process     → "Q3 Business Review 2024" (happened once, anchored) = event;
-                         "Quarterly Review Procedure" (repeatable workflow)   = process.
-  work vs process      -> If the text refers to a document, report, plan,
-                         specification, runbook, postmortem, or written artifact,
-                         prefer work. If the text refers to an executed method,
-                         analysis activity, operational procedure, or workflow,
-                         prefer process.
+- person        : named individual human (real, historical, or fictional).
+- organization  : named group of humans acting as a collective unit.
+- location      : named geographic or spatial place.
+- event         : named occurrence anchored in time, even if temporally fuzzy.
+                  One-time anchored occurrence = event; repeatable workflow = process.
+- artifact      : human-made physical object you can hold or point at (chip, device, specimen).
+                  Touchable physical object = artifact; citable/deployable intellectual output = work.
+- work          : named intellectual output: papers, software, datasets, models, standards,
+                  regulations, specifications, reports, plans, runbooks, postmortems.
+                  Text refers to a document/plan/runbook/postmortem = work; executed method/workflow = process.
+- naturalentity : named entity existing in the physical world independently of human production
+                  (gene, species, chemical element, cell line).
+                  Concrete biological/physical object = naturalentity; measurable property or abstraction = concept.
+- concept       : stable named domain concept best answered by "what IS it"
+                  (Attention Mechanism, Ionic Conductivity, Myocardial Fibrosis).
+                  WHAT = concept; HOW = process; when both apply, prefer process.
+- process       : named/reusable method, workflow, procedure, or analysis activity best
+                  answered by "how is it done" (Gradient Descent, CRISPR-Cas9, Homologous Recombination).
 
 Use ONLY the types provided in <Entity_types>. No other type values are permitted.
 
----Ambiguity Protocol---
-Use this protocol only when a candidate mention is relevant but its validity or
-type is unclear. The Extraction Workflow below remains the main execution order.
-When you cannot immediately assign a type, follow these steps in order:
-
-  Step 1  Is it a specific, stable, source-grounded referent, or only a
-          descriptor / modifier / placeholder phrase?
-          "Hybrid vehicle technology" -> descriptor phrase -> DO NOT EXTRACT.
-          "the query", "retrieved documents", "the generator" -> generic/filler -> DO NOT EXTRACT.
-          "Prius" -> named product -> artifact.
-          "Self-Attention" -> stable domain method -> process.
-
-  Step 2  Apply the WHAT / HOW test.
-          "X is ___" completes naturally with a definition?  → concept.
-          "X works by ___" completes naturally with steps?   → process.
-          Both complete? → process. Neither completes? → DO NOT EXTRACT.
-
-  Step 3  Is this entity central to the passage's argument?
-          YES -> concept only if it is an abstract, stable, source-grounded
-                 referent. Otherwise -> DO NOT EXTRACT.
-          NO  -> DO NOT EXTRACT.
-
-Prioritize entities that can form clear, meaningful relationships with other
-extracted entities. Avoid outputting isolated placeholder-like entities that
-cannot connect to anything else in the graph.
-
-Generic mechanisms, roles, objects, or unnamed placeholders belong in
-relationship_keywords or relationship_description unless they are stable named
-concepts, named methods, or concrete named referents.
-
-A correctly dropped entity is always preferable to a wrongly typed one.
-
 ---What Must Never Be Extracted as an Entity---
-The following must NOT appear as entity nodes.
+Never extract the following as entity nodes:
+- metric values (92.3%, 14ms, $2.4M): embed in descriptions instead.
+- role titles (CEO, Director, Engineer): embed in person description and relation description.
+- unnamed generics (a model, the query, retrieved documents, inputs, outputs, results): skip entirely.
+- pure time labels (Q3 2024, FY2023, deadline): skip unless part of a full named entity
+  (e.g. "Q3 2024 Product Review" = event, "Q3 2024 Root Cause Analysis" = process).
+- file/layout noise (paths, filenames, page numbers, bbox, chunk IDs): skip entirely.
+- negated entities: extract them normally as entities.
+- negated relations: do NOT create a positive relation edge; note in entity description instead.
 
-  Metric values   (92.3% accuracy, 14ms, $2.4M revenue)
-                  → Embed in relationship_description as natural language.
-                    Example: "GPT-4 achieved 92.3% accuracy on GLUE (test split)."
-                  → Do NOT extract as a separate entity node.
-
-  Role titles     (CEO, Director, Engineer)
-                  → Embed in relationship_description as natural language.
-                    Example: "Sam Altman serves as CEO of OpenAI since 2023."
-                  → Also include in the person entity_description as backup.
-                  → Do NOT extract as a separate entity node.
-
-  Unnamed generics  ("a model", "the algorithm", "the team", "the query",
-                     "retrieved documents", "the generator", "the layer",
-                     "values", "inputs", "outputs", "results") -> skip entirely.
-                     Do NOT extract a generic placeholder just to satisfy endpoint closure.
-
-  Pure time labels  ("Q3 2024", "FY2023", "deadline", "launch date")
-                    -> skip as standalone entities. Use them as attributes in
-                    descriptions unless they are part of a complete named event
-                    or work, such as "Q3 2024 Product Review".
-
-  File-system noise  (file paths, directory names, filenames, extensions,
-                      chunk IDs, bounding boxes, page numbers, layout labels)
-                  → skip entirely. Examples: /data/results, image_01.jpg,
-                    config.yaml, Page 3, Bounding Box, docbench_results.
-
-  Negated entities  exist and must be extracted normally.
-  Negated relations do NOT exist and must NOT produce a positive edge.
+---Negation Rule---
+  "GPT-3 was trained WITHOUT RLHF"
+  → Extract both GPT-3 (work) and RLHF (process) as entities.
+  → Do NOT create a GPT-3 –[trained_with]→ RLHF relationship edge.
+  → In the GPT-3 description, note: "[negated context: does not use RLHF here]"
 
 ---Canonical Type Rule---
 One surface name → one entity type, stable across the entire extraction run.
@@ -138,17 +76,25 @@ Never output the same surface name with two different types.
 If an entity has dual identity, assign the type matching its PRIMARY FUNCTION
 in the world and hold it globally.
 
+---Ambiguity Protocol---
+Use only when a candidate's validity or type is unclear.
+  1) If the phrase is only a descriptor, modifier, role, or generic placeholder
+     ("the query", "retrieved documents", "the generator"), DO NOT EXTRACT.
+  2) For stable named referents, use the WHAT/HOW test:
+     "X is ..." -> concept; "X works by ..." -> process; if both apply, prefer
+     process; if neither applies, DO NOT EXTRACT.
+  3) Keep only candidates that are central to the passage and can participate in
+     source-supported relationships.
+
+Generic roles, unnamed placeholders, and modifier phrases belong in
+relationship_description, not as entity nodes.
+A correctly dropped entity is always preferable to a wrongly typed one.
+
 ---Depth-1 Rule---
 Extract only the outermost complete named entity.
   "EU AI Act Article 13" → extract "EU AI Act" (work), not "Article 13" alone.
 Exception: extract a sub-component only when it is independently and widely
 referenced by that name outside this document.
-
----Negation Rule---
-  "GPT-3 was trained WITHOUT RLHF"
-  → Extract both GPT-3 (work) and RLHF (process) as entities.
-  → Do NOT create a GPT-3 –[trained_with]→ RLHF relationship edge.
-  → In the GPT-3 description, note: "[negated context: does not use RLHF here]"
 
 ---Entity Output Format---
 Output one line per entity. Fields are separated by {tuple_delimiter}.
@@ -180,16 +126,6 @@ The first field must be the literal string `relation`.
 
   source_entity / target_entity : Must match entity_name exactly as extracted above.
                                   {relation_endpoint_case_rule}
-                                  Endpoint closure is mandatory: every source_entity
-                                  and target_entity in every relation MUST exist as an
-                                  entity_name in the current extraction result. For the
-                                  initial extraction, this means the same output. For a
-                                  continuation/correction prompt, this means the previous
-                                  extraction plus the new or corrected entries. If a new
-                                  relation introduces an endpoint absent from the previous
-                                  extraction, add the missing entity only when it is
-                                  explicitly present in the input and allowed by the Entity
-                                  Rules; otherwise remove the relation.
   relationship_keywords         : One or more high-level keywords. Separate with comma.
                                   Do NOT use {tuple_delimiter} inside this field.
                                   Use lowercase by default; preserve meaningful
@@ -218,6 +154,8 @@ Follow this process before writing the final output.
     negation rules, not merely relation-minimal. Metric values and role titles
     remain attributes in descriptions, not entity endpoints. Negated facts do
     not produce positive relation edges.
+    The number of entities and relations depends solely on the input text's
+    content richness. Do not stop early to match any expected count.
 
 3.  Convert multi-part claims into binary relations.
     If one sentence states that a system uses three modules and is evaluated on
@@ -254,25 +192,18 @@ Follow this process before writing the final output.
     is not evidence; every relationship must be grounded in an explicit statement or a
     direct, source-supported implication from the input.
 
-3.  Before writing {completion_delimiter}, verify endpoint closure:
-    every source_entity and target_entity must exactly match an entity_name in the
-    current extraction result after casing/normalization. For initial extraction,
-    this is the same output; for continuation/correction, this is the previous
-    extraction plus the new or corrected entries. If any relation endpoint is still
-    missing, fix the output by adding the missing source-supported entity or deleting
-    the relation.
 
-4.  Decompose N-ary relationships into binary pairs.
+3.  Decompose N-ary relationships into binary pairs.
     "Alice, Bob, and Carol collaborated on Project X" →
     Alice–Project X, Bob–Project X, Carol–Project X.
 
-5.  Write all entity names and descriptions in the third person.
+4.  Write all entity names and descriptions in the third person.
     Do not use pronouns: "this article", "our company", "I", "you", "he/she".
 
-6.  Output language: {language}.
+5.  Output language: {language}.
     Proper nouns without a widely accepted translation stay in their original language.
 
-7.  After all entities and relationships are output, write the completion signal:
+6.  After all entities and relationships are output, write the completion signal:
     {completion_delimiter}
 
 ---Examples---
@@ -427,15 +358,15 @@ relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimit
 {completion_delimiter}
 """,
 
-    # Example 2 - Enterprise KPI reporting with metrics and role attributes
+    # Example 2 - Enterprise KPI: metrics in descriptions, role in person entity, casing normalization
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-The Q2 Service Performance Report states that Orion Support Platform resolved
+the q2 service performance report states that Orion Support Platform resolved
 98.7% of tickets within 24 hours and recorded an average response time of
-11 minutes. Elena Ruiz, VP of Customer Operations at Northstar Systems,
+11 minutes. Elena Ruiz, VP of Customer Operations at northstar systems,
 presented the report during the Monthly Service Review. The review compared
 Orion Support Platform against Legacy Queue Desk on escalation rate and
 first-response speed.
@@ -459,40 +390,7 @@ relation{tuple_delimiter}Orion Support Platform{tuple_delimiter}Legacy Queue Des
 {completion_delimiter}
 """,
 
-    # Example 3 - Cross-domain academic concept/process boundaries
-    """<Entity_types>
-["person","organization","location","event","artifact","work","naturalentity","concept","process"]
-
-<Input Text>
-```
-The Solid-State Electrolyte Design Framework paper defines Ionic Conductivity
-as a core material property for lithium interface performance. The paper
-describes a Grain Boundary Engineering Workflow that adjusts sintering profiles
-to improve Ionic Conductivity. Researchers use Impedance Spectroscopy to
-measure Ionic Conductivity, then apply Arrhenius Analysis to estimate activation
-energy trends. The framework cites the Lithium Interface Design Whitepaper for
-protocol background.
-```
-
-<Output>
-entity{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}work{tuple_delimiter}Paper described in the text as defining Ionic Conductivity as a core property and documenting methods for electrolyte analysis.
-entity{tuple_delimiter}Ionic Conductivity{tuple_delimiter}concept{tuple_delimiter}Material property described in the text as a core target for lithium interface performance.
-entity{tuple_delimiter}Grain Boundary Engineering Workflow{tuple_delimiter}process{tuple_delimiter}Workflow described in the text as adjusting sintering profiles to improve Ionic Conductivity.
-entity{tuple_delimiter}Impedance Spectroscopy{tuple_delimiter}process{tuple_delimiter}Measurement method described in the text as used to measure Ionic Conductivity.
-entity{tuple_delimiter}Arrhenius Analysis{tuple_delimiter}process{tuple_delimiter}Analysis method described in the text as applied to estimate activation energy trends.
-entity{tuple_delimiter}Lithium Interface Design Whitepaper{tuple_delimiter}work{tuple_delimiter}Whitepaper described in the text as cited for protocol background by the Solid-State Electrolyte Design Framework.
-relation{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}Ionic Conductivity{tuple_delimiter}core property definition{tuple_delimiter}The text states the Solid-State Electrolyte Design Framework defines Ionic Conductivity as a core material property.
-relation{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}Grain Boundary Engineering Workflow{tuple_delimiter}documented workflow{tuple_delimiter}The text states the framework describes a Grain Boundary Engineering Workflow.
-relation{tuple_delimiter}Grain Boundary Engineering Workflow{tuple_delimiter}Ionic Conductivity{tuple_delimiter}property optimization{tuple_delimiter}The text states the Grain Boundary Engineering Workflow improves Ionic Conductivity.
-relation{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}Impedance Spectroscopy{tuple_delimiter}measurement method{tuple_delimiter}The text states the framework uses Impedance Spectroscopy to measure Ionic Conductivity.
-relation{tuple_delimiter}Impedance Spectroscopy{tuple_delimiter}Ionic Conductivity{tuple_delimiter}conductivity measurement{tuple_delimiter}The text states Impedance Spectroscopy measures Ionic Conductivity.
-relation{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}Arrhenius Analysis{tuple_delimiter}analysis method{tuple_delimiter}The text states the framework applies Arrhenius Analysis.
-relation{tuple_delimiter}Arrhenius Analysis{tuple_delimiter}Impedance Spectroscopy{tuple_delimiter}post-measurement analysis{tuple_delimiter}The text states Arrhenius Analysis is applied after Impedance Spectroscopy in the same study flow.
-relation{tuple_delimiter}Solid-State Electrolyte Design Framework{tuple_delimiter}Lithium Interface Design Whitepaper{tuple_delimiter}citation, protocol background{tuple_delimiter}The text states the framework cites the Lithium Interface Design Whitepaper for protocol background.
-{completion_delimiter}
-""",
-
-    # Example 4 - Enterprise event/work/process extraction with time-label handling
+    # Example 3 - Enterprise event/work/process extraction with time-label handling
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
@@ -566,124 +464,52 @@ relation{tuple_delimiter}Priya Nair{tuple_delimiter}April Decision Meeting{tuple
 {completion_delimiter}
 """,
 
-    # Example 6 - Biomedical academic paper with scientific processes
+    # Example 5 - Biomedical trial with location: covers naturalentity, artifact, concept, location; casing normalization shown in Ex2
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
 <Input Text>
 ```
-The CARDIO-RNA Trial studied RNX-41 for Myocardial Fibrosis and compared its
-effects with Doxorubicin in a controlled arm. In a mechanistic experiment,
-researchers used CRISPR-Cas9 to knock out BRCA1 in the MCF-7 Cell Line and then
-measured DNA Repair through Homologous Recombination. A separate assay reported
-that Doxorubicin induced Apoptosis in the MCF-7 Cell Line at Week 12 with p<0.01
-significance.
+The CARDIO-RNA Trial, conducted in Berlin and led by Sofia Meier, studied
+RNX-41 for Myocardial Fibrosis and compared its effects with Doxorubicin in
+a controlled arm. Researchers used CRISPR-Cas9 to knock out BRCA1 in the
+MCF-7 Cell Line, then measured Homologous Recombination activity. A separate
+assay reported that Doxorubicin induced Apoptosis in the MCF-7 Cell Line at
+Week 12 with p<0.01 significance. All procedures followed the ICH E6 GCP Guideline.
 ```
 
 <Output>
-entity{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}event{tuple_delimiter}Trial described in the text as studying RNX-41 for Myocardial Fibrosis and comparing effects with Doxorubicin.
+entity{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}event{tuple_delimiter}Trial described in the text as studying RNX-41 for Myocardial Fibrosis and comparing effects with Doxorubicin in a controlled arm.
+entity{tuple_delimiter}Berlin{tuple_delimiter}location{tuple_delimiter}Location described in the text as where the CARDIO-RNA Trial was conducted.
+entity{tuple_delimiter}Sofia Meier{tuple_delimiter}person{tuple_delimiter}Individual described in the text as leading the CARDIO-RNA Trial.
 entity{tuple_delimiter}RNX-41{tuple_delimiter}artifact{tuple_delimiter}Therapeutic compound described in the text as studied in the CARDIO-RNA Trial for Myocardial Fibrosis.
-entity{tuple_delimiter}Myocardial Fibrosis{tuple_delimiter}concept{tuple_delimiter}Disease concept described in the text as the target condition in the CARDIO-RNA Trial.
+entity{tuple_delimiter}Myocardial Fibrosis{tuple_delimiter}concept{tuple_delimiter}Disease concept described in the text as the target condition studied in the CARDIO-RNA Trial.
 entity{tuple_delimiter}Doxorubicin{tuple_delimiter}artifact{tuple_delimiter}Drug described in the text as used in a controlled arm and as inducing Apoptosis in the MCF-7 Cell Line.
 entity{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}process{tuple_delimiter}Gene editing procedure described in the text as used to knock out BRCA1 in the MCF-7 Cell Line.
 entity{tuple_delimiter}BRCA1{tuple_delimiter}naturalentity{tuple_delimiter}Gene described in the text as knocked out by CRISPR-Cas9 in the MCF-7 Cell Line.
-entity{tuple_delimiter}MCF-7 Cell Line{tuple_delimiter}naturalentity{tuple_delimiter}Cell line described in the text as used in the CRISPR-Cas9 and Doxorubicin assays.
-entity{tuple_delimiter}DNA Repair{tuple_delimiter}process{tuple_delimiter}Biological process described in the text as measured through Homologous Recombination.
-entity{tuple_delimiter}Homologous Recombination{tuple_delimiter}process{tuple_delimiter}DNA repair process described in the text as the mechanism through which DNA Repair was measured.
+entity{tuple_delimiter}MCF-7 Cell Line{tuple_delimiter}naturalentity{tuple_delimiter}Cell line described in the text as used in the CRISPR-Cas9 knockout and Doxorubicin assays.
+entity{tuple_delimiter}Homologous Recombination{tuple_delimiter}process{tuple_delimiter}DNA repair process described in the text as measured after BRCA1 knockout in the MCF-7 Cell Line.
 entity{tuple_delimiter}Apoptosis{tuple_delimiter}process{tuple_delimiter}Biological process described in the text as induced by Doxorubicin in the MCF-7 Cell Line.
+entity{tuple_delimiter}ICH E6 GCP Guideline{tuple_delimiter}work{tuple_delimiter}Regulatory guideline described in the text as followed by all trial procedures.
 relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}RNX-41{tuple_delimiter}trial intervention{tuple_delimiter}The text states the CARDIO-RNA Trial studied RNX-41.
 relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}Myocardial Fibrosis{tuple_delimiter}target condition{tuple_delimiter}The text states the CARDIO-RNA Trial studied RNX-41 for Myocardial Fibrosis.
-relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}Doxorubicin{tuple_delimiter}controlled arm{tuple_delimiter}The text states the trial compared RNX-41 effects with Doxorubicin in a controlled arm.
+relation{tuple_delimiter}RNX-41{tuple_delimiter}Myocardial Fibrosis{tuple_delimiter}therapeutic target{tuple_delimiter}The text states RNX-41 was studied for Myocardial Fibrosis.
+relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}Doxorubicin{tuple_delimiter}controlled arm{tuple_delimiter}The text states the trial compared effects with Doxorubicin in a controlled arm.
+relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}Berlin{tuple_delimiter}trial location{tuple_delimiter}The text states the CARDIO-RNA Trial was conducted in Berlin.
+relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}Sofia Meier{tuple_delimiter}trial leadership{tuple_delimiter}The text states the CARDIO-RNA Trial was led by Sofia Meier.
 relation{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}BRCA1{tuple_delimiter}gene knockout{tuple_delimiter}The text states researchers used CRISPR-Cas9 to knock out BRCA1.
 relation{tuple_delimiter}CRISPR-Cas9{tuple_delimiter}MCF-7 Cell Line{tuple_delimiter}experimental model{tuple_delimiter}The text states CRISPR-Cas9 was used in the MCF-7 Cell Line.
 relation{tuple_delimiter}BRCA1{tuple_delimiter}MCF-7 Cell Line{tuple_delimiter}knockout context{tuple_delimiter}The text states BRCA1 was knocked out in the MCF-7 Cell Line.
-relation{tuple_delimiter}DNA Repair{tuple_delimiter}Homologous Recombination{tuple_delimiter}measurement mechanism{tuple_delimiter}The text states DNA Repair was measured through Homologous Recombination.
+relation{tuple_delimiter}BRCA1{tuple_delimiter}Homologous Recombination{tuple_delimiter}functional assessment{tuple_delimiter}The text states Homologous Recombination activity was measured after BRCA1 knockout.
 relation{tuple_delimiter}Doxorubicin{tuple_delimiter}Apoptosis{tuple_delimiter}drug effect{tuple_delimiter}The text states Doxorubicin induced Apoptosis.
 relation{tuple_delimiter}Doxorubicin{tuple_delimiter}MCF-7 Cell Line{tuple_delimiter}assay model{tuple_delimiter}The text states Doxorubicin induced Apoptosis in the MCF-7 Cell Line.
+relation{tuple_delimiter}CARDIO-RNA Trial{tuple_delimiter}ICH E6 GCP Guideline{tuple_delimiter}protocol compliance{tuple_delimiter}The text states all procedures followed the ICH E6 GCP Guideline.
 {completion_delimiter}
 """,
 
-    # Example 7 - Enterprise migration plan with location coverage
-    """<Entity_types>
-["person","organization","location","event","artifact","work","naturalentity","concept","process"]
-
-<Input Text>
-```
-The Project Helios Migration Plan describes moving the Billing API from Legacy
-Queue to the Aurora Stream Processor. The Helios Migration Workflow ran during
-Change Window CW-2024-09 in Berlin under Maya Patel. The Operations Runbook H-17
-lists the Rollback Procedure and Cache Warmup Procedure that operators must
-follow for backpressure incidents on the Aurora Stream Processor.
-```
-
-<Output>
-entity{tuple_delimiter}Project Helios Migration Plan{tuple_delimiter}work{tuple_delimiter}Migration plan described in the text as moving the Billing API from Legacy Queue to the Aurora Stream Processor.
-entity{tuple_delimiter}Billing API{tuple_delimiter}work{tuple_delimiter}Software API described in the text as moved from Legacy Queue to the Aurora Stream Processor.
-entity{tuple_delimiter}Legacy Queue{tuple_delimiter}work{tuple_delimiter}Software system described in the text as the source system for the Billing API migration.
-entity{tuple_delimiter}Aurora Stream Processor{tuple_delimiter}work{tuple_delimiter}Software system described in the text as the target system for the Billing API migration and as reporting backpressure.
-entity{tuple_delimiter}Helios Migration Workflow{tuple_delimiter}process{tuple_delimiter}Workflow described in the text as running during Change Window CW-2024-09 under Maya Patel.
-entity{tuple_delimiter}Change Window CW-2024-09{tuple_delimiter}event{tuple_delimiter}Named change window described in the text as when the Helios Migration Workflow ran.
-entity{tuple_delimiter}Berlin{tuple_delimiter}location{tuple_delimiter}Location described in the text as where the Helios Migration Workflow ran during Change Window CW-2024-09.
-entity{tuple_delimiter}Maya Patel{tuple_delimiter}person{tuple_delimiter}Individual described in the text as overseeing the Helios Migration Workflow.
-entity{tuple_delimiter}Operations Runbook H-17{tuple_delimiter}work{tuple_delimiter}Runbook described in the text as listing the Rollback Procedure and Cache Warmup Procedure.
-entity{tuple_delimiter}Rollback Procedure{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as listed in Operations Runbook H-17 for operators to follow.
-entity{tuple_delimiter}Cache Warmup Procedure{tuple_delimiter}process{tuple_delimiter}Procedure described in the text as listed in Operations Runbook H-17 for operators to follow.
-relation{tuple_delimiter}Project Helios Migration Plan{tuple_delimiter}Billing API{tuple_delimiter}migration subject{tuple_delimiter}The text states the Project Helios Migration Plan describes moving the Billing API.
-relation{tuple_delimiter}Project Helios Migration Plan{tuple_delimiter}Legacy Queue{tuple_delimiter}migration source{tuple_delimiter}The text states the Billing API is moved from Legacy Queue.
-relation{tuple_delimiter}Project Helios Migration Plan{tuple_delimiter}Aurora Stream Processor{tuple_delimiter}migration target{tuple_delimiter}The text states the Billing API is moved to the Aurora Stream Processor.
-relation{tuple_delimiter}Helios Migration Workflow{tuple_delimiter}Change Window CW-2024-09{tuple_delimiter}execution window{tuple_delimiter}The text states the Helios Migration Workflow ran during Change Window CW-2024-09.
-relation{tuple_delimiter}Helios Migration Workflow{tuple_delimiter}Berlin{tuple_delimiter}execution location{tuple_delimiter}The text states the Helios Migration Workflow ran in Berlin.
-relation{tuple_delimiter}Helios Migration Workflow{tuple_delimiter}Maya Patel{tuple_delimiter}workflow ownership{tuple_delimiter}The text states the Helios Migration Workflow ran under Maya Patel.
-relation{tuple_delimiter}Operations Runbook H-17{tuple_delimiter}Rollback Procedure{tuple_delimiter}runbook procedure{tuple_delimiter}The text states Operations Runbook H-17 lists the Rollback Procedure.
-relation{tuple_delimiter}Operations Runbook H-17{tuple_delimiter}Cache Warmup Procedure{tuple_delimiter}runbook procedure{tuple_delimiter}The text states Operations Runbook H-17 lists the Cache Warmup Procedure.
-relation{tuple_delimiter}Aurora Stream Processor{tuple_delimiter}Rollback Procedure{tuple_delimiter}backpressure response{tuple_delimiter}The text states operators follow the Rollback Procedure if the Aurora Stream Processor reports backpressure.
-relation{tuple_delimiter}Aurora Stream Processor{tuple_delimiter}Cache Warmup Procedure{tuple_delimiter}backpressure response{tuple_delimiter}The text states operators follow the Cache Warmup Procedure if the Aurora Stream Processor reports backpressure.
-{completion_delimiter}
-""",
 ]
 
-PROMPTS["entity_extraction_normalization_examples"] = [
-    # Example 8 - Lowercase source names canonicalized without lexical rewrite
-    """<Entity_types>
-["person","organization","location","event","artifact","work","naturalentity","concept","process"]
-
-<Input Text>
-```
-orion llm assistant integrates the zephyr rag pipeline for Acme Support. The
-implementation note records support tickets and retrieved passages as input
-records while describing the same named assistant and pipeline.
-```
-
-<Output>
-entity{tuple_delimiter}Orion LLM Assistant{tuple_delimiter}work{tuple_delimiter}System described in the text as integrating the Zephyr RAG Pipeline for Acme Support.
-entity{tuple_delimiter}Zephyr RAG Pipeline{tuple_delimiter}process{tuple_delimiter}Pipeline described in the text as integrated into Orion LLM Assistant.
-entity{tuple_delimiter}Acme Support{tuple_delimiter}organization{tuple_delimiter}Named support organization described in the text as the target context for Orion LLM Assistant.
-relation{tuple_delimiter}Orion LLM Assistant{tuple_delimiter}Zephyr RAG Pipeline{tuple_delimiter}integration, retrieval architecture{tuple_delimiter}The text states Orion LLM Assistant integrates the Zephyr RAG Pipeline.
-relation{tuple_delimiter}Orion LLM Assistant{tuple_delimiter}Acme Support{tuple_delimiter}support deployment{tuple_delimiter}The text states Orion LLM Assistant integrates the Zephyr RAG Pipeline for Acme Support.
-{completion_delimiter}
-""",
-    # Example 9 - Preserve documentation referent and uppercase names
-    """<Entity_types>
-["person","organization","location","event","artifact","work","naturalentity","concept","process"]
-
-<Input Text>
-```
-OpenAI API documentation explains how BERT can be used for semantic search in
-the Atlas Help Center Guide. The documentation records latency in milliseconds
-as a performance attribute and references user questions as query inputs.
-```
-
-<Output>
-entity{tuple_delimiter}OpenAI API Documentation{tuple_delimiter}work{tuple_delimiter}Documentation described in the text as explaining how BERT can be used for semantic search.
-entity{tuple_delimiter}BERT{tuple_delimiter}work{tuple_delimiter}Model described in the text as usable for semantic search according to the OpenAI API Documentation.
-entity{tuple_delimiter}Semantic Search{tuple_delimiter}process{tuple_delimiter}Stable search procedure described in the text as a use case for BERT.
-entity{tuple_delimiter}Atlas Help Center Guide{tuple_delimiter}work{tuple_delimiter}Guide described in the text as the context where the OpenAI API Documentation explains BERT usage for semantic search.
-relation{tuple_delimiter}OpenAI API Documentation{tuple_delimiter}BERT{tuple_delimiter}usage guidance, semantic search{tuple_delimiter}The text states the OpenAI API Documentation explains how BERT can be used for semantic search.
-relation{tuple_delimiter}BERT{tuple_delimiter}Semantic Search{tuple_delimiter}model usage{tuple_delimiter}The text states BERT can be used for semantic search.
-relation{tuple_delimiter}OpenAI API Documentation{tuple_delimiter}Atlas Help Center Guide{tuple_delimiter}documentation context{tuple_delimiter}The text states the OpenAI API Documentation explains BERT usage in the Atlas Help Center Guide.
-{completion_delimiter}
-    """,
-]
+PROMPTS["entity_extraction_normalization_examples"] = []
 
 # Fallback copy used when integrations accidentally omit the primary
 # normalization-example key during prompt assembly.
@@ -814,7 +640,8 @@ Consider the conversation history if provided to maintain conversational flow an
   - Scrutinize `Document Chunks` in the **Context**. Identify and extract all pieces of information that are directly relevant to answering the user query.
   - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
   - Track the reference_id of the document chunk which directly support the facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate the appropriate citations.
-  - Generate a **References** section at the end of the response. Each reference document must directly support the facts presented in the response.
+  - Generate a **References** section at the end of the response. ONLY include reference_id values that actually appear in the provided `Reference Document List`. Do NOT invent or hallucinate reference_id values that are not in the list.
+  - Each reference document must directly support the facts presented in the response.
   - Do not generate anything after the reference section.
 
 2. Content & Grounding:
@@ -829,7 +656,7 @@ Consider the conversation history if provided to maintain conversational flow an
 4. References Section Format:
   - The References section should be under heading: `### References`
   - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
-  - The Document Title in the citation must retain its original language.
+  - The Document Title must be taken VERBATIM from the `Reference Document List`. Do NOT invent document titles.
   - Output each citation on an individual line
   - Provide maximum of 5 most relevant citations.
   - Do not generate footnotes section or any comment, summary, or explanation after the references.

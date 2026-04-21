@@ -2355,7 +2355,7 @@ class ProcessorMixin:
     async def _batch_add_belongs_to_relations_by_chunk_mapping(
         self,
         chunk_results: List[Tuple],
-        chunk_to_modal_entity: Dict[str, Tuple[str, str]],
+        chunk_to_modal_entity: Dict[str, Tuple[str, str] | str],
         chunk_to_file_path: Dict[str, str],
     ) -> List[Tuple]:
         enhanced_chunk_results = []
@@ -2376,7 +2376,24 @@ class ProcessorMixin:
                             break
 
             if chunk_id and chunk_id in chunk_to_modal_entity:
-                modal_entity_name, modal_entity_type = chunk_to_modal_entity[chunk_id]
+                modal_entity_value = chunk_to_modal_entity[chunk_id]
+                if isinstance(modal_entity_value, (tuple, list)):
+                    modal_entity_name = str(modal_entity_value[0]).strip()
+                    raw_modal_entity_type = (
+                        modal_entity_value[1]
+                        if len(modal_entity_value) > 1
+                        else "multimodal"
+                    )
+                    modal_entity_type = (
+                        str(raw_modal_entity_type).strip()
+                        or "multimodal"
+                    )
+                else:
+                    modal_entity_name = str(modal_entity_value).strip()
+                    modal_entity_type = "multimodal"
+                if not modal_entity_name:
+                    enhanced_chunk_results.append((maybe_nodes, maybe_edges))
+                    continue
                 file_path = chunk_to_file_path.get(chunk_id, "multimodal_content")
 
                 # Add belongs_to relations for all extracted entities

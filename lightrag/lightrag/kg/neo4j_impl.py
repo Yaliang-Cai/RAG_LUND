@@ -726,6 +726,9 @@ class Neo4JStorage(BaseGraphStorage):
         Returns:
             A dictionary mapping each (src, tgt) tuple to the sum of their degrees.
         """
+        if not edge_pairs:
+            return {}
+
         # Collect unique node IDs from all edge pairs.
         unique_node_ids = {src for src, _ in edge_pairs}
         unique_node_ids.update({tgt for _, tgt in edge_pairs})
@@ -738,6 +741,55 @@ class Neo4JStorage(BaseGraphStorage):
         for src, tgt in edge_pairs:
             edge_degrees[(src, tgt)] = degrees.get(src, 0) + degrees.get(tgt, 0)
         return edge_degrees
+
+    @READ_RETRY
+    async def edge_degrees_batch_excluding_synonym(
+        self, edge_pairs: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], int]:
+        """Calculate edge degrees while ignoring SYNONYM relationships."""
+        if not edge_pairs:
+            return {}
+
+        unique_node_ids = {src for src, _ in edge_pairs}
+        unique_node_ids.update({tgt for _, tgt in edge_pairs})
+
+        workspace_label = self._get_workspace_label()
+        async with self._driver.session(
+            database=self._DATABASE, default_access_mode="READ"
+        ) as session:
+            query = f"""
+                UNWIND $node_ids AS id
+                MATCH (n:`{workspace_label}` {{entity_id: id}})
+                OPTIONAL MATCH (n)-[r]-()
+                WITH n, r
+                RETURN n.entity_id AS entity_id,
+                       sum(CASE
+                           WHEN r IS NULL THEN 0
+                           WHEN toUpper(coalesce(r.edge_type, '')) = 'SYNONYM' THEN 0
+                           WHEN toLower(coalesce(r.provenance, '')) = 'synonym_detection' THEN 0
+                           WHEN coalesce(r.source_id, '') = ''
+                                AND (
+                                    toLower(coalesce(r.keywords, '')) CONTAINS 'synonym'
+                                    OR toLower(coalesce(r.keywords, '')) CONTAINS 'alias'
+                                ) THEN 0
+                           ELSE 1
+                       END) AS degree
+            """
+            result = await session.run(query, node_ids=list(unique_node_ids))
+            degrees = {}
+            async for record in result:
+                degrees[record["entity_id"]] = int(record["degree"] or 0)
+            await result.consume()
+
+            for nid in unique_node_ids:
+                if nid not in degrees:
+                    logger.warning(f"[{self.workspace}] No node found with label '{nid}'")
+                    degrees[nid] = 0
+
+        return {
+            (src, tgt): degrees.get(src, 0) + degrees.get(tgt, 0)
+            for src, tgt in edge_pairs
+        }
 
     @READ_RETRY
     async def get_edge(

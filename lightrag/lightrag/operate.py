@@ -3743,7 +3743,8 @@ async def _merge_edges_then_upsert(
             # 6. Log once at the end if any update occurred
             if updated:
                 status_message = (
-                    f"Chunks appended from relation: `{existing_entity_id}`"
+                    f"Chunks appended to relation endpoint entity: `{existing_entity_id}` "
+                    f"from relation `{src_id}`~`{tgt_id}`"
                 )
                 logger.info(status_message)
                 if pipeline_status is not None and pipeline_status_lock is not None:
@@ -4398,23 +4399,24 @@ async def extract_entities(
     extraction_examples: list[str] = base_extraction_examples
     if enable_surface_normalization:
         normalization_examples = PROMPTS.get("entity_extraction_normalization_examples")
-        if not normalization_examples:
-            normalization_examples = PROMPTS.get(
-                "entity_extraction_normalization_examples_fallback", []
+        if normalization_examples:
+            extraction_examples.extend(normalization_examples)
+        else:
+            fallback_examples = PROMPTS.get(
+                "entity_extraction_normalization_examples_fallback"
             )
-            if normalization_examples:
+            if fallback_examples:
                 logger.warning(
                     "Using fallback normalization examples because "
                     "'entity_extraction_normalization_examples' is missing or empty."
                 )
-        if normalization_examples:
-            extraction_examples.extend(normalization_examples)
-        else:
-            logger.warning(
-                "Surface normalization is enabled but "
-                "normalization examples are unavailable; falling back to base "
-                "extraction examples only."
-            )
+                extraction_examples.extend(fallback_examples)
+            elif normalization_examples is None and fallback_examples is None:
+                logger.warning(
+                    "Surface normalization is enabled but normalization-example "
+                    "prompt keys are missing; falling back to base extraction "
+                    "examples only."
+                )
 
     examples = "\n".join(extraction_examples)
 
@@ -6966,9 +6968,20 @@ async def _find_most_related_edges_from_entities(
     edge_pairs_tuples = list(all_edges)  # all_edges is already a list of tuples
 
     # Call the batched functions concurrently.
+    exclude_synonym_edges = _should_exclude_synonym_edges(query_param)
+    filtered_degree_func = getattr(
+        knowledge_graph_inst,
+        "edge_degrees_batch_excluding_synonym",
+        None,
+    )
+    edge_degree_coro = (
+        filtered_degree_func(edge_pairs_tuples)
+        if exclude_synonym_edges and callable(filtered_degree_func)
+        else knowledge_graph_inst.edge_degrees_batch(edge_pairs_tuples)
+    )
     edge_data_dict, edge_degrees_dict = await asyncio.gather(
         knowledge_graph_inst.get_edges_batch(edge_pairs_dicts),
-        knowledge_graph_inst.edge_degrees_batch(edge_pairs_tuples),
+        edge_degree_coro,
     )
 
     # Reconstruct edge_datas list in the same order as the deduplicated results.
@@ -6989,7 +7002,7 @@ async def _find_most_related_edges_from_entities(
             }
             all_edges_data.append(combined)
 
-    if _should_exclude_synonym_edges(query_param):
+    if exclude_synonym_edges:
         before = len(all_edges_data)
         all_edges_data = [e for e in all_edges_data if not _is_synonym_edge(e)]
         filtered = before - len(all_edges_data)
