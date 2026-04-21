@@ -124,7 +124,7 @@ try:
 except ImportError:
     pypinyin = None
     _PYPINYIN_AVAILABLE = False
-    logger.warning(
+    logger.debug(
         "pypinyin is not installed. Chinese pinyin sorting will use simple string sorting."
     )
 
