@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import re
 import string
 from collections import Counter
@@ -111,8 +112,6 @@ def get_eval_query_overrides(dataset: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Dataset load functions
 # ---------------------------------------------------------------------------
-import random
-
 
 def _sample(items: list, n: int, seed: int) -> list:
     rng = random.Random(seed)
@@ -170,7 +169,8 @@ def load_musique(n: int = 500, seed: int = 42) -> list[dict]:
 def load_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
     """Load 2WikiMultiHopQA dev set. supporting_facts = list of sentence strings."""
     from datasets import load_dataset
-    ds = load_dataset("framolfese/2WikiMultihopQA", split="validation")
+    # framolfese/ is the working public mirror; original plan used voidful/ which has a broken loading script
+    ds = load_dataset("framolfese/2WikiMultihopQA", split="validation", trust_remote_code=True)
     raw = list(ds)
     sampled = _sample(raw, n, seed)
     result = []

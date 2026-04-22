@@ -135,6 +135,7 @@ def _check_items(items, expect_supporting: bool):
         if expect_supporting:
             assert "supporting_facts" in item
             assert isinstance(item["supporting_facts"], list)
+            assert len(item["supporting_facts"]) > 0
             assert all(isinstance(f, str) for f in item["supporting_facts"])
         else:
             assert item.get("supporting_facts") is None
