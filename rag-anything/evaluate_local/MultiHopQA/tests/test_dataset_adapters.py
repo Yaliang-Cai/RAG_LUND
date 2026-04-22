@@ -113,3 +113,64 @@ def test_get_eval_query_overrides_2wiki():
 def test_get_eval_query_overrides_unknown_raises():
     with pytest.raises(ValueError):
         get_eval_query_overrides("unknown_dataset")
+
+
+# ---------------------------------------------------------------------------
+# Load function tests — use n=3 to keep fast; requires internet/HF cache
+# ---------------------------------------------------------------------------
+from evaluate_local.MultiHopQA.dataset_adapters import (
+    load_hotpotqa,
+    load_musique,
+    load_2wiki,
+    load_simpleqa,
+)
+
+
+def _check_items(items, expect_supporting: bool):
+    assert len(items) > 0
+    for item in items:
+        assert "id" in item
+        assert "question" in item and item["question"]
+        assert "answer" in item and item["answer"]
+        if expect_supporting:
+            assert "supporting_facts" in item
+            assert isinstance(item["supporting_facts"], list)
+            assert all(isinstance(f, str) for f in item["supporting_facts"])
+        else:
+            assert item.get("supporting_facts") is None
+
+
+def test_load_hotpotqa_returns_correct_shape():
+    items = load_hotpotqa(n=3, seed=42)
+    assert len(items) == 3
+    _check_items(items, expect_supporting=True)
+
+
+def test_load_musique_returns_correct_shape():
+    items = load_musique(n=3, seed=42)
+    assert len(items) == 3
+    _check_items(items, expect_supporting=True)
+
+
+def test_load_2wiki_returns_correct_shape():
+    items = load_2wiki(n=3, seed=42)
+    assert len(items) == 3
+    _check_items(items, expect_supporting=True)
+
+
+def test_load_simpleqa_returns_correct_shape():
+    items = load_simpleqa(n=3, seed=42)
+    assert len(items) == 3
+    _check_items(items, expect_supporting=False)
+
+
+def test_load_hotpotqa_seed_reproducible():
+    a = load_hotpotqa(n=5, seed=42)
+    b = load_hotpotqa(n=5, seed=42)
+    assert [x["id"] for x in a] == [x["id"] for x in b]
+
+
+def test_load_hotpotqa_different_seeds_differ():
+    a = load_hotpotqa(n=5, seed=42)
+    b = load_hotpotqa(n=5, seed=99)
+    assert [x["id"] for x in a] != [x["id"] for x in b]

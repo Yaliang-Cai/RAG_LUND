@@ -106,3 +106,103 @@ def get_eval_query_overrides(dataset: str) -> dict[str, str]:
     if key not in _DATASET_OVERRIDES:
         raise ValueError(f"Unknown dataset: {dataset!r}. Valid: {sorted(_DATASET_OVERRIDES)}")
     return dict(_DATASET_OVERRIDES[key])
+
+
+# ---------------------------------------------------------------------------
+# Dataset load functions
+# ---------------------------------------------------------------------------
+import random
+
+
+def _sample(items: list, n: int, seed: int) -> list:
+    rng = random.Random(seed)
+    if n >= len(items):
+        return list(items)
+    return rng.sample(items, n)
+
+
+def load_hotpotqa(n: int = 500, seed: int = 42) -> list[dict]:
+    """Load HotpotQA distractor dev set. supporting_facts = list of sentence strings."""
+    from datasets import load_dataset
+    ds = load_dataset("hotpot_qa", "distractor", split="validation", trust_remote_code=True)
+    raw = list(ds)
+    sampled = _sample(raw, n, seed)
+    result = []
+    for row in sampled:
+        # Build a mapping: title -> list[sentence_text]
+        ctx = {title: sents for title, sents in zip(row["context"]["title"], row["context"]["sentences"])}
+        facts = []
+        for title, sent_id in zip(row["supporting_facts"]["title"], row["supporting_facts"]["sent_id"]):
+            sents = ctx.get(title, [])
+            if sent_id < len(sents):
+                facts.append(sents[sent_id])
+        result.append({
+            "id": row["id"],
+            "question": row["question"],
+            "answer": row["answer"],
+            "supporting_facts": facts,
+        })
+    return result
+
+
+def load_musique(n: int = 500, seed: int = 42) -> list[dict]:
+    """Load MuSiQue answerable dev set. supporting_facts = list of supporting paragraph texts."""
+    from datasets import load_dataset
+    ds = load_dataset("dgslibisey/MuSiQue", split="validation", trust_remote_code=True)
+    raw = [row for row in ds if row.get("answerable", True)]
+    sampled = _sample(raw, n, seed)
+    result = []
+    for row in sampled:
+        facts = [
+            p["paragraph_text"]
+            for p in row.get("paragraphs", [])
+            if p.get("is_supporting", False)
+        ]
+        result.append({
+            "id": row["id"],
+            "question": row["question"],
+            "answer": row["answer"],
+            "supporting_facts": facts,
+        })
+    return result
+
+
+def load_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
+    """Load 2WikiMultiHopQA dev set. supporting_facts = list of sentence strings."""
+    from datasets import load_dataset
+    ds = load_dataset("framolfese/2WikiMultihopQA", split="validation")
+    raw = list(ds)
+    sampled = _sample(raw, n, seed)
+    result = []
+    for row in sampled:
+        # context: {"title": [...], "sentences": [[...]]}
+        ctx = {title: sents for title, sents in zip(row["context"]["title"], row["context"]["sentences"])}
+        facts = []
+        for title, sent_id in zip(row["supporting_facts"]["title"], row["supporting_facts"]["sent_id"]):
+            sents = ctx.get(title, [])
+            if sent_id < len(sents):
+                facts.append(sents[sent_id])
+        result.append({
+            "id": row["id"],
+            "question": row["question"],
+            "answer": row["answer"],
+            "supporting_facts": facts,
+        })
+    return result
+
+
+def load_simpleqa(n: int = 500, seed: int = 42) -> list[dict]:
+    """Load SimpleQA test set. No supporting facts."""
+    from datasets import load_dataset
+    ds = load_dataset("basicv8vc/SimpleQA", split="test", trust_remote_code=True)
+    raw = list(ds)
+    sampled = _sample(raw, n, seed)
+    result = []
+    for row in sampled:
+        result.append({
+            "id": row.get("id", row["problem"]),
+            "question": row["problem"],
+            "answer": row["answer"],
+            "supporting_facts": None,
+        })
+    return result
