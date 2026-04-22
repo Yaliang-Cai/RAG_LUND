@@ -90,6 +90,7 @@ DEFAULT_PPR_QA_TOP_K = 5           # chunks fed to LLM after PPR retrieval (Hipp
 DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS = 65536
 DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS = 8192
 DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS = 200
+DEFAULT_RECOGNITION_DIFFLIB_CUTOFF = 0.5       # fuzzy-match cutoff: LLM output → entity_id
 
 # TODO: Deprated. All conversation_history messages is send to LLM.
 DEFAULT_HISTORY_TURNS = 0

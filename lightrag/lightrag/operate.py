@@ -80,6 +80,7 @@ from lightrag.constants import (
     DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
     DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
     DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
+    DEFAULT_RECOGNITION_DIFFLIB_CUTOFF,
 )
 from lightrag.kg.shared_storage import get_storage_keyed_lock
 import time
@@ -6224,6 +6225,7 @@ async def _recognition_memory_filter(
     recognition_prompt_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
     recognition_prompt_output_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
     recognition_prompt_reserved_tokens: int = DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
+    recognition_difflib_cutoff: float = DEFAULT_RECOGNITION_DIFFLIB_CUTOFF,
 ) -> dict[str, float]:
     """HippoRAG2-style recognition memory filter for global PPR entity seeds.
 
@@ -6257,12 +6259,18 @@ async def _recognition_memory_filter(
     top_rels = rel_results
     top_nodes = node_datas
 
-    # --- Step 2: fact_scores — max across triplets for same entity ---
-    fact_scores: dict[str, float] = {}
+    # --- Step 2: fact_scores — mean across triplets for same entity ---
+    # Using mean rather than max: multiple co-occurrences in high-scoring facts
+    # indicate stronger query relevance (HippoRAG2 number_of_occurs averaging).
+    fact_score_accum: dict[str, list[float]] = {}
     for rel in top_rels:
+        score = rel.get("distance", 0.0)
         for eid in (rel.get("src_id"), rel.get("tgt_id")):
             if eid:
-                fact_scores[eid] = max(fact_scores.get(eid, 0.0), rel.get("distance", 0.0))
+                fact_score_accum.setdefault(eid, []).append(score)
+    fact_scores: dict[str, float] = {
+        eid: sum(v) / len(v) for eid, v in fact_score_accum.items()
+    }
 
     # --- Step 3: Independent min-max normalisation ---
     norm_vdb = _min_max_norm({
@@ -6297,7 +6305,7 @@ async def _recognition_memory_filter(
     # --- Step 5: Build LLM prompt (with token budget guard) ---
     prompt_middle = "\n\nRetrieved facts (src | relation | tgt):\n"
     prompt_suffix = (
-        "\n\nReturn the relevant entity identifiers only, one per line. "
+        f"\n\nReturn up to {linking_top_k} relevant entity identifiers, one per line. "
         "Output ONLY the identifier (the part before ':' if a description follows). "
         "Entities appearing as src or tgt endpoints in the facts section are also valid candidates. "
         "If none are relevant, return an empty response."
@@ -6443,16 +6451,19 @@ async def _recognition_memory_filter(
             continue
         # Remove anything after the first ": " that the LLM may have copied from the prompt
         candidate_id = line.split(": ")[0].strip()
-        matches = difflib.get_close_matches(candidate_id, all_candidate_ids, n=1, cutoff=0.6)
+        matches = difflib.get_close_matches(candidate_id, all_candidate_ids, n=1, cutoff=recognition_difflib_cutoff)
         if matches:
             recognized_ids.add(matches[0])
 
     # --- Step 8: Merge weights ---
+    # LLM-recognized entities always enter the result; entities with zero
+    # normalized score (normalization floor or missing from VDB) receive a
+    # small floor weight (0.1) so they are not silently dropped.
+    FLOOR_WEIGHT = 0.1
     result: dict[str, float] = {}
     for eid in recognized_ids:
         w = max(norm_vdb.get(eid, 0.0), norm_fact.get(eid, 0.0))
-        if w > 0.0:
-            result[eid] = w
+        result[eid] = w if w > 0.0 else FLOOR_WEIGHT
 
     # --- Step 9: Truncate to top linking_top_k (HippoRAG2 link_top_k) ---
     if linking_top_k > 0 and len(result) > linking_top_k:
@@ -6508,12 +6519,21 @@ async def _ppr_rank_chunks_global(
 
     passage_node_weight = query_param.passage_node_weight
 
+    await engine._ensure_loaded()
+
+    # Hub penalty (HippoRAG2-aligned): divide by number of associated chunks,
+    # which measures entity specificity more directly than graph degree.
+    if query_param.hub_penalty_threshold > 0:
+        entity_to_chunks = engine._entity_to_chunks
+        for eid in list(entity_seed_weights.keys()):
+            n_chunks = len(entity_to_chunks.get(eid, []))
+            if n_chunks > query_param.hub_penalty_threshold:
+                entity_seed_weights[eid] /= n_chunks
+
     # Normalise entity seeds to sum=1
     entity_total = sum(entity_seed_weights.values())
     if entity_total > 0:
         entity_seed_weights = {k: v / entity_total for k, v in entity_seed_weights.items()}
-
-    await engine._ensure_loaded()
 
     # HippoRAG2-aligned full-graph chunk pool: ALL chunks in the knowledge graph are
     # included as PPR nodes, not just neighbours of seed entities.  This enables true
@@ -6666,6 +6686,12 @@ async def _ppr_rank_chunks(
             ),
             default=DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
         )
+        recognition_difflib_cutoff = float(
+            text_chunks_db.global_config.get(
+                "recognition_difflib_cutoff",
+                DEFAULT_RECOGNITION_DIFFLIB_CUTOFF,
+            )
+        )
         if llm_func and (node_datas or rel_results):
             try:
                 recognized = await _recognition_memory_filter(
@@ -6678,6 +6704,7 @@ async def _ppr_rank_chunks(
                     recognition_prompt_max_tokens=recognition_prompt_max_tokens,
                     recognition_prompt_output_max_tokens=recognition_prompt_output_max_tokens,
                     recognition_prompt_reserved_tokens=recognition_prompt_reserved_tokens,
+                    recognition_difflib_cutoff=recognition_difflib_cutoff,
                 )
             except Exception as e:
                 logger.warning(
@@ -6706,8 +6733,9 @@ async def _ppr_rank_chunks(
     if not entity_seed_weights:
         return []
 
-    # Step 1b: Hub penalty – down-weight high-degree generic entities
-    if query_param.hub_penalty_threshold > 0:
+    # Step 1b: Hub penalty – local path only (global path applies chunk-count
+    # penalty inside _ppr_rank_chunks_global after the engine is loaded).
+    if not use_global and query_param.hub_penalty_threshold > 0:
         seed_ids_for_degree = list(entity_seed_weights.keys())
         try:
             degrees = await knowledge_graph_inst.node_degrees_batch(seed_ids_for_degree)
@@ -7231,9 +7259,11 @@ async def _get_edge_data(
                 edge_props["weight"] = 1.0
 
             # Keep edge data without rank, maintain vector search order
+            # Preserve VDB distance so recognition memory can build fact_scores correctly.
             combined = {
                 "src_id": k["src_id"],
                 "tgt_id": k["tgt_id"],
+                "distance": k.get("distance", 0.0),
                 "created_at": k.get("created_at", None),
                 **edge_props,
             }

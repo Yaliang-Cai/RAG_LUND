@@ -103,6 +103,7 @@ from raganything.constants import (
     DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
     DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
     DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
+    DEFAULT_RECOGNITION_DIFFLIB_CUTOFF,
     DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION,
     DEFAULT_ENABLE_KEYWORD_CASE_NORMALIZATION,
     DEFAULT_ENTITY_UPPERCASE_ALLOWLIST,
@@ -227,6 +228,7 @@ class LocalRagSettings:
     recognition_prompt_reserved_tokens: int = (
         DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS
     )
+    recognition_difflib_cutoff: float = DEFAULT_RECOGNITION_DIFFLIB_CUTOFF
     enable_entity_surface_normalization: bool = (
         DEFAULT_ENABLE_ENTITY_SURFACE_NORMALIZATION
     )
@@ -499,6 +501,12 @@ class LocalRagSettings:
                 os.getenv(
                     "RAGANYTHING_RECOGNITION_PROMPT_RESERVED_TOKENS",
                     str(DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS),
+                )
+            ),
+            recognition_difflib_cutoff=float(
+                os.getenv(
+                    "RAGANYTHING_RECOGNITION_DIFFLIB_CUTOFF",
+                    str(DEFAULT_RECOGNITION_DIFFLIB_CUTOFF),
                 )
             ),
             enable_entity_surface_normalization=os.getenv(
@@ -1736,6 +1744,7 @@ class LocalRagService:
                 "recognition_prompt_max_tokens": self.settings.recognition_prompt_max_tokens,
                 "recognition_prompt_output_max_tokens": self.settings.recognition_prompt_output_max_tokens,
                 "recognition_prompt_reserved_tokens": self.settings.recognition_prompt_reserved_tokens,
+                "recognition_difflib_cutoff": self.settings.recognition_difflib_cutoff,
                 # V3 knobs are query-time only (QueryParam) and should not be
                 # passed into LightRAG.__init__ for compatibility.
                 "graph_storage": "Neo4JStorage",

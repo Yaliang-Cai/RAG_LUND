@@ -104,7 +104,7 @@ SUPPORTED_IMAGE_EXTENSIONS = [
 DEFAULT_TOP_K = 20        # default and max allowed value for top_k
 DEFAULT_CHUNK_TOP_K = 10  # final window size after reranking (chunk_top_k)
 DEFAULT_NAIVE_TOP_K = 20  # naive VDB retrieval count (mix/naive modes); independent of chunk_top_k
-DEFAULT_QUERY_MODE = "hybrid"   # "naive" | "local" | "global" | "hybrid" | "mix" | "rrf"
+DEFAULT_QUERY_MODE = "hybrid"   # "naive" | "local" | "global" | "hybrid" | "mix" | "rrf" | "ppr"
 DEFAULT_ENABLE_RERANK = True
 DEFAULT_ENABLE_KG_RERANK = True  # rerank entity/relation KG results (hybrid/mix); independent of chunk rerank
 DEFAULT_VLM_ENHANCED = True
@@ -280,8 +280,8 @@ DEFAULT_SYNONYMY_MIN_ENTITY_LEN = 2             # Min entity name length (filter
 # =============================================================================
 # V3: PPR Multi-hop Reasoning (neo4j-milvus branch)
 # =============================================================================
-DEFAULT_ENABLE_MULTI_HOP = False                # Enable/disable V3 PPR multi-hop in queries
-DEFAULT_MULTI_HOP_DEPTH = 2                     # PPR graph search depth
+DEFAULT_ENABLE_MULTI_HOP = False                # [Deprecated] Legacy flag for ppr_local. Use mode="ppr" instead.
+DEFAULT_MULTI_HOP_DEPTH = 2                     # BFS depth for ppr_local subgraph (legacy; unused in global PPR)
 DEFAULT_PPR_DAMPING = 0.5                       # PPR damping factor (alpha)
 DEFAULT_PPR_TOP_K = 50                          # Number of chunks returned by PPR
 DEFAULT_PASSAGE_NODE_WEIGHT = 0.05              # HippoRAG2 param: DPR chunk score scaling in PPR seed
@@ -294,6 +294,7 @@ DEFAULT_PPR_QA_TOP_K = 5                        # Chunks fed to LLM after PPR re
 DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS = 65536   # LLM recognition prompt hard cap for global PPR
 DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS = 8192  # LLM recognition output token cap
 DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS = 200  # Safety reserve for wrappers/system overhead
+DEFAULT_RECOGNITION_DIFFLIB_CUTOFF = 0.5        # difflib fuzzy-match cutoff: LLM output → entity_id (0.0–1.0)
 # Resilience & callback (service-level optional controls)
 # =============================================================================
 # 是否在 LocalRagService 层启用重试与熔断机制。
