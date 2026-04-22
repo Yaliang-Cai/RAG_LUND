@@ -24,7 +24,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _project_root = Path(__file__).resolve().parents[3]
 _lightrag_root = _project_root.parent / "lightrag"
@@ -66,12 +66,17 @@ def _append_jsonl(path: Path, record: dict) -> None:
 
 
 def _aggregate_jsonl(jsonl_path: Path, recall_ks: list[int]) -> dict[str, Any]:
+    if not jsonl_path.exists():
+        return {}
     records = []
     with jsonl_path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
-                records.append(json.loads(line))
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
     if not records:
         return {}
 
@@ -100,10 +105,10 @@ async def _run_mode(
     recall_ks: list[int],
     output_dir: Path,
     resume: bool,
-    score_em: Any,
-    score_f1: Any,
-    score_recall_at_k: Any,
-    get_eval_query_overrides: Any,
+    score_em: Callable[[str, str | list[str]], float],
+    score_f1: Callable[[str, str | list[str]], float],
+    score_recall_at_k: Callable[[list[dict], list[str] | None, int], float | None],
+    get_eval_query_overrides: Callable[[str], dict[str, str]],
 ) -> dict[str, Any]:
     jsonl_path = output_dir / f"{dataset}_{mode}_results.jsonl"
     existing_ids = _load_existing_ids(jsonl_path) if resume else set()
