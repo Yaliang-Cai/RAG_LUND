@@ -2109,3 +2109,35 @@ subgraph 延迟到 `done` 事件时按需查询（避免阻塞 SSE 流启动）�
 
 - 新增约束是“防混淆保护”，不会改变同组实验的正常行为。
 - 旧 manifest 若缺少 `ablation_flags` 元数据，在“已有索引且需要严格隔离”场景下会提示重建/换 workspace，避免历史状态带来不可追溯混合。
+
+---
+
+## 增量更新（2026-04-22，Safe Rerank Batch Backoff）
+
+### 目标
+
+- 给本地 CrossEncoder rerank 增加显存保护，避免默认 batch 过大时直接 OOM。
+- 保持当前“全候选 rerank 优先质量”的策略，不把 `rerank_score_scope` 改成预裁剪。
+- 保证 chunk rerank 与 KG entity/relation rerank 共享同一套 backoff 逻辑。
+
+### 本次结构化改动
+
+| 文件 | 改动 |
+|------|------|
+| `rag-anything/raganything/constants.py` | 新增 `DEFAULT_RERANK_BATCH_SIZE=32`、`DEFAULT_RERANK_ENABLE_OOM_BACKOFF=True`、`DEFAULT_RERANK_MIN_BATCH_SIZE=4` |
+| `rag-anything/raganything/services/local_rag.py` | `LocalRagSettings` 新增 rerank batch/backoff 配置与 env 映射；`build_rerank_func()` 改为显式传入 `batch_size`，并对 OOM 执行 `32 -> 16 -> 8 -> 4` 整次重跑；`4` 仍失败则回退为“不 rerank”；启动日志新增 batch guard 配置输出 |
+| `rag-anything/tests/test_rerank_batch_backoff.py` | 新增正常路径、单次 OOM 退避、多次 OOM 直到 fallback、非 OOM 异常不退避四类测试 |
+| `projects/docs/rerank_batch_backoff_2026-04-22.md` | 补充独立说明文档，记录新常量、退避语义、边界与日志 |
+
+### 执行语义
+
+- 默认 `rerank_batch_size=32`。
+- OOM-like 异常才会触发 backoff；普通错误不伪装成 OOM。
+- 每次 OOM 后都会丢弃当前尝试的全部中间状态，从头用更小 batch 重跑整次 rerank。
+- 退避到 `4` 仍 OOM 时，本次 rerank 直接放弃，沿用上层原始召回 fallback，不返回半成品分数。
+
+### 兼容性说明
+
+- 不修改 `rerank_score_scope` 现有语义。
+- 不改未使用后端，不新增 query 级别参数。
+- 不承诺不同 batch size 下分数 bit-identical；能保证的是同一次成功 rerank 的最终结果只来自某一个 batch size 的一次完整重跑，不混用半成品。

@@ -608,7 +608,7 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         self._client_timeout = _normalize_timeout_seconds(
             os.environ.get(
                 "QDRANT_CLIENT_TIMEOUT",
-                config.get("qdrant", "timeout", fallback=120),
+                config.get("qdrant", "timeout", fallback=240),
             ),
             "QDRANT_CLIENT_TIMEOUT",
         )
@@ -850,6 +850,7 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         top_k: int,
         query_embedding: list[float] = None,
         qdrant_retrieval_mode: str | None = None,
+        candidate_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         if query_embedding is not None:
             embedding = query_embedding
@@ -864,9 +865,28 @@ class QdrantVectorDBStorage(BaseVectorStorage):
             qdrant_retrieval_mode
             or self.global_config.get("qdrant_retrieval_mode")
         )
-        query_filter = models.Filter(
-            must=[workspace_filter_condition(self.effective_workspace)]
-        )
+        filter_conditions: list[Any] = [
+            workspace_filter_condition(self.effective_workspace)
+        ]
+        if candidate_ids is not None:
+            normalized_candidate_ids = [
+                str(candidate_id).strip()
+                for candidate_id in candidate_ids
+                if str(candidate_id).strip()
+            ]
+            if not normalized_candidate_ids:
+                return []
+            qdrant_candidate_ids = [
+                compute_mdhash_id_for_qdrant(
+                    candidate_id,
+                    prefix=self.effective_workspace,
+                )
+                for candidate_id in dict.fromkeys(normalized_candidate_ids)
+            ]
+            filter_conditions.append(
+                models.HasIdCondition(has_id=qdrant_candidate_ids)
+            )
+        query_filter = models.Filter(must=filter_conditions)
         search_params = (
             models.SearchParams(hnsw_ef=self._search_ef)
             if self._search_ef

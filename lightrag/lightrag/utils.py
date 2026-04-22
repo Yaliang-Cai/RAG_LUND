@@ -2465,12 +2465,20 @@ async def pick_by_vector_similarity(
     entity_info: list[dict[str, Any]],
     embedding_func: callable,
     query_embedding=None,
+    retrieval_mode: str = "dense",
+    candidate_retriever: callable | None = None,
 ) -> list[str]:
     """
-    Vector similarity-based text chunk selection algorithm.
+    Retrieval-based text chunk selection inside a candidate chunk pool.
 
-    This algorithm selects text chunks based on cosine similarity between
-    the query embedding and text chunk embeddings.
+    Preferred path:
+    - Use ``candidate_retriever`` to rank the candidate chunk IDs with the
+      configured retrieval mode (dense / bm25 / hybrid) while staying inside
+      the provided candidate pool.
+
+    Fallback path:
+    - If no candidate retriever is available, or it fails, fall back to local
+      dense cosine similarity using chunk vectors already stored in the VDB.
 
     Args:
         query: User's original query string
@@ -2479,9 +2487,12 @@ async def pick_by_vector_similarity(
         num_of_chunks: Number of chunks to select
         entity_info: List of entity information containing chunk IDs
         embedding_func: Embedding function to compute query embedding
+        retrieval_mode: Retrieval mode label for candidate pool ranking
+        candidate_retriever: Optional callable that ranks chunk candidates from
+            the provided chunk-id pool
 
     Returns:
-        List of selected text chunk IDs sorted by similarity (highest first)
+        List of selected text chunk IDs sorted by descending relevance
     """
     logger.debug(
         f"Vector similarity chunk selection: num_of_chunks={num_of_chunks}, entity_info_count={len(entity_info) if entity_info else 0}"
@@ -2491,10 +2502,16 @@ async def pick_by_vector_similarity(
         return []
 
     # Collect all unique chunk IDs from entity info
-    all_chunk_ids = set()
+    all_chunk_ids: list[str] = []
+    seen_chunk_ids: set[str] = set()
     for i, entity in enumerate(entity_info):
         chunk_ids = entity.get("sorted_chunks", [])
-        all_chunk_ids.update(chunk_ids)
+        for chunk_id in chunk_ids:
+            chunk_id_str = str(chunk_id).strip()
+            if not chunk_id_str or chunk_id_str in seen_chunk_ids:
+                continue
+            seen_chunk_ids.add(chunk_id_str)
+            all_chunk_ids.append(chunk_id_str)
 
     if not all_chunk_ids:
         logger.warning(
@@ -2506,7 +2523,49 @@ async def pick_by_vector_similarity(
         f"Vector similarity chunk selection: {len(all_chunk_ids)} unique chunk IDs collected"
     )
 
-    all_chunk_ids = list(all_chunk_ids)
+    if candidate_retriever is not None:
+        try:
+            ranked_candidates = await candidate_retriever(
+                query=query,
+                chunk_ids=all_chunk_ids,
+                top_k=num_of_chunks,
+                query_embedding=query_embedding,
+                retrieval_mode=retrieval_mode,
+            )
+            selected_chunk_ids: list[str] = []
+            selected_seen: set[str] = set()
+            for candidate in ranked_candidates or []:
+                chunk_id = candidate.get("chunk_id") or candidate.get("id")
+                chunk_id_str = str(chunk_id).strip() if chunk_id is not None else ""
+                if (
+                    not chunk_id_str
+                    or chunk_id_str not in seen_chunk_ids
+                    or chunk_id_str in selected_seen
+                ):
+                    continue
+                selected_seen.add(chunk_id_str)
+                selected_chunk_ids.append(chunk_id_str)
+                if len(selected_chunk_ids) >= num_of_chunks:
+                    break
+
+            if selected_chunk_ids:
+                logger.debug(
+                    "Candidate-pool retrieval chunk selection: %s chunks from %s candidates (mode=%s)",
+                    len(selected_chunk_ids),
+                    len(all_chunk_ids),
+                    retrieval_mode,
+                )
+                return selected_chunk_ids
+
+            logger.warning(
+                "Candidate-pool retrieval chunk selection returned no ranked candidates; falling back to dense vector similarity"
+            )
+        except Exception as e:
+            logger.warning(
+                "Candidate-pool retrieval chunk selection failed (mode=%s); falling back to dense vector similarity. reason=%s",
+                retrieval_mode,
+                e,
+            )
 
     try:
         # Use pre-computed query embedding if provided, otherwise compute it

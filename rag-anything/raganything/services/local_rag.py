@@ -18,6 +18,7 @@ import logging
 import logging.config
 import os
 import argparse
+import gc
 import ipaddress
 import shutil
 from dataclasses import dataclass, field
@@ -35,6 +36,11 @@ from lightrag.types import GPTKeywordExtractionFormat
 from lightrag.utils import EmbeddingFunc, Tokenizer
 from openai import AsyncOpenAI
 from sentence_transformers import CrossEncoder, SentenceTransformer
+
+try:
+    import torch
+except Exception:  # pragma: no cover - optional runtime dependency
+    torch = None
 
 from raganything import RAGAnything, RAGAnythingConfig
 from raganything.callbacks import MetricsCallback, ProcessingCallback
@@ -81,6 +87,9 @@ from raganything.constants import (
     DEFAULT_QDRANT_SPARSE_BM25_MODEL,
     DEFAULT_QDRANT_RETRIEVAL_MODE,
     DEFAULT_MIN_RERANK_SCORE,
+    DEFAULT_RERANK_BATCH_SIZE,
+    DEFAULT_RERANK_ENABLE_OOM_BACKOFF,
+    DEFAULT_RERANK_MIN_BATCH_SIZE,
     DEFAULT_ENABLE_INLINE_CITATIONS,
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
@@ -153,6 +162,9 @@ class LocalRagSettings:
     tiktoken_cache_dir: str = DEFAULT_TIKTOKEN_CACHE_DIR
     embedding_model_path: str = DEFAULT_EMBEDDING_MODEL_PATH
     rerank_model_path: str = DEFAULT_RERANK_MODEL_PATH
+    rerank_batch_size: int = DEFAULT_RERANK_BATCH_SIZE
+    rerank_enable_oom_backoff: bool = DEFAULT_RERANK_ENABLE_OOM_BACKOFF
+    rerank_min_batch_size: int = DEFAULT_RERANK_MIN_BATCH_SIZE
     tokenizer_model_path: str = DEFAULT_TOKENIZER_MODEL_PATH
     vision_model_path: str = DEFAULT_VISION_MODEL_PATH
 
@@ -261,6 +273,23 @@ class LocalRagSettings:
             tiktoken_cache_dir=os.getenv("TIKTOKEN_CACHE_DIR", DEFAULT_TIKTOKEN_CACHE_DIR),
             embedding_model_path=os.getenv("RAGANYTHING_EMBEDDING_MODEL_PATH", DEFAULT_EMBEDDING_MODEL_PATH),
             rerank_model_path=os.getenv("RAGANYTHING_RERANK_MODEL_PATH", DEFAULT_RERANK_MODEL_PATH),
+            rerank_batch_size=int(
+                os.getenv(
+                    "RAGANYTHING_RERANK_BATCH_SIZE",
+                    str(DEFAULT_RERANK_BATCH_SIZE),
+                )
+            ),
+            rerank_enable_oom_backoff=os.getenv(
+                "RAGANYTHING_RERANK_ENABLE_OOM_BACKOFF",
+                str(DEFAULT_RERANK_ENABLE_OOM_BACKOFF),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
+            rerank_min_batch_size=int(
+                os.getenv(
+                    "RAGANYTHING_RERANK_MIN_BATCH_SIZE",
+                    str(DEFAULT_RERANK_MIN_BATCH_SIZE),
+                )
+            ),
             tokenizer_model_path=tokenizer_model_path,
             vision_model_path=vision_model_path,
             log_dir=os.getenv("RAGANYTHING_LOG_DIR", DEFAULT_LOG_DIR),
@@ -685,22 +714,102 @@ def build_embedding_func(
     )
 
 
-def build_rerank_func(reranker_model: CrossEncoder, logger: logging.Logger):
-    async def rerank_func(query: str, documents: list[str], top_n: int) -> list[dict]:
+def _is_rerank_oom_exception(exc: BaseException) -> bool:
+    if torch is not None:
+        cuda_oom_error = getattr(torch.cuda, "OutOfMemoryError", None)
+        if cuda_oom_error is not None and isinstance(exc, cuda_oom_error):
+            return True
+
+    message = str(exc).lower()
+    oom_markers = (
+        "cuda out of memory",
+        "out of memory",
+        "cublas_status_alloc_failed",
+        "cuda error: out of memory",
+        "hip out of memory",
+        "insufficient memory",
+    )
+    return any(marker in message for marker in oom_markers)
+
+
+def _best_effort_clear_rerank_cuda_cache(logger: logging.Logger) -> None:
+    gc.collect()
+    if torch is None or not hasattr(torch, "cuda"):
+        return
+
+    try:
+        if not torch.cuda.is_available():
+            return
+    except Exception:
+        return
+
+    try:
+        torch.cuda.empty_cache()
+    except Exception as exc:  # pragma: no cover - best effort cleanup
+        logger.debug("Skipping torch.cuda.empty_cache after rerank OOM: %s", exc)
+
+
+def _next_rerank_batch_size(current_batch_size: int, min_batch_size: int) -> int | None:
+    if current_batch_size <= min_batch_size:
+        return None
+
+    next_batch_size = max(min_batch_size, current_batch_size // 2)
+    if next_batch_size >= current_batch_size:
+        return None
+    return next_batch_size
+
+
+def build_rerank_func(
+    settings: LocalRagSettings,
+    reranker_model: CrossEncoder,
+    logger: logging.Logger,
+):
+    async def rerank_func(
+        query: str, documents: list[str], top_n: int | None
+    ) -> list[dict]:
         if not documents:
             return []
-        try:
-            pairs = [[query, doc] for doc in documents]
-            scores = reranker_model.predict(pairs)
-            results = [
-                {"index": i, "relevance_score": float(score)}
-                for i, score in enumerate(scores)
-            ]
-            results.sort(key=lambda x: x["relevance_score"], reverse=True)
-            return results[:top_n]
-        except Exception as exc:
-            logger.error(f"Rerank Error: {exc}")
-            return []
+
+        pairs = [[query, doc] for doc in documents]
+        batch_size = max(1, int(settings.rerank_batch_size))
+        min_batch_size = max(1, int(settings.rerank_min_batch_size))
+        enable_oom_backoff = bool(settings.rerank_enable_oom_backoff)
+
+        while True:
+            try:
+                scores = reranker_model.predict(pairs, batch_size=batch_size)
+                results = [
+                    {"index": i, "relevance_score": float(score)}
+                    for i, score in enumerate(scores)
+                ]
+                results.sort(key=lambda x: x["relevance_score"], reverse=True)
+                return results[:top_n] if top_n is not None else results
+            except Exception as exc:
+                if not enable_oom_backoff or not _is_rerank_oom_exception(exc):
+                    logger.error("Rerank Error: %s", exc)
+                    return []
+
+                next_batch_size = _next_rerank_batch_size(batch_size, min_batch_size)
+                if next_batch_size is None:
+                    logger.warning(
+                        "Rerank OOM fallback: batch_size=%s, min_batch_size=%s, documents=%s, reason=%s. Falling back to original retrieved items without rerank.",
+                        batch_size,
+                        min_batch_size,
+                        len(documents),
+                        exc,
+                    )
+                    _best_effort_clear_rerank_cuda_cache(logger)
+                    return []
+
+                logger.warning(
+                    "Rerank OOM backoff: batch_size=%s, next_batch_size=%s, documents=%s, reason=%s. Retrying full rerank from scratch.",
+                    batch_size,
+                    next_batch_size,
+                    len(documents),
+                    exc,
+                )
+                _best_effort_clear_rerank_cuda_cache(logger)
+                batch_size = next_batch_size
 
     return rerank_func
 
@@ -1393,6 +1502,17 @@ class LocalRagService:
         self.settings.qdrant_retrieval_mode = _normalize_qdrant_retrieval_mode(
             self.settings.qdrant_retrieval_mode
         )
+        self.settings.rerank_batch_size = max(1, int(self.settings.rerank_batch_size))
+        self.settings.rerank_min_batch_size = max(
+            1, int(self.settings.rerank_min_batch_size)
+        )
+        if self.settings.rerank_min_batch_size > self.settings.rerank_batch_size:
+            self.logger.warning(
+                "Rerank min batch size exceeds rerank batch size; clamping min_batch_size=%s -> %s",
+                self.settings.rerank_min_batch_size,
+                self.settings.rerank_batch_size,
+            )
+            self.settings.rerank_min_batch_size = self.settings.rerank_batch_size
         normalized_allowlist: list[str] = []
         seen_allowlist: set[str] = set()
         for item in (self.settings.entity_uppercase_allowlist or []):
@@ -1481,6 +1601,12 @@ class LocalRagService:
             self.settings.exclude_synonym_edges,
         )
         self.logger.info(
+            "Rerank batch guard configured: batch_size=%s, oom_backoff=%s, min_batch_size=%s",
+            self.settings.rerank_batch_size,
+            self.settings.rerank_enable_oom_backoff,
+            self.settings.rerank_min_batch_size,
+        )
+        self.logger.info(
             "Text request timeout configured: %.1fs",
             self.settings.text_request_timeout_seconds,
         )
@@ -1523,7 +1649,11 @@ class LocalRagService:
 
         st_model, reranker_model = load_models(self.settings)
         self.embedding_func = build_embedding_func(self.settings, st_model)
-        self.rerank_func = build_rerank_func(reranker_model, self.logger)
+        self.rerank_func = build_rerank_func(
+            self.settings,
+            reranker_model,
+            self.logger,
+        )
         self.llm_model_func = build_llm_model_func(
             self.settings,
             self.text_client,

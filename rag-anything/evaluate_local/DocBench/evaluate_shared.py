@@ -314,6 +314,13 @@ def _build_query_params(
     ablation_flags: AblationFlags | None = None,
     query_mode: str | None = None,
     recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K,
+    keyword_fanout_mode: str = "joined",
+    entity_retrieval_mode: str = "dense",
+    chunk_retrieval_mode: str = "dense",
+    exclude_synonym_edges: bool | None = None,
+    answer_context_mode: str = "kg_prompt",
+    bypass_query_cache: bool = False,
+    bypass_keywords_cache: bool = False,
 ) -> dict[str, Any]:
     flags = ablation_flags or AblationFlags()
     params = dict(DOCBENCH_QUERY_PARAMS)
@@ -324,8 +331,17 @@ def _build_query_params(
             params["mode"] = normalized_mode
     if str(params.get("mode", "")).strip() == "ppr":
         params["recognition_top_k"] = max(0, int(recognition_top_k))
+        params["answer_context_mode"] = "chunk_only_prompt"
     else:
         params.pop("recognition_top_k", None)
+        params["answer_context_mode"] = str(answer_context_mode).strip()
+    params["chunk_qdrant_retrieval_mode"] = str(chunk_retrieval_mode).strip()
+    params["keyword_fanout_mode"] = str(keyword_fanout_mode).strip()
+    params["entity_qdrant_retrieval_mode"] = str(entity_retrieval_mode).strip()
+    params["bypass_query_cache"] = bool(bypass_query_cache)
+    params["bypass_keywords_cache"] = bool(bypass_keywords_cache)
+    if exclude_synonym_edges is not None:
+        params["exclude_synonym_edges"] = bool(exclude_synonym_edges)
     if one_sentence:
         params["user_prompt"] = ONE_SENTENCE_USER_PROMPT
         params["response_type"] = "Single Sentence"
@@ -1869,6 +1885,33 @@ async def main() -> None:
         default=DEFAULT_RECOGNITION_TOP_K,
         help="Recognition-memory relation top-k when query_mode='ppr'. Set 0 to disable.",
     )
+    parser.add_argument(
+        "--keyword_fanout_mode",
+        choices=["joined", "per_keyword_rrf"],
+        default="joined",
+    )
+    parser.add_argument(
+        "--entity_retrieval_mode",
+        choices=["dense", "bm25", "hybrid"],
+        default="dense",
+    )
+    parser.add_argument(
+        "--chunk_retrieval_mode",
+        choices=["dense", "bm25", "hybrid"],
+        default="dense",
+    )
+    parser.add_argument(
+        "--exclude_synonym_edges",
+        choices=["true", "false", "none"],
+        default="none",
+    )
+    parser.add_argument(
+        "--answer_context_mode",
+        choices=["kg_prompt", "chunk_only_prompt"],
+        default="kg_prompt",
+    )
+    parser.add_argument("--bypass_query_cache", action="store_true")
+    parser.add_argument("--bypass_keywords_cache", action="store_true")
     add_ablation_arguments(parser)
     parser.add_argument(
         "--allow_legacy_index_profile_adoption",
@@ -1912,6 +1955,17 @@ async def main() -> None:
         ablation_flags=ablation_flags,
         query_mode=args.query_mode,
         recognition_top_k=args.recognition_top_k,
+        keyword_fanout_mode=args.keyword_fanout_mode,
+        entity_retrieval_mode=args.entity_retrieval_mode,
+        chunk_retrieval_mode=args.chunk_retrieval_mode,
+        exclude_synonym_edges=(
+            None
+            if args.exclude_synonym_edges == "none"
+            else args.exclude_synonym_edges == "true"
+        ),
+        answer_context_mode=args.answer_context_mode,
+        bypass_query_cache=args.bypass_query_cache,
+        bypass_keywords_cache=args.bypass_keywords_cache,
     )
     experiment_id = _build_experiment_id(
         shared_workspace_id=args.shared_workspace_id,
