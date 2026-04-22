@@ -38,6 +38,7 @@ from evaluate_local.ablation_flags import (
 )
 from raganything.constants import (
     DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
+    DEFAULT_KG_CHUNK_SELECTION_SOURCE,
     DEFAULT_RECOGNITION_TOP_K,
     DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS,
     DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
@@ -283,7 +284,28 @@ def build_query_params(args: argparse.Namespace, *, chunk_top_k: int) -> dict[st
         "chunk_top_k": chunk_top_k,
         "enable_rerank": True,
         "rerank_score_scope": "all",
+        "keyword_fanout_mode": str(getattr(args, "keyword_fanout_mode", "joined")).strip(),
+        "entity_qdrant_retrieval_mode": str(
+            getattr(args, "entity_retrieval_mode", "dense")
+        ).strip(),
+        "chunk_qdrant_retrieval_mode": str(
+            getattr(args, "chunk_retrieval_mode", "dense")
+        ).strip(),
+        "kg_chunk_selection_source": str(
+            getattr(
+                args,
+                "kg_chunk_selection_source",
+                DEFAULT_KG_CHUNK_SELECTION_SOURCE,
+            )
+        ).strip(),
+        "bypass_query_cache": bool(getattr(args, "bypass_query_cache", False)),
+        "bypass_keywords_cache": bool(
+            getattr(args, "bypass_keywords_cache", False)
+        ),
     }
+    exclude_synonym_edges = getattr(args, "exclude_synonym_edges", None)
+    if exclude_synonym_edges is not None:
+        query_params["exclude_synonym_edges"] = bool(exclude_synonym_edges)
     query_params.update(get_ablation_flags(args).to_query_kwargs())
     query_params["enable_rerank"] = True
     query_params["rerank_score_scope"] = "all"
@@ -1552,6 +1574,12 @@ def has_matching_survey_retrieval(
         return False
     if str(params.get("rerank_score_scope", "all")) != "all":
         return False
+    if str(
+        params.get("kg_chunk_selection_source", DEFAULT_KG_CHUNK_SELECTION_SOURCE)
+    ) != str(
+        getattr(args, "kg_chunk_selection_source", DEFAULT_KG_CHUNK_SELECTION_SOURCE)
+    ):
+        return False
     stored_flags = AblationFlags.from_mapping(params.get("ablation_flags"))
     if stored_flags is None or stored_flags != expected_flags:
         return False
@@ -1611,6 +1639,12 @@ def has_matching_query_retrieval(
     if enable_rerank != bool(args.enable_rerank):
         return False
     if str(params.get("rerank_score_scope", "all")) != "all":
+        return False
+    if str(
+        params.get("kg_chunk_selection_source", DEFAULT_KG_CHUNK_SELECTION_SOURCE)
+    ) != str(
+        getattr(args, "kg_chunk_selection_source", DEFAULT_KG_CHUNK_SELECTION_SOURCE)
+    ):
         return False
     stored_flags = AblationFlags.from_mapping(params.get("ablation_flags"))
     if stored_flags is None or stored_flags != expected_flags:
@@ -2268,6 +2302,38 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["local", "global", "hybrid", "naive", "mix", "bypass", "ppr_local", "ppr"],
         default="hybrid",
     )
+    p.add_argument(
+        "--keyword_fanout_mode",
+        choices=["joined", "per_keyword_rrf"],
+        default="joined",
+    )
+    p.add_argument(
+        "--entity_retrieval_mode",
+        choices=["dense", "bm25", "hybrid"],
+        default="dense",
+    )
+    p.add_argument(
+        "--chunk_retrieval_mode",
+        choices=["dense", "bm25", "hybrid"],
+        default="dense",
+    )
+    p.add_argument(
+        "--kg-chunk-selection-source",
+        choices=["truncated", "untruncated"],
+        default=DEFAULT_KG_CHUNK_SELECTION_SOURCE,
+        help=(
+            "KG source set for entity/relation-related chunk selection. "
+            "Default keeps prompt-truncated KG results."
+        ),
+    )
+    p.add_argument(
+        "--exclude_synonym_edges",
+        type=as_bool,
+        default=None,
+        help="Override query-time synonym-edge filtering. Omit to keep auto/default behavior.",
+    )
+    p.add_argument("--bypass_query_cache", action="store_true")
+    p.add_argument("--bypass_keywords_cache", action="store_true")
     p.add_argument("--top-k", type=int, default=40)
     p.add_argument(
         "--chunk-top-k",

@@ -912,6 +912,20 @@ def _build_query_cache_params(
         "ppr_damping": query_param.ppr_damping,
         "ppr_top_k": query_param.ppr_top_k,
         "passage_node_weight": query_param.passage_node_weight,
+        "keyword_fanout_mode": getattr(query_param, "keyword_fanout_mode", "joined"),
+        "answer_context_mode": getattr(
+            query_param, "answer_context_mode", "kg_prompt"
+        ),
+        "kg_chunk_selection_source": getattr(
+            query_param, "kg_chunk_selection_source", "truncated"
+        ),
+        "entity_qdrant_retrieval_mode": getattr(
+            query_param, "entity_qdrant_retrieval_mode", None
+        ),
+        "chunk_qdrant_retrieval_mode": getattr(
+            query_param, "chunk_qdrant_retrieval_mode", None
+        ),
+        "exclude_synonym_edges": getattr(query_param, "exclude_synonym_edges", None),
         "history_signature": history_signature,
         "system_prompt_signature": _prompt_signature(system_prompt),
     }
@@ -922,6 +936,187 @@ def _compute_query_cache_args_hash(query: str, query_cache_params: dict[str, Any
     payload = {"query": query, **query_cache_params}
     payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return compute_args_hash(payload_json)
+
+
+def _should_bypass_cache(query_param: QueryParam, cache_type: str) -> bool:
+    if cache_type == "query":
+        return bool(getattr(query_param, "bypass_query_cache", False))
+    if cache_type == "keywords":
+        return bool(getattr(query_param, "bypass_keywords_cache", False))
+    return False
+
+
+def _resolve_answer_context_mode(query_param: QueryParam) -> str:
+    answer_context_mode = str(
+        getattr(query_param, "answer_context_mode", "kg_prompt") or "kg_prompt"
+    ).strip().lower()
+    if getattr(query_param, "mode", None) in ("ppr", "ppr_local"):
+        return "chunk_only_prompt"
+    return answer_context_mode or "kg_prompt"
+
+
+def _resolve_response_system_prompt_template(
+    query_param: QueryParam,
+    *,
+    system_prompt: str | None = None,
+) -> str:
+    if system_prompt:
+        return system_prompt
+    if _resolve_answer_context_mode(query_param) == "chunk_only_prompt":
+        return PROMPTS["naive_rag_response"]
+    return PROMPTS["rag_response"]
+
+
+def _resolve_kg_chunk_selection_inputs(
+    *,
+    search_result: dict[str, Any],
+    truncation_result: dict[str, Any],
+    query_param: QueryParam,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    selection_source = str(
+        getattr(query_param, "kg_chunk_selection_source", "truncated") or "truncated"
+    ).strip().lower()
+    if selection_source == "untruncated":
+        return (
+            search_result.get("final_entities", []),
+            search_result.get("final_relations", []),
+            "untruncated",
+        )
+    if selection_source != "truncated":
+        logger.warning(
+            "Unknown kg_chunk_selection_source=%r, falling back to truncated",
+            selection_source,
+        )
+    return (
+        truncation_result.get("filtered_entities", []),
+        truncation_result.get("filtered_relations", []),
+        "truncated",
+    )
+
+
+def _normalize_store_retrieval_mode(mode: Any, fallback: str) -> str:
+    candidate = str(mode or "").strip().lower()
+    if candidate in {"dense", "bm25", "hybrid"}:
+        return candidate
+    return str(fallback or "dense").strip().lower() or "dense"
+
+
+def _resolve_qdrant_retrieval_mode(query_param: QueryParam, store_kind: str) -> str:
+    fallback = getattr(query_param, "qdrant_retrieval_mode", "dense")
+    if store_kind in {"entity", "relation"}:
+        return _normalize_store_retrieval_mode(
+            getattr(query_param, "entity_qdrant_retrieval_mode", None),
+            fallback,
+        )
+    if store_kind == "chunk":
+        return _normalize_store_retrieval_mode(
+            getattr(query_param, "chunk_qdrant_retrieval_mode", None),
+            fallback,
+        )
+    return _normalize_store_retrieval_mode(fallback, "dense")
+
+
+def _rank_item_key(item: dict[str, Any], item_kind: str) -> str:
+    if item_kind == "entity":
+        return str(item.get("entity_id") or item.get("entity_name") or "")
+    if item_kind == "relation":
+        src = str(item.get("src_id") or "")
+        tgt = str(item.get("tgt_id") or "")
+        return "||".join(sorted([src, tgt]))
+    return str(item.get("chunk_id") or item.get("id") or "")
+
+
+def _rrf_merge_ranked_records(
+    ranking_lists: list[list[dict[str, Any]]],
+    *,
+    item_kind: str,
+    top_k: int,
+    score_field: str = "rrf_score",
+    rrf_k: int = 60,
+) -> list[dict[str, Any]]:
+    scores: dict[str, float] = {}
+    meta: dict[str, dict[str, Any]] = {}
+
+    for ranked in ranking_lists:
+        for rank, item in enumerate(ranked):
+            key = _rank_item_key(item, item_kind)
+            if not key:
+                continue
+            scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
+            if key not in meta:
+                meta[key] = dict(item)
+
+    merged: list[dict[str, Any]] = []
+    for key in sorted(scores, key=lambda current: scores[current], reverse=True):
+        item = dict(meta[key])
+        item[score_field] = float(scores[key])
+        merged.append(item)
+
+    return merged[:top_k] if top_k > 0 else merged
+
+
+def _search_hit_debug_item(item: dict[str, Any], item_kind: str) -> dict[str, Any]:
+    if item_kind == "entity":
+        return {
+            "entity_id": item.get("entity_id"),
+            "entity_name": item.get("entity_name"),
+            "score": item.get("distance", item.get("rrf_score")),
+        }
+    if item_kind == "relation":
+        return {
+            "src_id": item.get("src_id"),
+            "tgt_id": item.get("tgt_id"),
+            "description": item.get("description", ""),
+            "score": item.get("distance", item.get("rrf_score")),
+        }
+    return {
+        "chunk_id": item.get("chunk_id") or item.get("id"),
+        "score": item.get("distance", item.get("rrf_score")),
+    }
+
+
+async def _keyword_rrf_query_vector_storage(
+    vector_storage: BaseVectorStorage,
+    keywords: list[str],
+    top_k: int,
+    query_param: QueryParam,
+    *,
+    store_kind: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    keyword_rankings: list[list[dict[str, Any]]] = []
+    per_keyword_hits: list[dict[str, Any]] = []
+
+    for keyword in keywords:
+        results = await _query_vector_storage(
+            vector_storage,
+            keyword,
+            top_k,
+            query_param,
+            None,
+            store_kind=store_kind,
+        )
+        keyword_rankings.append(results)
+        per_keyword_hits.append(
+            {
+                "keyword": keyword,
+                "hits": [
+                    _search_hit_debug_item(item, store_kind)
+                    for item in results
+                ],
+            }
+        )
+
+    merged = _rrf_merge_ranked_records(
+        keyword_rankings,
+        item_kind=store_kind,
+        top_k=top_k,
+    )
+    debug = {
+        "fanout_mode": "per_keyword_rrf",
+        "per_keyword_hits": per_keyword_hits,
+        "merged_hits": [_search_hit_debug_item(item, store_kind) for item in merged],
+    }
+    return merged, debug
 
 
 _QWEN_IMAGE_PROCESSOR_CACHE: dict[str, Any] = {}
@@ -4711,6 +4906,8 @@ async def kg_query(
     hl_keywords, ll_keywords = await get_keywords_from_query(
         query, query_param, global_config, hashing_kv
     )
+    query_param.hl_keywords = list(hl_keywords or [])
+    query_param.ll_keywords = list(ll_keywords or [])
 
     logger.debug(f"High-level keywords: {hl_keywords}")
     logger.debug(f"Low-level  keywords: {ll_keywords}")
@@ -4741,6 +4938,7 @@ async def kg_query(
         text_chunks_db,
         query_param,
         chunks_vdb,
+        system_prompt=system_prompt,
     )
 
     if context_result is None:
@@ -4761,7 +4959,10 @@ async def kg_query(
     )
 
     # Build system prompt
-    sys_prompt_temp = system_prompt if system_prompt else PROMPTS["rag_response"]
+    sys_prompt_temp = _resolve_response_system_prompt_template(
+        query_param,
+        system_prompt=system_prompt,
+    )
     sys_prompt = sys_prompt_temp.format(
         response_type=response_type,
         user_prompt=user_prompt,
@@ -4795,9 +4996,11 @@ async def kg_query(
     )
     args_hash = _compute_query_cache_args_hash(query, query_cache_params)
 
-    cached_result = await handle_cache(
-        hashing_kv, args_hash, user_query, query_param.mode, cache_type="query"
-    )
+    cached_result = None
+    if not _should_bypass_cache(query_param, "query"):
+        cached_result = await handle_cache(
+            hashing_kv, args_hash, user_query, query_param.mode, cache_type="query"
+        )
 
     if cached_result is not None:
         cached_response, _ = cached_result  # Extract content, ignore timestamp
@@ -4814,7 +5017,11 @@ async def kg_query(
             stream=query_param.stream,
         )
 
-        if hashing_kv and hashing_kv.global_config.get("enable_llm_cache"):
+        if (
+            hashing_kv
+            and not _should_bypass_cache(query_param, "query")
+            and hashing_kv.global_config.get("enable_llm_cache")
+        ):
             queryparam_dict = dict(query_cache_params)
             await save_to_cache(
                 hashing_kv,
@@ -4919,9 +5126,11 @@ async def extract_keywords_only(
         text,
         language,
     )
-    cached_result = await handle_cache(
-        hashing_kv, args_hash, text, param.mode, cache_type="keywords"
-    )
+    cached_result = None
+    if not _should_bypass_cache(param, "keywords"):
+        cached_result = await handle_cache(
+            hashing_kv, args_hash, text, param.mode, cache_type="keywords"
+        )
     if cached_result is not None:
         cached_response, _ = cached_result  # Extract content, ignore timestamp
         try:
@@ -5000,7 +5209,10 @@ async def extract_keywords_only(
             "high_level_keywords": hl_keywords,
             "low_level_keywords": ll_keywords,
         }
-        if hashing_kv.global_config.get("enable_llm_cache"):
+        if (
+            not _should_bypass_cache(param, "keywords")
+            and hashing_kv.global_config.get("enable_llm_cache")
+        ):
             # Save to cache with query parameters
             queryparam_dict = {
                 "mode": param.mode,
@@ -5034,18 +5246,52 @@ async def _query_vector_storage(
     top_k: int,
     query_param: QueryParam,
     query_embedding: list[float] = None,
+    *,
+    store_kind: str = "generic",
+    candidate_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     if vector_storage.__class__.__name__ == "QdrantVectorDBStorage":
+        query_kwargs = {
+            "top_k": top_k,
+            "query_embedding": query_embedding,
+            "qdrant_retrieval_mode": _resolve_qdrant_retrieval_mode(
+                query_param,
+                store_kind,
+            ),
+        }
+        if candidate_ids is not None:
+            query_kwargs["candidate_ids"] = candidate_ids
         return await vector_storage.query(
             query,
-            top_k=top_k,
-            query_embedding=query_embedding,
-            qdrant_retrieval_mode=query_param.qdrant_retrieval_mode,
+            **query_kwargs,
         )
     return await vector_storage.query(
         query,
         top_k=top_k,
         query_embedding=query_embedding,
+    )
+
+
+async def _query_chunk_candidates_from_pool(
+    *,
+    query: str,
+    chunk_ids: list[str],
+    top_k: int,
+    chunks_vdb: BaseVectorStorage,
+    query_param: QueryParam,
+    query_embedding: list[float] = None,
+    retrieval_mode: str = "dense",
+) -> list[dict[str, Any]]:
+    if not chunk_ids:
+        return []
+    if chunks_vdb.__class__.__name__ != "QdrantVectorDBStorage":
+        return []
+    return await chunks_vdb.query(
+        query,
+        top_k=top_k,
+        query_embedding=query_embedding,
+        qdrant_retrieval_mode=retrieval_mode,
+        candidate_ids=chunk_ids,
     )
 
 
@@ -5086,6 +5332,7 @@ async def _get_vector_context(
             search_top_k,
             query_param,
             query_embedding,
+            store_kind="chunk",
         )
         if not results:
             logger.info(
@@ -5140,6 +5387,12 @@ async def _perform_kg_search(
     global_relations = []
     vector_chunks = []
     chunk_tracking = {}
+    retrieval_debug: dict[str, Any] = {
+        "local_search": {},
+        "global_search": {},
+        "kg_rerank": {"entities": [], "relations": []},
+        "ppr": {},
+    }
 
     # Handle different query modes
 
@@ -5168,36 +5421,40 @@ async def _perform_kg_search(
     _ppr_mode = query_param.mode in ("ppr", "ppr_local")
 
     if query_param.mode == "local" and len(ll_keywords) > 0:
-        local_entities, local_relations = await _get_node_data(
+        local_entities, local_relations, local_debug = await _get_node_data(
             ll_keywords,
             knowledge_graph_inst,
             entities_vdb,
             query_param,
         )
+        retrieval_debug["local_search"] = local_debug
 
     elif query_param.mode == "global" and len(hl_keywords) > 0:
-        global_relations, global_entities = await _get_edge_data(
+        global_relations, global_entities, global_debug = await _get_edge_data(
             hl_keywords,
             knowledge_graph_inst,
             relationships_vdb,
             query_param,
         )
+        retrieval_debug["global_search"] = global_debug
 
     else:  # hybrid / mix / rrf / ppr / ppr_local — or any unrecognised mode
         if len(ll_keywords) > 0:
-            local_entities, local_relations = await _get_node_data(
+            local_entities, local_relations, local_debug = await _get_node_data(
                 ll_keywords,
                 knowledge_graph_inst,
                 entities_vdb,
                 query_param,
             )
+            retrieval_debug["local_search"] = local_debug
         if len(hl_keywords) > 0:
-            global_relations, global_entities = await _get_edge_data(
+            global_relations, global_entities, global_debug = await _get_edge_data(
                 hl_keywords,
                 knowledge_graph_inst,
                 relationships_vdb,
                 query_param,
             )
+            retrieval_debug["global_search"] = global_debug
 
         # Get vector chunks for mix/rrf mode (PPR modes handle chunks internally)
         if query_param.mode in ("mix", "rrf") and chunks_vdb:
@@ -5299,6 +5556,7 @@ async def _perform_kg_search(
                 query_param=query_param,
                 query_embedding=query_embedding,
                 use_global=_use_global_ppr,
+                debug_info=retrieval_debug.setdefault("ppr", {}),
             )
 
     return {
@@ -5308,6 +5566,7 @@ async def _perform_kg_search(
         "ppr_chunks": ppr_chunks,
         "chunk_tracking": chunk_tracking,
         "query_embedding": query_embedding,
+        "retrieval_debug": retrieval_debug,
     }
 
 
@@ -5351,6 +5610,16 @@ async def _apply_token_truncation(
             "relations_context": [],
             "filtered_entities": [],
             "filtered_relations": [],
+            "entity_id_to_original": {},
+            "relation_id_to_original": {},
+        }
+
+    if _resolve_answer_context_mode(query_param) == "chunk_only_prompt":
+        return {
+            "entities_context": [],
+            "relations_context": [],
+            "filtered_entities": search_result["final_entities"],
+            "filtered_relations": search_result["final_relations"],
             "entity_id_to_original": {},
             "relation_id_to_original": {},
         }
@@ -5711,6 +5980,7 @@ async def _build_context_str(
     chunk_tracking: dict = None,
     entity_id_to_original: dict = None,
     relation_id_to_original: dict = None,
+    system_prompt: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """
     Build the final LLM context string with token processing.
@@ -5767,12 +6037,20 @@ async def _build_context_str(
         global_config.get("max_total_tokens", DEFAULT_MAX_TOTAL_TOKENS),
     )
 
-    # Get the system prompt template from PROMPTS or global_config
-    sys_prompt_template = global_config.get(
-        "system_prompt_template", PROMPTS["rag_response"]
+    # Match the same response prompt template selection used by kg_query so
+    # chunk token budgeting reflects the actual answer prompt.
+    sys_prompt_template = _resolve_response_system_prompt_template(
+        query_param,
+        system_prompt=system_prompt,
     )
 
-    kg_context_template = PROMPTS["kg_query_context"]
+    answer_context_mode = _resolve_answer_context_mode(query_param)
+    context_template_key = (
+        "naive_query_context"
+        if answer_context_mode == "chunk_only_prompt"
+        else "kg_query_context"
+    )
+    kg_context_template = PROMPTS[context_template_key]
     user_prompt = query_param.user_prompt if query_param.user_prompt else ""
     response_type = (
         query_param.response_type
@@ -6029,6 +6307,11 @@ async def _rerank_kg_results(
     """
     final_entities = search_result.get("final_entities", [])
     final_relations = search_result.get("final_relations", [])
+    retrieval_debug = search_result.setdefault("retrieval_debug", {})
+    kg_rerank_debug = retrieval_debug.setdefault(
+        "kg_rerank",
+        {"entities": [], "relations": []},
+    )
 
     # Rerank entities
     if final_entities:
@@ -6043,6 +6326,14 @@ async def _rerank_kg_results(
             item_label="entities",
         )
         search_result["final_entities"] = reranked
+        kg_rerank_debug["entities"] = [
+            {
+                "entity_id": item.get("entity_id"),
+                "entity_name": item.get("entity_name"),
+                "rerank_score": item.get("rerank_score"),
+            }
+            for item in reranked
+        ]
 
     # Rerank relations
     if final_relations:
@@ -6059,6 +6350,14 @@ async def _rerank_kg_results(
             item_label="relations",
         )
         search_result["final_relations"] = reranked
+        kg_rerank_debug["relations"] = [
+            {
+                "src_id": item.get("src_id") or (item.get("src_tgt") or [None, None])[0],
+                "tgt_id": item.get("tgt_id") or (item.get("src_tgt") or [None, None])[1],
+                "rerank_score": item.get("rerank_score"),
+            }
+            for item in reranked
+        ]
 
     return search_result
 
@@ -6074,6 +6373,7 @@ async def _build_query_context(
     text_chunks_db: BaseKVStorage,
     query_param: QueryParam,
     chunks_vdb: BaseVectorStorage = None,
+    system_prompt: str | None = None,
 ) -> QueryContextResult | None:
     """
     Main query context building function using the new 4-stage architecture:
@@ -6127,10 +6427,24 @@ async def _build_query_context(
         text_chunks_db.global_config,
     )
 
-    # Stage 3: Merge chunks using filtered entities/relations
+    chunk_entities, chunk_relations, kg_chunk_selection_source = (
+        _resolve_kg_chunk_selection_inputs(
+            search_result=search_result,
+            truncation_result=truncation_result,
+            query_param=query_param,
+        )
+    )
+    if kg_chunk_selection_source == "untruncated":
+        logger.info(
+            "KG chunk selection uses untruncated KG results: %d entities, %d relations",
+            len(chunk_entities),
+            len(chunk_relations),
+        )
+
+    # Stage 3: Merge chunks using selected entity/relation source
     merged_chunks = await _merge_all_chunks(
-        filtered_entities=truncation_result["filtered_entities"],
-        filtered_relations=truncation_result["filtered_relations"],
+        filtered_entities=chunk_entities,
+        filtered_relations=chunk_relations,
         vector_chunks=search_result["vector_chunks"],
         query=query,
         knowledge_graph_inst=knowledge_graph_inst,
@@ -6161,6 +6475,7 @@ async def _build_query_context(
         chunk_tracking=search_result["chunk_tracking"],
         entity_id_to_original=truncation_result["entity_id_to_original"],
         relation_id_to_original=truncation_result["relation_id_to_original"],
+        system_prompt=system_prompt,
     )
 
     # Convert keywords strings to lists and add complete metadata to raw_data
@@ -6185,9 +6500,15 @@ async def _build_query_context(
         "relations_after_truncation": len(
             truncation_result.get("filtered_relations", [])
         ),
+        "kg_chunk_selection_source": kg_chunk_selection_source,
+        "entities_for_chunk_selection": len(chunk_entities),
+        "relations_for_chunk_selection": len(chunk_relations),
         "merged_chunks_count": len(merged_chunks),
         "final_chunks_count": len(raw_data.get("data", {}).get("chunks", [])),
     }
+    raw_data["metadata"]["retrieval_debug"] = search_result.get(
+        "retrieval_debug", {}
+    )
 
     logger.debug(
         f"[_build_query_context] Context length: {len(context) if context else 0}"
@@ -6226,6 +6547,7 @@ async def _recognition_memory_filter(
     recognition_prompt_output_max_tokens: int = DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS,
     recognition_prompt_reserved_tokens: int = DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS,
     recognition_difflib_cutoff: float = DEFAULT_RECOGNITION_DIFFLIB_CUTOFF,
+    debug_info: dict[str, Any] | None = None,
 ) -> dict[str, float]:
     """HippoRAG2-style recognition memory filter for global PPR entity seeds.
 
@@ -6301,6 +6623,11 @@ async def _recognition_memory_filter(
 
     if not all_candidate_ids:
         return {}
+    if debug_info is not None:
+        debug_info["recognition_candidates"] = {
+            "entity_ids": list(entity_vdb_ids),
+            "triplet_entity_ids": list(triplet_eids),
+        }
 
     # --- Step 5: Build LLM prompt (with token budget guard) ---
     prompt_middle = "\n\nRetrieved facts (src | relation | tgt):\n"
@@ -6439,6 +6766,9 @@ async def _recognition_memory_filter(
     except Exception as e:
         logger.warning(f"PPR: recognition memory LLM call failed: {e}")
         return {}
+    if debug_info is not None:
+        debug_info["recognition_prompt"] = prompt
+        debug_info["recognition_output"] = llm_output
 
     # --- Step 7: Difflib mapping ---
     # Strip description suffix (": ...") the LLM may have echoed back, then fuzzy-match.
@@ -6474,6 +6804,9 @@ async def _recognition_memory_filter(
             f"PPR(global): recognition memory truncated to linking_top_k={linking_top_k} seeds"
         )
 
+    if debug_info is not None:
+        debug_info["recognized_seed_weights"] = dict(result)
+
     return result
 
 
@@ -6508,6 +6841,7 @@ async def _ppr_rank_chunks_global(
     text_chunks_db: BaseKVStorage,
     query_param: QueryParam,
     query_embedding: list[float] = None,
+    debug_info: dict[str, Any] | None = None,
 ) -> list[dict]:
     """Global PPR path: full-graph engine, skips BFS subgraph extraction.
 
@@ -6518,6 +6852,9 @@ async def _ppr_rank_chunks_global(
     engine = get_engine(knowledge_graph_inst)
 
     passage_node_weight = query_param.passage_node_weight
+    if debug_info is not None:
+        debug_info["mode"] = "ppr"
+        debug_info["entity_seed_weights"] = dict(entity_seed_weights)
 
     await engine._ensure_loaded()
 
@@ -6557,6 +6894,7 @@ async def _ppr_rank_chunks_global(
             query_param.ppr_top_k * 4,
             query_param,
             query_embedding,
+            store_kind="chunk",
         )
         if chunk_results:
             scores = [c.get("distance", 0.0) for c in chunk_results]
@@ -6567,6 +6905,14 @@ async def _ppr_rank_chunks_global(
                 if cid and cid in chunk_to_entities:
                     normalized = (c.get("distance", 0.0) - min_s) / range_s
                     chunk_seed_weights[cid] = normalized
+        if debug_info is not None:
+            debug_info["chunk_dpr_seeds"] = [
+                {
+                    "chunk_id": c.get("chunk_id") or c.get("id"),
+                    "score": c.get("distance", 0.0),
+                }
+                for c in chunk_results or []
+            ]
     except Exception as e:
         logger.warning(f"PPR(global): chunks VDB query failed: {e}")
 
@@ -6609,6 +6955,12 @@ async def _ppr_rank_chunks_global(
         f"{len(chunk_to_entities)} graph chunk nodes (full-graph pool), "
         f"{len(chunk_seed_weights)} DPR seeds"
     )
+    if debug_info is not None:
+        debug_info["graph_chunk_node_count"] = len(chunk_to_entities)
+        debug_info["ppr_ranked_chunks"] = [
+            {"chunk_id": chunk.get("chunk_id"), "ppr_score": chunk.get("ppr_score")}
+            for chunk in result_chunks
+        ]
     return result_chunks
 
 
@@ -6623,6 +6975,7 @@ async def _ppr_rank_chunks(
     query_param: QueryParam,
     query_embedding: list[float] = None,
     use_global: bool = False,
+    debug_info: dict[str, Any] | None = None,
 ) -> list[dict]:
     """PPR chunk ranking — local BFS (use_global=False) or full-graph (use_global=True).
 
@@ -6639,6 +6992,8 @@ async def _ppr_rank_chunks(
     # Global PPR path: recognition memory filters seeds via LLM (when enabled).
     # Local PPR path: direct max-merge (unchanged behaviour).
     entity_seed_weights: dict[str, float] = {}
+    if debug_info is not None:
+        debug_info["mode"] = "ppr" if use_global else "ppr_local"
 
     # Always fetch relation VDB results — used by both paths
     rel_results: list[dict] = []
@@ -6649,9 +7004,19 @@ async def _ppr_rank_chunks(
             query_param.top_k,
             query_param,
             query_embedding,
+            store_kind="relation",
         )
     except Exception as e:
         logger.warning(f"PPR: relation VDB query failed: {e}")
+    if debug_info is not None:
+        debug_info["relation_seeds"] = [
+            {
+                "src_id": rel.get("src_id"),
+                "tgt_id": rel.get("tgt_id"),
+                "score": rel.get("distance", 0.0),
+            }
+            for rel in rel_results
+        ]
 
     exclude_synonym_edges = _should_exclude_synonym_edges(query_param)
     if exclude_synonym_edges and rel_results:
@@ -6705,6 +7070,7 @@ async def _ppr_rank_chunks(
                     recognition_prompt_output_max_tokens=recognition_prompt_output_max_tokens,
                     recognition_prompt_reserved_tokens=recognition_prompt_reserved_tokens,
                     recognition_difflib_cutoff=recognition_difflib_cutoff,
+                    debug_info=debug_info,
                 )
             except Exception as e:
                 logger.warning(
@@ -6732,6 +7098,9 @@ async def _ppr_rank_chunks(
 
     if not entity_seed_weights:
         return []
+    if debug_info is not None:
+        debug_info["seed_entities"] = list(entity_seed_weights.keys())
+        debug_info["seed_entity_weights"] = dict(entity_seed_weights)
 
     # Step 1b: Hub penalty – local path only (global path applies chunk-count
     # penalty inside _ppr_rank_chunks_global after the engine is loaded).
@@ -6758,6 +7127,7 @@ async def _ppr_rank_chunks(
             text_chunks_db=text_chunks_db,
             query_param=query_param,
             query_embedding=query_embedding,
+            debug_info=debug_info,
         )
 
     # Step 2: Get subgraph (entities + edges)
@@ -6824,6 +7194,7 @@ async def _ppr_rank_chunks(
             query_param.ppr_top_k * 2,
             query_param,
             query_embedding,
+            store_kind="chunk",
         )
         if chunk_results:
             scores = [c.get("distance", 0.0) for c in chunk_results]
@@ -6887,6 +7258,18 @@ async def _ppr_rank_chunks(
         f"PPR chunk ranking: {len(result_chunks)} chunks from {len(subgraph_nodes)} entities, "
         f"{len(chunk_to_entities)} virtual chunks"
     )
+    if debug_info is not None:
+        debug_info["seed_entities"] = list(entity_seed_weights.keys())
+        debug_info["subgraph_node_count"] = len(subgraph_nodes)
+        debug_info["subgraph_edge_count"] = len(subgraph_edges)
+        debug_info["chunk_dpr_seeds"] = [
+            {"chunk_id": cid, "score": score}
+            for cid, score in chunk_seed_weights.items()
+        ]
+        debug_info["ppr_ranked_chunks"] = [
+            {"chunk_id": chunk.get("chunk_id"), "ppr_score": chunk.get("ppr_score")}
+            for chunk in result_chunks
+        ]
 
     return result_chunks
 
@@ -6902,15 +7285,40 @@ async def _get_node_data(
         f"Query nodes: {query} (top_k:{query_param.top_k}, cosine:{entities_vdb.cosine_better_than_threshold})"
     )
 
-    results = await _query_vector_storage(
-        entities_vdb,
-        query,
-        query_param.top_k,
-        query_param,
-    )
+    keyword_debug: dict[str, Any] = {
+        "fanout_mode": "joined",
+        "per_keyword_hits": [],
+        "merged_hits": [],
+        "one_hop_relations": [],
+    }
+    if getattr(query_param, "keyword_fanout_mode", "joined") == "per_keyword_rrf":
+        ll_keywords = [
+            str(keyword).strip()
+            for keyword in getattr(query_param, "ll_keywords", [])
+            if str(keyword).strip()
+        ]
+        queries = ll_keywords or [query]
+        results, keyword_debug = await _keyword_rrf_query_vector_storage(
+            entities_vdb,
+            queries,
+            query_param.top_k,
+            query_param,
+            store_kind="entity",
+        )
+    else:
+        results = await _query_vector_storage(
+            entities_vdb,
+            query,
+            query_param.top_k,
+            query_param,
+            store_kind="entity",
+        )
+        keyword_debug["merged_hits"] = [
+            _search_hit_debug_item(item, "entity") for item in results
+        ]
 
     if not len(results):
-        return [], []
+        return [], [], keyword_debug
 
     # Extract all entity IDs from your results list
     # Use composite entity_id (from VDB metadata) when available, fall back to entity_name
@@ -6955,6 +7363,24 @@ async def _get_node_data(
             query_param,
             knowledge_graph_inst,
         )
+    keyword_debug["one_hop_relations"] = [
+        {
+            "src_id": edge["src_tgt"][0] if "src_tgt" in edge else edge.get("src_id"),
+            "tgt_id": edge["src_tgt"][1] if "src_tgt" in edge else edge.get("tgt_id"),
+            "description": edge.get("description", ""),
+            "weight": edge.get("weight"),
+            "entity_relevance": edge.get("_entity_relevance"),
+        }
+        for edge in use_relations
+    ]
+    keyword_debug["final_entities"] = [
+        {
+            "entity_id": item.get("entity_id"),
+            "entity_name": item.get("entity_name"),
+            "vdb_score": item.get("vdb_score"),
+        }
+        for item in node_datas
+    ]
 
     logger.info(
         f"Local query: {len(node_datas)} entites, {len(use_relations)} relations"
@@ -6962,7 +7388,7 @@ async def _get_node_data(
 
     # Entities are sorted by cosine similarity
     # Relations are sorted by rank + weight
-    return node_datas, use_relations
+    return node_datas, use_relations, keyword_debug
 
 
 async def _find_most_related_edges_from_entities(
@@ -7147,6 +7573,16 @@ async def _find_related_text_unit_from_entities(
     #     When reranking is disabled, the text chunks delivered to the LLM tend to favor naive retrieval.
     if kg_chunk_pick_method == "VECTOR" and query and chunks_vdb:
         num_of_chunks = int(max_related_chunks * len(entities_with_chunks) / 2)
+        chunk_retrieval_mode = _resolve_qdrant_retrieval_mode(query_param, "chunk")
+        candidate_retriever = (
+            partial(
+                _query_chunk_candidates_from_pool,
+                chunks_vdb=chunks_vdb,
+                query_param=query_param,
+            )
+            if chunks_vdb.__class__.__name__ == "QdrantVectorDBStorage"
+            else None
+        )
 
         # Get embedding function from global config
         actual_embedding_func = text_chunks_db.embedding_func
@@ -7163,6 +7599,8 @@ async def _find_related_text_unit_from_entities(
                     entity_info=entities_with_chunks,
                     embedding_func=actual_embedding_func,
                     query_embedding=query_embedding,
+                    retrieval_mode=chunk_retrieval_mode,
+                    candidate_retriever=candidate_retriever,
                 )
 
                 if selected_chunk_ids == []:
@@ -7172,12 +7610,12 @@ async def _find_related_text_unit_from_entities(
                     )
                 else:
                     logger.info(
-                        f"Selecting {len(selected_chunk_ids)} from {total_entity_chunks} entity-related chunks by vector similarity"
+                        f"Selecting {len(selected_chunk_ids)} from {total_entity_chunks} entity-related chunks by {chunk_retrieval_mode} candidate-pool retrieval"
                     )
 
             except Exception as e:
                 logger.error(
-                    f"Error in vector similarity sorting: {e}, falling back to WEIGHT method"
+                    f"Error in candidate-pool retrieval sorting: {e}, falling back to WEIGHT method"
                 )
                 kg_chunk_pick_method = "WEIGHT"
 
@@ -7231,15 +7669,40 @@ async def _get_edge_data(
         f"Query edges: {keywords} (top_k:{query_param.top_k}, cosine:{relationships_vdb.cosine_better_than_threshold})"
     )
 
-    results = await _query_vector_storage(
-        relationships_vdb,
-        keywords,
-        query_param.top_k,
-        query_param,
-    )
+    keyword_debug: dict[str, Any] = {
+        "fanout_mode": "joined",
+        "per_keyword_hits": [],
+        "merged_hits": [],
+        "connected_entities": [],
+    }
+    if getattr(query_param, "keyword_fanout_mode", "joined") == "per_keyword_rrf":
+        hl_keywords = [
+            str(keyword).strip()
+            for keyword in getattr(query_param, "hl_keywords", [])
+            if str(keyword).strip()
+        ]
+        queries = hl_keywords or [keywords]
+        results, keyword_debug = await _keyword_rrf_query_vector_storage(
+            relationships_vdb,
+            queries,
+            query_param.top_k,
+            query_param,
+            store_kind="relation",
+        )
+    else:
+        results = await _query_vector_storage(
+            relationships_vdb,
+            keywords,
+            query_param.top_k,
+            query_param,
+            store_kind="relation",
+        )
+        keyword_debug["merged_hits"] = [
+            _search_hit_debug_item(item, "relation") for item in results
+        ]
 
     if not len(results):
-        return [], []
+        return [], [], keyword_debug
 
     # Prepare edge pairs in two forms:
     # For the batch edge properties function, use dicts.
@@ -7290,7 +7753,24 @@ async def _get_edge_data(
         f"Global query: {len(use_entities)} entites, {len(edge_datas)} relations"
     )
 
-    return edge_datas, use_entities
+    keyword_debug["final_relations"] = [
+        {
+            "src_id": item.get("src_id"),
+            "tgt_id": item.get("tgt_id"),
+            "description": item.get("description", ""),
+            "weight": item.get("weight"),
+        }
+        for item in edge_datas
+    ]
+    keyword_debug["connected_entities"] = [
+        {
+            "entity_id": item.get("entity_id"),
+            "entity_name": item.get("entity_name"),
+        }
+        for item in use_entities
+    ]
+
+    return edge_datas, use_entities, keyword_debug
 
 
 async def _find_most_related_entities_from_relationships(
@@ -7452,6 +7932,16 @@ async def _find_related_text_unit_from_relations(
 
     if kg_chunk_pick_method == "VECTOR" and query and chunks_vdb:
         num_of_chunks = int(max_related_chunks * len(relations_with_chunks) / 2)
+        chunk_retrieval_mode = _resolve_qdrant_retrieval_mode(query_param, "chunk")
+        candidate_retriever = (
+            partial(
+                _query_chunk_candidates_from_pool,
+                chunks_vdb=chunks_vdb,
+                query_param=query_param,
+            )
+            if chunks_vdb.__class__.__name__ == "QdrantVectorDBStorage"
+            else None
+        )
 
         # Get embedding function from global config
         actual_embedding_func = text_chunks_db.embedding_func
@@ -7468,6 +7958,8 @@ async def _find_related_text_unit_from_relations(
                     entity_info=relations_with_chunks,
                     embedding_func=actual_embedding_func,
                     query_embedding=query_embedding,
+                    retrieval_mode=chunk_retrieval_mode,
+                    candidate_retriever=candidate_retriever,
                 )
 
                 if selected_chunk_ids == []:
@@ -7477,12 +7969,12 @@ async def _find_related_text_unit_from_relations(
                     )
                 else:
                     logger.info(
-                        f"Selecting {len(selected_chunk_ids)} from {total_relation_chunks} relation-related chunks by vector similarity"
+                        f"Selecting {len(selected_chunk_ids)} from {total_relation_chunks} relation-related chunks by {chunk_retrieval_mode} candidate-pool retrieval"
                     )
 
             except Exception as e:
                 logger.error(
-                    f"Error in vector similarity sorting: {e}, falling back to WEIGHT method"
+                    f"Error in candidate-pool retrieval sorting: {e}, falling back to WEIGHT method"
                 )
                 kg_chunk_pick_method = "WEIGHT"
 

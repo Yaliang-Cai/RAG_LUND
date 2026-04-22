@@ -104,14 +104,18 @@ SUPPORTED_IMAGE_EXTENSIONS = [
 DEFAULT_TOP_K = 20        # default and max allowed value for top_k
 DEFAULT_CHUNK_TOP_K = 10  # final window size after reranking (chunk_top_k)
 DEFAULT_NAIVE_TOP_K = 20  # naive VDB retrieval count (mix/naive modes); independent of chunk_top_k
-DEFAULT_QUERY_MODE = "hybrid"   # "naive" | "local" | "global" | "hybrid" | "mix" | "rrf" | "ppr"
+DEFAULT_QUERY_MODE = "hybrid"   # "naive" | "local" | "global" | "hybrid" | "mix" | "rrf" | "ppr_local" | "ppr"
 DEFAULT_ENABLE_RERANK = True
 DEFAULT_ENABLE_KG_RERANK = True  # rerank entity/relation KG results (hybrid/mix); independent of chunk rerank
 DEFAULT_VLM_ENHANCED = True
+DEFAULT_KG_CHUNK_SELECTION_SOURCE = "truncated"  # "truncated" | "untruncated"
 
 # Reranker score 过滤阈值：rerank 完成后，得分低于此值的 chunk 会被丢弃。
 # 0.3：过滤 rerank 分数断崖后的低质量 chunk，避免噪声 chunk 干扰 LLM。
 DEFAULT_MIN_RERANK_SCORE = 0.3
+DEFAULT_RERANK_BATCH_SIZE = 32
+DEFAULT_RERANK_ENABLE_OOM_BACKOFF = True
+DEFAULT_RERANK_MIN_BATCH_SIZE = 4
 
 # =============================================================================
 # Knowledge graph visualization defaults

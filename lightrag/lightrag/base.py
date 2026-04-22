@@ -139,6 +139,41 @@ class QueryParam:
     Non-Qdrant vector stores ignore this option.
     """
 
+    entity_qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] | None = None
+    """Optional Qdrant retrieval override for entity and relation searches.
+    When None, falls back to qdrant_retrieval_mode.
+    """
+
+    chunk_qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] | None = None
+    """Optional Qdrant retrieval override for chunk searches.
+    When None, falls back to qdrant_retrieval_mode.
+    """
+
+    keyword_fanout_mode: Literal["joined", "per_keyword_rrf"] = "joined"
+    """Keyword retrieval strategy.
+    - "joined": current behavior, join same-level keywords into one query string.
+    - "per_keyword_rrf": query each same-level keyword independently and fuse results with RRF.
+    """
+
+    answer_context_mode: Literal["kg_prompt", "chunk_only_prompt"] = "kg_prompt"
+    """Controls the answer-time prompt/context shape for KG retrieval modes.
+    - "kg_prompt": include entity/relation/chunk context.
+    - "chunk_only_prompt": answer from chunks only using the naive-style prompt/context.
+    PPR mode behaves as chunk_only_prompt regardless of this field.
+    """
+
+    kg_chunk_selection_source: Literal["truncated", "untruncated"] = "truncated"
+    """Controls which KG result set supplies entity/relation source chunks.
+    - "truncated": use prompt-truncated entity/relation results (default).
+    - "untruncated": use reranked raw KG results for chunk selection only.
+    """
+
+    bypass_query_cache: bool = False
+    """If True, skip query-level LLM cache lookup and save for the final answer."""
+
+    bypass_keywords_cache: bool = False
+    """If True, skip keyword-extraction cache lookup and save."""
+
     max_entity_tokens: int = int(
         os.getenv("MAX_ENTITY_TOKENS", str(DEFAULT_MAX_ENTITY_TOKENS))
     )
