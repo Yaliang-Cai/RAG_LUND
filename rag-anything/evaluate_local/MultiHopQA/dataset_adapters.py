@@ -9,7 +9,7 @@ from typing import Any
 # Answer normalization (standard HotpotQA / SQuAD normalization)
 # ---------------------------------------------------------------------------
 
-_ARTICLES_RE = re.compile(r"\b(a|an|the)\b", re.IGNORECASE)
+_ARTICLES_RE = re.compile(r"\b(a|an|the)\b")
 
 
 def normalize_answer(s: str) -> str:
@@ -48,6 +48,8 @@ def _f1_single(pred: str, gold: str) -> float:
 
 def score_f1(pred: str, gold: str | list[str]) -> float:
     if isinstance(gold, list):
+        if not gold:
+            return 0.0
         return max(_f1_single(pred, g) for g in gold)
     return _f1_single(pred, gold)
 
@@ -67,7 +69,10 @@ def score_recall_at_k(
     top_chunks = chunks[:k]
     top_texts = [normalize_answer(c.get("content", "")) for c in top_chunks]
     covered = sum(
-        any(normalize_answer(fact) in t for t in top_texts)
+        any(
+            " " + normalize_answer(fact) + " " in " " + t + " "
+            for t in top_texts
+        )
         for fact in supporting_facts
     )
     return covered / len(supporting_facts)

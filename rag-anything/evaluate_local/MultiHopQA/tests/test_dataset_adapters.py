@@ -83,15 +83,31 @@ def test_recall_at_k_none_facts_returns_none():
     assert score_recall_at_k([{"content": "x"}], None, k=5) is None
 
 
+def test_score_f1_empty_gold_list():
+    assert score_f1("berlin", []) == 0.0
+
+
 def test_get_eval_query_overrides_hotpotqa():
     overrides = get_eval_query_overrides("hotpotqa")
     assert overrides["response_type"] == "Short Answer"
-    assert "yes" in overrides["user_prompt"].lower() or "short" in overrides["user_prompt"].lower()
+    assert "yes" in overrides["user_prompt"].lower() and "no" in overrides["user_prompt"].lower()
 
 
 def test_get_eval_query_overrides_simpleqa():
     overrides = get_eval_query_overrides("simpleqa")
     assert overrides["response_type"] == "Short Answer"
+
+
+def test_get_eval_query_overrides_musique():
+    overrides = get_eval_query_overrides("musique")
+    assert overrides["response_type"] == "Short Answer"
+    assert "yes" in overrides["user_prompt"].lower() and "no" in overrides["user_prompt"].lower()
+
+
+def test_get_eval_query_overrides_2wiki():
+    overrides = get_eval_query_overrides("2wiki")
+    assert overrides["response_type"] == "Short Answer"
+    assert "yes" in overrides["user_prompt"].lower() and "no" in overrides["user_prompt"].lower()
 
 
 def test_get_eval_query_overrides_unknown_raises():
