@@ -6,6 +6,7 @@ import argparse
 import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -34,6 +35,7 @@ DEFAULT_SHARED_PPR_TOP_K = 50
 DEFAULT_SHARED_PPR_QA_TOP_K = 20
 DEFAULT_SURGE_PPR_TOP_K = 50
 DEFAULT_SURGE_PPR_QA_TOP_K = 50
+INDEX_PROFILE_FILE = ".ablation_index_profile.json"
 _PROFILE_HINTS: dict[str, dict[str, bool]] = {
     "v0_v1_v2_v3": {
         "enable_entity_disambiguation": True,
@@ -500,6 +502,65 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def _repair_legacy_index_profile_if_needed(
+    *,
+    workspace_dir: str | Path,
+    workspace_id: str,
+    ablation_flags: Any,
+    allow_legacy_adoption: bool,
+) -> dict[str, Any] | None:
+    if not allow_legacy_adoption:
+        return None
+
+    inferred = _infer_profile_flags_from_workspace_id(workspace_id)
+    if inferred is None:
+        return None
+
+    target_entity = bool(getattr(ablation_flags, "enable_entity_disambiguation", False))
+    target_synonym = bool(getattr(ablation_flags, "enable_synonym_linking", False))
+    if (
+        bool(inferred["enable_entity_disambiguation"]) != target_entity
+        or bool(inferred["enable_synonym_linking"]) != target_synonym
+    ):
+        return None
+
+    profile_path = Path(workspace_dir) / INDEX_PROFILE_FILE
+    if not profile_path.exists():
+        return None
+
+    try:
+        raw_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw_profile, dict):
+        return None
+
+    existing_entity = bool(raw_profile.get("enable_entity_disambiguation", True))
+    existing_synonym = bool(raw_profile.get("enable_synonym_linking", False))
+    if existing_entity == target_entity and existing_synonym == target_synonym:
+        return None
+
+    repaired_profile = dict(raw_profile)
+    repaired_profile["profile_version"] = int(repaired_profile.get("profile_version", 1))
+    repaired_profile["enable_entity_disambiguation"] = target_entity
+    repaired_profile["enable_synonym_linking"] = target_synonym
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = profile_path.with_name(f"{INDEX_PROFILE_FILE}.bak.{timestamp}")
+    shutil.copy2(profile_path, backup_path)
+    profile_path.write_text(
+        json.dumps(repaired_profile, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {
+        "workspace_id": workspace_id,
+        "profile_path": str(profile_path),
+        "backup_path": str(backup_path),
+        "previous_profile": raw_profile,
+        "repaired_profile": repaired_profile,
+    }
 
 
 def _glob_dirs(pattern: Path) -> list[Path]:
@@ -997,6 +1058,31 @@ def main(argv: list[str] | None = None) -> int:
         workspace_id=args.surge_workspace_id,
         require_existing=bool(args.require_existing_workspaces),
     )
+    repaired_profiles: list[dict[str, Any]] = []
+    shared_profile_repair = _repair_legacy_index_profile_if_needed(
+        workspace_dir=shared_layout["workspace_dir"],
+        workspace_id=args.shared_workspace_id,
+        ablation_flags=args.ablation_flags,
+        allow_legacy_adoption=bool(args.allow_legacy_index_profile_adoption),
+    )
+    if shared_profile_repair is not None:
+        repaired_profiles.append(shared_profile_repair)
+    surge_profile_repair = _repair_legacy_index_profile_if_needed(
+        workspace_dir=surge_layout["workspace_dir"],
+        workspace_id=args.surge_workspace_id,
+        ablation_flags=args.ablation_flags,
+        allow_legacy_adoption=bool(args.allow_legacy_index_profile_adoption),
+    )
+    if surge_profile_repair is not None:
+        repaired_profiles.append(surge_profile_repair)
+    for repaired in repaired_profiles:
+        print(
+            "Repaired legacy workspace index profile metadata:",
+            repaired["profile_path"],
+            "backup:",
+            repaired["backup_path"],
+            file=sys.stderr,
+        )
 
     run_root = Path(args.output_root) / args.run_id
     progress_file = run_root / "progress.jsonl"
@@ -1015,6 +1101,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.allow_legacy_index_profile_adoption
             ),
             "ablation_flags": args.ablation_flags.to_dict(),
+            "repaired_legacy_index_profiles": repaired_profiles,
             "shared_experiments": shared_experiments,
             "surge_experiments": surge_experiments,
         },
