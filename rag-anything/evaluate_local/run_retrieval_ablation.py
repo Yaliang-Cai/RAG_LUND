@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from evaluate_local.ablation_flags import add_ablation_arguments, validate_ablation_flags
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -29,6 +31,33 @@ DEFAULT_SHARED_PPR_TOP_K = 50
 DEFAULT_SHARED_PPR_QA_TOP_K = 20
 DEFAULT_SURGE_PPR_TOP_K = 50
 DEFAULT_SURGE_PPR_QA_TOP_K = 50
+_PROFILE_HINTS: dict[str, dict[str, bool]] = {
+    "v0_v1_v2_v3": {
+        "enable_entity_disambiguation": True,
+        "enable_synonym_linking": True,
+        "enable_multi_hop": True,
+    },
+    "v0_v1_v2": {
+        "enable_entity_disambiguation": True,
+        "enable_synonym_linking": True,
+        "enable_multi_hop": False,
+    },
+    "v0_v1": {
+        "enable_entity_disambiguation": True,
+        "enable_synonym_linking": False,
+        "enable_multi_hop": False,
+    },
+    "db_only": {
+        "enable_entity_disambiguation": False,
+        "enable_synonym_linking": False,
+        "enable_multi_hop": False,
+    },
+    "v0": {
+        "enable_entity_disambiguation": False,
+        "enable_synonym_linking": False,
+        "enable_multi_hop": False,
+    },
+}
 
 
 def _now_iso() -> str:
@@ -37,6 +66,25 @@ def _now_iso() -> str:
 
 def _parse_csv(raw: str) -> list[str]:
     return [token.strip() for token in str(raw or "").split(",") if token.strip()]
+
+
+def _argv_mentions_option(argv: list[str], *option_names: str) -> bool:
+    for token in argv:
+        for option_name in option_names:
+            if token == option_name or token.startswith(option_name + "="):
+                return True
+    return False
+
+
+def _infer_profile_flags_from_workspace_id(workspace_id: str) -> dict[str, bool] | None:
+    normalized = str(workspace_id or "").strip().lower()
+    if not normalized:
+        return None
+    for profile_key in sorted(_PROFILE_HINTS.keys(), key=len, reverse=True):
+        marker = f"_{profile_key}"
+        if normalized.endswith(marker) or marker in normalized:
+            return dict(_PROFILE_HINTS[profile_key])
+    return None
 
 
 def _with_unified_retrieval(item: dict[str, Any]) -> dict[str, Any]:
@@ -362,6 +410,7 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    add_ablation_arguments(parser)
     parser.add_argument(
         "--allow-legacy-index-profile-adoption",
         action=argparse.BooleanOptionalAction,
@@ -382,6 +431,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser
+
+
+def _apply_inferred_ablation_flag_defaults(
+    args: argparse.Namespace, argv: list[str] | None
+) -> None:
+    raw_argv = list(argv or [])
+    explicit_entity = _argv_mentions_option(
+        raw_argv,
+        "--enable-entity-disambiguation",
+        "--enable_entity_disambiguation",
+    )
+    explicit_synonym = _argv_mentions_option(
+        raw_argv,
+        "--enable-synonym-linking",
+        "--enable_synonym_linking",
+    )
+    explicit_multi_hop = _argv_mentions_option(
+        raw_argv,
+        "--enable-multi-hop",
+        "--enable_multi_hop",
+    )
+    if explicit_entity and explicit_synonym and explicit_multi_hop:
+        return
+
+    inferred_candidates = [
+        _infer_profile_flags_from_workspace_id(args.shared_workspace_id),
+        _infer_profile_flags_from_workspace_id(args.surge_workspace_id),
+    ]
+    inferred = [item for item in inferred_candidates if item is not None]
+    if not inferred:
+        return
+    first = inferred[0]
+    if any(item != first for item in inferred[1:]):
+        raise ValueError(
+            "Workspace profile inference mismatch between shared/surge workspace ids. "
+            "Pass explicit ablation flags to disambiguate."
+        )
+
+    if not explicit_entity:
+        args.enable_entity_disambiguation = bool(first["enable_entity_disambiguation"])
+    if not explicit_synonym:
+        args.enable_synonym_linking = bool(first["enable_synonym_linking"])
+    if not explicit_multi_hop:
+        args.enable_multi_hop = bool(first["enable_multi_hop"])
 
 
 def _bool_tokens(raw: str) -> list[bool]:
@@ -615,6 +708,18 @@ def _shared_command(args: argparse.Namespace, experiment: dict[str, Any], output
         str(args.max_async_generate),
         "--max_async_judge",
         str(args.max_async_judge),
+        "--enable-entity-disambiguation",
+        "true" if bool(args.enable_entity_disambiguation) else "false",
+        "--enable-synonym-linking",
+        "true" if bool(args.enable_synonym_linking) else "false",
+        "--enable-multi-hop",
+        "true" if bool(args.enable_multi_hop) else "false",
+        "--multi-hop-depth",
+        str(args.multi_hop_depth),
+        "--ppr-damping",
+        str(args.ppr_damping),
+        "--passage-node-weight",
+        str(args.passage_node_weight),
         "--query_mode",
         str(experiment["query_mode"]),
         "--recognition_top_k",
@@ -680,6 +785,18 @@ def _surge_command(args: argparse.Namespace, experiment: dict[str, Any], output_
         str(args.k_list),
         "--survey-k-list",
         str(args.survey_k_list),
+        "--enable-entity-disambiguation",
+        "true" if bool(args.enable_entity_disambiguation) else "false",
+        "--enable-synonym-linking",
+        "true" if bool(args.enable_synonym_linking) else "false",
+        "--enable-multi-hop",
+        "true" if bool(args.enable_multi_hop) else "false",
+        "--multi-hop-depth",
+        str(args.multi_hop_depth),
+        "--ppr-damping",
+        str(args.ppr_damping),
+        "--passage-node-weight",
+        str(args.passage_node_weight),
         "--keyword_fanout_mode",
         str(experiment["keyword_fanout_mode"]),
         "--entity_retrieval_mode",
@@ -862,7 +979,10 @@ def _run_one(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(raw_argv)
+    _apply_inferred_ablation_flag_defaults(args, raw_argv)
+    args.ablation_flags = validate_ablation_flags(args, naming_style="hyphen")
     shared_experiments, surge_experiments = _selected_experiments(args)
     shared_layout = resolve_shared_workspace_layout(
         run_root=args.run_root,
@@ -891,6 +1011,7 @@ def main(argv: list[str] | None = None) -> int:
             "allow_legacy_index_profile_adoption": bool(
                 args.allow_legacy_index_profile_adoption
             ),
+            "ablation_flags": args.ablation_flags.to_dict(),
             "shared_experiments": shared_experiments,
             "surge_experiments": surge_experiments,
         },
