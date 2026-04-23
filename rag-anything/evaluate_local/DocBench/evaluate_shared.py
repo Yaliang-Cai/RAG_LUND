@@ -28,6 +28,7 @@ from evaluate_local.ablation_flags import (
     AblationFlags,
     add_ablation_arguments,
     apply_ablation_flags_to_settings,
+    as_bool,
     build_index_profile,
     ensure_workspace_index_profile,
     validate_ablation_flags,
@@ -321,12 +322,14 @@ def _build_query_params(
     answer_context_mode: str = "kg_prompt",
     kg_chunk_selection_source: str = "truncated",
     max_total_tokens: int | None = None,
+    enable_rerank: bool = True,
     bypass_query_cache: bool = False,
     bypass_keywords_cache: bool = False,
 ) -> dict[str, Any]:
     flags = ablation_flags or AblationFlags()
     params = dict(DOCBENCH_QUERY_PARAMS)
     params.update(flags.to_query_kwargs())
+    params["enable_rerank"] = bool(enable_rerank)
     if query_mode is not None:
         normalized_mode = str(query_mode).strip()
         if normalized_mode:
@@ -334,6 +337,16 @@ def _build_query_params(
     if str(params.get("mode", "")).strip() == "ppr":
         params["recognition_top_k"] = max(0, int(recognition_top_k))
         params["answer_context_mode"] = "chunk_only_prompt"
+        ppr_top_k = int(params.get("ppr_top_k", 0) or 0)
+        ppr_qa_top_k = int(params.get("ppr_qa_top_k", 0) or 0)
+        if ppr_top_k <= 0:
+            raise ValueError(f"ppr_top_k must be > 0, got {ppr_top_k}")
+        if ppr_qa_top_k <= 0:
+            raise ValueError(f"ppr_qa_top_k must be > 0, got {ppr_qa_top_k}")
+        if ppr_qa_top_k > ppr_top_k:
+            raise ValueError(
+                f"ppr_qa_top_k must be <= ppr_top_k, got {ppr_qa_top_k} > {ppr_top_k}"
+            )
     else:
         params.pop("recognition_top_k", None)
         params["answer_context_mode"] = str(answer_context_mode).strip()
@@ -1946,6 +1959,11 @@ async def main() -> None:
         default="truncated",
     )
     parser.add_argument("--max_total_tokens", type=int, default=45000)
+    parser.add_argument(
+        "--enable_rerank",
+        type=as_bool,
+        default=DOCBENCH_QUERY_PARAMS["enable_rerank"],
+    )
     parser.add_argument("--bypass_query_cache", action="store_true")
     parser.add_argument("--bypass_keywords_cache", action="store_true")
     add_ablation_arguments(parser)
@@ -2002,6 +2020,7 @@ async def main() -> None:
         answer_context_mode=args.answer_context_mode,
         kg_chunk_selection_source=args.kg_chunk_selection_source,
         max_total_tokens=args.max_total_tokens,
+        enable_rerank=args.enable_rerank,
         bypass_query_cache=args.bypass_query_cache,
         bypass_keywords_cache=args.bypass_keywords_cache,
     )

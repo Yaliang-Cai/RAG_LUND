@@ -21,6 +21,7 @@ from raganything.constants import (
     DEFAULT_MULTI_HOP_DEPTH,
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_PPR_DAMPING,
+    DEFAULT_PPR_QA_TOP_K,
     DEFAULT_PPR_TOP_K,
 )
 
@@ -62,6 +63,7 @@ class AblationFlags:
     multi_hop_depth: int = DEFAULT_MULTI_HOP_DEPTH
     ppr_damping: float = DEFAULT_PPR_DAMPING
     ppr_top_k: int = DEFAULT_PPR_TOP_K
+    ppr_qa_top_k: int = DEFAULT_PPR_QA_TOP_K
     passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
 
     @classmethod
@@ -89,6 +91,7 @@ class AblationFlags:
                 multi_hop_depth=int(payload["multi_hop_depth"]),
                 ppr_damping=float(payload["ppr_damping"]),
                 ppr_top_k=int(payload["ppr_top_k"]),
+                ppr_qa_top_k=int(payload.get("ppr_qa_top_k", DEFAULT_PPR_QA_TOP_K)),
                 passage_node_weight=float(payload["passage_node_weight"]),
             )
         except Exception:
@@ -103,6 +106,7 @@ class AblationFlags:
             multi_hop_depth=int(args.multi_hop_depth),
             ppr_damping=float(args.ppr_damping),
             ppr_top_k=int(args.ppr_top_k),
+            ppr_qa_top_k=int(getattr(args, "ppr_qa_top_k", DEFAULT_PPR_QA_TOP_K)),
             passage_node_weight=float(args.passage_node_weight),
         )
 
@@ -114,6 +118,7 @@ class AblationFlags:
             "multi_hop_depth": self.multi_hop_depth,
             "ppr_damping": self.ppr_damping,
             "ppr_top_k": self.ppr_top_k,
+            "ppr_qa_top_k": self.ppr_qa_top_k,
             "passage_node_weight": self.passage_node_weight,
         }
 
@@ -130,6 +135,7 @@ class AblationFlags:
             "multi_hop_depth": self.multi_hop_depth,
             "ppr_damping": self.ppr_damping,
             "ppr_top_k": self.ppr_top_k,
+            "ppr_qa_top_k": self.ppr_qa_top_k,
             "passage_node_weight": self.passage_node_weight,
         }
 
@@ -200,6 +206,13 @@ def add_ablation_arguments(
         default=DEFAULT_PPR_TOP_K,
     )
     parser.add_argument(
+        "--ppr-qa-top-k",
+        *(["--ppr_qa_top_k"] if include_legacy_underscore_alias else []),
+        dest="ppr_qa_top_k",
+        type=int,
+        default=DEFAULT_PPR_QA_TOP_K,
+    )
+    parser.add_argument(
         "--passage-node-weight",
         *(["--passage_node_weight"] if include_legacy_underscore_alias else []),
         dest="passage_node_weight",
@@ -221,6 +234,15 @@ def validate_ablation_flags(
     if flags.ppr_top_k <= 0:
         raise ValueError(
             f"{_flag_name('ppr-top-k', naming_style)} must be > 0, got {flags.ppr_top_k}"
+        )
+    if flags.ppr_qa_top_k <= 0:
+        raise ValueError(
+            f"{_flag_name('ppr-qa-top-k', naming_style)} must be > 0, got {flags.ppr_qa_top_k}"
+        )
+    if flags.ppr_qa_top_k > flags.ppr_top_k:
+        raise ValueError(
+            f"{_flag_name('ppr-qa-top-k', naming_style)} must be <= "
+            f"{_flag_name('ppr-top-k', naming_style)}, got {flags.ppr_qa_top_k} > {flags.ppr_top_k}"
         )
     if not (0.0 < flags.ppr_damping < 1.0):
         raise ValueError(
@@ -253,6 +275,7 @@ def apply_ablation_flags_to_settings(settings: Any, flags: AblationFlags) -> Non
     settings.multi_hop_depth = flags.multi_hop_depth
     settings.ppr_damping = flags.ppr_damping
     settings.ppr_top_k = flags.ppr_top_k
+    settings.ppr_qa_top_k = flags.ppr_qa_top_k
     settings.passage_node_weight = flags.passage_node_weight
 
 

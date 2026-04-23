@@ -901,6 +901,7 @@ def _build_query_cache_params(
         "ll_keywords": ll_keywords_str,
         "user_prompt": user_prompt,
         "enable_rerank": query_param.enable_rerank,
+        "enable_kg_rerank": query_param.enable_kg_rerank,
         "include_references": query_param.include_references,
         "multimodal_top_k": query_param.multimodal_top_k,
         "enable_image_token_budget": query_param.enable_image_token_budget,
@@ -911,7 +912,12 @@ def _build_query_cache_params(
         "multi_hop_depth": query_param.multi_hop_depth,
         "ppr_damping": query_param.ppr_damping,
         "ppr_top_k": query_param.ppr_top_k,
+        "ppr_qa_top_k": query_param.ppr_qa_top_k,
         "passage_node_weight": query_param.passage_node_weight,
+        "recognition_top_k": query_param.recognition_top_k,
+        "linking_top_k": query_param.linking_top_k,
+        "ppr_synonym_weight_mode": query_param.ppr_synonym_weight_mode,
+        "qdrant_retrieval_mode": query_param.qdrant_retrieval_mode,
         "keyword_fanout_mode": getattr(query_param, "keyword_fanout_mode", "joined"),
         "answer_context_mode": getattr(
             query_param, "answer_context_mode", "kg_prompt"

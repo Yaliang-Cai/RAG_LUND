@@ -25,7 +25,10 @@ if str(PROJECT_ROOT) not in sys.path:
 load_dotenv()
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
-from evaluate_local.run_retrieval_ablation import build_reduced_experiment_matrix
+from evaluate_local.run_retrieval_ablation import (
+    build_reduced_experiment_matrix,
+    _validate_ppr_controls,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +49,8 @@ CHUNK_TOP_K = 20
 SURGE_CHUNK_TOP_K = 0
 MAX_TOTAL_TOKENS = 45000
 RECOGNITION_TOP_K = 20
+PPR_TOP_K = 50
+PPR_QA_TOP_K = 20 if DATASET == "docbench" else 50
 
 KEYWORD_FANOUT_MODE = "joined"  # joined | per_keyword_rrf
 RETRIEVAL_MODE = "dense"  # dense | hybrid
@@ -53,6 +58,7 @@ KG_CHUNK_SELECTION_SOURCE = "truncated"  # truncated | untruncated; hybrid only
 EXCLUDE_SYNONYM_EDGES = True
 
 ANSWER_CONTEXT_MODE = "kg_prompt"  # hybrid only; ppr is always chunk_only_prompt
+ENABLE_RERANK = True
 BYPASS_QUERY_CACHE = True
 BYPASS_KEYWORDS_CACHE = False
 
@@ -98,7 +104,14 @@ def _dataset_key(dataset: str) -> str:
 def _debug_group_matrix(dataset: str) -> list[dict[str, Any]]:
     dataset_key = _dataset_key(dataset)
     task = "shared" if dataset_key == "docbench" else "surge"
-    return build_reduced_experiment_matrix(task)
+    kwargs: dict[str, int] = {}
+    if dataset_key == "docbench":
+        kwargs["shared_ppr_top_k"] = PPR_TOP_K
+        kwargs["shared_ppr_qa_top_k"] = PPR_QA_TOP_K
+    else:
+        kwargs["surge_ppr_top_k"] = PPR_TOP_K
+        kwargs["surge_ppr_qa_top_k"] = PPR_QA_TOP_K
+    return build_reduced_experiment_matrix(task, **kwargs)
 
 
 def _single_group(dataset: str) -> dict[str, Any]:
@@ -115,8 +128,12 @@ def _single_group(dataset: str) -> dict[str, Any]:
     if QUERY_MODE == "ppr":
         item["exclude_synonym_edges"] = False
         item["answer_context_mode"] = "chunk_only_prompt"
+        item["enable_rerank"] = ENABLE_RERANK
+        item["ppr_top_k"] = PPR_TOP_K
+        item["ppr_qa_top_k"] = PPR_QA_TOP_K
     else:
         item["kg_chunk_selection_source"] = KG_CHUNK_SELECTION_SOURCE
+        item["enable_rerank"] = ENABLE_RERANK
         if dataset_key == "docbench":
             item["answer_context_mode"] = ANSWER_CONTEXT_MODE
     return item
@@ -135,12 +152,21 @@ def _query_kwargs(group: dict[str, Any]) -> dict[str, Any]:
         "entity_qdrant_retrieval_mode": str(group["entity_retrieval_mode"]),
         "chunk_qdrant_retrieval_mode": str(group["chunk_retrieval_mode"]),
         "exclude_synonym_edges": bool(group["exclude_synonym_edges"]),
+        "enable_rerank": bool(group.get("enable_rerank", ENABLE_RERANK)),
         "bypass_query_cache": BYPASS_QUERY_CACHE,
         "bypass_keywords_cache": BYPASS_KEYWORDS_CACHE,
     }
     if "kg_chunk_selection_source" in group:
         kwargs["kg_chunk_selection_source"] = str(group["kg_chunk_selection_source"])
     if query_mode == "ppr":
+        kwargs["ppr_top_k"] = int(group.get("ppr_top_k", PPR_TOP_K))
+        kwargs["ppr_qa_top_k"] = int(group.get("ppr_qa_top_k", PPR_QA_TOP_K))
+        _validate_ppr_controls(
+            query_mode=query_mode,
+            ppr_top_k=kwargs["ppr_top_k"],
+            ppr_qa_top_k=kwargs["ppr_qa_top_k"],
+            context=f"debug:{group.get('name', 'single')}",
+        )
         kwargs["answer_context_mode"] = "chunk_only_prompt"
     elif dataset_key == "docbench":
         kwargs["answer_context_mode"] = str(
@@ -198,6 +224,14 @@ async def _run_group(
         _print_section("GlobalSearch", retrieval_debug.get("global_search"))
         _print_section("KGRerank", retrieval_debug.get("kg_rerank"))
     else:
+        _print_section(
+            "PPRControls",
+            {
+                "enable_rerank": kwargs.get("enable_rerank"),
+                "ppr_top_k": kwargs.get("ppr_top_k"),
+                "ppr_qa_top_k": kwargs.get("ppr_qa_top_k"),
+            },
+        )
         _print_section("PPR", retrieval_debug.get("ppr"))
 
     _print_section(
@@ -226,6 +260,9 @@ async def main() -> None:
     print(f"dataset={DATASET}")
     print(f"run_group_matrix={RUN_GROUP_MATRIX}")
     print(f"query={QUERY}")
+    print(f"enable_rerank={ENABLE_RERANK}")
+    print(f"ppr_top_k={PPR_TOP_K}")
+    print(f"ppr_qa_top_k={PPR_QA_TOP_K}")
     print(f"groups={[group['name'] for group in groups]}")
 
     for group in groups:

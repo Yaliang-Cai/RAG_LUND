@@ -24,6 +24,10 @@ DEFAULT_RUN_ROOT = (
 DEFAULT_SHARED_WORKSPACE_ID = "docbench_shared_graphbm25_20260421_v0_v1_v2"
 DEFAULT_SURGE_WORKSPACE_ID = "surge_fast_graphbm25_20260421_v0_v1_v2"
 DEFAULT_OUTPUT_ROOT = "evaluate_local/retrieval_ablation_runs"
+DEFAULT_SHARED_PPR_TOP_K = 50
+DEFAULT_SHARED_PPR_QA_TOP_K = 20
+DEFAULT_SURGE_PPR_TOP_K = 50
+DEFAULT_SURGE_PPR_QA_TOP_K = 50
 
 
 def _now_iso() -> str:
@@ -41,6 +45,7 @@ def _with_unified_retrieval(item: dict[str, Any]) -> dict[str, Any]:
         "retrieval_mode": retrieval_mode,
         "entity_retrieval_mode": retrieval_mode,
         "chunk_retrieval_mode": retrieval_mode,
+        "enable_rerank": bool(item.get("enable_rerank", True)),
     }
 
 
@@ -67,6 +72,9 @@ def _ppr_experiment(
     name: str,
     keyword_fanout_mode: str,
     retrieval_mode: str,
+    enable_rerank: bool,
+    ppr_top_k: int,
+    ppr_qa_top_k: int,
 ) -> dict[str, Any]:
     return _with_unified_retrieval(
         {
@@ -77,11 +85,41 @@ def _ppr_experiment(
             "retrieval_mode": retrieval_mode,
             "exclude_synonym_edges": False,
             "answer_context_mode": "chunk_only_prompt",
+            "enable_rerank": bool(enable_rerank),
+            "ppr_top_k": int(ppr_top_k),
+            "ppr_qa_top_k": int(ppr_qa_top_k),
         }
     )
 
 
-def build_reduced_experiment_matrix(task: str) -> list[dict[str, Any]]:
+def _validate_ppr_controls(
+    *,
+    query_mode: str,
+    ppr_top_k: int | None,
+    ppr_qa_top_k: int | None,
+    context: str,
+) -> None:
+    if str(query_mode).strip() != "ppr":
+        return
+    if ppr_top_k is None or int(ppr_top_k) <= 0:
+        raise ValueError(f"{context}: ppr_top_k must be > 0, got {ppr_top_k!r}")
+    if ppr_qa_top_k is None or int(ppr_qa_top_k) <= 0:
+        raise ValueError(f"{context}: ppr_qa_top_k must be > 0, got {ppr_qa_top_k!r}")
+    if int(ppr_qa_top_k) > int(ppr_top_k):
+        raise ValueError(
+            f"{context}: ppr_qa_top_k must be <= ppr_top_k, got "
+            f"{int(ppr_qa_top_k)} > {int(ppr_top_k)}"
+        )
+
+
+def build_reduced_experiment_matrix(
+    task: str,
+    *,
+    shared_ppr_top_k: int = DEFAULT_SHARED_PPR_TOP_K,
+    shared_ppr_qa_top_k: int = DEFAULT_SHARED_PPR_QA_TOP_K,
+    surge_ppr_top_k: int = DEFAULT_SURGE_PPR_TOP_K,
+    surge_ppr_qa_top_k: int = DEFAULT_SURGE_PPR_QA_TOP_K,
+) -> list[dict[str, Any]]:
     normalized_task = str(task).strip().lower()
     if normalized_task in {"docbench", "shared"}:
         task_name = "shared"
@@ -118,15 +156,30 @@ def build_reduced_experiment_matrix(task: str) -> list[dict[str, Any]]:
             },
             _ppr_experiment(
                 task=task_name,
-                name="ppr_dense",
+                name="ppr_dense_rerank",
                 keyword_fanout_mode="joined",
                 retrieval_mode="dense",
+                enable_rerank=True,
+                ppr_top_k=shared_ppr_top_k,
+                ppr_qa_top_k=shared_ppr_qa_top_k,
+            ),
+            _ppr_experiment(
+                task=task_name,
+                name="ppr_dense_no_rerank",
+                keyword_fanout_mode="joined",
+                retrieval_mode="dense",
+                enable_rerank=False,
+                ppr_top_k=shared_ppr_top_k,
+                ppr_qa_top_k=shared_ppr_qa_top_k,
             ),
             _ppr_experiment(
                 task=task_name,
                 name="ppr_hybrid_per_keyword",
                 keyword_fanout_mode="per_keyword_rrf",
                 retrieval_mode="hybrid",
+                enable_rerank=True,
+                ppr_top_k=shared_ppr_top_k,
+                ppr_qa_top_k=shared_ppr_qa_top_k,
             ),
         ]
         return experiments
@@ -149,15 +202,30 @@ def build_reduced_experiment_matrix(task: str) -> list[dict[str, Any]]:
             ),
             _ppr_experiment(
                 task="surge",
-                name="ppr_dense",
+                name="ppr_dense_rerank",
                 keyword_fanout_mode="joined",
                 retrieval_mode="dense",
+                enable_rerank=True,
+                ppr_top_k=surge_ppr_top_k,
+                ppr_qa_top_k=surge_ppr_qa_top_k,
+            ),
+            _ppr_experiment(
+                task="surge",
+                name="ppr_dense_no_rerank",
+                keyword_fanout_mode="joined",
+                retrieval_mode="dense",
+                enable_rerank=False,
+                ppr_top_k=surge_ppr_top_k,
+                ppr_qa_top_k=surge_ppr_qa_top_k,
             ),
             _ppr_experiment(
                 task="surge",
                 name="ppr_hybrid_per_keyword",
                 keyword_fanout_mode="per_keyword_rrf",
                 retrieval_mode="hybrid",
+                enable_rerank=True,
+                ppr_top_k=surge_ppr_top_k,
+                ppr_qa_top_k=surge_ppr_qa_top_k,
             ),
         ]
 
@@ -189,6 +257,7 @@ def build_full_experiment_matrix(
                                     "retrieval_mode": retrieval_mode,
                                     "exclude_synonym_edges": bool(exclude_synonym_edges),
                                     "answer_context_mode": "chunk_only_prompt",
+                                    "enable_rerank": True,
                                 }
                             )
                         )
@@ -204,6 +273,7 @@ def build_full_experiment_matrix(
                                             "exclude_synonym_edges": bool(exclude_synonym_edges),
                                             "kg_chunk_selection_source": kg_chunk_selection_source,
                                             "answer_context_mode": answer_context_mode,
+                                            "enable_rerank": True,
                                         }
                                     )
                                 )
@@ -259,6 +329,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-k", type=int, default=40)
     parser.add_argument("--shared-chunk-top-k", type=int, default=20)
     parser.add_argument("--surge-chunk-top-k", type=int, default=0)
+    parser.add_argument("--shared-ppr-top-k", type=int, default=DEFAULT_SHARED_PPR_TOP_K)
+    parser.add_argument(
+        "--shared-ppr-qa-top-k",
+        type=int,
+        default=DEFAULT_SHARED_PPR_QA_TOP_K,
+    )
+    parser.add_argument("--surge-ppr-top-k", type=int, default=DEFAULT_SURGE_PPR_TOP_K)
+    parser.add_argument(
+        "--surge-ppr-qa-top-k",
+        type=int,
+        default=DEFAULT_SURGE_PPR_QA_TOP_K,
+    )
     parser.add_argument("--chunk-top-k", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--max-total-tokens", type=int, default=45000)
     parser.add_argument("--recognition-top-k", type=int, default=20)
@@ -371,6 +453,8 @@ def _shared_command(args: argparse.Namespace, experiment: dict[str, Any], output
         str(experiment["chunk_retrieval_mode"]),
         "--exclude_synonym_edges",
         "true" if experiment["exclude_synonym_edges"] else "false",
+        "--enable_rerank",
+        "true" if experiment.get("enable_rerank", True) else "false",
     ]
     if args.bypass_query_cache:
         cmd.append("--bypass_query_cache")
@@ -385,6 +469,15 @@ def _shared_command(args: argparse.Namespace, experiment: dict[str, Any], output
         )
     if experiment["query_mode"] != "ppr":
         cmd.extend(["--answer_context_mode", str(experiment["answer_context_mode"])])
+    if experiment["query_mode"] == "ppr":
+        cmd.extend(
+            [
+                "--ppr_top_k",
+                str(experiment["ppr_top_k"]),
+                "--ppr_qa_top_k",
+                str(experiment["ppr_qa_top_k"]),
+            ]
+        )
     return cmd
 
 
@@ -417,6 +510,8 @@ def _surge_command(args: argparse.Namespace, experiment: dict[str, Any], output_
         str(experiment["chunk_retrieval_mode"]),
         "--exclude_synonym_edges",
         "true" if experiment["exclude_synonym_edges"] else "false",
+        "--enable-rerank",
+        "true" if experiment.get("enable_rerank", True) else "false",
     ]
     if args.bypass_query_cache:
         cmd.append("--bypass_query_cache")
@@ -429,7 +524,49 @@ def _surge_command(args: argparse.Namespace, experiment: dict[str, Any], output_
                 str(experiment["kg_chunk_selection_source"]),
             ]
         )
+    if experiment["query_mode"] == "ppr":
+        cmd.extend(
+            [
+                "--ppr-top-k",
+                str(experiment["ppr_top_k"]),
+                "--ppr-qa-top-k",
+                str(experiment["ppr_qa_top_k"]),
+            ]
+        )
     return cmd
+
+
+def _finalize_experiment_for_task(
+    *,
+    task: str,
+    experiment: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    finalized = dict(experiment)
+    finalized["task"] = task
+    finalized["enable_rerank"] = bool(finalized.get("enable_rerank", True))
+    if finalized.get("query_mode") == "ppr":
+        if task == "shared":
+            finalized["ppr_top_k"] = int(
+                finalized.get("ppr_top_k", args.shared_ppr_top_k)
+            )
+            finalized["ppr_qa_top_k"] = int(
+                finalized.get("ppr_qa_top_k", args.shared_ppr_qa_top_k)
+            )
+        else:
+            finalized["ppr_top_k"] = int(
+                finalized.get("ppr_top_k", args.surge_ppr_top_k)
+            )
+            finalized["ppr_qa_top_k"] = int(
+                finalized.get("ppr_qa_top_k", args.surge_ppr_qa_top_k)
+            )
+        _validate_ppr_controls(
+            query_mode=str(finalized["query_mode"]),
+            ppr_top_k=finalized.get("ppr_top_k"),
+            ppr_qa_top_k=finalized.get("ppr_qa_top_k"),
+            context=f"{task}:{finalized.get('name', finalized.get('query_mode', 'experiment'))}",
+        )
+    return finalized
 
 
 def _build_full_experiments(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -455,12 +592,12 @@ def _selected_experiments(args: argparse.Namespace) -> tuple[list[dict[str, Any]
 
     if args.matrix_mode == "full":
         full = _build_full_experiments(args)
-        shared = [{**item, "task": "shared"} for item in full]
+        shared = [
+            _finalize_experiment_for_task(task="shared", experiment=item, args=args)
+            for item in full
+        ]
         surge = [
-            {
-                **item,
-                "task": "surge",
-            }
+            _finalize_experiment_for_task(task="surge", experiment=item, args=args)
             for item in full
             if not (
                 item["query_mode"] != "ppr"
@@ -469,8 +606,34 @@ def _selected_experiments(args: argparse.Namespace) -> tuple[list[dict[str, Any]
         ]
         return shared, surge
 
-    shared = build_reduced_experiment_matrix("shared")
-    surge = build_reduced_experiment_matrix("surge")
+    shared = [
+        _finalize_experiment_for_task(
+            task="shared",
+            experiment=item,
+            args=args,
+        )
+        for item in build_reduced_experiment_matrix(
+            "shared",
+            shared_ppr_top_k=args.shared_ppr_top_k,
+            shared_ppr_qa_top_k=args.shared_ppr_qa_top_k,
+            surge_ppr_top_k=args.surge_ppr_top_k,
+            surge_ppr_qa_top_k=args.surge_ppr_qa_top_k,
+        )
+    ]
+    surge = [
+        _finalize_experiment_for_task(
+            task="surge",
+            experiment=item,
+            args=args,
+        )
+        for item in build_reduced_experiment_matrix(
+            "surge",
+            shared_ppr_top_k=args.shared_ppr_top_k,
+            shared_ppr_qa_top_k=args.shared_ppr_qa_top_k,
+            surge_ppr_top_k=args.surge_ppr_top_k,
+            surge_ppr_qa_top_k=args.surge_ppr_qa_top_k,
+        )
+    ]
     return shared, surge
 
 

@@ -278,12 +278,14 @@ def settings_for_surge(args: argparse.Namespace) -> LocalRagSettings:
 
 
 def build_query_params(args: argparse.Namespace, *, chunk_top_k: int) -> dict[str, Any]:
+    flags = get_ablation_flags(args)
     query_params = {
         "mode": args.query_mode,
         "top_k": args.top_k,
         "chunk_top_k": chunk_top_k,
         "max_total_tokens": int(getattr(args, "max_total_tokens", 45000)),
-        "enable_rerank": True,
+        "recognition_top_k": DEFAULT_RECOGNITION_TOP_K,
+        "enable_rerank": bool(getattr(args, "enable_rerank", True)),
         "rerank_score_scope": "all",
         "keyword_fanout_mode": str(getattr(args, "keyword_fanout_mode", "joined")).strip(),
         "entity_qdrant_retrieval_mode": str(
@@ -307,8 +309,18 @@ def build_query_params(args: argparse.Namespace, *, chunk_top_k: int) -> dict[st
     exclude_synonym_edges = getattr(args, "exclude_synonym_edges", None)
     if exclude_synonym_edges is not None:
         query_params["exclude_synonym_edges"] = bool(exclude_synonym_edges)
-    query_params.update(get_ablation_flags(args).to_query_kwargs())
-    query_params["enable_rerank"] = True
+    query_params.update(flags.to_query_kwargs())
+    if str(args.query_mode).strip() == "ppr":
+        ppr_top_k = int(query_params.get("ppr_top_k", 0) or 0)
+        ppr_qa_top_k = int(query_params.get("ppr_qa_top_k", 0) or 0)
+        if ppr_top_k <= 0:
+            raise ValueError(f"ppr_top_k must be > 0, got {ppr_top_k}")
+        if ppr_qa_top_k <= 0:
+            raise ValueError(f"ppr_qa_top_k must be > 0, got {ppr_qa_top_k}")
+        if ppr_qa_top_k > ppr_top_k:
+            raise ValueError(
+                f"ppr_qa_top_k must be <= ppr_top_k, got {ppr_qa_top_k} > {ppr_top_k}"
+            )
     query_params["rerank_score_scope"] = "all"
     return query_params
 
@@ -1524,13 +1536,63 @@ def to_bool(v: Any) -> bool:
     raise ValueError(f"invalid bool value: {v!r}")
 
 
+def _canonicalize_match_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _canonicalize_match_value(val)
+            for key, val in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, list):
+        return [_canonicalize_match_value(item) for item in value]
+    if isinstance(value, float):
+        return round(value, 12)
+    return value
+
+
+def _build_expected_effective_query_params(
+    *,
+    args: argparse.Namespace,
+    chunk_top_k: int,
+    ks: list[int],
+) -> dict[str, Any]:
+    flags = get_ablation_flags(args)
+    return build_query_params(args, chunk_top_k=chunk_top_k) | {
+        "ablation_group": flags.ablation_group(),
+        "ablation_flags": flags.to_dict(),
+        "k_list": list(ks),
+    }
+
+
+def _effective_query_params_match(
+    *,
+    stored_params: Any,
+    args: argparse.Namespace,
+    chunk_top_k: int,
+    ks: list[int],
+) -> bool:
+    if not isinstance(stored_params, dict):
+        return False
+    expected_params = _build_expected_effective_query_params(
+        args=args,
+        chunk_top_k=chunk_top_k,
+        ks=ks,
+    )
+    for key, expected_value in expected_params.items():
+        if key not in stored_params:
+            return False
+        if _canonicalize_match_value(stored_params.get(key)) != _canonicalize_match_value(
+            expected_value
+        ):
+            return False
+    return True
+
+
 def has_matching_survey_retrieval(
     summary: dict[str, Any],
     args: argparse.Namespace,
     ks: list[int],
     expected_survey_count: int | None = None,
 ) -> bool:
-    expected_flags = get_ablation_flags(args)
     expected_chunk_top_k = resolve_chunk_top_k(args.chunk_top_k, ks)
     expected_subset = Path(args.data_root) / args.subset_dir
     summary_checks = {
@@ -1558,33 +1620,12 @@ def has_matching_survey_retrieval(
     for key, value in summary_checks_extra.items():
         if str(summary.get(key)) != value:
             return False
-    params = summary.get("effective_query_params", {})
-    if not isinstance(params, dict):
-        return False
-    if str(params.get("mode")) != str(args.query_mode):
-        return False
-    if parse_int(params.get("top_k")) != args.top_k:
-        return False
-    if parse_int(params.get("chunk_top_k")) != expected_chunk_top_k:
-        return False
-    try:
-        enable_rerank = to_bool(params.get("enable_rerank"))
-    except Exception:
-        return False
-    if enable_rerank != bool(args.enable_rerank):
-        return False
-    if str(params.get("rerank_score_scope", "all")) != "all":
-        return False
-    if str(
-        params.get("kg_chunk_selection_source", DEFAULT_KG_CHUNK_SELECTION_SOURCE)
-    ) != str(
-        getattr(args, "kg_chunk_selection_source", DEFAULT_KG_CHUNK_SELECTION_SOURCE)
+    if not _effective_query_params_match(
+        stored_params=summary.get("effective_query_params", {}),
+        args=args,
+        chunk_top_k=expected_chunk_top_k,
+        ks=ks,
     ):
-        return False
-    stored_flags = AblationFlags.from_mapping(params.get("ablation_flags"))
-    if stored_flags is None or stored_flags != expected_flags:
-        return False
-    if list(params.get("k_list") or []) != ks:
         return False
     if expected_survey_count is not None:
         if parse_int(summary.get("survey_count")) != expected_survey_count:
@@ -1600,7 +1641,6 @@ def has_matching_query_retrieval(
     ks: list[int],
     expected_query_count: int | None = None,
 ) -> bool:
-    expected_flags = get_ablation_flags(args)
     expected_chunk_top_k = resolve_chunk_top_k(args.chunk_top_k, ks)
     expected_subset = Path(args.data_root) / args.subset_dir
     if str(summary.get("mode")) != "retrieval":
@@ -1624,33 +1664,12 @@ def has_matching_query_retrieval(
         if str(summary.get(key)) != value:
             return False
 
-    params = summary.get("effective_query_params", {})
-    if not isinstance(params, dict):
-        return False
-    if str(params.get("mode")) != str(args.query_mode):
-        return False
-    if parse_int(params.get("top_k")) != args.top_k:
-        return False
-    if parse_int(params.get("chunk_top_k")) != expected_chunk_top_k:
-        return False
-    try:
-        enable_rerank = to_bool(params.get("enable_rerank"))
-    except Exception:
-        return False
-    if enable_rerank != bool(args.enable_rerank):
-        return False
-    if str(params.get("rerank_score_scope", "all")) != "all":
-        return False
-    if str(
-        params.get("kg_chunk_selection_source", DEFAULT_KG_CHUNK_SELECTION_SOURCE)
-    ) != str(
-        getattr(args, "kg_chunk_selection_source", DEFAULT_KG_CHUNK_SELECTION_SOURCE)
+    if not _effective_query_params_match(
+        stored_params=summary.get("effective_query_params", {}),
+        args=args,
+        chunk_top_k=expected_chunk_top_k,
+        ks=ks,
     ):
-        return False
-    stored_flags = AblationFlags.from_mapping(params.get("ablation_flags"))
-    if stored_flags is None or stored_flags != expected_flags:
-        return False
-    if list(params.get("k_list") or []) != ks:
         return False
     if expected_query_count is not None:
         if parse_int(summary.get("query_count")) != expected_query_count:
@@ -2260,10 +2279,6 @@ def validate_args(args: argparse.Namespace) -> None:
     elif args.chunk_top_k < 0:
         raise ValueError(
             f"--chunk-top-k must be > 0 or 0(disabled), got {args.chunk_top_k}"
-        )
-    if not bool(args.enable_rerank):
-        raise ValueError(
-            "--enable-rerank must be true for evaluation; selected chunks must be reranked."
         )
     if args.max_concurrency <= 0:
         raise ValueError(
