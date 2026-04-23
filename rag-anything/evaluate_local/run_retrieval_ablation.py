@@ -13,12 +13,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from evaluate_local.ablation_flags import add_ablation_arguments, validate_ablation_flags
-
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECTS_ROOT = PROJECT_ROOT.parent
+LOCAL_LIGHTRAG_ROOT = PROJECTS_ROOT / "lightrag"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+if LOCAL_LIGHTRAG_ROOT.exists() and str(LOCAL_LIGHTRAG_ROOT) not in sys.path:
+    sys.path.insert(0, str(LOCAL_LIGHTRAG_ROOT))
+
+from evaluate_local.ablation_flags import add_ablation_arguments, validate_ablation_flags
 
 
 DEFAULT_RUN_ROOT = (
