@@ -96,13 +96,13 @@ def _resolve_working_dir(
             workspace_id=workspace_id,
             require_existing=True,
         )
-        return str(layout["working_dir_root"])
+        return str(layout["workspace_dir"])
     layout = resolve_surge_workspace_layout(
         run_root=run_root,
         workspace_id=workspace_id,
         require_existing=True,
     )
-    return str(layout["storage_root"])
+    return str(layout["workspace_dir"])
 
 
 def _dataset_key(dataset: str) -> str:
