@@ -363,6 +363,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
     )
     parser.add_argument(
+        "--allow-legacy-index-profile-adoption",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Allow adopting existing workspaces that contain index artifacts but lack "
+            ".ablation_index_profile.json metadata."
+        ),
+    )
+    parser.add_argument(
         "--require-existing-workspaces",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -645,6 +654,8 @@ def _shared_command(args: argparse.Namespace, experiment: dict[str, Any], output
                 str(experiment["ppr_qa_top_k"]),
             ]
         )
+    if args.allow_legacy_index_profile_adoption:
+        cmd.append("--allow_legacy_index_profile_adoption")
     return cmd
 
 
@@ -700,6 +711,8 @@ def _surge_command(args: argparse.Namespace, experiment: dict[str, Any], output_
                 str(experiment["ppr_qa_top_k"]),
             ]
         )
+    if args.allow_legacy_index_profile_adoption:
+        cmd.append("--allow-legacy-index-profile-adoption")
     return cmd
 
 
@@ -875,6 +888,9 @@ def main(argv: list[str] | None = None) -> int:
             "shared_workspace_layout": shared_layout,
             "surge_workspace_layout": surge_layout,
             "matrix_mode": args.matrix_mode,
+            "allow_legacy_index_profile_adoption": bool(
+                args.allow_legacy_index_profile_adoption
+            ),
             "shared_experiments": shared_experiments,
             "surge_experiments": surge_experiments,
         },
