@@ -249,7 +249,7 @@ Your response must contain only missed or corrected entries, not a full rewrite.
 2.  Output only: (a) missed entities/relationships, (b) corrected versions of
     truncated or malformed entries.
 3.  Apply all rules from the system prompt: type definitions, ambiguity protocol,
-    canonical type rule, depth-1 rule, negation rule, attribute encoding,
+    canonical type rule, depth-1 rule, negation rule, exclusion rules,
     relation completeness, and endpoint closure.
 4.  For continuation, endpoint closure is evaluated against the combined extraction:
     the previous assistant extraction plus the missed/corrected entries you output now.
@@ -432,7 +432,7 @@ relation{tuple_delimiter}Apollo Postmortem{tuple_delimiter}Apollo Remediation Pl
 {completion_delimiter}
 """,
 
-    # Example 5 - Negated decisions do not create positive execution edges
+    # Example 4 - Negated decisions do not create positive execution edges
     """<Entity_types>
 ["person","organization","location","event","artifact","work","naturalentity","concept","process"]
 
@@ -725,18 +725,19 @@ You are an expert keyword extractor, specializing in analyzing user queries for 
 
 ---Goal---
 Given a user query, your task is to extract two distinct types of keywords:
-1. **high_level_keywords**: for overarching concepts or themes, capturing user's core intent, the subject area, or the type of question being asked.
-2. **low_level_keywords**: for specific entities or details, identifying the specific entities, proper nouns, technical jargon, product names, or concrete items.
+1. **high_level_keywords**: overarching themes and relational concepts that describe the query's intent. Use lowercase short phrases (e.g., "gene knockout", "performance metrics", "api integration").
+2. **low_level_keywords**: specific named entities mentioned or implied by the query. Use title-cased style. Covers any named referent of these types: person, organization, location, event, artifact, work, naturalentity, concept, process.
 
 ---Instructions & Constraints---
 1. **Output Format**: Your output MUST be a valid JSON object and nothing else. Do not include any explanatory text, markdown code fences (like ```json), or any other text before or after the JSON. It will be parsed directly by a JSON parser.
-2. **Source of Truth**: All keywords must be explicitly derived from the user query, with both high-level and low-level keyword categories are required to contain content.
-3. **Concise & Meaningful**: Keywords should be concise words or meaningful phrases. Prioritize multi-word phrases when they represent a single concept. For example, from "latest financial report of Apple Inc.", you should extract "latest financial report" and "Apple Inc." rather than "latest", "financial", "report", and "Apple".
+2. **Source of Truth**: Keywords must be grounded in the user query. Direct mentions are always included; reasonable inferences are permitted—for low_level_keywords, infer entity-type terms (person, organization, location, event, artifact, work, naturalentity, concept, process); for high_level_keywords, infer related relational themes. Both categories must contain at least one keyword.
+3. **Concise & Meaningful**: Keywords should be concise words or meaningful phrases. Prioritize multi-word phrases when they represent a single concept. For example, from "What did Elena Ruiz present about the Orion Support Platform in the Q2 Service Performance Report?", extract "Elena Ruiz", "Orion Support Platform", and "Q2 Service Performance Report" as low_level_keywords and "report presentation" as a high_level_keyword — not individual words like "present", "Q2", or "Platform".
 4. **Handle Edge Cases**: For queries that are too simple, vague, or nonsensical (e.g., "hello", "ok", "asdfghjkl"), you must return a JSON object with empty lists for both keyword types.
 5. **Language**: All extracted keywords MUST be in {language}. Proper nouns (e.g., personal names, place names, organization names) should be kept in their original language.
 6. **Casing (high_level_keywords)**: Use lowercase phrases by default. Preserve meaningful uppercase or mixed-case proper nouns/acronyms (e.g., OpenAI, BERT, API, 6G).
 7. **Casing (low_level_keywords)**: Use entity-style casing. Preserve mixed-case proper nouns/acronyms; otherwise normalize case-insensitive phrases to canonical title-style wording.
-8. **Casing Alignment**: When a low_level keyword corresponds to an extractable entity mention, align its casing with the entity extraction `entity_name` rule (title-cased by default while preserving meaningful acronyms and internal capitals). This keeps `high_level_keywords` aligned with relationship keyword style and `low_level_keywords` aligned with entity naming.
+8. **Exclusions**: Do not include as keywords: raw metric values (90%, $2M, 14ms), standalone role titles without a name (CEO, Director), unnamed generic placeholders (the model, the system, the team), standalone time labels (Q3 2024, FY2023) unless they are part of a full named entity (e.g. "Q3 2024 Root Cause Analysis"). These are not entity-type terms and make poor keywords.
+9. **Complete Names**: For low_level_keywords, use the outermost complete named entity. Prefer "EU AI Act" over "Article 13"; prefer "Q3 2024 Root Cause Analysis" over "Q3 2024" alone.
 
 ---Examples---
 {examples}
@@ -750,34 +751,34 @@ Output:"""
 PROMPTS["keywords_extraction_examples"] = [
     """Example 1:
 
-Query: "How does international trade influence global economic stability?"
+Query: "What are the environmental consequences of deforestation on biodiversity?"
 
 Output:
 {
-  "high_level_keywords": ["international trade", "global economic stability", "economic impact"],
-  "low_level_keywords": ["trade agreements", "tariffs", "currency exchange", "imports", "exports"]
+  "high_level_keywords": ["environmental consequences", "biodiversity impact", "ecological loss"],
+  "low_level_keywords": ["Deforestation", "Biodiversity", "Carbon Emissions", "Habitat Loss"]
 }
 
 """,
     """Example 2:
 
-Query: "What are the environmental consequences of deforestation on biodiversity?"
+Query: "What performance metrics did the Orion Support Platform achieve in the Q2 Service Performance Report?"
 
 Output:
 {
-  "high_level_keywords": ["environmental consequences", "deforestation", "biodiversity loss"],
-  "low_level_keywords": ["species extinction", "habitat destruction", "carbon emissions", "rainforest", "ecosystem"]
+  "high_level_keywords": ["performance metrics", "service performance", "operational reporting"],
+  "low_level_keywords": ["Orion Support Platform", "Q2 Service Performance Report"]
 }
 
 """,
     """Example 3:
 
-Query: "What is the role of education in reducing poverty?"
+Query: "How was CRISPR-Cas9 used to knock out BRCA1 in the CARDIO-RNA Trial?"
 
 Output:
 {
-  "high_level_keywords": ["education", "poverty reduction", "socioeconomic development"],
-  "low_level_keywords": ["school access", "literacy rates", "job training", "income inequality"]
+  "high_level_keywords": ["gene editing application", "gene knockout", "clinical trial methodology"],
+  "low_level_keywords": ["CRISPR-Cas9", "BRCA1", "CARDIO-RNA Trial"]
 }
 
 """,
@@ -787,8 +788,8 @@ Query: "How can OpenAI API and BERT be used for semantic search in a 6G assistan
 
 Output:
 {
-  "high_level_keywords": ["semantic search", "assistant design", "6G application"],
-  "low_level_keywords": ["OpenAI API", "BERT", "6G assistant"]
+  "high_level_keywords": ["model usage", "api integration", "assistant design"],
+  "low_level_keywords": ["OpenAI API", "BERT", "Semantic Search", "6G Assistant"]
 }
 
 """,

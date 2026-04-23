@@ -319,6 +319,8 @@ def _build_query_params(
     chunk_retrieval_mode: str = "dense",
     exclude_synonym_edges: bool | None = None,
     answer_context_mode: str = "kg_prompt",
+    kg_chunk_selection_source: str = "truncated",
+    max_total_tokens: int | None = None,
     bypass_query_cache: bool = False,
     bypass_keywords_cache: bool = False,
 ) -> dict[str, Any]:
@@ -338,6 +340,9 @@ def _build_query_params(
     params["chunk_qdrant_retrieval_mode"] = str(chunk_retrieval_mode).strip()
     params["keyword_fanout_mode"] = str(keyword_fanout_mode).strip()
     params["entity_qdrant_retrieval_mode"] = str(entity_retrieval_mode).strip()
+    params["kg_chunk_selection_source"] = str(kg_chunk_selection_source).strip()
+    if max_total_tokens is not None:
+        params["max_total_tokens"] = int(max_total_tokens)
     params["bypass_query_cache"] = bool(bypass_query_cache)
     params["bypass_keywords_cache"] = bool(bypass_keywords_cache)
     if exclude_synonym_edges is not None:
@@ -595,13 +600,28 @@ def _extract_rerank_chunk_payload(
     count_input = rerank_debug.get("count_input")
     count_after_rerank = rerank_debug.get("count_after_rerank")
     count_after_threshold = rerank_debug.get("count_after_threshold")
+    count_after_chunk_top_k = rerank_debug.get("count_after_chunk_top_k")
     count_final = rerank_debug.get("count_final")
+
+    chunk_ids_all = rerank_debug.get("chunk_ids_all")
+    chunk_ids_after_threshold = rerank_debug.get("chunk_ids_after_threshold")
+    chunk_ids_after_chunk_top_k = rerank_debug.get("chunk_ids_after_chunk_top_k")
+    chunk_ids_final = rerank_debug.get("chunk_ids_final")
 
     def _safe_count(value: Any, fallback: int) -> int:
         try:
             return int(value)
         except (TypeError, ValueError):
             return fallback
+
+    def _safe_ids(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [
+            str(item).strip()
+            for item in value
+            if item is not None and str(item).strip()
+        ]
 
     return {
         "rerank_scope": str(
@@ -612,6 +632,10 @@ def _extract_rerank_chunk_payload(
             "input": _safe_count(count_input, len(scores_all)),
             "all": _safe_count(count_after_rerank, len(scores_all)),
             "after_threshold": _safe_count(count_after_threshold, len(scores_after_threshold)),
+            "after_chunk_top_k": _safe_count(
+                count_after_chunk_top_k,
+                len(_safe_ids(chunk_ids_after_chunk_top_k)) or len(scores_after_threshold),
+            ),
             "final": _safe_count(count_final, len(scores_final)),
         },
         "distribution": {
@@ -623,6 +647,12 @@ def _extract_rerank_chunk_payload(
             "all": scores_all,
             "after_threshold": scores_after_threshold,
             "final": scores_final,
+        },
+        "chunk_ids": {
+            "all": _safe_ids(chunk_ids_all),
+            "after_threshold": _safe_ids(chunk_ids_after_threshold),
+            "after_chunk_top_k": _safe_ids(chunk_ids_after_chunk_top_k),
+            "final": _safe_ids(chunk_ids_final),
         },
         "threshold_retention": _build_threshold_retention(scores_all),
         "has_rerank_debug": has_rerank_debug,
@@ -1910,6 +1940,12 @@ async def main() -> None:
         choices=["kg_prompt", "chunk_only_prompt"],
         default="kg_prompt",
     )
+    parser.add_argument(
+        "--kg_chunk_selection_source",
+        choices=["truncated", "untruncated"],
+        default="truncated",
+    )
+    parser.add_argument("--max_total_tokens", type=int, default=45000)
     parser.add_argument("--bypass_query_cache", action="store_true")
     parser.add_argument("--bypass_keywords_cache", action="store_true")
     add_ablation_arguments(parser)
@@ -1964,6 +2000,8 @@ async def main() -> None:
             else args.exclude_synonym_edges == "true"
         ),
         answer_context_mode=args.answer_context_mode,
+        kg_chunk_selection_source=args.kg_chunk_selection_source,
+        max_total_tokens=args.max_total_tokens,
         bypass_query_cache=args.bypass_query_cache,
         bypass_keywords_cache=args.bypass_keywords_cache,
     )

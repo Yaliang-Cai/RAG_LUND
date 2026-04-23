@@ -282,6 +282,7 @@ def build_query_params(args: argparse.Namespace, *, chunk_top_k: int) -> dict[st
         "mode": args.query_mode,
         "top_k": args.top_k,
         "chunk_top_k": chunk_top_k,
+        "max_total_tokens": int(getattr(args, "max_total_tokens", 45000)),
         "enable_rerank": True,
         "rerank_score_scope": "all",
         "keyword_fanout_mode": str(getattr(args, "keyword_fanout_mode", "joined")).strip(),
@@ -2341,6 +2342,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="0 disables chunk_top_k truncation; >0 keeps only top-k chunks before final token budgeting.",
     )
+    p.add_argument("--max-total-tokens", type=int, default=45000)
     p.add_argument("--k-list", default="5,10,20,30,50")
     p.add_argument("--survey-k-list", default="50,100,200,500")
     p.add_argument("--enable-rerank", type=as_bool, default=True)
