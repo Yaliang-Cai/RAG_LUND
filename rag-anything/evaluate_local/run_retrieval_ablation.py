@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import subprocess
@@ -23,7 +24,7 @@ DEFAULT_RUN_ROOT = (
 )
 DEFAULT_SHARED_WORKSPACE_ID = "docbench_shared_graphbm25_20260421_v0_v1_v2"
 DEFAULT_SURGE_WORKSPACE_ID = "surge_fast_graphbm25_20260421_v0_v1_v2"
-DEFAULT_OUTPUT_ROOT = "evaluate_local/retrieval_ablation_runs"
+DEFAULT_OUTPUT_ROOT = str(PROJECT_ROOT / "evaluate_local" / "retrieval_ablation_runs")
 DEFAULT_SHARED_PPR_TOP_K = 50
 DEFAULT_SHARED_PPR_QA_TOP_K = 20
 DEFAULT_SURGE_PPR_TOP_K = 50
@@ -361,6 +362,15 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    parser.add_argument(
+        "--require-existing-workspaces",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Resolve prebuilt DocBench/SurGE workspaces under run-root and fail fast if they "
+            "are missing. Disable only when you intentionally want fresh workspaces."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -387,6 +397,151 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def _glob_dirs(pattern: Path) -> list[Path]:
+    return sorted(
+        Path(item).resolve() for item in glob.glob(str(pattern)) if Path(item).is_dir()
+    )
+
+
+def _resolve_workspace_candidates(*patterns: Path) -> list[Path]:
+    matches: list[Path] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        for item in _glob_dirs(pattern):
+            key = str(item)
+            if key not in seen:
+                seen.add(key)
+                matches.append(item)
+    return matches
+
+
+def _select_unique_workspace_match(kind: str, workspace_id: str, matches: list[Path]) -> Path | None:
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    ordered = sorted(matches, key=lambda item: len(item.parts), reverse=True)
+    deepest = ordered[0]
+    deepest_str = str(deepest)
+    if all(
+        deepest_str == str(item) or deepest_str.startswith(str(item) + os.sep)
+        for item in ordered[1:]
+    ):
+        return deepest
+    raise ValueError(
+        f"Ambiguous {kind} workspace resolution for {workspace_id!r}. "
+        f"Matches: {[str(item) for item in matches]}"
+    )
+
+
+def resolve_shared_workspace_layout(
+    *,
+    run_root: str | Path,
+    workspace_id: str,
+    require_existing: bool = True,
+) -> dict[str, str]:
+    run_root_path = Path(run_root).resolve()
+    matches = _resolve_workspace_candidates(
+        run_root_path
+        / "_workspace_cache"
+        / "docbench_shared"
+        / "*"
+        / "rag_workspaces"
+        / workspace_id
+        / workspace_id,
+        run_root_path
+        / "_workspace_cache"
+        / "docbench_shared"
+        / "*"
+        / "rag_workspaces"
+        / workspace_id,
+        run_root_path / "*" / "evaluate_shared" / "rag_workspaces" / workspace_id / workspace_id,
+        run_root_path / "*" / "evaluate_shared" / "rag_workspaces" / workspace_id,
+        run_root_path / workspace_id / workspace_id,
+        run_root_path / workspace_id,
+    )
+    workspace_dir = _select_unique_workspace_match("DocBench shared", workspace_id, matches)
+    if workspace_dir is None:
+        if require_existing:
+            raise FileNotFoundError(
+                "DocBench shared workspace not found under run_root. "
+                f"run_root={run_root_path} workspace_id={workspace_id}"
+            )
+        workspace_dir = (run_root_path / workspace_id).resolve()
+
+    working_dir_root = run_root_path
+    state_dir: Path | None = None
+    if workspace_dir.parent.name == workspace_id and workspace_dir.parent.parent.name == "rag_workspaces":
+        working_dir_root = workspace_dir.parent
+        state_dir = workspace_dir.parent.parent.parent
+    elif workspace_dir.parent.name == "rag_workspaces":
+        working_dir_root = workspace_dir.parent
+        state_dir = workspace_dir.parent.parent
+
+    payload = {
+        "workspace_dir": str(workspace_dir),
+        "working_dir_root": str(working_dir_root),
+    }
+    if state_dir is not None:
+        payload["state_dir"] = str(state_dir)
+        payload["manifest_file"] = str(state_dir / "shared_ingest_manifest.json")
+        payload["failures_file"] = str(state_dir / "shared_ingest_failures.jsonl")
+    return payload
+
+
+def resolve_surge_workspace_layout(
+    *,
+    run_root: str | Path,
+    workspace_id: str,
+    require_existing: bool = True,
+) -> dict[str, str]:
+    run_root_path = Path(run_root).resolve()
+    matches = _resolve_workspace_candidates(
+        run_root_path
+        / "_workspace_cache"
+        / "surge_fast"
+        / "*"
+        / "rag_storage"
+        / workspace_id
+        / workspace_id,
+        run_root_path
+        / "_workspace_cache"
+        / "surge_fast"
+        / "*"
+        / "rag_storage"
+        / workspace_id,
+        run_root_path / "*" / "evaluate_surge_fast" / "rag_storage" / workspace_id / workspace_id,
+        run_root_path / "*" / "evaluate_surge_fast" / "rag_storage" / workspace_id,
+        run_root_path / workspace_id / workspace_id,
+        run_root_path / workspace_id,
+    )
+    workspace_dir = _select_unique_workspace_match("SurGE", workspace_id, matches)
+    if workspace_dir is None:
+        if require_existing:
+            raise FileNotFoundError(
+                "SurGE workspace not found under run_root. "
+                f"run_root={run_root_path} workspace_id={workspace_id}"
+            )
+        workspace_dir = (run_root_path / workspace_id).resolve()
+
+    storage_root = run_root_path
+    state_dir: Path | None = None
+    if workspace_dir.parent.name == workspace_id and workspace_dir.parent.parent.name == "rag_storage":
+        storage_root = workspace_dir.parent
+        state_dir = workspace_dir.parent.parent.parent
+    elif workspace_dir.parent.name == "rag_storage":
+        storage_root = workspace_dir.parent
+        state_dir = workspace_dir.parent.parent
+
+    payload = {
+        "workspace_dir": str(workspace_dir),
+        "storage_root": str(storage_root),
+    }
+    if state_dir is not None:
+        payload["state_dir"] = str(state_dir)
+    return payload
+
+
 def _run_command(*, command: list[str], cwd: Path, env: dict[str, str], log_file: Path) -> int:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with open(log_file, "w", encoding="utf-8") as f:
@@ -405,7 +560,13 @@ def _run_command(*, command: list[str], cwd: Path, env: dict[str, str], log_file
     return int(proc.returncode)
 
 
-def _build_workspace_env(base_env: dict[str, str], args: argparse.Namespace) -> dict[str, str]:
+def _build_workspace_env(
+    base_env: dict[str, str],
+    args: argparse.Namespace,
+    *,
+    shared_layout: dict[str, str],
+    surge_layout: dict[str, str],
+) -> dict[str, str]:
     env = dict(base_env)
     env["PYTHONPATH"] = os.pathsep.join(
         [
@@ -414,8 +575,14 @@ def _build_workspace_env(base_env: dict[str, str], args: argparse.Namespace) -> 
             str(env.get("PYTHONPATH", "")).strip(),
         ]
     ).strip(os.pathsep)
-    env["DOCBENCH_SHARED_WORKING_DIR_ROOT"] = str(args.run_root)
-    env["SURGE_FAST_RAG_STORAGE_DIR"] = str(args.run_root)
+    env["DOCBENCH_SHARED_WORKING_DIR_ROOT"] = str(shared_layout["working_dir_root"])
+    env["SURGE_FAST_RAG_STORAGE_DIR"] = str(surge_layout["storage_root"])
+    manifest_file = shared_layout.get("manifest_file")
+    if manifest_file:
+        env["DOCBENCH_SHARED_INGEST_MANIFEST_FILE"] = manifest_file
+    failures_file = shared_layout.get("failures_file")
+    if failures_file:
+        env["DOCBENCH_SHARED_INGEST_FAILURES_FILE"] = failures_file
     return env
 
 
@@ -684,6 +851,16 @@ def _run_one(
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     shared_experiments, surge_experiments = _selected_experiments(args)
+    shared_layout = resolve_shared_workspace_layout(
+        run_root=args.run_root,
+        workspace_id=args.shared_workspace_id,
+        require_existing=bool(args.require_existing_workspaces),
+    )
+    surge_layout = resolve_surge_workspace_layout(
+        run_root=args.run_root,
+        workspace_id=args.surge_workspace_id,
+        require_existing=bool(args.require_existing_workspaces),
+    )
 
     run_root = Path(args.output_root) / args.run_id
     progress_file = run_root / "progress.jsonl"
@@ -695,13 +872,20 @@ def main(argv: list[str] | None = None) -> int:
             "run_root": args.run_root,
             "shared_workspace_id": args.shared_workspace_id,
             "surge_workspace_id": args.surge_workspace_id,
+            "shared_workspace_layout": shared_layout,
+            "surge_workspace_layout": surge_layout,
             "matrix_mode": args.matrix_mode,
             "shared_experiments": shared_experiments,
             "surge_experiments": surge_experiments,
         },
     )
 
-    env = _build_workspace_env(dict(os.environ), args)
+    env = _build_workspace_env(
+        dict(os.environ),
+        args,
+        shared_layout=shared_layout,
+        surge_layout=surge_layout,
+    )
 
     results: list[dict[str, Any]] = []
     if args.tasks in {"both", "shared"}:

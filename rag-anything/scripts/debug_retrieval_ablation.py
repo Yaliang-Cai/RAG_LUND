@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -28,6 +28,8 @@ from raganything.services.local_rag import LocalRagService, LocalRagSettings
 from evaluate_local.run_retrieval_ablation import (
     build_reduced_experiment_matrix,
     _validate_ppr_controls,
+    resolve_shared_workspace_layout,
+    resolve_surge_workspace_layout,
 )
 
 
@@ -87,9 +89,20 @@ def _resolve_working_dir(
 ) -> str:
     if working_dir:
         return str(working_dir)
-    if str(run_root).startswith("/"):
-        return str(PurePosixPath(run_root) / workspace_id)
-    return str(Path(run_root) / workspace_id)
+    dataset_key = _dataset_key(DATASET)
+    if dataset_key == "docbench":
+        layout = resolve_shared_workspace_layout(
+            run_root=run_root,
+            workspace_id=workspace_id,
+            require_existing=True,
+        )
+        return str(layout["working_dir_root"])
+    layout = resolve_surge_workspace_layout(
+        run_root=run_root,
+        workspace_id=workspace_id,
+        require_existing=True,
+    )
+    return str(layout["storage_root"])
 
 
 def _dataset_key(dataset: str) -> str:
