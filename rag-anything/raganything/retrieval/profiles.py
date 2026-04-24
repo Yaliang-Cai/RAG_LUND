@@ -1,6 +1,11 @@
 from dataclasses import dataclass, field
 
 
+KNOWN_PATHS: frozenset[str] = frozenset(
+    ["naive", "hybrid", "mix", "ppr", "qdrant_hybrid", "qdrant_sparse"]
+)
+
+
 @dataclass
 class RetrievalProfile:
     name: str
@@ -12,12 +17,25 @@ class RetrievalProfile:
     min_rerank_score: float = 0.3
     rerank_candidate_cap: int = 60
     max_concurrent_paths: int | None = None
-    path_overrides: dict[str, dict] = field(default_factory=dict)
+    path_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        missing_weights = [p for p in self.paths if p not in self.rrf_weights]
+        if missing_weights:
+            raise ValueError(
+                f"Profile '{self.name}': paths missing from rrf_weights: {missing_weights}"
+            )
+        extra_weights = [p for p in self.rrf_weights if p not in self.paths]
+        if extra_weights:
+            raise ValueError(
+                f"Profile '{self.name}': rrf_weights keys not in paths: {extra_weights}"
+            )
+        unknown_paths = [p for p in self.paths if p not in KNOWN_PATHS]
+        if unknown_paths:
+            raise ValueError(
+                f"Profile '{self.name}': unknown path names: {unknown_paths}"
+            )
 
-KNOWN_PATHS: frozenset[str] = frozenset(
-    ["naive", "hybrid", "mix", "ppr", "qdrant_hybrid", "qdrant_sparse"]
-)
 
 PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
     p.name: p

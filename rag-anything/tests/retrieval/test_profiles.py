@@ -1,3 +1,5 @@
+import pytest
+
 from raganything.retrieval.profiles import (
     RetrievalProfile,
     PROFILE_REGISTRY,
@@ -51,3 +53,33 @@ def test_profile_defaults():
     assert p.rerank_candidate_cap == 60
     assert p.max_concurrent_paths is None
     assert p.path_overrides == {}
+
+
+def test_profile_raises_on_missing_rrf_weight():
+    with pytest.raises(ValueError, match="missing from rrf_weights"):
+        RetrievalProfile(
+            name="bad",
+            description="test",
+            paths=["naive", "hybrid"],
+            rrf_weights={"naive": 1.0},  # missing "hybrid"
+        )
+
+
+def test_profile_raises_on_extra_rrf_weight():
+    with pytest.raises(ValueError, match="rrf_weights keys not in paths"):
+        RetrievalProfile(
+            name="bad",
+            description="test",
+            paths=["naive"],
+            rrf_weights={"naive": 1.0, "hybrid": 0.5},  # "hybrid" not in paths
+        )
+
+
+def test_profile_raises_on_unknown_path():
+    with pytest.raises(ValueError, match="unknown path names"):
+        RetrievalProfile(
+            name="bad",
+            description="test",
+            paths=["nonexistent_backend"],
+            rrf_weights={"nonexistent_backend": 1.0},
+        )
