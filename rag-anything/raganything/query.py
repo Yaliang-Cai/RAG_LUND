@@ -541,6 +541,59 @@ class QueryMixin:
         # Ensure LightRAG is initialized
         await self._ensure_lightrag_initialized()
 
+        # ── mode="auto": get chunks from router, then run standard VLM dereference ──
+        if mode == "auto":
+            profile_name: str | None = kwargs.pop("profile", None)
+            kwargs.setdefault("multimodal_top_k", DEFAULT_MULTIMODAL_TOP_K)
+            kwargs.setdefault("rerank_score_scope", "all")
+            kwargs.setdefault("qdrant_retrieval_mode", DEFAULT_QDRANT_RETRIEVAL_MODE)
+            image_cap = kwargs.get("multimodal_top_k") or DEFAULT_MULTIMODAL_TOP_K
+            qp_kwargs = {k: v for k, v in kwargs.items() if k in _QUERY_PARAM_FIELDS}
+            query_param_auto = QueryParam(mode="hybrid", **qp_kwargs)
+
+            router = RetrievalRouter(self.lightrag)
+            final_chunks, routing_trace = await router.route(
+                query,
+                query_param_auto,
+                profile_name=profile_name,
+            )
+
+            # Build context string from chunks; _process_image_paths_for_vlm
+            # scans it for "Image Path:" lines → base64 dereference
+            context_str = "\n\n---\n\n".join(
+                c.get("content", "") for c in final_chunks
+            )
+
+            enhanced_prompt, images_base64 = await self._process_image_paths_for_vlm(
+                context_str, max_images=image_cap
+            )
+
+            if not images_base64:
+                answer = await self._generate_text_answer_from_retrieval_prompt(
+                    enhanced_prompt,
+                    query,
+                    system_prompt=system_prompt,
+                    conversation_history=getattr(query_param_auto, "conversation_history", None),
+                    history_summary=getattr(query_param_auto, "history_summary", None),
+                )
+                if return_trace:
+                    return {"answer": answer, "trace": {"routing": routing_trace}}
+                return answer
+
+            messages = self._build_vlm_messages_with_images(
+                enhanced_prompt,
+                query,
+                system_prompt,
+                images_base64=images_base64,
+                conversation_history=getattr(query_param_auto, "conversation_history", None),
+                history_summary=getattr(query_param_auto, "history_summary", None),
+            )
+            result = await self._call_vlm_with_multimodal_content(messages)
+            if return_trace:
+                return {"answer": result, "trace": {"routing": routing_trace}}
+            return result
+        # ── end mode="auto" ───────────────────────────────────────────────
+
         self.logger.info(f"Executing VLM enhanced query: {query[:100]}...")
 
         # 1. Get original retrieval prompt (without generating final answer)
