@@ -86,11 +86,12 @@ class RetrievalProfile:
 | Profile | Paths | Key path_overrides | Query Type |
 |---|---|---|---|
 | `precise` | `qdrant_sparse` | `qdrant_retrieval_mode="bm25"` | Error codes, CVE IDs, rare proper nouns |
-| `factual` | `naive` | — | Single-hop facts, answer in one chunk |
-| `graph_hybrid` | `hybrid`, `naive` | — | Entity association, no deep multi-hop |
+| `local` | `hybrid`, `naive` | — | Specific entity or clear single-hop fact; hybrid already subsumes VDB retrieval |
 | `multihop` | `ppr`, `hybrid` | — | Cross-entity chain reasoning |
 | `descriptive` | `mix`, `qdrant_hybrid` | `kg_chunk_selection_source="untruncated"`, `answer_context_mode="kg_prompt"` | Open-ended description, broad coverage |
 | `full` | `naive`, `hybrid`, `mix`, `ppr`, `qdrant_hybrid`, `qdrant_sparse` | — | Fallback / evaluation / low-confidence |
+
+**Rationale for merging `factual` + `graph_hybrid` → `local`:** Most single-hop facts are graph triples (entity–attribute–value); `hybrid` mode already calls the VDB path internally, so `factual` (naive-only) is a strict subset. The classifier boundary between the two was unstable in zero-shot settings. `local` unifies them under a clearer semantic: "direct query targeting a specific entity or fact."
 
 **Future iteration:** `descriptive` profile will gain a `summary_node_boost` parameter that up-weights Summary-type graph nodes during PPR seed construction, improving coverage for document-level descriptive queries. Not in scope for this release.
 
@@ -122,20 +123,18 @@ appropriate retrieval profile from the list below.
 
 Available profiles and typical examples:
 
-- precise: Exact character-level match queries (error codes, IDs, rare proper nouns)
+- precise: Exact character-level match (error codes, IDs, rare proper nouns)
   Examples: "What is the impact scope of CVE-2026-001?"
             "Status of order ID ORD-20260424-8821"
 
-- factual: Single-hop fact, answer clearly exists in a single passage
+- local: Direct query targeting a specific entity or clear single-hop fact
   Examples: "How many parameters does BERT have?"
-            "What is the default chunk size in LightRAG?"
-
-- graph_hybrid: Requires entity association but not deep multi-hop reasoning
-  Examples: "What are the architectural differences between BERT and GPT?"
+            "What are the architectural differences between BERT and GPT?"
             "When should you use RAG vs fine-tuning?"
 
 - multihop: Chain reasoning across multiple entities or documents
   Examples: "What other papers have been published by the authors cited in HippoRAG2?"
+            "Which components of LightRAG were influenced by HippoRAG2?"
 
 - descriptive: Open-ended question requiring broad, complete context
   Examples: "Describe the overall architecture of LightRAG."
@@ -218,13 +217,17 @@ results = await asyncio.gather(
 ### 6.4 Fusion Pipeline
 
 ```
-chunks from all paths (tagged with source path)
-    → deduplicate by chunk_id (keep first occurrence)
-    → _rrf_merge(chunks_by_path, weights=profile.rrf_weights, k=profile.rrf_k)
-    → reranker.rerank(merged[:rerank_candidate_cap])   # default cap: top-60
+chunks from all paths, each as an independent ranked list
+    → _rrf_merge(ranked_lists_by_path, weights=profile.rrf_weights, k=profile.rrf_k)
+         # RRF scores each chunk: Score(d) = Σ_p  weight_p × 1/(k + rank(d,p))
+         # chunks appearing in multiple paths accumulate higher scores (rank consensus)
+         # output is a single deduplicated list sorted by RRF score
+    → reranker.rerank(rrf_output[:rerank_candidate_cap])
     → filter(score >= profile.min_rerank_score)
     → final[:chunk_top_k]
 ```
+
+**Critical ordering constraint:** Deduplication must NOT happen before `_rrf_merge`. Each path's ranked list must be passed intact so that a chunk appearing in multiple paths accumulates its cross-path rank signals. Pre-deduplication would discard these signals and reduce RRF to a simple rank-boost, losing its statistical robustness. `_rrf_merge` produces a deduplicated, score-sorted output as a natural consequence of the scoring formula.
 
 `rerank_candidate_cap` is defined per-Profile (default 60). A failed path contributes an empty list to RRF, which naturally degrades without breaking the pipeline.
 
