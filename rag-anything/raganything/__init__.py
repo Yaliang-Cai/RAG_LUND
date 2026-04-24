@@ -1,5 +1,8 @@
-from .raganything import RAGAnything as RAGAnything
-from .config import RAGAnythingConfig as RAGAnythingConfig
+try:
+    from .raganything import RAGAnything as RAGAnything
+    from .config import RAGAnythingConfig as RAGAnythingConfig
+except (ImportError, ModuleNotFoundError):
+    pass
 
 # Core parser class is always available.
 from .parser import Parser as Parser
