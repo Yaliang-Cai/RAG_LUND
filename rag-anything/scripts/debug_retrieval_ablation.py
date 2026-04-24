@@ -153,6 +153,7 @@ def _single_group(dataset: str) -> dict[str, Any]:
     else:
         item["kg_chunk_selection_source"] = KG_CHUNK_SELECTION_SOURCE
         item["enable_rerank"] = ENABLE_RERANK
+        item["enable_kg_rerank"] = True
         if dataset_key == "docbench":
             item["answer_context_mode"] = ANSWER_CONTEXT_MODE
     return item
@@ -178,6 +179,7 @@ def _query_kwargs(group: dict[str, Any]) -> dict[str, Any]:
         "chunk_qdrant_retrieval_mode": str(group["chunk_retrieval_mode"]),
         "exclude_synonym_edges": bool(group["exclude_synonym_edges"]),
         "enable_rerank": bool(group.get("enable_rerank", ENABLE_RERANK)),
+        "enable_kg_rerank": bool(group.get("enable_kg_rerank", True)),
         "bypass_query_cache": BYPASS_QUERY_CACHE,
         "bypass_keywords_cache": BYPASS_KEYWORDS_CACHE,
     }

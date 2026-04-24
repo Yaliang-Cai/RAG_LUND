@@ -327,6 +327,7 @@ def _build_query_params(
     max_total_tokens: int | None = None,
     multimodal_top_k: int | None = None,
     enable_rerank: bool = True,
+    enable_kg_rerank: bool = True,
     bypass_query_cache: bool = False,
     bypass_keywords_cache: bool = False,
 ) -> dict[str, Any]:
@@ -334,6 +335,7 @@ def _build_query_params(
     params = dict(DOCBENCH_QUERY_PARAMS)
     params.update(flags.to_query_kwargs())
     params["enable_rerank"] = bool(enable_rerank)
+    params["enable_kg_rerank"] = bool(enable_kg_rerank)
     if query_mode is not None:
         normalized_mode = str(query_mode).strip()
         if normalized_mode:
@@ -1992,6 +1994,13 @@ async def main() -> None:
         type=as_bool,
         default=DOCBENCH_QUERY_PARAMS["enable_rerank"],
     )
+    parser.add_argument(
+        "--enable_kg_rerank",
+        "--enable-kg-rerank",
+        dest="enable_kg_rerank",
+        type=as_bool,
+        default=True,
+    )
     parser.add_argument("--bypass_query_cache", action="store_true")
     parser.add_argument("--bypass_keywords_cache", action="store_true")
     add_ablation_arguments(parser)
@@ -2052,6 +2061,7 @@ async def main() -> None:
         max_total_tokens=args.max_total_tokens,
         multimodal_top_k=args.multimodal_top_k,
         enable_rerank=args.enable_rerank,
+        enable_kg_rerank=args.enable_kg_rerank,
         bypass_query_cache=args.bypass_query_cache,
         bypass_keywords_cache=args.bypass_keywords_cache,
     )

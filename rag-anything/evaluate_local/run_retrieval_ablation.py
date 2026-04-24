@@ -103,6 +103,7 @@ def _with_unified_retrieval(item: dict[str, Any]) -> dict[str, Any]:
         "entity_retrieval_mode": retrieval_mode,
         "chunk_retrieval_mode": retrieval_mode,
         "enable_rerank": bool(item.get("enable_rerank", True)),
+        "enable_kg_rerank": bool(item.get("enable_kg_rerank", True)),
         "keyword_entity_rrf_k": int(
             item.get("keyword_entity_rrf_k", DEFAULT_KEYWORD_ENTITY_RRF_K)
         ),
@@ -194,6 +195,12 @@ def build_reduced_experiment_matrix(
                 "name": "per_keyword_kg",
                 "keyword_fanout_mode": "per_keyword_rrf",
             },
+            {
+                **baseline,
+                "name": "per_keyword_no_kg_rerank_kg",
+                "keyword_fanout_mode": "per_keyword_rrf",
+                "enable_kg_rerank": False,
+            },
             _with_unified_retrieval(
                 {
                     **baseline,
@@ -255,6 +262,12 @@ def build_reduced_experiment_matrix(
                 **baseline,
                 "name": "per_keyword",
                 "keyword_fanout_mode": "per_keyword_rrf",
+            },
+            {
+                **baseline,
+                "name": "per_keyword_no_kg_rerank",
+                "keyword_fanout_mode": "per_keyword_rrf",
+                "enable_kg_rerank": False,
             },
             _with_unified_retrieval(
                 {
@@ -836,6 +849,8 @@ def _shared_command(args: argparse.Namespace, experiment: dict[str, Any], output
         "true" if experiment["exclude_synonym_edges"] else "false",
         "--enable_rerank",
         "true" if experiment.get("enable_rerank", True) else "false",
+        "--enable_kg_rerank",
+        "true" if experiment.get("enable_kg_rerank", True) else "false",
     ]
     if args.bypass_query_cache:
         cmd.append("--bypass_query_cache")
@@ -911,6 +926,8 @@ def _surge_command(args: argparse.Namespace, experiment: dict[str, Any], output_
         "true" if experiment["exclude_synonym_edges"] else "false",
         "--enable-rerank",
         "true" if experiment.get("enable_rerank", True) else "false",
+        "--enable-kg-rerank",
+        "true" if experiment.get("enable_kg_rerank", True) else "false",
     ]
     if args.bypass_query_cache:
         cmd.append("--bypass_query_cache")
@@ -946,6 +963,7 @@ def _finalize_experiment_for_task(
     finalized = dict(experiment)
     finalized["task"] = task
     finalized["enable_rerank"] = bool(finalized.get("enable_rerank", True))
+    finalized["enable_kg_rerank"] = bool(finalized.get("enable_kg_rerank", True))
     if finalized.get("query_mode") == "ppr":
         if task == "shared":
             finalized["ppr_top_k"] = int(
