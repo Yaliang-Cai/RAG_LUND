@@ -70,3 +70,33 @@ async def test_aquery_non_auto_mode_unchanged():
 
     router_cls.assert_not_called()
     assert result == "legacy answer"
+
+
+async def test_aquery_vlm_enhanced_auto_mode_uses_router():
+    """VLM enhanced + mode=auto: router provides chunks, then image dereference runs."""
+    mixin = _make_mixin([])
+    mixin.vision_model_func = AsyncMock(return_value="vlm answer")
+
+    test_chunks = [
+        {"chunk_id": "c1", "content": "Image Path: /data/img.jpg\nsome text", "file_path": "f.pdf"}
+    ]
+    router_mock = MagicMock()
+    router_mock.route = AsyncMock(return_value=(test_chunks, {
+        "profile": "descriptive", "confidence": 0.8, "reasoning": "r",
+        "paths_activated": ["mix"], "paths_failed": [],
+        "chunks_per_path": {"mix": 1}, "chunks_after_rrf": 1,
+        "chunks_after_rerank": 1, "chunks_after_threshold": 1,
+        "latency_per_path": {"classifier": 0.2, "mix": 0.5},
+    }))
+
+    with patch("raganything.query.RetrievalRouter", return_value=router_mock):
+        with patch.object(mixin, "_process_image_paths_for_vlm",
+                          new=AsyncMock(return_value=("processed prompt", []))):
+            with patch.object(mixin, "_generate_text_answer_from_retrieval_prompt",
+                              new=AsyncMock(return_value="text answer")):
+                result = await QueryMixin.aquery_vlm_enhanced(
+                    mixin, "describe image", mode="auto"
+                )
+
+    router_mock.route.assert_called_once()
+    assert isinstance(result, str)
