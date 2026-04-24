@@ -35,6 +35,7 @@ DEFAULT_SHARED_PPR_TOP_K = 50
 DEFAULT_SHARED_PPR_QA_TOP_K = 20
 DEFAULT_SURGE_PPR_TOP_K = 50
 DEFAULT_SURGE_PPR_QA_TOP_K = 50
+DEFAULT_DOCBENCH_MULTIMODAL_TOP_K = 3
 INDEX_PROFILE_FILE = ".ablation_index_profile.json"
 _PROFILE_HINTS: dict[str, dict[str, bool]] = {
     "v0_v1_v2_v3": {
@@ -398,6 +399,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunk-top-k", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--max-total-tokens", type=int, default=45000)
     parser.add_argument("--recognition-top-k", type=int, default=20)
+    parser.add_argument(
+        "--docbench-multimodal-top-k",
+        type=int,
+        default=DEFAULT_DOCBENCH_MULTIMODAL_TOP_K,
+    )
     parser.add_argument("--start-id", type=int, default=0)
     parser.add_argument("--end-id", type=int, default=49)
     parser.add_argument("--max-async-ingest", type=int, default=4)
@@ -788,6 +794,8 @@ def _shared_command(args: argparse.Namespace, experiment: dict[str, Any], output
         str(experiment["query_mode"]),
         "--recognition_top_k",
         str(args.recognition_top_k),
+        "--multimodal_top_k",
+        str(args.docbench_multimodal_top_k),
         "--max_total_tokens",
         str(args.max_total_tokens),
         "--keyword_fanout_mode",
@@ -893,7 +901,7 @@ def _surge_command(args: argparse.Namespace, experiment: dict[str, Any], output_
             ]
         )
     if args.allow_legacy_index_profile_adoption:
-        cmd.append("--allow-legacy-index-profile-adoption")
+        cmd.extend(["--allow-legacy-index-profile-adoption", "true"])
     return cmd
 
 
@@ -1026,7 +1034,7 @@ def _run_one(
             command=_shared_command(args, experiment, output_dir),
             cwd=PROJECT_ROOT,
             env=env,
-            log_file=output_dir / "logs" / "shared_generate.log",
+            log_file=output_dir / "evaluate_shared" / "logs" / "runner_subprocess.log",
         )
         status_row["status"] = "ok" if code == 0 else f"failed:{code}"
     else:
@@ -1035,7 +1043,7 @@ def _run_one(
             command=_surge_command(args, experiment, output_dir),
             cwd=PROJECT_ROOT,
             env=env,
-            log_file=output_dir / "logs" / "surge_retrieval.log",
+            log_file=output_dir / "evaluate_surge_fast" / "logs" / "runner_subprocess.log",
         )
         status_row["status"] = "ok" if code == 0 else f"failed:{code}"
     _append_jsonl(progress_file, {**status_row, "status": "completed"})
@@ -1100,6 +1108,7 @@ def main(argv: list[str] | None = None) -> int:
             "allow_legacy_index_profile_adoption": bool(
                 args.allow_legacy_index_profile_adoption
             ),
+            "docbench_multimodal_top_k": int(args.docbench_multimodal_top_k),
             "ablation_flags": args.ablation_flags.to_dict(),
             "repaired_legacy_index_profiles": repaired_profiles,
             "shared_experiments": shared_experiments,

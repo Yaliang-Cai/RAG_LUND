@@ -120,7 +120,7 @@ DOCBENCH_QUERY_PARAMS = {
     "enable_rerank": True,
     "rerank_score_scope": "all",
     "vlm_enhanced": True,
-    "multimodal_top_k": 5,
+    "multimodal_top_k": 3,
     "image_token_estimate_method": "qwen_vl",
     "image_token_model_name_or_path": RAG_VISION_MODEL_PATH,
     "image_wrapper_tokens_per_image": 2,
@@ -322,6 +322,7 @@ def _build_query_params(
     answer_context_mode: str = "kg_prompt",
     kg_chunk_selection_source: str = "truncated",
     max_total_tokens: int | None = None,
+    multimodal_top_k: int | None = None,
     enable_rerank: bool = True,
     bypass_query_cache: bool = False,
     bypass_keywords_cache: bool = False,
@@ -356,6 +357,8 @@ def _build_query_params(
     params["kg_chunk_selection_source"] = str(kg_chunk_selection_source).strip()
     if max_total_tokens is not None:
         params["max_total_tokens"] = int(max_total_tokens)
+    if multimodal_top_k is not None:
+        params["multimodal_top_k"] = int(multimodal_top_k)
     params["bypass_query_cache"] = bool(bypass_query_cache)
     params["bypass_keywords_cache"] = bool(bypass_keywords_cache)
     if exclude_synonym_edges is not None:
@@ -1960,6 +1963,11 @@ async def main() -> None:
     )
     parser.add_argument("--max_total_tokens", type=int, default=45000)
     parser.add_argument(
+        "--multimodal_top_k",
+        type=int,
+        default=DOCBENCH_QUERY_PARAMS["multimodal_top_k"],
+    )
+    parser.add_argument(
         "--enable_rerank",
         type=as_bool,
         default=DOCBENCH_QUERY_PARAMS["enable_rerank"],
@@ -2020,6 +2028,7 @@ async def main() -> None:
         answer_context_mode=args.answer_context_mode,
         kg_chunk_selection_source=args.kg_chunk_selection_source,
         max_total_tokens=args.max_total_tokens,
+        multimodal_top_k=args.multimodal_top_k,
         enable_rerank=args.enable_rerank,
         bypass_query_cache=args.bypass_query_cache,
         bypass_keywords_cache=args.bypass_keywords_cache,
