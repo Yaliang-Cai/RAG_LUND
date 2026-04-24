@@ -101,9 +101,10 @@ class QueryParam:
     - "naive":     Performs a basic search without advanced techniques.
     - "mix":       Integrates knowledge graph and vector retrieval.
     - "rrf":       Like mix, but uses Reciprocal Rank Fusion to merge multi-source chunks.
-    - "ppr":       Full-graph PPR (GlobalPPREngine + scipy/fast-pagerank). Requires
-                   Neo4j backend and ``pip install fast-pagerank``.
-    - "ppr_local": Local-subgraph PPR via BFS + networkx (ablation baseline).
+    - "ppr":       Full-graph PPR (GlobalPPREngine + scipy/fast-pagerank).
+                   **Requires Neo4j backend** (raises RuntimeError on other backends)
+                   and ``pip install fast-pagerank``.
+    - "ppr_local": Local-subgraph PPR via BFS + networkx. Works with any graph backend.
     """
 
     only_need_context: bool = False
@@ -273,12 +274,6 @@ class QueryParam:
     """
 
     # V3: PPR Multi-hop Reasoning
-    # Prefer mode="ppr" (global) or mode="ppr_local" (local BFS) over this flag.
-    # This flag is kept for backward compatibility: setting it True is equivalent
-    # to mode="ppr_local" when mode is not already a PPR mode.
-    enable_multi_hop: bool = False
-    """[Deprecated] Enable local PPR. Use mode="ppr_local" or mode="ppr" instead."""
-
     multi_hop_depth: int = 2
     """Max depth for subgraph extraction around seed entities."""
 

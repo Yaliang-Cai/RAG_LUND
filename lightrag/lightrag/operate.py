@@ -123,14 +123,13 @@ def _should_exclude_synonym_edges(query_param: QueryParam) -> bool:
     """Resolve query-time synonym filtering with mode-aware defaults.
 
     Auto default (exclude_synonym_edges is None):
-    - PPR mode (ppr/ppr_local or legacy enable_multi_hop): False
+    - PPR mode (ppr/ppr_local): False
     - Non-PPR modes: True
     """
     if query_param.exclude_synonym_edges is not None:
         return bool(query_param.exclude_synonym_edges)
 
-    ppr_mode = query_param.mode in ("ppr", "ppr_local") or query_param.enable_multi_hop
-    return not ppr_mode
+    return not (query_param.mode in ("ppr", "ppr_local"))
 
 
 def _is_factual_or_legacy_edge(edge_data: dict[str, Any] | None) -> bool:
@@ -908,7 +907,6 @@ def _build_query_cache_params(
         "image_token_estimate_method": query_param.image_token_estimate_method,
         "image_token_model_name_or_path": query_param.image_token_model_name_or_path,
         "image_wrapper_tokens_per_image": query_param.image_wrapper_tokens_per_image,
-        "enable_multi_hop": query_param.enable_multi_hop,
         "multi_hop_depth": query_param.multi_hop_depth,
         "ppr_damping": query_param.ppr_damping,
         "ppr_top_k": query_param.ppr_top_k,
@@ -5543,9 +5541,9 @@ async def _perform_kg_search(
     )
 
     # V3: PPR chunk ranking
-    # Triggered by mode="ppr" / mode="ppr_local" or the legacy enable_multi_hop flag.
+    # Triggered by mode="ppr" (global) or mode="ppr_local" (local BFS).
     ppr_chunks = []
-    _run_ppr = _ppr_mode or query_param.enable_multi_hop
+    _run_ppr = _ppr_mode
     _use_global_ppr = query_param.mode == "ppr"
 
     if _run_ppr and chunks_vdb:
@@ -5819,7 +5817,7 @@ async def _merge_all_chunks(
 ) -> list[dict]:
     """
     Merge chunks from different sources: vector_chunks + entity_chunks + relation_chunks.
-    When PPR chunks are available (V3 enable_multi_hop), they take priority.
+    When PPR chunks are available (mode="ppr" or "ppr_local"), they take priority.
     """
     if chunk_tracking is None:
         chunk_tracking = {}
@@ -7125,6 +7123,12 @@ async def _ppr_rank_chunks(
     # Global PPR path: skip BFS, use full-graph GlobalPPREngine            #
     # ------------------------------------------------------------------ #
     if use_global:
+        if not hasattr(knowledge_graph_inst, "get_all_nodes_and_edges"):
+            raise RuntimeError(
+                "mode='ppr' (global PPR) requires a Neo4j graph backend. "
+                "The current graph storage does not implement get_all_nodes_and_edges(). "
+                "Either switch to Neo4j, or use mode='ppr_local' which works with any backend."
+            )
         return await _ppr_rank_chunks_global(
             query=query,
             entity_seed_weights=entity_seed_weights,

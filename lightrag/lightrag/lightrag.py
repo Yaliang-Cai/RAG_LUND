@@ -200,7 +200,7 @@ class LightRAG:
     """V1 base toggle: use composite key (name|type) as entity ID to resolve homonym ambiguity. V2/V3 depend on this."""
 
     enable_synonym_linking: bool = field(default=False)
-    """V2 orthogonal toggle: build SYNONYM edges during ingestion. Independent of enable_multi_hop."""
+    """V2 orthogonal toggle: build SYNONYM edges during ingestion."""
 
     synonymy_threshold: float = field(default=0.8)
     """Cosine similarity threshold for synonym detection (aligned with HippoRAG2 default)."""

@@ -105,11 +105,6 @@ class QueryRequest(BaseModel):
         description='How many retrieved chunks are scored by reranker: "top_k" or "all".',
     )
 
-    enable_multi_hop: Optional[bool] = Field(
-        default=None,
-        description="Enable V3 PPR multi-hop retrieval.",
-    )
-
     multi_hop_depth: Optional[int] = Field(
         default=None,
         ge=1,
