@@ -79,7 +79,6 @@ if _mineru_output_dir_override:
     OUTPUT_MD_DIR = Path(_mineru_output_dir_override)
 else:
     OUTPUT_MD_DIR = OUTPUT_DIR / "mineru_outputs"
-OUTPUT_MD_DIR.mkdir(parents=True, exist_ok=True)
 
 SYSTEM_ANSWERS_FILE = OUTPUT_DIR / "system_answers.jsonl"
 EVAL_RESULTS_FILE = OUTPUT_DIR / "eval_results.jsonl"
@@ -1329,6 +1328,7 @@ async def generate_answers_shared(
 
         async def _ingest_one(doc_name: str, pdf_file: Path) -> str:
             logger.info("[%s] Ingest into shared storage: %s", doc_name, pdf_file.name)
+            OUTPUT_MD_DIR.mkdir(parents=True, exist_ok=True)
             doc_output_dir = str(OUTPUT_MD_DIR / f"docbench_{doc_name}")
             await service.ingest(
                 file_path=str(pdf_file),
