@@ -24,6 +24,7 @@ from raganything.query_message_repack import (
     build_answer_suffix,
     repack_query_messages,
 )
+from raganything.retrieval import RetrievalRouter
 from raganything.utils import (
     get_processor_for_type,
     encode_image_to_base64,
@@ -247,6 +248,32 @@ class QueryMixin:
         kwargs.setdefault("rerank_score_scope", "all")
         kwargs.setdefault("qdrant_retrieval_mode", DEFAULT_QDRANT_RETRIEVAL_MODE)
 
+        # ── mode="auto": delegate to RetrievalRouter ──────────────────────
+        if mode == "auto":
+            import dataclasses as _dc
+            _qp_fields = {f.name for f in _dc.fields(QueryParam)}
+            profile_name: str | None = kwargs.pop("profile", None)
+            return_trace_auto = bool(kwargs.pop("return_trace", False))
+            qp_kwargs = {k: v for k, v in kwargs.items() if k in _qp_fields}
+            query_param_auto = QueryParam(mode="hybrid", **qp_kwargs)  # mode ignored by router
+            router = RetrievalRouter(self.lightrag)
+            final_chunks, routing_trace = await router.route(
+                query,
+                query_param_auto,
+                profile_name=profile_name,
+            )
+            answer = await self._generate_answer_from_chunks(
+                query,
+                final_chunks,
+                system_prompt=system_prompt,
+                response_type=query_param_auto.response_type,
+            )
+            answer = answer if isinstance(answer, str) else str(answer)
+            if return_trace_auto:
+                return {"answer": answer, "trace": {"routing": routing_trace}}
+            return answer
+        # ── end mode="auto" ───────────────────────────────────────────────
+
         # Check if VLM enhanced query should be used
         vlm_enhanced = kwargs.pop("vlm_enhanced", None)
         return_trace = bool(kwargs.pop("return_trace", False))
@@ -288,8 +315,10 @@ class QueryMixin:
                 mode=mode,
             )
 
-        # Create query parameters
-        query_param = QueryParam(mode=mode, **kwargs)
+        # Create query parameters (filter out custom kwargs not declared on QueryParam)
+        import dataclasses as _dc
+        _qp_fields = {f.name for f in _dc.fields(QueryParam)}
+        query_param = QueryParam(mode=mode, **{k: v for k, v in kwargs.items() if k in _qp_fields})
 
         self.logger.info(f"Executing text query: {query[:100]}...")
         self.logger.info(f"Query mode: {mode}")
@@ -584,6 +613,36 @@ class QueryMixin:
         if return_trace:
             return {"answer": result, "trace": prompt_result}
         return result
+
+    async def _generate_answer_from_chunks(
+        self,
+        query: str,
+        chunks: list[dict],
+        *,
+        system_prompt: str | None,
+        response_type: str = "Multiple Paragraphs",
+    ) -> str:
+        if not chunks:
+            context = "No relevant information found."
+        else:
+            parts = []
+            for i, chunk in enumerate(chunks, 1):
+                fp = chunk.get("file_path", "unknown")
+                content = chunk.get("content", "")
+                parts.append(f"[{i}] Source: {fp}\n{content}")
+            context = "\n\n---\n\n".join(parts)
+
+        prompt = (
+            f"Answer the following question based only on the provided context.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {query}\n\n"
+            f"Provide a {response_type} response."
+        )
+        llm_model_func = getattr(self.lightrag, "llm_model_func", None)
+        if llm_model_func is None:
+            raise ValueError("LightRAG llm_model_func is not available")
+        answer = await llm_model_func(prompt, system_prompt=system_prompt)
+        return answer if isinstance(answer, str) else str(answer)
 
     async def _process_multimodal_query_content(
         self, base_query: str, multimodal_content: List[Dict[str, Any]]
