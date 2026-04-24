@@ -131,7 +131,6 @@ class AblationFlags:
 
     def to_query_kwargs(self) -> dict[str, Any]:
         return {
-            "enable_multi_hop": self.enable_multi_hop,
             "multi_hop_depth": self.multi_hop_depth,
             "ppr_damping": self.ppr_damping,
             "ppr_top_k": self.ppr_top_k,

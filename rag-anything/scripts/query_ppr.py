@@ -108,7 +108,6 @@ def _parse_args():
     p.add_argument("--no-rerank", action="store_true", help="Disable chunk reranking")
     p.add_argument("--no-kg-rerank", action="store_true",
                    help="Disable entity/relation KG reranking (independent of --no-rerank)")
-    p.add_argument("--multi-hop", action="store_true", help="Enable PPR multi-hop for non-PPR modes (V3)")
     p.add_argument("--trace", action="store_true", help="Print retrieval trace JSON")
     return p.parse_args()
 
@@ -120,8 +119,6 @@ async def run(args):
 
     workspace_id = args.workspace
     query = args.query
-    enable_multi_hop = args.multi_hop
-
     query_kwargs = dict(
         mode=args.mode,
         top_k=args.top_k,
@@ -130,7 +127,6 @@ async def run(args):
         enable_rerank=not args.no_rerank,
         enable_kg_rerank=not args.no_kg_rerank,
         rerank_score_scope="all",
-        enable_multi_hop=enable_multi_hop,
         ppr_damping=args.ppr_damping,
         ppr_top_k=args.ppr_top_k,
         passage_node_weight=args.passage_node_weight,
@@ -141,7 +137,7 @@ async def run(args):
         query_kwargs["ppr_qa_top_k"] = max(1, args.ppr_qa_top_k)
 
     print(f"\n[Query] workspace={workspace_id}")
-    print(f"        mode={args.mode}  multi_hop={enable_multi_hop}  rerank={not args.no_rerank}  kg_rerank={not args.no_kg_rerank}")
+    print(f"        mode={args.mode}  rerank={not args.no_rerank}  kg_rerank={not args.no_kg_rerank}")
     print(f"        top_k={args.top_k}  chunk_top_k={args.chunk_top_k}  naive_top_k={args.naive_top_k}")
     print(f"        ppr_damping={args.ppr_damping}  ppr_top_k={args.ppr_top_k}")
     print(f"        passage_node_weight={args.passage_node_weight}")

@@ -59,6 +59,7 @@ from raganything.constants import (
 DEFAULT_SCRIPT_DIR = "/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/DocBench"
 DEFAULT_DATA_ROOT = "/data/y50056788/Yaliang/datasets_for_eval/data_for_DocBench"
 DEFAULT_OUTPUT_DIR_NAME = "docbench_shared_results"
+DOCBENCH_MIN_RERANK_SCORE = 0.3
 
 SCRIPT_DIR = Path(os.getenv("DOCBENCH_SHARED_SCRIPT_DIR", DEFAULT_SCRIPT_DIR))
 DATA_ROOT = Path(os.getenv("DOCBENCH_SHARED_DATA_ROOT", DEFAULT_DATA_ROOT))
@@ -386,6 +387,7 @@ def _build_experiment_signature(
     end_id: int,
     ablation_flags: AblationFlags,
     query_params: dict[str, Any],
+    runtime_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "shared_workspace_id": str(shared_workspace_id),
@@ -396,6 +398,7 @@ def _build_experiment_signature(
         },
         "ablation_flags": ablation_flags.to_dict(),
         "query_params": dict(query_params),
+        "runtime_settings": dict(runtime_settings or {}),
         "range": {
             "start_id": int(start_id),
             "end_id": int(end_id),
@@ -413,6 +416,7 @@ def _build_experiment_id(
     end_id: int,
     ablation_flags: AblationFlags,
     query_params: dict[str, Any],
+    runtime_settings: dict[str, Any] | None = None,
 ) -> str:
     signature = _build_experiment_signature(
         shared_workspace_id=shared_workspace_id,
@@ -423,6 +427,7 @@ def _build_experiment_id(
         end_id=end_id,
         ablation_flags=ablation_flags,
         query_params=query_params,
+        runtime_settings=runtime_settings,
     )
     canonical = json.dumps(
         signature,
@@ -1036,6 +1041,7 @@ def _build_shared_settings(
     settings.temperature = 0.0
     settings.query_max_tokens = 2048
     settings.ingest_max_tokens = 8192
+    settings.min_rerank_score = DOCBENCH_MIN_RERANK_SCORE
     settings.vlm_enable_json_schema = True
     # Keep non-ablation switches stable and enabled across runs.
     settings.enable_entity_surface_normalization = True
@@ -1051,6 +1057,10 @@ def _build_shared_settings(
     )
     apply_ablation_flags_to_settings(settings, ablation_flags)
     return settings
+
+
+def _docbench_runtime_settings() -> dict[str, Any]:
+    return {"min_rerank_score": DOCBENCH_MIN_RERANK_SCORE}
 
 
 async def _cleanup_rag_instance(service: LocalRagService, rag_workspace_id: str) -> None:
@@ -1120,6 +1130,7 @@ def _save_generation_config(
     ablation_flags: AblationFlags,
     experiment_id: str,
     index_profile: dict[str, Any],
+    runtime_settings: dict[str, Any] | None = None,
 ) -> None:
     experiment_signature = _build_experiment_signature(
         shared_workspace_id=shared_workspace_id,
@@ -1130,6 +1141,7 @@ def _save_generation_config(
         end_id=end_id,
         ablation_flags=ablation_flags,
         query_params=query_params,
+        runtime_settings=runtime_settings,
     )
     _save_json(
         GENERATION_CONFIG_FILE,
@@ -1148,6 +1160,7 @@ def _save_generation_config(
             "ablation_flags": ablation_flags.to_dict(),
             "index_profile": dict(index_profile),
             "effective_query_params": dict(query_params),
+            "runtime_settings": dict(runtime_settings or {}),
         },
     )
 
@@ -1196,6 +1209,7 @@ async def generate_answers_shared(
         ablation_flags=ablation_flags,
         experiment_id=experiment_id,
         index_profile=ensured_index_profile,
+        runtime_settings=_docbench_runtime_settings(),
     )
 
     service = LocalRagService(settings)
@@ -2074,6 +2088,7 @@ async def main() -> None:
         end_id=args.end_id,
         ablation_flags=ablation_flags,
         query_params=query_params,
+        runtime_settings=_docbench_runtime_settings(),
     )
 
     logger.info(

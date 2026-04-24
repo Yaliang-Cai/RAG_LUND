@@ -32,7 +32,6 @@ from raganything.constants import (
     DEFAULT_GRAPH_SEARCH_SEED_LIMIT,
     DEFAULT_GRAPH_SEARCH_MAX_RESULTS,
     DEFAULT_GRAPH_SEARCH_MAX_SAFE,
-    DEFAULT_ENABLE_MULTI_HOP,
     DEFAULT_MULTI_HOP_DEPTH,
     DEFAULT_PPR_DAMPING,
     DEFAULT_PPR_TOP_K,
@@ -174,7 +173,6 @@ class QueryRequest(BaseModel):
     return_graph: bool = False
     graph_max_depth: int = DEFAULT_GRAPH_MAX_DEPTH
     graph_max_nodes: int = DEFAULT_GRAPH_MAX_NODES
-    enable_multi_hop: bool = DEFAULT_ENABLE_MULTI_HOP
     multi_hop_depth: int = DEFAULT_MULTI_HOP_DEPTH
     ppr_damping: float = DEFAULT_PPR_DAMPING
     ppr_top_k: int = DEFAULT_PPR_TOP_K
@@ -493,7 +491,6 @@ async def query_endpoint(
         chunk_top_k=chunk_top_k,
         enable_rerank=payload.enable_rerank,
         rerank_score_scope="all",
-        enable_multi_hop=payload.enable_multi_hop,
         multi_hop_depth=payload.multi_hop_depth,
         ppr_damping=payload.ppr_damping,
         ppr_top_k=payload.ppr_top_k,
@@ -517,7 +514,6 @@ async def query_endpoint(
         chunk_top_k=chunk_top_k,
         enable_rerank=payload.enable_rerank,
         vlm_enhanced=payload.vlm_enhanced,
-        enable_multi_hop=payload.enable_multi_hop,
         multi_hop_depth=payload.multi_hop_depth,
         ppr_damping=payload.ppr_damping,
         ppr_top_k=payload.ppr_top_k,
@@ -559,7 +555,6 @@ async def query_stream_endpoint(
                 payload.workspace_id, payload.query,
                 mode=payload.mode, top_k=top_k,
                 chunk_top_k=chunk_top_k, enable_rerank=payload.enable_rerank,
-                enable_multi_hop=payload.enable_multi_hop,
                 multi_hop_depth=payload.multi_hop_depth,
                 ppr_damping=payload.ppr_damping,
                 ppr_top_k=payload.ppr_top_k,

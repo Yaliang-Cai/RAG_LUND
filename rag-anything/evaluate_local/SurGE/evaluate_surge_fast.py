@@ -73,6 +73,7 @@ DEFAULT_CHUNKS = "subset_chunks.jsonl"
 DEFAULT_CORPUS = "subset_corpus.json"
 DEFAULT_WORKSPACE = "surge_subset_fast_shared"
 SURGE_NEVER_SPLIT_DELIMITER = "__SURGE_NEVER_SPLIT__"
+SURGE_MIN_RERANK_SCORE = 0.0
 
 PER_QUERY_FILE = RETRIEVAL_DIR / "retrieval_per_query.jsonl"
 SUMMARY_FILE = RETRIEVAL_DIR / "retrieval_summary.json"
@@ -269,12 +270,17 @@ def settings_for_surge(args: argparse.Namespace) -> LocalRagSettings:
     s.enable_entity_surface_normalization = True
     s.enable_keyword_case_normalization = True
     s.strict_relation_endpoint_entity_match = True
+    s.min_rerank_score = SURGE_MIN_RERANK_SCORE
     s.recognition_top_k = DEFAULT_RECOGNITION_TOP_K
     s.recognition_prompt_max_tokens = DEFAULT_RECOGNITION_PROMPT_MAX_TOKENS
     s.recognition_prompt_output_max_tokens = DEFAULT_RECOGNITION_PROMPT_OUTPUT_MAX_TOKENS
     s.recognition_prompt_reserved_tokens = DEFAULT_RECOGNITION_PROMPT_RESERVED_TOKENS
     apply_ablation_flags_to_settings(s, get_ablation_flags(args))
     return s
+
+
+def _surge_runtime_settings() -> dict[str, Any]:
+    return {"min_rerank_score": SURGE_MIN_RERANK_SCORE}
 
 
 def build_query_params(args: argparse.Namespace, *, chunk_top_k: int) -> dict[str, Any]:
@@ -1567,6 +1573,7 @@ def _build_expected_effective_query_params(
         "ablation_group": flags.ablation_group(),
         "ablation_flags": flags.to_dict(),
         "k_list": list(ks),
+        **_surge_runtime_settings(),
     }
 
 
@@ -1862,6 +1869,7 @@ async def run_retrieval(args: argparse.Namespace) -> int:
                 "max_concurrency": args.max_concurrency,
                 "max_retries": args.max_retries,
                 "k_list": ks,
+                **_surge_runtime_settings(),
             },
             "ingest_summary": ingest_summary,
             "chunks_source_stats": chunk_stats,
@@ -2132,6 +2140,7 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
                 "max_concurrency": args.max_concurrency,
                 "max_retries": args.max_retries,
                 "k_list": survey_ks,
+                **_surge_runtime_settings(),
             },
             "ingest_summary": ingest_summary,
             "chunks_source_stats": chunk_stats,

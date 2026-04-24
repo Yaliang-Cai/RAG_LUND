@@ -165,6 +165,7 @@ class LocalRagSettings:
     rerank_batch_size: int = DEFAULT_RERANK_BATCH_SIZE
     rerank_enable_oom_backoff: bool = DEFAULT_RERANK_ENABLE_OOM_BACKOFF
     rerank_min_batch_size: int = DEFAULT_RERANK_MIN_BATCH_SIZE
+    min_rerank_score: float = DEFAULT_MIN_RERANK_SCORE
     tokenizer_model_path: str = DEFAULT_TOKENIZER_MODEL_PATH
     vision_model_path: str = DEFAULT_VISION_MODEL_PATH
 
@@ -288,6 +289,12 @@ class LocalRagSettings:
                 os.getenv(
                     "RAGANYTHING_RERANK_MIN_BATCH_SIZE",
                     str(DEFAULT_RERANK_MIN_BATCH_SIZE),
+                )
+            ),
+            min_rerank_score=float(
+                os.getenv(
+                    "RAGANYTHING_MIN_RERANK_SCORE",
+                    os.getenv("MIN_RERANK_SCORE", str(DEFAULT_MIN_RERANK_SCORE)),
                 )
             ),
             tokenizer_model_path=tokenizer_model_path,
@@ -1860,7 +1867,7 @@ class LocalRagService:
                 "embedding_func_max_async": DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
                 # rerank 后保留 chunk 的最低分数（LightRAG 默认 0.0 = 不过滤）
                 # BGE-reranker-v2-m3 相关 chunk 典型得分 >0.5，不相关 <0.3
-                "min_rerank_score": DEFAULT_MIN_RERANK_SCORE,
+                "min_rerank_score": self.settings.min_rerank_score,
                 # V1/V2/V3 ablation toggles
                 "enable_entity_disambiguation": self.settings.enable_entity_disambiguation,
                 "enable_synonym_linking": self.settings.enable_synonym_linking,
@@ -2071,6 +2078,7 @@ class LocalRagService:
     async def query(self, workspace_id: str, query: str, **kwargs) -> str:
         rag = await self.get_rag(workspace_id)
         normalized_kwargs = dict(kwargs)
+        normalized_kwargs.pop("enable_multi_hop", None)
         normalized_kwargs.setdefault(
             "image_token_estimate_method",
             self.settings.image_token_estimate_method,
@@ -2086,7 +2094,6 @@ class LocalRagService:
         normalized_kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
             str(normalized_kwargs.get("image_token_estimate_method", ""))
         )
-        normalized_kwargs.setdefault("enable_multi_hop", self.settings.enable_multi_hop)
         normalized_kwargs.setdefault("multi_hop_depth", self.settings.multi_hop_depth)
         normalized_kwargs.setdefault("ppr_damping", self.settings.ppr_damping)
         normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
@@ -2124,6 +2131,7 @@ class LocalRagService:
     ) -> dict[str, Any]:
         rag = await self.get_rag(workspace_id, working_dir=working_dir)
         normalized_kwargs = dict(kwargs)
+        normalized_kwargs.pop("enable_multi_hop", None)
         normalized_kwargs.setdefault(
             "image_token_estimate_method",
             self.settings.image_token_estimate_method,
@@ -2139,7 +2147,6 @@ class LocalRagService:
         normalized_kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
             str(normalized_kwargs.get("image_token_estimate_method", ""))
         )
-        normalized_kwargs.setdefault("enable_multi_hop", self.settings.enable_multi_hop)
         normalized_kwargs.setdefault("multi_hop_depth", self.settings.multi_hop_depth)
         normalized_kwargs.setdefault("ppr_damping", self.settings.ppr_damping)
         normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
@@ -2183,7 +2190,6 @@ class LocalRagService:
         top_k: int = DEFAULT_TOP_K,
         chunk_top_k: int = DEFAULT_CHUNK_TOP_K,
         enable_rerank: bool = DEFAULT_ENABLE_RERANK,
-        enable_multi_hop: bool | None = None,
         multi_hop_depth: int | None = None,
         ppr_damping: float | None = None,
         ppr_top_k: int | None = None,
@@ -2213,7 +2219,6 @@ class LocalRagService:
                 stream=True,
                 include_references=True,
                 user_prompt=_INLINE_CITATION_INSTRUCTION if _INLINE_CITATIONS_ENABLED else "",
-                enable_multi_hop=enable_multi_hop if enable_multi_hop is not None else self.settings.enable_multi_hop,
                 multi_hop_depth=multi_hop_depth if multi_hop_depth is not None else self.settings.multi_hop_depth,
                 ppr_damping=ppr_damping if ppr_damping is not None else self.settings.ppr_damping,
                 ppr_top_k=ppr_top_k if ppr_top_k is not None else self.settings.ppr_top_k,

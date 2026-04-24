@@ -35,6 +35,7 @@ DEFAULT_SURVEYS = "subset_surveys.json"
 DEFAULT_CHUNKS = "subset_chunks.jsonl"
 DEFAULT_CORPUS = "subset_corpus.json"
 DEFAULT_WORKSPACE = "surge_subset_shared"
+SURGE_MIN_RERANK_SCORE = 0.0
 SURGE_NEVER_SPLIT_DELIMITER = "__SURGE_NEVER_SPLIT__"
 
 PER_QUERY_FILE = RETRIEVAL_DIR / "retrieval_per_query.jsonl"
@@ -254,6 +255,7 @@ def settings_for_surge(args: argparse.Namespace) -> LocalRagSettings:
     s.working_dir_root = str(RAG_STORAGE_DIR)
     s.output_dir = str(RAG_OUTPUT_DIR)
     s.log_dir = str(LOG_DIR)
+    s.min_rerank_score = SURGE_MIN_RERANK_SCORE
     s.enable_entity_disambiguation = bool(args.enable_entity_disambiguation)
     s.enable_synonym_linking = bool(args.enable_synonym_linking)
     s.enable_multi_hop = bool(args.enable_multi_hop)
@@ -1183,7 +1185,6 @@ async def run_retrieval(args: argparse.Namespace) -> int:
         "chunk_top_k": chunk_top_k,
         "enable_rerank": args.enable_rerank,
         "rerank_score_scope": "all",
-        "enable_multi_hop": args.enable_multi_hop,
         "multi_hop_depth": args.multi_hop_depth,
         "ppr_damping": args.ppr_damping,
         "ppr_top_k": args.ppr_top_k,
@@ -1213,7 +1214,6 @@ async def run_retrieval(args: argparse.Namespace) -> int:
                     top_k=args.top_k,
                     chunk_top_k=chunk_top_k,
                     enable_rerank=args.enable_rerank,
-                    enable_multi_hop=args.enable_multi_hop,
                     multi_hop_depth=args.multi_hop_depth,
                     ppr_damping=args.ppr_damping,
                     ppr_top_k=args.ppr_top_k,
@@ -1369,7 +1369,6 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
         "chunk_top_k": chunk_top_k,
         "enable_rerank": args.enable_rerank,
         "rerank_score_scope": "all",
-        "enable_multi_hop": args.enable_multi_hop,
         "multi_hop_depth": args.multi_hop_depth,
         "ppr_damping": args.ppr_damping,
         "ppr_top_k": args.ppr_top_k,
@@ -1401,7 +1400,6 @@ async def run_survey_retrieval(args: argparse.Namespace) -> int:
                     top_k=args.top_k,
                     chunk_top_k=chunk_top_k,
                     enable_rerank=args.enable_rerank,
-                    enable_multi_hop=args.enable_multi_hop,
                     multi_hop_depth=args.multi_hop_depth,
                     ppr_damping=args.ppr_damping,
                     ppr_top_k=args.ppr_top_k,

@@ -185,7 +185,6 @@ class QueryMixin:
                 "user_prompt",
                 "history_turns",
                 "include_references",
-                "enable_multi_hop",
                 "multi_hop_depth",
                 "ppr_damping",
                 "ppr_top_k",
@@ -248,6 +247,7 @@ class QueryMixin:
         kwargs.setdefault("chunk_top_k", DEFAULT_CHUNK_TOP_K)
         kwargs.setdefault("rerank_score_scope", "all")
         kwargs.setdefault("qdrant_retrieval_mode", DEFAULT_QDRANT_RETRIEVAL_MODE)
+        kwargs.pop("enable_multi_hop", None)
 
         # Check if VLM enhanced query should be used
         vlm_enhanced = kwargs.pop("vlm_enhanced", None)
@@ -515,6 +515,7 @@ class QueryMixin:
         kwargs.setdefault("multimodal_top_k", DEFAULT_MULTIMODAL_TOP_K)
         kwargs.setdefault("rerank_score_scope", "all")
         kwargs.setdefault("qdrant_retrieval_mode", DEFAULT_QDRANT_RETRIEVAL_MODE)
+        kwargs.pop("enable_multi_hop", None)
         query_param = QueryParam(mode=mode, only_need_prompt=True, **kwargs)
         image_cap = query_param.multimodal_top_k
         if image_cap is None:
