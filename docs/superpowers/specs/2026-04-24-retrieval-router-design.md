@@ -93,6 +93,7 @@ class RetrievalProfile:
     enable_rerank: bool = True
     min_rerank_score: float = 0.3
     rerank_candidate_cap: int = 60            # top-N fed to reranker after RRF
+    max_concurrent_paths: int | None = None  # None = unlimited; set on heavy profiles to protect Neo4j
     path_overrides: dict[str, dict] = field(default_factory=dict)
 ```
 
@@ -221,13 +222,26 @@ All paths return a standardized `list[Chunk]`. `overrides` are merged into a cop
 ### 6.3 Parallel Execution
 
 ```python
-results = await asyncio.gather(
-    *[run_path(name, query, param, lightrag, profile.path_overrides.get(name, {}))
-      for name in profile.paths],
-    return_exceptions=True,
-)
+sem = asyncio.Semaphore(profile.max_concurrent_paths) if profile.max_concurrent_paths else None
+
+async def _guarded(name: str):
+    if sem:
+        async with sem:
+            return await run_path(name, query, param, lightrag, profile.path_overrides.get(name, {}))
+    return await run_path(name, query, param, lightrag, profile.path_overrides.get(name, {}))
+
+results = await asyncio.gather(*[_guarded(n) for n in profile.paths], return_exceptions=True)
 # Failed paths are logged as warnings and excluded from fusion; other paths proceed normally
 ```
+
+When `max_concurrent_paths` is `None` no Semaphore is created and there is zero overhead. For the `full` profile it is set to `3`, batching 6 paths into two waves to prevent concurrent Neo4j graph traversals from queuing against each other. The LLM-layer concurrency cap (`LLM_MODEL_MAX_ASYNC`) remains the primary guard against vLLM scheduler saturation; the Semaphore here targets I/O-heavy graph backends only.
+
+**Default `max_concurrent_paths` per profile:**
+
+| Profile | `max_concurrent_paths` |
+|---|---|
+| `precise`, `local`, `multihop`, `descriptive` | `None` (2–3 paths, no limit needed) |
+| `full` | `3` (6 paths in two waves, protects Neo4j) |
 
 ### 6.4 Fusion Pipeline
 
