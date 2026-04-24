@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from lightrag import QueryParam
 from raganything.query import QueryMixin
 
+pytestmark = pytest.mark.asyncio
+
 
 def _make_mixin(chunks: list[dict]) -> QueryMixin:
     """Build a minimal QueryMixin stand-in."""
@@ -17,6 +19,7 @@ def _make_mixin(chunks: list[dict]) -> QueryMixin:
         return {"success": True}
 
     mixin._ensure_lightrag_initialized = fake_ensure_initialized
+    mixin._generate_answer_from_chunks = AsyncMock(return_value="answer text")
     return mixin
 
 
@@ -66,3 +69,4 @@ async def test_aquery_non_auto_mode_unchanged():
         result = await QueryMixin.aquery(mixin, "test", mode="hybrid")
 
     router_cls.assert_not_called()
+    assert result == "legacy answer"

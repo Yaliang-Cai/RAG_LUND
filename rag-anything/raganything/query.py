@@ -4,6 +4,7 @@ Query functionality for RAGAnything
 Contains all query-related methods for both text and multimodal queries
 """
 
+import dataclasses
 import json
 import hashlib
 import re
@@ -12,6 +13,10 @@ from typing import Dict, List, Any
 from pathlib import Path
 from lightrag import QueryParam
 from lightrag.utils import always_get_an_event_loop
+
+_QUERY_PARAM_FIELDS: frozenset[str] = frozenset(
+    f.name for f in dataclasses.fields(QueryParam)
+)
 from raganything.prompt import PROMPTS
 from raganything.constants import (
     DEFAULT_MULTIMODAL_TOP_K,
@@ -221,11 +226,15 @@ class QueryMixin:
         Args:
             query: Query text
             mode: Query mode ("local", "global", "hybrid", "naive", "mix", "bypass", "rrf")
+                - "auto": delegates to RetrievalRouter; pass profile=<name> to bypass LLM classification.
+                  VLM enhancement is not active in this mode (use aquery_vlm_enhanced for VLM+auto).
             system_prompt: Optional system prompt to include.
             **kwargs: Other query parameters, will be passed to QueryParam
                 - vlm_enhanced: bool, default True when vision_model_func is available.
                   If True, will parse image paths in retrieved context and replace them
                   with base64 encoded images for VLM processing.
+                - profile: str, only used when mode="auto". Forces a specific retrieval profile,
+                  bypassing LLM classification.
 
         Returns:
             str | dict[str, Any]: Query result.
@@ -250,11 +259,9 @@ class QueryMixin:
 
         # ── mode="auto": delegate to RetrievalRouter ──────────────────────
         if mode == "auto":
-            import dataclasses as _dc
-            _qp_fields = {f.name for f in _dc.fields(QueryParam)}
             profile_name: str | None = kwargs.pop("profile", None)
             return_trace_auto = bool(kwargs.pop("return_trace", False))
-            qp_kwargs = {k: v for k, v in kwargs.items() if k in _qp_fields}
+            qp_kwargs = {k: v for k, v in kwargs.items() if k in _QUERY_PARAM_FIELDS}
             query_param_auto = QueryParam(mode="hybrid", **qp_kwargs)  # mode ignored by router
             router = RetrievalRouter(self.lightrag)
             final_chunks, routing_trace = await router.route(
@@ -316,9 +323,7 @@ class QueryMixin:
             )
 
         # Create query parameters (filter out custom kwargs not declared on QueryParam)
-        import dataclasses as _dc
-        _qp_fields = {f.name for f in _dc.fields(QueryParam)}
-        query_param = QueryParam(mode=mode, **{k: v for k, v in kwargs.items() if k in _qp_fields})
+        query_param = QueryParam(mode=mode, **{k: v for k, v in kwargs.items() if k in _QUERY_PARAM_FIELDS})
 
         self.logger.info(f"Executing text query: {query[:100]}...")
         self.logger.info(f"Query mode: {mode}")
