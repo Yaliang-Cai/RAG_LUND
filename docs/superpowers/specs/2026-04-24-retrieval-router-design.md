@@ -61,6 +61,21 @@ aquery(query, mode="auto", ...)
 - RRF merge and reranker reuse LightRAG's existing `_rrf_merge` and rerank infrastructure
 - When `profile=` is passed explicitly, the LLM classifier call is skipped entirely
 
+### 3.4 VLM Dereference Integration
+
+`RetrievalRouter.route()` returns `list[Chunk]` — it does **not** render a prompt string. The VLM image-path dereference pipeline (`_process_image_paths_for_vlm`) operates on a rendered prompt string and must therefore run after prompt assembly. The `mode="auto"` call path for VLM-enhanced queries is:
+
+```
+aquery_vlm_enhanced(query, mode="auto", ...)
+    └── RetrievalRouter.route(query, param)      → list[Chunk]
+    └── lightrag.build_prompt(query, chunks)     → raw_prompt string
+    └── _process_image_paths_for_vlm(raw_prompt) → enhanced_prompt, images_base64
+    └── _build_vlm_messages_with_images(...)     → messages
+    └── _call_vlm_with_multimodal_content(...)   → answer
+```
+
+This keeps the router's responsibility strictly retrieval + fusion. Prompt rendering and image dereference remain in `aquery_vlm_enhanced()`, unchanged from the non-auto path. The only new step is calling `lightrag.build_prompt()` with the router's chunk output instead of invoking `lightrag.aquery_llm(only_need_prompt=True)`.
+
 ---
 
 ## 4. Profile System
