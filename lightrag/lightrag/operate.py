@@ -917,6 +917,8 @@ def _build_query_cache_params(
         "ppr_synonym_weight_mode": query_param.ppr_synonym_weight_mode,
         "qdrant_retrieval_mode": query_param.qdrant_retrieval_mode,
         "keyword_fanout_mode": getattr(query_param, "keyword_fanout_mode", "joined"),
+        "keyword_entity_rrf_k": getattr(query_param, "keyword_entity_rrf_k", 10),
+        "keyword_relation_rrf_k": getattr(query_param, "keyword_relation_rrf_k", 20),
         "answer_context_mode": getattr(
             query_param, "answer_context_mode", "kg_prompt"
         ),
@@ -1020,6 +1022,20 @@ def _resolve_qdrant_retrieval_mode(query_param: QueryParam, store_kind: str) -> 
     return _normalize_store_retrieval_mode(fallback, "dense")
 
 
+def _resolve_keyword_rrf_k(query_param: QueryParam, store_kind: str) -> int:
+    if store_kind == "entity":
+        return _to_non_negative_int(
+            getattr(query_param, "keyword_entity_rrf_k", 10),
+            default=10,
+        )
+    if store_kind == "relation":
+        return _to_non_negative_int(
+            getattr(query_param, "keyword_relation_rrf_k", 20),
+            default=20,
+        )
+    return _to_non_negative_int(getattr(query_param, "rrf_k", 60), default=60)
+
+
 def _rank_item_key(item: dict[str, Any], item_kind: str) -> str:
     if item_kind == "entity":
         return str(item.get("entity_id") or item.get("entity_name") or "")
@@ -1089,6 +1105,7 @@ async def _keyword_rrf_query_vector_storage(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     keyword_rankings: list[list[dict[str, Any]]] = []
     per_keyword_hits: list[dict[str, Any]] = []
+    rrf_k = _resolve_keyword_rrf_k(query_param, store_kind)
 
     for keyword in keywords:
         results = await _query_vector_storage(
@@ -1114,9 +1131,11 @@ async def _keyword_rrf_query_vector_storage(
         keyword_rankings,
         item_kind=store_kind,
         top_k=top_k,
+        rrf_k=rrf_k,
     )
     debug = {
         "fanout_mode": "per_keyword_rrf",
+        "rrf_k": rrf_k,
         "per_keyword_hits": per_keyword_hits,
         "merged_hits": [_search_hit_debug_item(item, store_kind) for item in merged],
     }

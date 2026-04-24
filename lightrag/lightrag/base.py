@@ -156,6 +156,16 @@ class QueryParam:
     - "per_keyword_rrf": query each same-level keyword independently and fuse results with RRF.
     """
 
+    keyword_entity_rrf_k: int = int(os.getenv("KEYWORD_ENTITY_RRF_K", "10"))
+    """RRF smoothing constant for per-keyword entity fanout fusion.
+    Only used when keyword_fanout_mode="per_keyword_rrf".
+    """
+
+    keyword_relation_rrf_k: int = int(os.getenv("KEYWORD_RELATION_RRF_K", "20"))
+    """RRF smoothing constant for per-keyword relation fanout fusion.
+    Only used when keyword_fanout_mode="per_keyword_rrf".
+    """
+
     answer_context_mode: Literal["kg_prompt", "chunk_only_prompt"] = "kg_prompt"
     """Controls the answer-time prompt/context shape for KG retrieval modes.
     - "kg_prompt": include entity/relation/chunk context.

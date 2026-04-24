@@ -26,6 +26,8 @@ load_dotenv()
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
 from evaluate_local.run_retrieval_ablation import (
+    DEFAULT_KEYWORD_ENTITY_RRF_K,
+    DEFAULT_KEYWORD_RELATION_RRF_K,
     build_reduced_experiment_matrix,
     _validate_ppr_controls,
     resolve_shared_workspace_layout,
@@ -55,6 +57,8 @@ PPR_TOP_K = 50
 PPR_QA_TOP_K = 20 if DATASET == "docbench" else 50
 
 KEYWORD_FANOUT_MODE = "joined"  # joined | per_keyword_rrf
+KEYWORD_ENTITY_RRF_K = DEFAULT_KEYWORD_ENTITY_RRF_K
+KEYWORD_RELATION_RRF_K = DEFAULT_KEYWORD_RELATION_RRF_K
 RETRIEVAL_MODE = "dense"  # dense | hybrid
 KG_CHUNK_SELECTION_SOURCE = "truncated"  # truncated | untruncated; hybrid only
 EXCLUDE_SYNONYM_EDGES = True
@@ -133,6 +137,8 @@ def _single_group(dataset: str) -> dict[str, Any]:
         "name": "single",
         "query_mode": QUERY_MODE,
         "keyword_fanout_mode": KEYWORD_FANOUT_MODE,
+        "keyword_entity_rrf_k": KEYWORD_ENTITY_RRF_K,
+        "keyword_relation_rrf_k": KEYWORD_RELATION_RRF_K,
         "retrieval_mode": RETRIEVAL_MODE,
         "entity_retrieval_mode": RETRIEVAL_MODE,
         "chunk_retrieval_mode": RETRIEVAL_MODE,
@@ -162,6 +168,12 @@ def _query_kwargs(group: dict[str, Any]) -> dict[str, Any]:
         "max_total_tokens": MAX_TOTAL_TOKENS,
         "recognition_top_k": RECOGNITION_TOP_K,
         "keyword_fanout_mode": str(group["keyword_fanout_mode"]),
+        "keyword_entity_rrf_k": int(
+            group.get("keyword_entity_rrf_k", KEYWORD_ENTITY_RRF_K)
+        ),
+        "keyword_relation_rrf_k": int(
+            group.get("keyword_relation_rrf_k", KEYWORD_RELATION_RRF_K)
+        ),
         "entity_qdrant_retrieval_mode": str(group["entity_retrieval_mode"]),
         "chunk_qdrant_retrieval_mode": str(group["chunk_retrieval_mode"]),
         "exclude_synonym_edges": bool(group["exclude_synonym_edges"]),

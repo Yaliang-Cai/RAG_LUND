@@ -196,6 +196,8 @@ class QueryMixin:
                 "ppr_synonym_weight_mode",
                 "qdrant_retrieval_mode",
                 "keyword_fanout_mode",
+                "keyword_entity_rrf_k",
+                "keyword_relation_rrf_k",
                 "answer_context_mode",
                 "kg_chunk_selection_source",
                 "entity_qdrant_retrieval_mode",

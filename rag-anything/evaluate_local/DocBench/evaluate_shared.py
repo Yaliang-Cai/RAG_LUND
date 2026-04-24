@@ -123,6 +123,8 @@ DOCBENCH_QUERY_PARAMS = {
     "image_token_estimate_method": "qwen_vl",
     "image_token_model_name_or_path": RAG_VISION_MODEL_PATH,
     "image_wrapper_tokens_per_image": 2,
+    "keyword_entity_rrf_k": 10,
+    "keyword_relation_rrf_k": 20,
 }
 DOCBENCH_QUERY_MODE_CHOICES = (
     "local",
@@ -315,6 +317,8 @@ def _build_query_params(
     query_mode: str | None = None,
     recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K,
     keyword_fanout_mode: str = "joined",
+    keyword_entity_rrf_k: int = 10,
+    keyword_relation_rrf_k: int = 20,
     entity_retrieval_mode: str = "dense",
     chunk_retrieval_mode: str = "dense",
     exclude_synonym_edges: bool | None = None,
@@ -352,6 +356,8 @@ def _build_query_params(
         params["answer_context_mode"] = str(answer_context_mode).strip()
     params["chunk_qdrant_retrieval_mode"] = str(chunk_retrieval_mode).strip()
     params["keyword_fanout_mode"] = str(keyword_fanout_mode).strip()
+    params["keyword_entity_rrf_k"] = int(keyword_entity_rrf_k)
+    params["keyword_relation_rrf_k"] = int(keyword_relation_rrf_k)
     params["entity_qdrant_retrieval_mode"] = str(entity_retrieval_mode).strip()
     params["kg_chunk_selection_source"] = str(kg_chunk_selection_source).strip()
     if max_total_tokens is not None:
@@ -1937,6 +1943,20 @@ async def main() -> None:
         default="joined",
     )
     parser.add_argument(
+        "--keyword_entity_rrf_k",
+        "--keyword-entity-rrf-k",
+        dest="keyword_entity_rrf_k",
+        type=int,
+        default=DOCBENCH_QUERY_PARAMS["keyword_entity_rrf_k"],
+    )
+    parser.add_argument(
+        "--keyword_relation_rrf_k",
+        "--keyword-relation-rrf-k",
+        dest="keyword_relation_rrf_k",
+        type=int,
+        default=DOCBENCH_QUERY_PARAMS["keyword_relation_rrf_k"],
+    )
+    parser.add_argument(
         "--entity_retrieval_mode",
         choices=["dense", "bm25", "hybrid"],
         default="dense",
@@ -2018,6 +2038,8 @@ async def main() -> None:
         query_mode=args.query_mode,
         recognition_top_k=args.recognition_top_k,
         keyword_fanout_mode=args.keyword_fanout_mode,
+        keyword_entity_rrf_k=args.keyword_entity_rrf_k,
+        keyword_relation_rrf_k=args.keyword_relation_rrf_k,
         entity_retrieval_mode=args.entity_retrieval_mode,
         chunk_retrieval_mode=args.chunk_retrieval_mode,
         exclude_synonym_edges=(

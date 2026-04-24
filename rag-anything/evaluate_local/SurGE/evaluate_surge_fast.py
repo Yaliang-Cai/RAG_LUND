@@ -288,6 +288,12 @@ def build_query_params(args: argparse.Namespace, *, chunk_top_k: int) -> dict[st
         "enable_rerank": bool(getattr(args, "enable_rerank", True)),
         "rerank_score_scope": "all",
         "keyword_fanout_mode": str(getattr(args, "keyword_fanout_mode", "joined")).strip(),
+        "keyword_entity_rrf_k": int(
+            getattr(args, "keyword_entity_rrf_k", 10)
+        ),
+        "keyword_relation_rrf_k": int(
+            getattr(args, "keyword_relation_rrf_k", 20)
+        ),
         "entity_qdrant_retrieval_mode": str(
             getattr(args, "entity_retrieval_mode", "dense")
         ).strip(),
@@ -2322,6 +2328,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--keyword_fanout_mode",
         choices=["joined", "per_keyword_rrf"],
         default="joined",
+    )
+    p.add_argument(
+        "--keyword-entity-rrf-k",
+        "--keyword_entity_rrf_k",
+        dest="keyword_entity_rrf_k",
+        type=int,
+        default=10,
+    )
+    p.add_argument(
+        "--keyword-relation-rrf-k",
+        "--keyword_relation_rrf_k",
+        dest="keyword_relation_rrf_k",
+        type=int,
+        default=20,
     )
     p.add_argument(
         "--entity_retrieval_mode",
