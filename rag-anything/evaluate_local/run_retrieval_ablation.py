@@ -644,8 +644,9 @@ def resolve_shared_workspace_layout(
     working_dir_root = run_root_path
     state_dir: Path | None = None
     if workspace_dir.parent.name == workspace_id and workspace_dir.parent.parent.name == "rag_workspaces":
+        workspace_dir = workspace_dir.parent
         working_dir_root = workspace_dir.parent
-        state_dir = workspace_dir.parent.parent.parent
+        state_dir = workspace_dir.parent.parent
     elif workspace_dir.parent.name == "rag_workspaces":
         working_dir_root = workspace_dir.parent
         state_dir = workspace_dir.parent.parent
@@ -699,8 +700,9 @@ def resolve_surge_workspace_layout(
     storage_root = run_root_path
     state_dir: Path | None = None
     if workspace_dir.parent.name == workspace_id and workspace_dir.parent.parent.name == "rag_storage":
+        workspace_dir = workspace_dir.parent
         storage_root = workspace_dir.parent
-        state_dir = workspace_dir.parent.parent.parent
+        state_dir = workspace_dir.parent.parent
     elif workspace_dir.parent.name == "rag_storage":
         storage_root = workspace_dir.parent
         state_dir = workspace_dir.parent.parent
