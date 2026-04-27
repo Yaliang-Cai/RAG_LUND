@@ -279,7 +279,13 @@ class QueryMixin:
             )
             answer = answer if isinstance(answer, str) else str(answer)
             if return_trace_auto:
-                return {"answer": answer, "trace": {"routing": routing_trace}}
+                return {
+                    "answer": answer,
+                    "trace": {
+                        "routing": routing_trace,
+                        "data": {"chunks": final_chunks},
+                    },
+                }
             return answer
         # ── end mode="auto" ───────────────────────────────────────────────
 

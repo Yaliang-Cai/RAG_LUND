@@ -136,7 +136,7 @@ python evaluate_local/MultiHopQA/evaluate_multihop.py \
     --workspace hotpotqa_500_seed42 \
     --working-dir /data/rag_workspaces/hotpotqa_500_seed42 \
     --output-dir ./multihop_results \
-    --modes naive hybrid ppr auto \
+    --modes naive hybrid ppr auto full \
     --n-samples 500 \
     --seed 42
 ```
@@ -182,9 +182,15 @@ version when the smoke test passes.
 | `naive` | Flat dense vector search over all chunks; no graph traversal. Pure retrieval baseline. |
 | `hybrid` | LightRAG hybrid: combines `local` (entity-anchored dense retrieval) and `global` (community/theme-level dense retrieval). All retrieval is pure dense — no BM25 or keyword search. Second baseline. |
 | `ppr` | Personalized PageRank over the knowledge graph. Multi-hop graph traversal on top of dense retrieval. |
-| `auto` | RetrievalRouter selects the best mode per query via LLM classification. |
+| `auto` | RetrievalRouter classifies each query via LLM and dispatches it to the best-matching retrieval profile (e.g. `multihop` → ppr+hybrid, `local` → hybrid+naive, `descriptive` → mix+qdrant_hybrid). Results from the selected profile's paths are fused with weighted RRF and optionally reranked. |
+| `full` | Forces the router's `full` profile for every query — all six retrieval paths (naive, hybrid, mix, ppr, qdrant_hybrid, qdrant_sparse) run in parallel and are fused via weighted RRF. No LLM classification overhead; the widest possible evidence net per query. |
 
-`naive` is the minimal baseline (dense-only, no graph).  `hybrid` is the standard LightRAG baseline — it uses more retrieval signals than `naive` (both local entity context and global thematic context) but still relies purely on dense vectors.  `ppr` adds graph-based multi-hop traversal on top; the gap between `hybrid` and `ppr` measures the value of graph reasoning.  `auto` tests whether the router correctly dispatches hard multi-hop queries to `ppr` and simpler queries to cheaper modes.
+`naive` is the minimal baseline (dense-only, no graph).  `hybrid` is the standard LightRAG baseline — it uses more retrieval signals than `naive` (both local entity context and global thematic context) but still relies purely on dense vectors.  `ppr` adds graph-based multi-hop traversal on top; the gap between `hybrid` and `ppr` measures the value of graph reasoning.
+
+`auto` and `full` both go through the `RetrievalRouter`; the difference is how the retrieval profile is chosen:
+
+- **`auto`**: LLM classifies the query type per question (multi-hop, local fact, descriptive, …) and activates only the paths relevant to that type.  It is the smarter but more expensive option — it pays one extra LLM call per question in exchange for precision.  The gap between `ppr` and `auto` measures whether the router's profile selection adds value over always using PPR.
+- **`full`**: Pins the `full` profile for every query — all six paths fire unconditionally, results are merged with weighted RRF, then reranked.  This is the maximum-recall upper bound for the router-based architecture.  The gap between `auto` and `full` measures whether LLM-based routing beats brute-force path fusion, and at what latency cost.
 
 ---
 
@@ -228,6 +234,7 @@ multihop_results/
 ├── hotpotqa_hybrid_results.jsonl
 ├── hotpotqa_ppr_results.jsonl
 ├── hotpotqa_auto_results.jsonl
+├── hotpotqa_full_results.jsonl
 └── hotpotqa_summary.json           # aggregated metrics across all modes
 ```
 
@@ -260,7 +267,8 @@ multihop_results/
     "naive":  {"em": 0.312, "f1": 0.421, "recall@5": 0.51, "recall@10": 0.64, "recall@20": 0.73, "n": 500},
     "hybrid": {"em": 0.338, "f1": 0.447, "recall@5": 0.58, "recall@10": 0.71, "recall@20": 0.80, "n": 500},
     "ppr":    {"em": 0.361, "f1": 0.472, "recall@5": 0.63, "recall@10": 0.76, "recall@20": 0.84, "n": 500},
-    "auto":   {"em": 0.355, "f1": 0.468, "recall@5": 0.62, "recall@10": 0.75, "recall@20": 0.83, "n": 500}
+    "auto":   {"em": 0.355, "f1": 0.468, "recall@5": 0.62, "recall@10": 0.75, "recall@20": 0.83, "n": 500},
+    "full":   {"em": 0.368, "f1": 0.479, "recall@5": 0.65, "recall@10": 0.78, "recall@20": 0.86, "n": 500}
   }
 }
 ```
@@ -342,7 +350,7 @@ python evaluate_local/MultiHopQA/evaluate_multihop.py \
     --workspace hotpotqa_500_seed42 \
     --working-dir /data/rag_workspaces/hotpotqa_500_seed42 \
     --output-dir ./multihop_results \
-    --modes naive hybrid ppr auto \
+    --modes naive hybrid ppr auto full \
     --n-samples 500 \
     --seed 42 \
     --recall-k 5 10 20
@@ -359,4 +367,5 @@ naive          0.XXXX   0.XXXX  0.XXXX  0.XXXX  0.XXXX
 hybrid         0.XXXX   0.XXXX  0.XXXX  0.XXXX  0.XXXX
 ppr            0.XXXX   0.XXXX  0.XXXX  0.XXXX  0.XXXX
 auto           0.XXXX   0.XXXX  0.XXXX  0.XXXX  0.XXXX
+full           0.XXXX   0.XXXX  0.XXXX  0.XXXX  0.XXXX
 ```

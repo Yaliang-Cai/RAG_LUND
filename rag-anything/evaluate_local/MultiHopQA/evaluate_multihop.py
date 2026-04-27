@@ -35,7 +35,7 @@ for p in (_project_root, _lightrag_root):
 from dotenv import load_dotenv
 load_dotenv()
 
-VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto")
+VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto", "full")
 VALID_DATASETS = ("hotpotqa", "musique", "2wiki", "simpleqa")
 
 _REFERENCES_RE = re.compile(r"#+\s*references?.*", re.IGNORECASE | re.DOTALL)
@@ -119,17 +119,26 @@ async def _run_mode(
     done = len(existing_ids)
     total = len(items)
 
+    # "full" is a pseudo-mode: forces the router's "full" profile (all paths, RRF fusion).
+    # "auto" lets the router classify per query and pick the best profile.
+    # Both use mode="auto" on the wire; only "full" pins a profile.
+    wire_mode = "auto" if mode in ("auto", "full") else mode
+    wire_profile = "full" if mode == "full" else None
+
     for item in items:
         if item["id"] in existing_ids:
             continue
 
         try:
+            call_kwargs = dict(query_overrides)
+            if wire_profile is not None:
+                call_kwargs["profile"] = wire_profile
             result = await service.query_with_trace(
                 workspace_id=workspace_id,
                 query=item["question"],
                 working_dir=working_dir,
-                mode=mode,
-                **query_overrides,
+                mode=wire_mode,
+                **call_kwargs,
             )
             raw_answer = result.get("answer", "")
             answer = _strip_references(raw_answer)
@@ -242,7 +251,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--dataset",     required=True, choices=VALID_DATASETS)
     p.add_argument("--workspace",   required=True, help="Pre-built workspace ID")
     p.add_argument("--working-dir", required=True, dest="working_dir")
-    p.add_argument("--modes",       nargs="+", default=["naive", "hybrid", "ppr", "auto"],
+    p.add_argument("--modes",       nargs="+", default=["naive", "hybrid", "ppr", "auto", "full"],
                    choices=VALID_MODES, metavar="MODE")
     p.add_argument("--n-samples",   type=int, default=500, dest="n_samples")
     p.add_argument("--recall-k",    type=int, nargs="+", default=[5, 10, 20], dest="recall_k")
