@@ -25,6 +25,8 @@ Neo4j (entities + relations)          LightRAG KV Store (chunk_id → content)
                                │
                ./data/<graph_name>/processed/stage1/
                   nodes.csv / edges.csv / relations.csv
+               ./data/<graph_name>/raw/
+                  documents.json
                                │
                   GFMRetriever (lazy singleton)
                   raganything/retrieval/gfm_retriever.py
@@ -102,7 +104,8 @@ capital_of,"{}"
 2. Enumerate Neo4j entity nodes → emit as entity nodes
 3. For each entity, query Neo4j for which chunk IDs it appears in → emit `mentioned_in` edges
 4. Enumerate Neo4j relations → emit entity→entity edges and relation types
-5. Write the four CSV files with correct headers to `./data/<graph_name>/processed/stage1/`
+5. Write the three CSV files with correct headers to `./data/<graph_name>/processed/stage1/`
+6. Write `./data/<graph_name>/raw/documents.json` — flat mapping `{"chunk_id": "chunk content", ...}` for all chunks; prevents errors from GFM-RAG downstream APIs that probe the raw directory
 
 **Key invariant:** document node `name` in `nodes.csv` must exactly match the `chunk_id` key in LightRAG's KV store. No ID translation layer is needed downstream.
 
