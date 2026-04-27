@@ -5637,15 +5637,7 @@ async def _apply_token_truncation(
             "relation_id_to_original": {},
         }
 
-    if _resolve_answer_context_mode(query_param) == "chunk_only_prompt":
-        return {
-            "entities_context": [],
-            "relations_context": [],
-            "filtered_entities": search_result["final_entities"],
-            "filtered_relations": search_result["final_relations"],
-            "entity_id_to_original": {},
-            "relation_id_to_original": {},
-        }
+    chunk_only_prompt = _resolve_answer_context_mode(query_param) == "chunk_only_prompt"
 
     final_entities = search_result["final_entities"]
     final_relations = search_result["final_relations"]
@@ -5775,6 +5767,16 @@ async def _apply_token_truncation(
                 filtered_relations.append(relation)
                 filtered_relation_id_to_original[pair] = relation
                 seen_edges.add(pair)
+
+    if chunk_only_prompt:
+        return {
+            "entities_context": [],
+            "relations_context": [],
+            "filtered_entities": filtered_entities,
+            "filtered_relations": filtered_relations,
+            "entity_id_to_original": filtered_entity_id_to_original,
+            "relation_id_to_original": filtered_relation_id_to_original,
+        }
 
     return {
         "entities_context": entities_context,
