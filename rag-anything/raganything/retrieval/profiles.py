@@ -77,12 +77,14 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
         RetrievalProfile(
             name="full",
             description="Fallback when query type is unclear or ambiguous",
-            paths=["naive", "hybrid", "mix", "ppr", "qdrant_hybrid", "qdrant_sparse"],
+            paths=["ppr", "hybrid", "naive", "qdrant_sparse"],
             rrf_weights={
-                p: 1.0
-                for p in ["naive", "hybrid", "mix", "ppr", "qdrant_hybrid", "qdrant_sparse"]
+                "ppr":           1.2,
+                "hybrid":        1.0,
+                "naive":         0.7,
+                "qdrant_sparse": 0.9,
             },
-            max_concurrent_paths=3,
+            max_concurrent_paths=None,
         ),
     ]
 }
