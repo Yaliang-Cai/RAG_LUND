@@ -100,3 +100,33 @@ async def test_aquery_vlm_enhanced_auto_mode_uses_router():
 
     router_mock.route.assert_called_once()
     assert isinstance(result, str)
+
+
+async def test_aquery_auto_return_trace_includes_routing():
+    mixin = _make_mixin([])
+    router_mock = MagicMock()
+    routing_trace = {
+        "profile": "local",
+        "confidence": 0.9,
+        "reasoning": "factual query",
+        "paths_activated": ["hybrid", "naive"],
+        "paths_failed": [],
+        "chunks_per_path": {"hybrid": 3, "naive": 2},
+        "chunks_after_rrf": 4,
+        "chunks_after_rerank": 3,
+        "chunks_after_threshold": 3,
+        "latency_per_path": {"classifier": 0.12, "hybrid": 0.45, "naive": 0.08},
+    }
+    router_mock.route = AsyncMock(return_value=([], routing_trace))
+
+    with patch("raganything.query.RetrievalRouter", return_value=router_mock):
+        result = await QueryMixin.aquery(
+            mixin, "test query", mode="auto", return_trace=True
+        )
+
+    assert isinstance(result, dict)
+    assert "answer" in result
+    assert "trace" in result
+    assert result["trace"]["routing"]["profile"] == "local"
+    assert "latency_per_path" in result["trace"]["routing"]
+    assert result["trace"]["routing"]["latency_per_path"]["classifier"] == 0.12
