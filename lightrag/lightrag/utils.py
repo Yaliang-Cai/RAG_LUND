@@ -2972,12 +2972,32 @@ async def process_chunks_unified(
     elif unique_chunks:
         chunk_ids_after_threshold = _extract_chunk_ids(unique_chunks)
 
-    # 3. Apply chunk_top_k limiting in strict rerank order.
+    # 3. Apply post-rerank candidate limiting in strict rerank order.
+    # For PPR modes, ppr_qa_top_k is a post-rerank QA/input cap and should not
+    # reduce the pre-rerank candidate pool. chunk_top_k remains a generic final cap.
+    effective_chunk_limit: int | None = None
+    limit_reasons: list[str] = []
+    if getattr(query_param, "mode", None) in ("ppr", "ppr_local"):
+        ppr_qa_top_k = getattr(query_param, "ppr_qa_top_k", None)
+        if ppr_qa_top_k is not None and ppr_qa_top_k > 0:
+            effective_chunk_limit = int(ppr_qa_top_k)
+            limit_reasons.append(f"ppr_qa_top_k={int(ppr_qa_top_k)}")
     if query_param.chunk_top_k is not None and query_param.chunk_top_k > 0:
-        if len(unique_chunks) > query_param.chunk_top_k:
-            unique_chunks = unique_chunks[: query_param.chunk_top_k]
+        chunk_top_k_limit = int(query_param.chunk_top_k)
+        effective_chunk_limit = (
+            chunk_top_k_limit
+            if effective_chunk_limit is None
+            else min(effective_chunk_limit, chunk_top_k_limit)
+        )
+        limit_reasons.append(f"chunk_top_k={chunk_top_k_limit}")
+    if effective_chunk_limit is not None:
+        if len(unique_chunks) > effective_chunk_limit:
+            unique_chunks = unique_chunks[:effective_chunk_limit]
         logger.debug(
-            f"Kept chunk_top-k: {len(unique_chunks)} chunks (deduplicated original: {origin_count})"
+            "Kept post-rerank top-k: %d chunks (deduplicated original: %d, limits: %s)",
+            len(unique_chunks),
+            origin_count,
+            ", ".join(limit_reasons) if limit_reasons else "none",
         )
     count_after_chunk_top_k = len(unique_chunks)
     chunk_ids_after_chunk_top_k = _extract_chunk_ids(unique_chunks)

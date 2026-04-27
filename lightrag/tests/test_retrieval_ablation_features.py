@@ -8,6 +8,7 @@ from lightrag.operate import (
     _apply_token_truncation,
     _build_context_str,
     _build_query_cache_params,
+    _merge_all_chunks,
     _keyword_rrf_query_vector_storage,
     _query_vector_storage,
     _resolve_kg_chunk_selection_inputs,
@@ -16,7 +17,7 @@ from lightrag.operate import (
     kg_query,
 )
 from lightrag.prompt import PROMPTS
-from lightrag.utils import pick_by_vector_similarity
+from lightrag.utils import pick_by_vector_similarity, process_chunks_unified
 
 
 class _DummyTokenizer:
@@ -225,6 +226,70 @@ async def test_chunk_only_prompt_preserves_truncated_kg_selection_inputs():
     assert chunk_only_result["filtered_relations"] == kg_result["filtered_relations"]
     assert chunk_only_result["entities_context"] == []
     assert chunk_only_result["relations_context"] == []
+
+
+@pytest.mark.asyncio
+async def test_merge_all_chunks_defers_ppr_qa_top_k_until_post_rerank():
+    ppr_chunks = [
+        {"chunk_id": "c1", "content": "chunk-1", "ppr_score": 0.9},
+        {"chunk_id": "c2", "content": "chunk-2", "ppr_score": 0.8},
+        {"chunk_id": "c3", "content": "chunk-3", "ppr_score": 0.7},
+    ]
+
+    merged = await _merge_all_chunks(
+        filtered_entities=[],
+        filtered_relations=[],
+        vector_chunks=[],
+        query="q",
+        query_param=QueryParam(mode="ppr", ppr_top_k=3, ppr_qa_top_k=2),
+        ppr_chunks=ppr_chunks,
+    )
+
+    assert [chunk["chunk_id"] for chunk in merged] == ["c1", "c2", "c3"]
+
+
+@pytest.mark.asyncio
+async def test_process_chunks_unified_applies_ppr_qa_top_k_after_rerank():
+    candidate_chunks = [
+        {"chunk_id": "c1", "content": "chunk-1"},
+        {"chunk_id": "c2", "content": "chunk-2"},
+        {"chunk_id": "c3", "content": "chunk-3"},
+    ]
+    reranked_chunks = [
+        {"chunk_id": "c3", "content": "chunk-3", "rerank_score": 0.93},
+        {"chunk_id": "c1", "content": "chunk-1", "rerank_score": 0.91},
+        {"chunk_id": "c2", "content": "chunk-2", "rerank_score": 0.77},
+    ]
+
+    async def fake_apply_rerank_if_enabled(**kwargs):
+        assert [chunk["chunk_id"] for chunk in kwargs["retrieved_docs"]] == [
+            "c1",
+            "c2",
+            "c3",
+        ]
+        assert kwargs["top_n"] == 3
+        return reranked_chunks
+
+    with patch(
+        "lightrag.utils.apply_rerank_if_enabled",
+        new=AsyncMock(side_effect=fake_apply_rerank_if_enabled),
+    ):
+        final_chunks = await process_chunks_unified(
+            query="q",
+            unique_chunks=candidate_chunks,
+            query_param=QueryParam(
+                mode="ppr",
+                ppr_top_k=3,
+                ppr_qa_top_k=2,
+                chunk_top_k=0,
+                enable_rerank=True,
+                rerank_score_scope="all",
+            ),
+            global_config={"min_rerank_score": 0.0},
+            source_type="ppr",
+        )
+
+    assert [chunk["chunk_id"] for chunk in final_chunks] == ["c3", "c1"]
 
 
 def test_query_cache_params_include_kg_chunk_selection_source():

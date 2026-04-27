@@ -133,7 +133,7 @@ def _sample(items: list, n: int, seed: int) -> list:
 def load_hotpotqa(n: int = 500, seed: int = 42) -> list[dict]:
     """Load HotpotQA distractor dev set. supporting_facts = full paragraph texts for gold titles."""
     from datasets import load_dataset
-    ds = load_dataset("hotpot_qa", "distractor", split="validation", trust_remote_code=True)
+    ds = load_dataset("hotpot_qa", "distractor", split="validation")
     raw = list(ds)
     sampled = _sample(raw, n, seed)
     result = []
@@ -161,7 +161,7 @@ def load_hotpotqa(n: int = 500, seed: int = 42) -> list[dict]:
 def extract_corpus_hotpotqa(n: int = 500, seed: int = 42) -> list[dict]:
     """Return unique context paragraphs for n sampled HotpotQA questions (for indexing)."""
     from datasets import load_dataset
-    ds = load_dataset("hotpot_qa", "distractor", split="validation", trust_remote_code=True)
+    ds = load_dataset("hotpot_qa", "distractor", split="validation")
     raw = list(ds)
     sampled = _sample(raw, n, seed)
     seen: dict[str, None] = {}
@@ -177,7 +177,7 @@ def extract_corpus_hotpotqa(n: int = 500, seed: int = 42) -> list[dict]:
 def load_musique(n: int = 500, seed: int = 42) -> list[dict]:
     """Load MuSiQue answerable dev set. supporting_facts = list of supporting paragraph texts."""
     from datasets import load_dataset
-    ds = load_dataset("dgslibisey/MuSiQue", split="validation", trust_remote_code=True)
+    ds = load_dataset("dgslibisey/MuSiQue", split="validation")
     raw = [row for row in ds if row.get("answerable", True)]
     sampled = _sample(raw, n, seed)
     result = []
@@ -199,7 +199,7 @@ def load_musique(n: int = 500, seed: int = 42) -> list[dict]:
 def extract_corpus_musique(n: int = 500, seed: int = 42) -> list[dict]:
     """Return unique context paragraphs for n sampled MuSiQue questions (for indexing)."""
     from datasets import load_dataset
-    ds = load_dataset("dgslibisey/MuSiQue", split="validation", trust_remote_code=True)
+    ds = load_dataset("dgslibisey/MuSiQue", split="validation")
     raw = [row for row in ds if row.get("answerable", True)]
     sampled = _sample(raw, n, seed)
     seen: dict[str, None] = {}
@@ -219,7 +219,7 @@ def load_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
     """Load 2WikiMultiHopQA dev set. supporting_facts = full paragraph texts for gold titles."""
     from datasets import load_dataset
     # framolfese/ is the working public mirror; original plan used voidful/ which has a broken loading script
-    ds = load_dataset("framolfese/2WikiMultihopQA", split="validation", trust_remote_code=True)
+    ds = load_dataset("framolfese/2WikiMultihopQA", split="validation")
     raw = list(ds)
     sampled = _sample(raw, n, seed)
     result = []
@@ -245,7 +245,7 @@ def load_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
 def extract_corpus_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
     """Return unique context paragraphs for n sampled 2WikiMultiHopQA questions (for indexing)."""
     from datasets import load_dataset
-    ds = load_dataset("framolfese/2WikiMultihopQA", split="validation", trust_remote_code=True)
+    ds = load_dataset("framolfese/2WikiMultihopQA", split="validation")
     raw = list(ds)
     sampled = _sample(raw, n, seed)
     seen: dict[str, None] = {}
@@ -261,7 +261,7 @@ def extract_corpus_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
 def load_simpleqa(n: int = 500, seed: int = 42) -> list[dict]:
     """Load SimpleQA test set. No supporting facts."""
     from datasets import load_dataset
-    ds = load_dataset("basicv8vc/SimpleQA", split="test", trust_remote_code=True)
+    ds = load_dataset("basicv8vc/SimpleQA", split="test")
     raw = list(ds)
     sampled = _sample(raw, n, seed)
     result = []

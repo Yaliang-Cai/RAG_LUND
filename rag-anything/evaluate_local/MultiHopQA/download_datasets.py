@@ -21,23 +21,20 @@ def main():
     from datasets import load_dataset
 
     configs = [
-        ("hotpot_qa",                    "distractor",  "validation", True),
-        ("dgslibisey/MuSiQue",           None,          "validation", True),
-        ("framolfese/2WikiMultihopQA",    None,          "validation", True),
-        ("basicv8vc/SimpleQA",           None,          "test",       True),
+        ("hotpot_qa", "distractor", "validation"),
+        ("dgslibisey/MuSiQue", None, "validation"),
+        ("framolfese/2WikiMultihopQA", None, "validation"),
+        ("basicv8vc/SimpleQA", None, "test"),
     ]
 
-    for name, config, split, trust in configs:
+    for name, config, split in configs:
         label = f"{name}[{config or 'default'}]/{split}"
         print(f"[download] Downloading {label} ...")
         try:
-            kwargs = {}
-            if trust:
-                kwargs["trust_remote_code"] = True
             if config:
-                load_dataset(name, config, split=split, **kwargs)
+                load_dataset(name, config, split=split)
             else:
-                load_dataset(name, split=split, **kwargs)
+                load_dataset(name, split=split)
             print(f"[download] OK: {label}")
         except Exception as e:
             print(f"[download] FAILED: {label} — {e}")

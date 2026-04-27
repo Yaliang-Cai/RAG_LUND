@@ -1,42 +1,380 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Step 1 of the MultiHopQA evaluation pipeline — build a LightRAG workspace
+Step 1 of the MultiHopQA evaluation pipeline: build a LightRAG workspace
 from the subset corpus that corresponds to the sampled evaluation questions.
 
-Run this BEFORE evaluate_multihop.py.  Use the same --n-samples and --seed
+Run this BEFORE evaluate_multihop.py. Use the same --n-samples and --seed
 in both scripts so the evaluation queries match the indexed corpus.
 
-Usage:
-    python evaluate_local/MultiHopQA/build_index.py \\
-        --dataset hotpotqa \\
-        --n-samples 500 \\
-        --workspace hotpotqa_500_seed42 \\
-        --working-dir /data/y50056788/.../rag_workspaces/hotpotqa_500_seed42
-
-    python evaluate_local/MultiHopQA/build_index.py \\
-        --dataset musique \\
-        --n-samples 500 \\
-        --workspace musique_500_seed42 \\
-        --working-dir /data/y50056788/.../rag_workspaces/musique_500_seed42
+The indexer uses a SurGE-style fast ingest path:
+  - sampled-question paragraphs are converted to stable source records
+  - source records are packed into virtual batch documents
+  - each virtual batch is split back into one paragraph per LightRAG chunk
+  - virtual batch documents are inserted concurrently
+  - source map + manifest files are written next to the workspace
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Iterable
 
-_project_root = Path(__file__).resolve().parents[3]
-_lightrag_root = _project_root.parent / "lightrag"
-for p in (_project_root, _lightrag_root):
+_projects_root = Path(__file__).resolve().parents[3]
+_raganything_root = Path(__file__).resolve().parents[2]
+_lightrag_root = _projects_root / "lightrag"
+for p in (_raganything_root, _lightrag_root, _projects_root):
     if p.exists() and str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 VALID_DATASETS = ("hotpotqa", "musique", "2wiki")
+MULTIHOPQA_NEVER_SPLIT_DELIMITER = "__MULTIHOPQA_NEVER_SPLIT__"
+SOURCE_MAP_FILENAME = "multihopqa_chunk_source_map.json"
+SOURCE_RECORDS_FILENAME = "multihopqa_source_records.jsonl"
+INGEST_MANIFEST_FILENAME = "multihopqa_ingest_manifest.json"
+INGEST_PROGRESS_FILENAME = "multihopqa_ingest_progress.jsonl"
+INGEST_FAILURES_FILENAME = "multihopqa_ingest_failures.jsonl"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _save_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _append_jsonl_line(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _iter_batches(values: list[Any], batch_size: int) -> Iterable[list[Any]]:
+    size = max(1, int(batch_size))
+    for i in range(0, len(values), size):
+        yield values[i : i + size]
+
+
+def _format_paragraph(title: Any, text: Any) -> str:
+    title_text = str(title or "").strip()
+    body_text = str(text or "").strip()
+    if title_text and body_text:
+        return f"{title_text}\n{body_text}".strip()
+    return (title_text or body_text).strip()
+
+
+def prepare_source_records(
+    *,
+    dataset: str,
+    corpus: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any]]:
+    """Convert extracted paragraphs into stable source records and chunk map.
+
+    LightRAG chunk IDs are content hashes. Because virtual-batch ingest uses
+    split_by_character_only=True, each formatted paragraph becomes exactly one
+    chunk, so the source paragraph can be mapped to the future chunk ID before
+    insertion.
+    """
+    from lightrag.utils import compute_mdhash_id, sanitize_text_for_encoding
+
+    source_records: dict[str, dict[str, Any]] = {}
+    chunk_source_map: dict[str, dict[str, Any]] = {}
+    empty_count = 0
+
+    for idx, row in enumerate(corpus, start=1):
+        title = str(row.get("title") or "").strip()
+        text = str(row.get("text") or "").strip()
+        content = sanitize_text_for_encoding(_format_paragraph(title, text)).strip()
+        if not content:
+            empty_count += 1
+            continue
+
+        source_paragraph_id = f"{dataset}_{idx:06d}"
+        lightrag_chunk_id = compute_mdhash_id(content, prefix="chunk-")
+        if lightrag_chunk_id in chunk_source_map:
+            existing = chunk_source_map[lightrag_chunk_id]
+            raise ValueError(
+                "duplicate LightRAG chunk id "
+                f"{lightrag_chunk_id}: {existing.get('source_paragraph_id')} "
+                f"and {source_paragraph_id}"
+            )
+
+        record = {
+            "source_paragraph_id": source_paragraph_id,
+            "dataset": dataset,
+            "title": title,
+            "text": text,
+            "content": content,
+            "lightrag_chunk_id": lightrag_chunk_id,
+        }
+        source_records[source_paragraph_id] = record
+        chunk_source_map[lightrag_chunk_id] = {
+            "source_paragraph_id": source_paragraph_id,
+            "dataset": dataset,
+            "title": title,
+            "text": text,
+            "content": content,
+        }
+
+    stats = {
+        "source_paragraph_count": len(source_records),
+        "source_chunk_count": len(chunk_source_map),
+        "empty_paragraph_count": empty_count,
+    }
+    return source_records, chunk_source_map, stats
+
+
+def resolve_safe_split_delimiter(texts: list[str]) -> str:
+    """Return a delimiter absent from every source text."""
+    preferred = MULTIHOPQA_NEVER_SPLIT_DELIMITER
+    if all(preferred not in text for text in texts):
+        return preferred
+    while True:
+        candidate = f"{preferred}_{uuid.uuid4().hex}"
+        if all(candidate not in text for text in texts):
+            return candidate
+
+
+def build_virtual_batches(
+    *,
+    source_records: dict[str, dict[str, Any]],
+    ingest_batch_size: int,
+) -> list[dict[str, Any]]:
+    source_ids = sorted(source_records)
+    batches: list[dict[str, Any]] = []
+    for batch_idx, batch_source_ids in enumerate(
+        _iter_batches(source_ids, max(1, int(ingest_batch_size))),
+        start=1,
+    ):
+        rows = [source_records[source_id] for source_id in batch_source_ids]
+        texts = [str(row["content"]) for row in rows]
+        delimiter = resolve_safe_split_delimiter(texts)
+        batch_doc_id = f"multihopqa_batch_{batch_idx:06d}"
+        batches.append(
+            {
+                "batch_doc_id": batch_doc_id,
+                "file_path": f"{batch_doc_id}.txt",
+                "delimiter": delimiter,
+                "content": delimiter.join(texts),
+                "source_paragraph_ids": [str(row["source_paragraph_id"]) for row in rows],
+                "expected_chunk_ids": [str(row["lightrag_chunk_id"]) for row in rows],
+                "expected_chunk_count": len(rows),
+            }
+        )
+    return batches
+
+
+def _load_successful_batch_ids(progress_path: Path) -> set[str]:
+    successful: set[str] = set()
+    if not progress_path.exists():
+        return successful
+    with progress_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("status") == "ok" and row.get("batch_doc_id"):
+                successful.add(str(row["batch_doc_id"]))
+    return successful
+
+
+def validate_existing_manifest_for_resume(
+    *,
+    manifest_path: Path,
+    workspace: str,
+    dataset: str,
+    n_samples: int,
+    seed: int,
+) -> None:
+    """Refuse resume when an existing manifest belongs to another corpus."""
+    if not manifest_path.exists():
+        return
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid existing manifest JSON: {manifest_path}") from exc
+
+    expected = {
+        "workspace_id": workspace,
+        "dataset": dataset,
+        "n_samples": int(n_samples),
+        "seed": int(seed),
+    }
+    mismatches: list[str] = []
+    for key, expected_value in expected.items():
+        actual_value = payload.get(key)
+        if actual_value != expected_value:
+            mismatches.append(f"{key}: existing={actual_value!r} current={expected_value!r}")
+    if mismatches:
+        raise ValueError(
+            "Existing MultiHopQA ingest manifest does not match this --resume run. "
+            "Use the original workspace/dataset/n-samples/seed, or choose a new "
+            f"working-dir/workspace. Details: {'; '.join(mismatches)}"
+        )
+
+
+async def _with_retries(label: str, retries: int, coro_factory):
+    attempt = 0
+    while True:
+        try:
+            return await coro_factory()
+        except Exception:
+            if attempt >= retries:
+                raise
+            attempt += 1
+            wait_seconds = min(30, 2**attempt)
+            print(f"[build_index] WARN: {label} failed; retry {attempt}/{retries} in {wait_seconds}s")
+            await asyncio.sleep(wait_seconds)
+
+
+def _persist_source_artifacts(
+    *,
+    working_dir: Path,
+    workspace: str,
+    dataset: str,
+    n_samples: int,
+    seed: int,
+    source_records: dict[str, dict[str, Any]],
+    chunk_source_map: dict[str, dict[str, Any]],
+    source_stats: dict[str, Any],
+) -> None:
+    source_records_path = working_dir / SOURCE_RECORDS_FILENAME
+    source_map_path = working_dir / SOURCE_MAP_FILENAME
+
+    _write_jsonl(source_records_path, source_records.values())
+    _save_json(
+        source_map_path,
+        {
+            "schema_version": "multihopqa_chunk_source_map_v1",
+            "generated_at": _utc_now(),
+            "workspace_id": workspace,
+            "dataset": dataset,
+            "n_samples": n_samples,
+            "seed": seed,
+            "source_stats": source_stats,
+            "map_size": len(chunk_source_map),
+            "map": chunk_source_map,
+        },
+    )
+
+
+async def _ingest_batches(
+    *,
+    service: Any,
+    workspace: str,
+    working_dir: str,
+    batches: list[dict[str, Any]],
+    progress_path: Path,
+    failures_path: Path,
+    resume: bool,
+    batch_doc_concurrency: int,
+    max_retries: int,
+) -> dict[str, Any]:
+    successful_before = _load_successful_batch_ids(progress_path) if resume else set()
+    if not resume:
+        progress_path.unlink(missing_ok=True)
+        failures_path.unlink(missing_ok=True)
+
+    pending_batches = [
+        batch for batch in batches if str(batch["batch_doc_id"]) not in successful_before
+    ]
+    print(
+        "[build_index] Virtual batches: "
+        f"{len(batches)} total, {len(successful_before)} already ok, {len(pending_batches)} pending"
+    )
+    print(f"[build_index] Concurrent virtual batch workers: {batch_doc_concurrency}")
+
+    sem = asyncio.Semaphore(max(1, int(batch_doc_concurrency)))
+    lock = asyncio.Lock()
+    done = 0
+    success_count = 0
+    failure_count = 0
+    ingested_source_count = 0
+
+    async def _insert_one(batch: dict[str, Any]) -> None:
+        await service.lightrag_ainsert(
+            workspace_id=workspace,
+            input=str(batch["content"]),
+            ids=str(batch["batch_doc_id"]),
+            file_paths=str(batch["file_path"]),
+            split_by_character=str(batch["delimiter"]),
+            split_by_character_only=True,
+            working_dir=working_dir,
+        )
+
+    async def _process_one(batch: dict[str, Any]) -> None:
+        nonlocal done, success_count, failure_count, ingested_source_count
+        batch_doc_id = str(batch["batch_doc_id"])
+        expected_count = int(batch["expected_chunk_count"])
+        async with sem:
+            try:
+                await _with_retries(
+                    label=f"ingest {batch_doc_id}",
+                    retries=max(0, int(max_retries)),
+                    coro_factory=lambda: _insert_one(batch),
+                )
+                progress_row = {
+                    "timestamp": _utc_now(),
+                    "status": "ok",
+                    "batch_doc_id": batch_doc_id,
+                    "expected_chunk_count": expected_count,
+                    "source_paragraph_ids": batch["source_paragraph_ids"],
+                    "expected_chunk_ids": batch["expected_chunk_ids"],
+                }
+                _append_jsonl_line(progress_path, progress_row)
+                async with lock:
+                    success_count += 1
+                    ingested_source_count += expected_count
+            except Exception as exc:
+                failure_row = {
+                    "timestamp": _utc_now(),
+                    "status": "failed",
+                    "batch_doc_id": batch_doc_id,
+                    "error": str(exc),
+                    "expected_chunk_count": expected_count,
+                    "source_paragraph_ids": list(batch["source_paragraph_ids"])[:20],
+                }
+                _append_jsonl_line(failures_path, failure_row)
+                async with lock:
+                    failure_count += 1
+            finally:
+                async with lock:
+                    done += 1
+                    if done % 10 == 0 or done == len(pending_batches):
+                        print(f"[build_index]   {done}/{len(pending_batches)} virtual batches processed")
+
+    if pending_batches:
+        await asyncio.gather(*[asyncio.create_task(_process_one(batch)) for batch in pending_batches])
+
+    return {
+        "successful_before_batch_count": len(successful_before),
+        "pending_batch_count": len(pending_batches),
+        "successful_now_batch_count": success_count,
+        "failed_now_batch_count": failure_count,
+        "ingested_now_source_paragraph_count": ingested_source_count,
+    }
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -49,63 +387,196 @@ async def main(args: argparse.Namespace) -> None:
 
     extractors = {
         "hotpotqa": extract_corpus_hotpotqa,
-        "musique":  extract_corpus_musique,
-        "2wiki":    extract_corpus_2wiki,
+        "musique": extract_corpus_musique,
+        "2wiki": extract_corpus_2wiki,
     }
+
+    working_dir_path = Path(args.working_dir).resolve()
+    working_dir_path.mkdir(parents=True, exist_ok=True)
+    progress_path = working_dir_path / INGEST_PROGRESS_FILENAME
+    failures_path = working_dir_path / INGEST_FAILURES_FILENAME
+    manifest_path = working_dir_path / INGEST_MANIFEST_FILENAME
+    if args.resume:
+        validate_existing_manifest_for_resume(
+            manifest_path=manifest_path,
+            workspace=args.workspace,
+            dataset=args.dataset,
+            n_samples=args.n_samples,
+            seed=args.seed,
+        )
 
     print(f"[build_index] Extracting corpus: {args.dataset} n={args.n_samples} seed={args.seed}")
     corpus = extractors[args.dataset](n=args.n_samples, seed=args.seed)
     print(f"[build_index] Corpus size: {len(corpus)} unique paragraphs")
 
-    # Format for LightRAG: "Title\nText" so the title becomes part of the chunk
-    docs = [f"{p['title']}\n{p['text']}" for p in corpus]
+    source_records, chunk_source_map, source_stats = prepare_source_records(
+        dataset=args.dataset,
+        corpus=corpus,
+    )
+    print(f"[build_index] Source records: {source_stats}")
+    _persist_source_artifacts(
+        working_dir=working_dir_path,
+        workspace=args.workspace,
+        dataset=args.dataset,
+        n_samples=args.n_samples,
+        seed=args.seed,
+        source_records=source_records,
+        chunk_source_map=chunk_source_map,
+        source_stats=source_stats,
+    )
+
+    batches = build_virtual_batches(
+        source_records=source_records,
+        ingest_batch_size=args.ingest_batch_size,
+    )
 
     settings = LocalRagSettings.from_env()
+    # Match SurGE fast-ingest behavior: the virtual batches are independent and
+    # LightRAG's own LLM/embedding semaphores remain the real resource guard.
+    settings.serialize_ingest_by_workspace_id = False
     service = LocalRagService(settings)
 
-    print(f"[build_index] Target workspace: {args.workspace!r}")
-    print(f"[build_index] Working dir:      {args.working_dir}")
+    rag = await service.get_rag(args.workspace, working_dir=str(working_dir_path))
+    kwargs = getattr(rag, "lightrag_kwargs", None)
+    if isinstance(kwargs, dict):
+        kwargs["llm_model_max_async"] = max(1, int(args.llm_model_max_async))
 
-    batch = args.batch_size
-    for i in range(0, len(docs), batch):
-        chunk = docs[i : i + batch]
-        await service.lightrag_ainsert(
-            workspace_id=args.workspace,
-            input=chunk,
-            working_dir=args.working_dir,
+    print(f"[build_index] Target workspace: {args.workspace!r}")
+    print(f"[build_index] Working dir:      {working_dir_path}")
+    print(f"[build_index] Ingest batch size: {args.ingest_batch_size} paragraphs/virtual-doc")
+    print(f"[build_index] LLM max async:     {args.llm_model_max_async}")
+    print(f"[build_index] Resume:            {args.resume}")
+
+    ingest_stats = await _ingest_batches(
+        service=service,
+        workspace=args.workspace,
+        working_dir=str(working_dir_path),
+        batches=batches,
+        progress_path=progress_path,
+        failures_path=failures_path,
+        resume=args.resume,
+        batch_doc_concurrency=args.batch_doc_concurrency,
+        max_retries=args.max_retries,
+    )
+
+    manifest = {
+        "schema_version": "multihopqa_ingest_manifest_v1",
+        "generated_at": _utc_now(),
+        "workspace_id": args.workspace,
+        "dataset": args.dataset,
+        "n_samples": args.n_samples,
+        "seed": args.seed,
+        "working_dir": str(working_dir_path),
+        "ingest_mode": "virtual_batch",
+        "ingest_batch_size": args.ingest_batch_size,
+        "batch_doc_concurrency": args.batch_doc_concurrency,
+        "llm_model_max_async": args.llm_model_max_async,
+        "batch_count": len(batches),
+        "expected_chunk_total": len(chunk_source_map),
+        "source_stats": source_stats,
+        "ingest_stats": ingest_stats,
+        "artifacts": {
+            "source_records": str(working_dir_path / SOURCE_RECORDS_FILENAME),
+            "chunk_source_map": str(working_dir_path / SOURCE_MAP_FILENAME),
+            "progress": str(progress_path),
+            "failures": str(failures_path),
+        },
+    }
+    _save_json(manifest_path, manifest)
+
+    if ingest_stats["failed_now_batch_count"]:
+        raise RuntimeError(
+            f"{ingest_stats['failed_now_batch_count']} virtual batch(es) failed. "
+            f"See {failures_path}"
         )
-        done = min(i + batch, len(docs))
-        print(f"[build_index]   {done}/{len(docs)} paragraphs indexed")
 
     print("\n[build_index] Indexing complete.")
+    print(f"[build_index] Manifest:         {manifest_path}")
+    print(f"[build_index] Chunk source map: {working_dir_path / SOURCE_MAP_FILENAME}")
     print("[build_index] Run evaluation with:")
-    print(f"  python evaluate_local/MultiHopQA/evaluate_multihop.py \\")
+    print("  python evaluate_local/MultiHopQA/evaluate_multihop.py \\")
     print(f"    --dataset {args.dataset} \\")
     print(f"    --workspace {args.workspace} \\")
-    print(f"    --working-dir {args.working_dir} \\")
+    print(f"    --working-dir {working_dir_path} \\")
     print(f"    --n-samples {args.n_samples} \\")
     print(f"    --seed {args.seed} \\")
-    print(f"    --output-dir ./multihop_results \\")
-    print(f"    --modes ppr hybrid mix")
+    print("    --output-dir ./multihop_results \\")
+    print("    --modes naive hybrid ppr auto full")
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Index a multi-hop QA corpus subset into a LightRAG workspace."
     )
-    p.add_argument("--dataset",     required=True, choices=VALID_DATASETS,
-                   help="Which dataset's context paragraphs to index")
-    p.add_argument("--workspace",   required=True,
-                   help="Workspace ID to create or append to")
-    p.add_argument("--working-dir", required=True, dest="working_dir",
-                   help="Directory where LightRAG stores its index files")
-    p.add_argument("--n-samples",   type=int, default=500, dest="n_samples",
-                   help="Number of questions to sample (must match evaluate_multihop.py)")
-    p.add_argument("--seed",        type=int, default=42,
-                   help="Random seed (must match evaluate_multihop.py)")
-    p.add_argument("--batch-size",  type=int, default=50, dest="batch_size",
-                   help="Paragraphs per ainsert call")
-    return p.parse_args()
+    p.add_argument(
+        "--dataset",
+        required=True,
+        choices=VALID_DATASETS,
+        help="Which dataset's context paragraphs to index",
+    )
+    p.add_argument("--workspace", required=True, help="Workspace ID to create or resume")
+    p.add_argument(
+        "--working-dir",
+        required=True,
+        dest="working_dir",
+        help="Directory where LightRAG stores this workspace index and source-map files",
+    )
+    p.add_argument(
+        "--n-samples",
+        type=int,
+        default=500,
+        dest="n_samples",
+        help="Number of questions to sample (must match evaluate_multihop.py)",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed (must match evaluate_multihop.py)",
+    )
+    p.add_argument(
+        "--ingest-batch-size",
+        "--batch-size",
+        type=int,
+        default=256,
+        dest="ingest_batch_size",
+        help="Source paragraphs packed into one virtual batch document",
+    )
+    p.add_argument(
+        "--batch-doc-concurrency",
+        type=int,
+        default=2,
+        help="Concurrent virtual batch document inserts",
+    )
+    p.add_argument(
+        "--llm-model-max-async",
+        type=int,
+        default=48,
+        help="LightRAG LLM extraction worker concurrency during ingest",
+    )
+    p.add_argument(
+        "--max-retries",
+        type=int,
+        default=0,
+        help="Retries per failed virtual batch insert",
+    )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip virtual batches already marked ok in the progress JSONL",
+    )
+    args = p.parse_args()
+    if args.n_samples <= 0:
+        raise SystemExit("--n-samples must be > 0")
+    if args.ingest_batch_size <= 0:
+        raise SystemExit("--ingest-batch-size/--batch-size must be > 0")
+    if args.batch_doc_concurrency <= 0:
+        raise SystemExit("--batch-doc-concurrency must be > 0")
+    if args.llm_model_max_async <= 0:
+        raise SystemExit("--llm-model-max-async must be > 0")
+    if args.max_retries < 0:
+        raise SystemExit("--max-retries must be >= 0")
+    return args
 
 
 if __name__ == "__main__":

@@ -26,9 +26,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-_project_root = Path(__file__).resolve().parents[3]
-_lightrag_root = _project_root.parent / "lightrag"
-for p in (_project_root, _lightrag_root):
+_projects_root = Path(__file__).resolve().parents[3]
+_raganything_root = Path(__file__).resolve().parents[2]
+_lightrag_root = _projects_root / "lightrag"
+for p in (_raganything_root, _lightrag_root, _projects_root):
     if p.exists() and str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
@@ -37,6 +38,7 @@ load_dotenv()
 
 VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto", "full")
 VALID_DATASETS = ("hotpotqa", "musique", "2wiki", "simpleqa")
+SOURCE_MAP_FILENAME = "multihopqa_chunk_source_map.json"
 
 _REFERENCES_RE = re.compile(r"#+\s*references?.*", re.IGNORECASE | re.DOTALL)
 
@@ -63,6 +65,60 @@ def _load_existing_ids(jsonl_path: Path) -> set[str]:
 def _append_jsonl(path: Path, record: dict) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _load_chunk_source_map(working_dir: str | Path) -> dict[str, dict[str, Any]]:
+    source_map_path = Path(working_dir) / SOURCE_MAP_FILENAME
+    if not source_map_path.exists():
+        return {}
+    try:
+        payload = json.loads(source_map_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    mapping = payload.get("map", {})
+    if not isinstance(mapping, dict):
+        return {}
+    return {str(k): v for k, v in mapping.items() if isinstance(v, dict)}
+
+
+def _trace_chunk_id(chunk: dict[str, Any]) -> str:
+    for key in ("id", "chunk_id", "_id", "__id__", "key"):
+        value = str(chunk.get(key) or "").strip()
+        if value:
+            return value
+    content = str(chunk.get("content") or "").strip()
+    if not content:
+        return ""
+    from lightrag.utils import compute_mdhash_id, sanitize_text_for_encoding
+
+    return compute_mdhash_id(sanitize_text_for_encoding(content).strip(), prefix="chunk-")
+
+
+def _resolve_retrieved_sources(
+    chunks: list[dict[str, Any]],
+    chunk_source_map: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not chunk_source_map:
+        return []
+    sources: list[dict[str, Any]] = []
+    for rank, chunk in enumerate(chunks, start=1):
+        if not isinstance(chunk, dict):
+            continue
+        chunk_id = _trace_chunk_id(chunk)
+        if not chunk_id:
+            continue
+        source = chunk_source_map.get(chunk_id)
+        if not source:
+            continue
+        sources.append(
+            {
+                "rank": rank,
+                "chunk_id": chunk_id,
+                "source_paragraph_id": source.get("source_paragraph_id"),
+                "title": source.get("title"),
+            }
+        )
+    return sources
 
 
 def _aggregate_jsonl(jsonl_path: Path, recall_ks: list[int]) -> dict[str, Any]:
@@ -109,6 +165,7 @@ async def _run_mode(
     score_f1: Callable[[str, str | list[str]], float],
     score_recall_at_k: Callable[[list[dict], list[str] | None, int], float | None],
     get_eval_query_overrides: Callable[[str], dict[str, str]],
+    chunk_source_map: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     jsonl_path = output_dir / f"{dataset}_{mode}_results.jsonl"
     existing_ids = _load_existing_ids(jsonl_path) if resume else set()
@@ -164,6 +221,15 @@ async def _run_mode(
             r = score_recall_at_k(chunks, item.get("supporting_facts"), k)
             record[f"recall@{k}"] = r
 
+        retrieved_sources = _resolve_retrieved_sources(chunks, chunk_source_map)
+        if retrieved_sources:
+            record["retrieved_source_paragraph_ids"] = [
+                str(s["source_paragraph_id"])
+                for s in retrieved_sources
+                if s.get("source_paragraph_id")
+            ]
+            record["retrieved_sources"] = retrieved_sources
+
         _append_jsonl(jsonl_path, record)
         done += 1
         if done % 50 == 0 or done == total:
@@ -196,6 +262,11 @@ async def main(args: argparse.Namespace) -> None:
 
     settings = LocalRagSettings.from_env()
     service = LocalRagService(settings)
+    chunk_source_map = _load_chunk_source_map(args.working_dir)
+    if chunk_source_map:
+        print(f"[eval] Loaded chunk source map: {len(chunk_source_map)} chunks")
+    else:
+        print("[eval] No chunk source map found; JSONL will not include retrieved source ids")
 
     results: dict[str, dict] = {}
     for mode in args.modes:
@@ -214,6 +285,7 @@ async def main(args: argparse.Namespace) -> None:
             score_f1=score_f1,
             score_recall_at_k=score_recall_at_k,
             get_eval_query_overrides=get_eval_query_overrides,
+            chunk_source_map=chunk_source_map,
         )
         results[mode] = metrics
         print(f"  [{mode}] EM={metrics.get('em', 0):.4f}  F1={metrics.get('f1', 0):.4f}")

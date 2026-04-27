@@ -99,10 +99,17 @@ If a paper section needs to position RAG-Anything relative to retrieval-speciali
 
 ## Step 1 — Build the index
 
-Download datasets to HuggingFace cache (one-time):
+Download datasets to HuggingFace cache (one-time).  Prefer absolute paths and
+set `HF_HOME` so HuggingFace's `hub/`, `datasets/`, and `xet/` directories stay
+under the evaluation data root:
 
 ```bash
-python evaluate_local/MultiHopQA/download_datasets.py
+mkdir -p /data/y50056788/Yaliang/datasets_for_eval/hf_cache/datasets
+
+HF_HOME=/data/y50056788/Yaliang/datasets_for_eval/hf_cache \
+HF_DATASETS_CACHE=/data/y50056788/Yaliang/datasets_for_eval/hf_cache/datasets \
+python evaluate_local/MultiHopQA/download_datasets.py \
+    --data-dir /data/y50056788/Yaliang/datasets_for_eval/hf_cache/datasets
 ```
 
 Index the corpus for a dataset:
@@ -112,7 +119,11 @@ python evaluate_local/MultiHopQA/build_index.py \
     --dataset hotpotqa \
     --n-samples 500 \
     --workspace hotpotqa_500_seed42 \
-    --working-dir /data/rag_workspaces/hotpotqa_500_seed42
+    --working-dir /data/rag_workspaces/hotpotqa_500_seed42 \
+    --ingest-batch-size 256 \
+    --batch-doc-concurrency 2 \
+    --llm-model-max-async 48 \
+    --resume
 ```
 
 | Argument | Default | Description |
@@ -122,9 +133,30 @@ python evaluate_local/MultiHopQA/build_index.py \
 | `--working-dir` | required | Absolute path where LightRAG stores its index |
 | `--n-samples` | 500 | Questions to sample; determines corpus size |
 | `--seed` | 42 | Must match `--seed` in Step 2 |
-| `--batch-size` | 50 | Paragraphs per `ainsert` call |
+| `--ingest-batch-size` / `--batch-size` | 256 | Source paragraphs packed into one virtual batch document |
+| `--batch-doc-concurrency` | 2 | Concurrent virtual batch document inserts |
+| `--llm-model-max-async` | 48 | LightRAG LLM extraction worker concurrency during ingest |
+| `--max-retries` | 0 | Retries per failed virtual batch insert |
+| `--resume` | false | Skip virtual batches already marked `ok` in the progress JSONL |
 
 **Important:** use the same `--n-samples` and `--seed` in both steps.  The corpus is built from exactly the paragraphs bundled with the sampled questions.
+
+`build_index.py` uses a SurGE-style fast ingest path.  It packs many source
+paragraphs into virtual batch documents, splits each virtual document back into
+one paragraph per LightRAG chunk with `split_by_character_only=True`, and runs
+multiple virtual batch inserts concurrently.  Each workspace directory also gets
+source-map artifacts:
+
+```
+multihopqa_source_records.jsonl       # one original source paragraph per row
+multihopqa_chunk_source_map.json      # LightRAG chunk id -> source paragraph
+multihopqa_ingest_progress.jsonl      # successful virtual batches for resume
+multihopqa_ingest_failures.jsonl      # failed virtual batches, if any
+multihopqa_ingest_manifest.json       # build parameters and counts
+```
+
+The source map is what lets evaluation and debugging resolve retrieved chunks
+back to their original dataset paragraph.
 
 ---
 
@@ -354,6 +386,29 @@ python evaluate_local/MultiHopQA/evaluate_multihop.py \
     --n-samples 500 \
     --seed 42 \
     --recall-k 5 10 20
+```
+
+For current 500-question runs on `/data/y50056788`, prefer this explicit
+cache + concurrent-ingest form:
+
+```bash
+mkdir -p /data/y50056788/Yaliang/datasets_for_eval/hf_cache/datasets
+HF_HOME=/data/y50056788/Yaliang/datasets_for_eval/hf_cache \
+HF_DATASETS_CACHE=/data/y50056788/Yaliang/datasets_for_eval/hf_cache/datasets \
+python evaluate_local/MultiHopQA/download_datasets.py \
+    --data-dir /data/y50056788/Yaliang/datasets_for_eval/hf_cache/datasets
+
+python evaluate_local/MultiHopQA/build_index.py \
+    --dataset hotpotqa \
+    --n-samples 500 \
+    --seed 42 \
+    --workspace hotpotqa_500_seed42 \
+    --working-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/MultiHopQA/rag_workspaces/hotpotqa_500_seed42 \
+    --ingest-batch-size 256 \
+    --batch-doc-concurrency 2 \
+    --llm-model-max-async 48 \
+    --max-retries 1 \
+    --resume
 ```
 
 The final console output is a comparison table:

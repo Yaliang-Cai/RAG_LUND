@@ -5845,13 +5845,9 @@ async def _merge_all_chunks(
 
     # V3: When PPR chunks are available, they replace entity/relation chunk selection.
     # PPR scores already encode the graph structure signal; vector_chunks supplement.
+    # Do not apply ppr_qa_top_k here: rerank should see the full PPR retrieval pool
+    # (up to ppr_top_k). ppr_qa_top_k is enforced later, after rerank/threshold.
     if ppr_chunks:
-        # HippoRAG2 qa_top_k: slice PPR candidates to the LLM-context budget.
-        # ppr_top_k controls retrieval breadth; ppr_qa_top_k controls LLM input size.
-        ppr_qa_top_k = getattr(query_param, "ppr_qa_top_k", None) if query_param else None
-        if ppr_qa_top_k and ppr_qa_top_k > 0:
-            ppr_chunks = ppr_chunks[:ppr_qa_top_k]
-
         merged_chunks = []
         seen_chunk_ids = set()
 
@@ -5887,7 +5883,10 @@ async def _merge_all_chunks(
                 )
 
         logger.info(
-            f"PPR-priority merged chunks: {len(ppr_chunks)} PPR (qa_top_k={ppr_qa_top_k}) + {len(vector_chunks)} vector -> {len(merged_chunks)} (deduplicated)"
+            "PPR-priority merged chunks: %d PPR (ppr_qa_top_k deferred) + %d vector -> %d (deduplicated)",
+            len(ppr_chunks),
+            len(vector_chunks),
+            len(merged_chunks),
         )
         return merged_chunks
 
