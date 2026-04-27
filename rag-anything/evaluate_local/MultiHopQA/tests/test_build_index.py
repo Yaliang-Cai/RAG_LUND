@@ -8,9 +8,11 @@ import pytest
 
 from evaluate_local.MultiHopQA.build_index import (
     MULTIHOPQA_NEVER_SPLIT_DELIMITER,
+    _TeeOutput,
     build_virtual_batches,
     prepare_source_records,
     resolve_safe_split_delimiter,
+    resolve_log_file,
     validate_existing_manifest_for_resume,
 )
 
@@ -134,3 +136,21 @@ def test_validate_existing_manifest_for_resume_accepts_matching_manifest(tmp_pat
         n_samples=500,
         seed=42,
     )
+
+
+def test_resolve_log_file_defaults_inside_working_dir(tmp_path):
+    assert resolve_log_file(tmp_path, None) == tmp_path / "multihopqa_build_index.log"
+
+
+def test_resolve_log_file_accepts_explicit_path(tmp_path):
+    explicit = tmp_path / "logs" / "hotpotqa.log"
+    assert resolve_log_file(tmp_path, str(explicit)) == explicit
+
+
+def test_tee_output_writes_prints_to_log_file(tmp_path):
+    log_file = tmp_path / "build.log"
+
+    with _TeeOutput(log_file):
+        print("hello build log")
+
+    assert "hello build log" in log_file.read_text(encoding="utf-8")

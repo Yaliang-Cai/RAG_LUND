@@ -20,10 +20,11 @@ import argparse
 import asyncio
 import json
 import sys
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, TextIO
 
 _projects_root = Path(__file__).resolve().parents[3]
 _raganything_root = Path(__file__).resolve().parents[2]
@@ -43,10 +44,63 @@ SOURCE_RECORDS_FILENAME = "multihopqa_source_records.jsonl"
 INGEST_MANIFEST_FILENAME = "multihopqa_ingest_manifest.json"
 INGEST_PROGRESS_FILENAME = "multihopqa_ingest_progress.jsonl"
 INGEST_FAILURES_FILENAME = "multihopqa_ingest_failures.jsonl"
+BUILD_LOG_FILENAME = "multihopqa_build_index.log"
+
+
+class _TeeStream:
+    def __init__(self, primary: TextIO, secondary: TextIO) -> None:
+        self._primary = primary
+        self._secondary = secondary
+
+    def write(self, data: str) -> int:
+        self._primary.write(data)
+        self._secondary.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self._primary.flush()
+        self._secondary.flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._primary, "isatty", lambda: False)())
+
+
+class _TeeOutput:
+    def __init__(self, log_file: Path) -> None:
+        self._log_file = log_file
+        self._file: TextIO | None = None
+        self._stdout: TextIO | None = None
+        self._stderr: TextIO | None = None
+
+    def __enter__(self) -> Path:
+        self._log_file.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self._log_file.open("w", encoding="utf-8", buffering=1)
+        self._stdout = sys.stdout
+        self._stderr = sys.stderr
+        sys.stdout = _TeeStream(sys.stdout, self._file)  # type: ignore[assignment]
+        sys.stderr = _TeeStream(sys.stderr, self._file)  # type: ignore[assignment]
+        return self._log_file
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._stdout is not None:
+            sys.stdout = self._stdout
+        if self._stderr is not None:
+            sys.stderr = self._stderr
+        if self._file is not None:
+            self._file.flush()
+            self._file.close()
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def resolve_log_file(working_dir: str | Path, log_file: str | None) -> Path:
+    working_dir_path = Path(working_dir)
+    if log_file:
+        candidate = Path(log_file).expanduser()
+        return candidate if candidate.is_absolute() else working_dir_path / candidate
+    return working_dir_path / BUILD_LOG_FILENAME
 
 
 def _save_json(path: Path, payload: dict[str, Any]) -> None:
@@ -443,6 +497,7 @@ async def main(args: argparse.Namespace) -> None:
 
     print(f"[build_index] Target workspace: {args.workspace!r}")
     print(f"[build_index] Working dir:      {working_dir_path}")
+    print(f"[build_index] Log file:         {args.resolved_log_file}")
     print(f"[build_index] Ingest batch size: {args.ingest_batch_size} paragraphs/virtual-doc")
     print(f"[build_index] LLM max async:     {args.llm_model_max_async}")
     print(f"[build_index] Resume:            {args.resume}")
@@ -480,6 +535,7 @@ async def main(args: argparse.Namespace) -> None:
             "chunk_source_map": str(working_dir_path / SOURCE_MAP_FILENAME),
             "progress": str(progress_path),
             "failures": str(failures_path),
+            "log_file": str(args.resolved_log_file),
         },
     }
     _save_json(manifest_path, manifest)
@@ -565,6 +621,15 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip virtual batches already marked ok in the progress JSONL",
     )
+    p.add_argument(
+        "--log-file",
+        default=None,
+        dest="log_file",
+        help=(
+            "Build log path. Defaults to multihopqa_build_index.log inside "
+            "--working-dir. Relative paths are resolved under --working-dir."
+        ),
+    )
     args = p.parse_args()
     if args.n_samples <= 0:
         raise SystemExit("--n-samples must be > 0")
@@ -576,8 +641,18 @@ def _parse_args() -> argparse.Namespace:
         raise SystemExit("--llm-model-max-async must be > 0")
     if args.max_retries < 0:
         raise SystemExit("--max-retries must be >= 0")
+    working_dir_path = Path(args.working_dir).resolve()
+    args.working_dir = str(working_dir_path)
+    args.resolved_log_file = resolve_log_file(working_dir_path, args.log_file)
     return args
 
 
 if __name__ == "__main__":
-    asyncio.run(main(_parse_args()))
+    parsed_args = _parse_args()
+    with _TeeOutput(parsed_args.resolved_log_file) as log_path:
+        try:
+            print(f"[build_index] Writing log to: {log_path}")
+            asyncio.run(main(parsed_args))
+        except Exception:
+            traceback.print_exc()
+            raise

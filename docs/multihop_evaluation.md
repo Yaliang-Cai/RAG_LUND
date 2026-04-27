@@ -138,6 +138,7 @@ python evaluate_local/MultiHopQA/build_index.py \
 | `--llm-model-max-async` | 48 | LightRAG LLM extraction worker concurrency during ingest |
 | `--max-retries` | 0 | Retries per failed virtual batch insert |
 | `--resume` | false | Skip virtual batches already marked `ok` in the progress JSONL |
+| `--log-file` | `{working-dir}/multihopqa_build_index.log` | Build log file; relative paths are resolved under `--working-dir` |
 
 **Important:** use the same `--n-samples` and `--seed` in both steps.  The corpus is built from exactly the paragraphs bundled with the sampled questions.
 
@@ -153,6 +154,7 @@ multihopqa_chunk_source_map.json      # LightRAG chunk id -> source paragraph
 multihopqa_ingest_progress.jsonl      # successful virtual batches for resume
 multihopqa_ingest_failures.jsonl      # failed virtual batches, if any
 multihopqa_ingest_manifest.json       # build parameters and counts
+multihopqa_build_index.log            # terminal output and failure tracebacks
 ```
 
 The source map is what lets evaluation and debugging resolve retrieved chunks
@@ -408,6 +410,7 @@ python evaluate_local/MultiHopQA/build_index.py \
     --batch-doc-concurrency 2 \
     --llm-model-max-async 48 \
     --max-retries 1 \
+    --log-file multihopqa_build_index.log \
     --resume
 ```
 
