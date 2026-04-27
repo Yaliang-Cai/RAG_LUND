@@ -13,7 +13,7 @@ Usage:
         --workspace my_hotpotqa_workspace \
         --working-dir /data/y50056788/.../rag_workspaces/my_hotpotqa_workspace \
         --output-dir /data/y50056788/.../multihop_results \
-        --modes ppr hybrid mix
+        --modes naive hybrid ppr auto
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ for p in (_project_root, _lightrag_root):
 from dotenv import load_dotenv
 load_dotenv()
 
-VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass")
+VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto")
 VALID_DATASETS = ("hotpotqa", "musique", "2wiki", "simpleqa")
 
 _REFERENCES_RE = re.compile(r"#+\s*references?.*", re.IGNORECASE | re.DOTALL)
@@ -242,7 +242,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--dataset",     required=True, choices=VALID_DATASETS)
     p.add_argument("--workspace",   required=True, help="Pre-built workspace ID")
     p.add_argument("--working-dir", required=True, dest="working_dir")
-    p.add_argument("--modes",       nargs="+", default=["ppr", "hybrid", "mix"],
+    p.add_argument("--modes",       nargs="+", default=["naive", "hybrid", "ppr", "auto"],
                    choices=VALID_MODES, metavar="MODE")
     p.add_argument("--n-samples",   type=int, default=500, dest="n_samples")
     p.add_argument("--recall-k",    type=int, nargs="+", default=[5, 10, 20], dest="recall_k")

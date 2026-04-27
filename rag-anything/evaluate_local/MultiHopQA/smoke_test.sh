@@ -1,61 +1,66 @@
 #!/usr/bin/env bash
 # Multi-Hop QA Evaluation Pipeline — Smoke Test
 #
-# Run this before launching the full 500-question evaluation to verify
-# the pipeline works end-to-end.
+# Runs the full two-step pipeline (build_index → evaluate) on 5 questions
+# to verify the setup works end-to-end before launching a 500-question run.
+#
+# The script creates its own small workspace (n=5) so the corpus and the
+# evaluation questions are guaranteed to match.  No pre-built workspace needed.
 #
 # Usage:
-#   export WORKSPACE_ID=my_hotpotqa_workspace
-#   export WORKING_DIR=/data/y50056788/.../rag_workspaces/my_hotpotqa_workspace
 #   bash evaluate_local/MultiHopQA/smoke_test.sh
 #
-# Or override inline:
-#   WORKSPACE_ID=foo WORKING_DIR=/path/to/ws bash evaluate_local/MultiHopQA/smoke_test.sh
+# Override the working-dir root (default: /tmp):
+#   SMOKE_WS_ROOT=/data/rag_workspaces bash evaluate_local/MultiHopQA/smoke_test.sh
 
 set -euo pipefail
 
-WORKSPACE_ID="${WORKSPACE_ID:-}"
-WORKING_DIR="${WORKING_DIR:-}"
-SMOKE_OUTPUT="/tmp/multihop_smoke_$(date +%Y%m%d_%H%M%S)"
+SMOKE_WS_ROOT="${SMOKE_WS_ROOT:-/tmp}"
+SMOKE_TAG="multihop_smoke_$(date +%Y%m%d_%H%M%S)"
+WORKSPACE_ID="$SMOKE_TAG"
+WORKING_DIR="$SMOKE_WS_ROOT/$SMOKE_TAG"
+SMOKE_OUTPUT="/tmp/${SMOKE_TAG}_results"
 DATASET="hotpotqa"
 MODE="hybrid"
 N=5
 SEED=42
-
-# ---------------------------------------------------------------------------
-# Validate required env vars
-# ---------------------------------------------------------------------------
-if [[ -z "$WORKSPACE_ID" ]]; then
-    echo "[smoke] ERROR: WORKSPACE_ID is not set."
-    echo "        Export it before running: export WORKSPACE_ID=<your_workspace_id>"
-    exit 1
-fi
-if [[ -z "$WORKING_DIR" ]]; then
-    echo "[smoke] ERROR: WORKING_DIR is not set."
-    echo "        Export it before running: export WORKING_DIR=<path_to_workspace_dir>"
-    exit 1
-fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 echo "================================================================"
 echo "[smoke] Multi-Hop QA Pipeline Smoke Test"
-echo "[smoke] Workspace:   $WORKSPACE_ID"
-echo "[smoke] Working dir: $WORKING_DIR"
-echo "[smoke] Output dir:  $SMOKE_OUTPUT"
-echo "[smoke] Dataset:     $DATASET  mode=$MODE  n=$N  seed=$SEED"
+echo "[smoke] Workspace ID: $WORKSPACE_ID"
+echo "[smoke] Working dir:  $WORKING_DIR"
+echo "[smoke] Output dir:   $SMOKE_OUTPUT"
+echo "[smoke] Dataset:      $DATASET  mode=$MODE  n=$N  seed=$SEED"
 echo "================================================================"
 
-mkdir -p "$SMOKE_OUTPUT"
-
-# ---------------------------------------------------------------------------
-# Step 1: Fresh run (5 questions, hybrid mode)
-# ---------------------------------------------------------------------------
-echo ""
-echo "[smoke] Step 1: Fresh 5-question run..."
+mkdir -p "$WORKING_DIR" "$SMOKE_OUTPUT"
 
 cd "$PROJECT_ROOT"
+
+# ---------------------------------------------------------------------------
+# Step 0: Build index for exactly the N smoke-test questions
+# ---------------------------------------------------------------------------
+echo ""
+echo "[smoke] Step 0: Building index (n=$N paragraphs subset)..."
+
+python evaluate_local/MultiHopQA/build_index.py \
+    --dataset "$DATASET" \
+    --n-samples "$N" \
+    --seed "$SEED" \
+    --workspace "$WORKSPACE_ID" \
+    --working-dir "$WORKING_DIR"
+
+echo "[smoke] Step 0: PASSED"
+
+# ---------------------------------------------------------------------------
+# Step 1: Fresh evaluation run (5 questions, single mode)
+# ---------------------------------------------------------------------------
+echo ""
+echo "[smoke] Step 1: Fresh 5-question evaluation run..."
+
 python evaluate_local/MultiHopQA/evaluate_multihop.py \
     --dataset "$DATASET" \
     --workspace "$WORKSPACE_ID" \
@@ -113,12 +118,11 @@ with open('$JSONL') as f:
 echo "[smoke] Step 1: PASSED"
 
 # ---------------------------------------------------------------------------
-# Step 2: Resume test (re-run with --resume, should skip all 5 and reuse results)
+# Step 2: Resume test (re-run with --resume; should skip all N and not duplicate)
 # ---------------------------------------------------------------------------
 echo ""
 echo "[smoke] Step 2: Resume test (should skip all $N already-answered questions)..."
 
-RESUME_LOG="$SMOKE_OUTPUT/resume_test.log"
 python evaluate_local/MultiHopQA/evaluate_multihop.py \
     --dataset "$DATASET" \
     --workspace "$WORKSPACE_ID" \
@@ -127,7 +131,7 @@ python evaluate_local/MultiHopQA/evaluate_multihop.py \
     --modes "$MODE" \
     --n-samples "$N" \
     --seed "$SEED" \
-    --resume 2>&1 | tee "$RESUME_LOG"
+    --resume
 
 # JSONL should still have exactly N lines (no duplicates)
 NLINES_AFTER=$(wc -l < "$JSONL")
@@ -159,6 +163,18 @@ echo "[smoke] Step 2: PASSED"
 echo ""
 echo "================================================================"
 echo "[smoke] ALL STEPS PASSED"
-echo "[smoke] Output dir: $SMOKE_OUTPUT"
-echo "[smoke] Ready to launch full evaluation with run_multihop_evals.py"
+echo "[smoke] Smoke workspace: $WORKING_DIR"
+echo "[smoke] Results:         $SMOKE_OUTPUT"
+echo ""
+echo "[smoke] To run the full 500-question evaluation:"
+echo "  python evaluate_local/MultiHopQA/build_index.py \\"
+echo "      --dataset $DATASET --n-samples 500 --seed $SEED \\"
+echo "      --workspace ${DATASET}_500_seed${SEED} \\"
+echo "      --working-dir <YOUR_WORKSPACE_ROOT>/${DATASET}_500_seed${SEED}"
+echo ""
+echo "  python evaluate_local/MultiHopQA/evaluate_multihop.py \\"
+echo "      --dataset $DATASET --n-samples 500 --seed $SEED \\"
+echo "      --workspace ${DATASET}_500_seed${SEED} \\"
+echo "      --working-dir <YOUR_WORKSPACE_ROOT>/${DATASET}_500_seed${SEED} \\"
+echo "      --output-dir ./multihop_results"
 echo "================================================================"

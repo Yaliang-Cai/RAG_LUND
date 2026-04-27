@@ -59,21 +59,31 @@ def score_f1(pred: str, gold: str | list[str]) -> float:
 # Recall@K
 # ---------------------------------------------------------------------------
 
+def _fact_key(fact: str, n_words: int = 10) -> str:
+    """First n_words of fact lowercased — used as a fingerprint for recall matching.
+
+    Avoids applying normalize_answer (which strips punctuation) to long paragraph
+    texts, where aggressive normalization destroys substring match signal.
+    """
+    return " ".join(fact.lower().split()[:n_words])
+
+
 def score_recall_at_k(
     chunks: list[dict[str, Any]],
     supporting_facts: list[str] | None,
     k: int,
 ) -> float | None:
-    """Return fraction of supporting facts covered by top-k chunks, or None if no facts."""
+    """Return fraction of supporting facts covered by top-k chunks, or None if no facts.
+
+    supporting_facts are paragraph-level texts (not individual sentences).
+    Matching uses the first 10 words of each fact as a fingerprint so that
+    minor whitespace / punctuation differences don't cause false misses.
+    """
     if not supporting_facts:
         return None
-    top_chunks = chunks[:k]
-    top_texts = [normalize_answer(c.get("content", "")) for c in top_chunks]
+    top_texts = [c.get("content", "").lower() for c in chunks[:k]]
     covered = sum(
-        any(
-            " " + normalize_answer(fact) + " " in " " + t + " "
-            for t in top_texts
-        )
+        any(_fact_key(fact) in t for t in top_texts)
         for fact in supporting_facts
     )
     return covered / len(supporting_facts)
@@ -121,20 +131,24 @@ def _sample(items: list, n: int, seed: int) -> list:
 
 
 def load_hotpotqa(n: int = 500, seed: int = 42) -> list[dict]:
-    """Load HotpotQA distractor dev set. supporting_facts = list of sentence strings."""
+    """Load HotpotQA distractor dev set. supporting_facts = full paragraph texts for gold titles."""
     from datasets import load_dataset
     ds = load_dataset("hotpot_qa", "distractor", split="validation", trust_remote_code=True)
     raw = list(ds)
     sampled = _sample(raw, n, seed)
     result = []
     for row in sampled:
-        # Build a mapping: title -> list[sentence_text]
         ctx = {title: sents for title, sents in zip(row["context"]["title"], row["context"]["sentences"])}
+        # Collect unique gold titles (preserving order) and join their sentences into paragraphs.
+        # Full-paragraph facts give reliable Recall@K signal at chunk granularity.
+        seen: dict[str, None] = {}
+        for title in row["supporting_facts"]["title"]:
+            seen[title] = None
         facts = []
-        for title, sent_id in zip(row["supporting_facts"]["title"], row["supporting_facts"]["sent_id"]):
+        for title in seen:
             sents = ctx.get(title, [])
-            if sent_id < len(sents):
-                facts.append(sents[sent_id])
+            if sents:
+                facts.append(" ".join(sents))
         result.append({
             "id": row["id"],
             "question": row["question"],
@@ -142,6 +156,22 @@ def load_hotpotqa(n: int = 500, seed: int = 42) -> list[dict]:
             "supporting_facts": facts,
         })
     return result
+
+
+def extract_corpus_hotpotqa(n: int = 500, seed: int = 42) -> list[dict]:
+    """Return unique context paragraphs for n sampled HotpotQA questions (for indexing)."""
+    from datasets import load_dataset
+    ds = load_dataset("hotpot_qa", "distractor", split="validation", trust_remote_code=True)
+    raw = list(ds)
+    sampled = _sample(raw, n, seed)
+    seen: dict[str, None] = {}
+    corpus: list[dict] = []
+    for row in sampled:
+        for title, sents in zip(row["context"]["title"], row["context"]["sentences"]):
+            if title not in seen:
+                seen[title] = None
+                corpus.append({"title": title, "text": " ".join(sents)})
+    return corpus
 
 
 def load_musique(n: int = 500, seed: int = 42) -> list[dict]:
@@ -166,8 +196,27 @@ def load_musique(n: int = 500, seed: int = 42) -> list[dict]:
     return result
 
 
+def extract_corpus_musique(n: int = 500, seed: int = 42) -> list[dict]:
+    """Return unique context paragraphs for n sampled MuSiQue questions (for indexing)."""
+    from datasets import load_dataset
+    ds = load_dataset("dgslibisey/MuSiQue", split="validation", trust_remote_code=True)
+    raw = [row for row in ds if row.get("answerable", True)]
+    sampled = _sample(raw, n, seed)
+    seen: dict[str, None] = {}
+    corpus: list[dict] = []
+    for row in sampled:
+        for p in row.get("paragraphs", []):
+            title = p.get("title", "")
+            text = p.get("paragraph_text", "")
+            key = title or text[:80]
+            if key and key not in seen:
+                seen[key] = None
+                corpus.append({"title": title, "text": text})
+    return corpus
+
+
 def load_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
-    """Load 2WikiMultiHopQA dev set. supporting_facts = list of sentence strings."""
+    """Load 2WikiMultiHopQA dev set. supporting_facts = full paragraph texts for gold titles."""
     from datasets import load_dataset
     # framolfese/ is the working public mirror; original plan used voidful/ which has a broken loading script
     ds = load_dataset("framolfese/2WikiMultihopQA", split="validation", trust_remote_code=True)
@@ -175,13 +224,15 @@ def load_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
     sampled = _sample(raw, n, seed)
     result = []
     for row in sampled:
-        # context: {"title": [...], "sentences": [[...]]}
         ctx = {title: sents for title, sents in zip(row["context"]["title"], row["context"]["sentences"])}
+        seen: dict[str, None] = {}
+        for title in row["supporting_facts"]["title"]:
+            seen[title] = None
         facts = []
-        for title, sent_id in zip(row["supporting_facts"]["title"], row["supporting_facts"]["sent_id"]):
+        for title in seen:
             sents = ctx.get(title, [])
-            if sent_id < len(sents):
-                facts.append(sents[sent_id])
+            if sents:
+                facts.append(" ".join(sents))
         result.append({
             "id": row["id"],
             "question": row["question"],
@@ -189,6 +240,22 @@ def load_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
             "supporting_facts": facts,
         })
     return result
+
+
+def extract_corpus_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
+    """Return unique context paragraphs for n sampled 2WikiMultiHopQA questions (for indexing)."""
+    from datasets import load_dataset
+    ds = load_dataset("framolfese/2WikiMultihopQA", split="validation", trust_remote_code=True)
+    raw = list(ds)
+    sampled = _sample(raw, n, seed)
+    seen: dict[str, None] = {}
+    corpus: list[dict] = []
+    for row in sampled:
+        for title, sents in zip(row["context"]["title"], row["context"]["sentences"]):
+            if title not in seen:
+                seen[title] = None
+                corpus.append({"title": title, "text": " ".join(sents)})
+    return corpus
 
 
 def load_simpleqa(n: int = 500, seed: int = 42) -> list[dict]:

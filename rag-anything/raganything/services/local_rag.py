@@ -2016,9 +2016,10 @@ class LocalRagService:
         file_paths: str | list[str] | None = None,
         split_by_character: str | None = None,
         split_by_character_only: bool = False,
+        working_dir: str | None = None,
     ) -> Any:
         """Resilience-wrapped proxy to LightRAG.ainsert for prebuilt-chunk ingest paths."""
-        rag = await self.get_rag(workspace_id)
+        rag = await self.get_rag(workspace_id, working_dir=working_dir)
         await self._ensure_workspace_warmed(workspace_id)
 
         async def _run_insert() -> Any:
