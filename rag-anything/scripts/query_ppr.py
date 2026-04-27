@@ -6,6 +6,15 @@ Quick interactive test for PPR global-mode queries on an existing workspace.
 Usage:
 python scripts/query_ppr.py  -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode ppr
 
+# LLM 自动路由（分类器决定 profile）
+python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode auto --trace
+
+# 强制指定 profile=precise（绕过分类器）
+python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode auto --profile precise --trace
+
+# ppr 模式对比基线
+python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode ppr --trace
+
 
 
 Optional overrides:
@@ -14,6 +23,28 @@ Optional overrides:
   --chunk-top-k 10
   --naive-top-k 20
   --ppr-top-k 50
+  # LLM 自动路由（不指定 profile，让分类器决定）
+  python scripts/query_ppr.py \
+    -w My_Graph \
+    -q "Describe the overall architecture of LightRAG." \
+    --mode auto \
+    --trace
+
+  # 强制指定 profile（绕过 LLM 分类器，适合消融实验）
+  python scripts/query_ppr.py \
+    -w My_Graph \
+    -q "What is the impact scope of CVE-2026-001?" \
+    --mode auto \
+    --profile precise \
+    --trace
+
+  # 与 ppr 模式对比
+  python scripts/query_ppr.py \
+    -w My_Graph \
+    -q "..." \
+    --mode ppr \
+    --trace
+
   --ppr-damping 0.5
   --passage-node-weight 1.0
   --recognition-top-k 20   # 0 = disable recognition memory
@@ -76,8 +107,15 @@ def _parse_args():
     p.add_argument(
         "--mode",
         default="ppr",
-        choices=["ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass"],
-        help="Query mode (default: ppr = global PPR with recognition memory)",
+        choices=["ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto"],
+        help="Query mode (default: ppr = global PPR with recognition memory). "
+             "Use 'auto' for LLM-based profile routing.",
+    )
+    p.add_argument(
+        "--profile",
+        default=None,
+        choices=["precise", "local", "multihop", "descriptive", "full"],
+        help="(auto mode only) Force a specific retrieval profile, bypassing LLM classification.",
     )
     p.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     p.add_argument("--chunk-top-k", type=int, default=DEFAULT_CHUNK_TOP_K,
@@ -139,6 +177,8 @@ async def run(args):
         query_kwargs["recognition_top_k"] = max(0, args.recognition_top_k)
         query_kwargs["linking_top_k"] = max(0, args.linking_top_k)
         query_kwargs["ppr_qa_top_k"] = max(1, args.ppr_qa_top_k)
+    if args.mode == "auto" and args.profile:
+        query_kwargs["profile"] = args.profile
 
     print(f"\n[Query] workspace={workspace_id}")
     print(f"        mode={args.mode}  multi_hop={enable_multi_hop}  rerank={not args.no_rerank}  kg_rerank={not args.no_kg_rerank}")
@@ -165,13 +205,21 @@ async def run(args):
     print(answer)
 
     if trace:
-        trace_data = trace.get("data", trace)
-        chunks = trace_data.get("chunks", [])
-        entities = trace_data.get("entities", [])
-        relations = trace_data.get("relations", [])
-        print(f"\n[Trace summary]  chunks={len(chunks)}  entities={len(entities)}  relations={len(relations)}")
-        if chunks:
-            print(f"  Top chunk score: {chunks[0].get('score', 'n/a') if isinstance(chunks[0], dict) else 'n/a'}")
+        if "routing" in trace:
+            # auto mode: routing trace
+            rt = trace["routing"]
+            print(f"\n[Routing trace]  profile={rt.get('profile')}  confidence={rt.get('confidence')}  paths={rt.get('paths_activated')}")
+            print(f"  chunks_after_rrf={rt.get('chunks_after_rrf')}  chunks_after_rerank={rt.get('chunks_after_rerank')}  final={rt.get('chunks_after_threshold')}")
+            lpp = rt.get("latency_per_path", {})
+            print(f"  latency_per_path: {lpp}")
+        else:
+            trace_data = trace.get("data", trace)
+            chunks = trace_data.get("chunks", [])
+            entities = trace_data.get("entities", [])
+            relations = trace_data.get("relations", [])
+            print(f"\n[Trace summary]  chunks={len(chunks)}  entities={len(entities)}  relations={len(relations)}")
+            if chunks:
+                print(f"  Top chunk score: {chunks[0].get('score', 'n/a') if isinstance(chunks[0], dict) else 'n/a'}")
         if args.trace:
             print("\n[Trace JSON]")
             print(json.dumps(trace, ensure_ascii=False, indent=2)[:8000])  # cap at 8k chars
