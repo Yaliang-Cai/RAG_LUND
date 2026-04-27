@@ -49,8 +49,8 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
         RetrievalProfile(
             name="local",
             description="Direct query targeting a specific entity or clear single-hop fact",
-            paths=["hybrid", "naive"],
-            rrf_weights={"hybrid": 1.0, "naive": 1.0},
+            paths=["mix"],
+            rrf_weights={"mix": 1.0},
         ),
         RetrievalProfile(
             name="multihop",
