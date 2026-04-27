@@ -53,6 +53,50 @@ Paragraphs are well below the 1 200-token chunk limit, so each paragraph becomes
 
 ---
 
+## Evaluation design and comparison context
+
+### What this evaluation measures
+
+This pipeline uses the **closed-corpus distractor setting** native to each dataset.  Every question already bundles its own candidate paragraphs (2 gold + 8–18 distractors).  At `n=500`, the index contains roughly 3 000–8 000 unique paragraphs — all gold paragraphs are guaranteed to be present.  The retrieval task is therefore: find the correct 2 paragraphs among a pool of ~5 000, where the distractors come from the other 499 questions in the sample.
+
+This is a valid and internally consistent benchmark for **comparing query modes against each other**.  The same index, same LLM, same embedding model, and same prompt are used for every mode, so the only variable is the retrieval strategy.  Differences in EM / F1 / Recall@K across modes directly measure the value of graph traversal (ppr), routing (auto), or flat vector search (naive).
+
+The one thing this setting does **not** support is a direct apples-to-apples comparison with systems evaluated on a full open-domain corpus.
+
+### How HippoRAG2's evaluation differs
+
+HippoRAG2 (Gutierrez et al., 2024; [arXiv:2405.14831](https://arxiv.org/abs/2405.14831)) targets **open-domain multi-hop retrieval** and is evaluated under a fundamentally different protocol:
+
+| Dimension | This evaluation | HippoRAG2 |
+|-----------|-----------------|------------|
+| Corpus | Closed — only the paragraphs bundled with the sampled questions | Open — full Wikipedia dump (HotpotQA fullwiki: ~5 M paragraphs) or full dataset corpus |
+| Pool size at n=500 | 3 000–8 000 paragraphs | Millions of paragraphs |
+| Gold docs in index | Guaranteed by construction | Must be retrieved from the full corpus |
+| Retrieval difficulty | Moderate (needle in ~5 000) | Hard (needle in millions) |
+| Primary metric | EM / F1 / Recall@K (end-to-end) | Recall@2 / F1 (retrieval-focused) |
+| Index construction | LightRAG KG + dense vectors (LLM entity extraction per paragraph) | Lightweight graph over entity co-occurrence |
+| LLM / embedding | Configurable (local vLLM, bge-m3) | Fixed in paper (OpenAI embeddings) |
+
+Because the corpus size, retrieval difficulty, LLM, and embedding model all differ, **numbers from this evaluation cannot be placed in the same table as HippoRAG2's published results** without a protocol-alignment note.
+
+### System positioning
+
+RAG-Anything is a **general-purpose multimodal document RAG system**.  Its design goal is ingesting heterogeneous documents (PDF, Office, images, tables, equations) and answering questions over them — not winning retrieval benchmarks on Wikipedia text.
+
+HippoRAG2 is a **specialist multi-hop retrieval system** built specifically to maximise recall on Wikipedia-scale corpora.  It does not handle multimodal documents, structured tables, or equation parsing.
+
+The appropriate use of this evaluation pipeline is therefore:
+
+- **Use it** to compare ppr vs. hybrid vs. naive vs. auto on the same index and decide which mode to default to.
+- **Use it** to track regressions as the retrieval code evolves.
+- **Do not use it** to claim that RAG-Anything outperforms or underperforms HippoRAG2 — the systems solve different problems under different constraints.
+
+If a paper section needs to position RAG-Anything relative to retrieval-specialist systems, the recommended framing is:
+
+> "We evaluate query-mode performance using the closed-corpus distractor setting of HotpotQA / MuSiQue / 2WikiMultiHopQA (n=500, seed=42).  This differs from the open-domain fullwiki protocol used by HippoRAG2 [cite]; our corpus contains only the paragraphs bundled with the sampled questions (~3 000–8 000 paragraphs), making absolute numbers not directly comparable.  The evaluation is designed to measure the incremental value of graph-based multi-hop traversal (ppr) and adaptive routing (auto) over flat dense retrieval (naive) within a unified general-purpose multimodal RAG system."
+
+---
+
 ## Step 1 — Build the index
 
 Download datasets to HuggingFace cache (one-time):
