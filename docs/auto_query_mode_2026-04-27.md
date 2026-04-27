@@ -41,7 +41,11 @@ query
     ┌────────┴──────────┐
     │  parallel paths   │  (asyncio.gather + optional Semaphore)
     │                   │
-  naive  hybrid  mix  ppr  qdrant_hybrid  qdrant_sparse
+  ppr  hybrid  naive  qdrant_sparse          (full profile)
+  ppr  hybrid                                (multihop profile)
+  hybrid  naive                              (local profile)
+  mix  qdrant_hybrid                         (descriptive profile)
+  qdrant_sparse                              (precise profile)
     │       │     │    │        │              │
     └───────┴─────┴────┴────────┴──────────────┘
              │ ranked chunk lists (intact, no pre-dedup)
@@ -81,7 +85,7 @@ Each profile encodes a retrieval strategy as a named, reusable configuration. Pr
 | `local` | `hybrid` + `naive` | Single-hop factual queries. Hybrid covers entity-centric KG paths; naive adds dense vector recall for short answer facts. |
 | `multihop` | `ppr` + `hybrid` | Multi-entity chain reasoning. PPR propagates across the KG to surface indirect connections; hybrid anchors on direct mentions. |
 | `descriptive` | `mix` + `qdrant_hybrid` | Open-ended, broad-context questions. `mix` activates untruncated KG context (`kg_chunk_selection_source=untruncated`); Qdrant hybrid adds dense+sparse complementary recall. |
-| `full` | all 6 paths | Fallback for ambiguous queries. Bounded by a concurrency semaphore (3 concurrent paths) to protect Neo4j under load. |
+| `full` | `ppr` + `hybrid` + `naive` + `qdrant_sparse` | Fallback for ambiguous queries. All 4 paths run fully in parallel (no semaphore). Weights are calibrated to counter dense-overlap inflation: `ppr=1.2, hybrid=1.0, qdrant_sparse=0.9, naive=0.7`. |
 
 ### 3.2 Profile Fields
 
@@ -223,7 +227,7 @@ For evaluation and ablation settings, the classifier can be bypassed by explicit
 
 ### 8.3 Parallel Multi-Path Recall
 
-Once a profile is selected, all configured retrieval paths are executed concurrently via asynchronous parallel dispatch. The system supports up to six retrieval paths: dense vector retrieval (naive), entity-centric KG retrieval (hybrid), joint KG + dense retrieval (mix), Personalized PageRank over the knowledge graph (PPR), Qdrant dense-sparse hybrid retrieval (qdrant_hybrid), and BM25 sparse retrieval (qdrant_sparse). For profiles activating Neo4j-intensive paths, a concurrency semaphore limits simultaneous graph queries to prevent connection pool exhaustion.
+Once a profile is selected, all configured retrieval paths are executed concurrently via asynchronous parallel dispatch. The system supports four retrieval paths in the full profile: Personalized PageRank over the knowledge graph (PPR), entity-centric KG retrieval with dense entity seeds (hybrid), dense vector chunk retrieval (naive), and BM25 sparse chunk retrieval (qdrant_sparse). `mix` and `qdrant_hybrid` are available for targeted profiles (`descriptive`) but excluded from `full` to avoid redundant dense overlap. All four `full` paths run in fully parallel dispatch with no concurrency semaphore.
 
 Individual path failures are isolated: a failed path is recorded in the routing trace but does not abort the overall retrieval. The system raises an error only if all paths fail simultaneously.
 
@@ -234,6 +238,8 @@ Retrieved chunk lists from all active paths are fused using a weighted extension
 $$\text{Score}(d) = \sum_{p \in P} w_p \cdot \frac{1}{k + \text{rank}_p(d)}$$
 
 where $P$ is the set of active paths, $w_p$ is the profile-assigned weight of path $p$, $\text{rank}_p(d)$ is the zero-based rank of $d$ in path $p$'s result list, and $k$ is a smoothing constant (default: 60). Documents not returned by path $p$ contribute zero for that path. Crucially, each path's ranked list enters the fusion intact without prior deduplication, preserving cross-path rank consensus: a document appearing at rank 1 in two independent paths accumulates a higher fused score than a document appearing at rank 1 in only one path. Deduplication is a natural byproduct of the score accumulation rather than a preprocessing step.
+
+Path weights in the `full` profile are calibrated to counter the dense-overlap inflation effect: `hybrid` (KG traversal, dense entity seeds) and `naive` (direct dense chunk retrieval) share the same underlying dense retrieval signal at the chunk level. Without weight adjustment, a chunk retrieved by both paths accumulates a doubled RRF contribution, causing dense results to dominate and diluting unique signals from PPR and BM25. The calibrated weights (`ppr=1.2, hybrid=1.0, qdrant_sparse=0.9, naive=0.7`) dampen the naive path's contribution relative to the non-overlapping paths while preserving its role as a recall safety net.
 
 ### 8.5 Neural Reranking and Threshold Filtering
 
