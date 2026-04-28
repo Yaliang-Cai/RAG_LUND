@@ -55,8 +55,8 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
         RetrievalProfile(
             name="local",
             description="Single focal entity: attributes, direct relationships, or status of one specific entity",
-            paths=["local_kg", "naive"],
-            rrf_weights={"local_kg": 1.0, "naive": 0.8},
+            paths=["local_kg", "qdrant_chunks_hybrid"],
+            rrf_weights={"local_kg": 1.0, "qdrant_chunks_hybrid": 0.8},
         ),
         RetrievalProfile(
             name="multihop",
