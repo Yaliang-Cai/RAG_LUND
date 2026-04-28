@@ -73,5 +73,6 @@ async def test_unknown_path_raises():
 
 
 def test_all_known_paths_configured():
-    from raganything.retrieval.profiles import KNOWN_PATHS
-    assert set(_PATH_CONFIG.keys()) == KNOWN_PATHS
+    from raganything.retrieval.paths import KNOWN_PATHS
+    # KNOWN_PATHS includes "gfm" special-case which is not in _PATH_CONFIG
+    assert set(_PATH_CONFIG.keys()) | {"gfm"} == KNOWN_PATHS

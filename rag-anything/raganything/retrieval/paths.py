@@ -19,10 +19,9 @@ _PATH_CONFIG: dict[str, tuple[str, str | None]] = {
     "qdrant_hybrid":        ("hybrid",  "hybrid"),
     "qdrant_sparse":        ("naive",   "bm25"),
     "qdrant_chunks_hybrid": ("naive",   "hybrid"),  # dense+BM25 chunk search, no KG traversal
-    "gfm":                  ("gfm",     None),
 }
 
-KNOWN_PATHS: frozenset[str] = frozenset(_PATH_CONFIG.keys())
+KNOWN_PATHS: frozenset[str] = frozenset(_PATH_CONFIG.keys()) | frozenset(["gfm"])
 
 
 # Fields that are declared on QueryParam (version-safe lookup performed once)
