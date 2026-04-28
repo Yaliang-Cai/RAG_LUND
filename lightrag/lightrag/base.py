@@ -338,6 +338,22 @@ class QueryParam:
     PPR retrieval still produces ppr_top_k candidates (retrieval_top_k), but only
     the top ppr_qa_top_k are included in the LLM context.  Default 5 matches HippoRAG2."""
 
+    ppr_post_rerank_fusion: Literal["none", "raw_rrf"] = os.getenv(
+        "PPR_POST_RERANK_FUSION", "none"
+    ).lower()
+    """Optional PPR-only post-rerank fusion policy.
+    - "none": keep strict rerank order after chunk reranking.
+    - "raw_rrf": fuse the raw PPR ranking and reranked chunk ranking with RRF
+      before thresholding and post-rerank caps.
+    """
+
+    ppr_post_rerank_rrf_k: int = int(
+        os.getenv("PPR_POST_RERANK_RRF_K", "60")
+    )
+    """RRF smoothing constant used when ppr_post_rerank_fusion="raw_rrf".
+    Default 60 keeps the classic RRF behavior.
+    """
+
     # RRF mode
     rrf_k: int = int(os.getenv("RRF_K", "60"))
     """Smoothing constant for Reciprocal Rank Fusion. Higher values reduce the impact of top ranks.

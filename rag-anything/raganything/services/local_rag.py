@@ -2102,6 +2102,8 @@ class LocalRagService:
         normalized_kwargs.setdefault("recognition_top_k", self.settings.recognition_top_k)
         normalized_kwargs.setdefault("linking_top_k", self.settings.linking_top_k)
         normalized_kwargs.setdefault("ppr_qa_top_k", self.settings.ppr_qa_top_k)
+        normalized_kwargs.setdefault("ppr_post_rerank_fusion", "none")
+        normalized_kwargs.setdefault("ppr_post_rerank_rrf_k", 60)
         normalized_kwargs.setdefault(
             "exclude_synonym_edges", self.settings.exclude_synonym_edges
         )
@@ -2155,6 +2157,8 @@ class LocalRagService:
         normalized_kwargs.setdefault("recognition_top_k", self.settings.recognition_top_k)
         normalized_kwargs.setdefault("linking_top_k", self.settings.linking_top_k)
         normalized_kwargs.setdefault("ppr_qa_top_k", self.settings.ppr_qa_top_k)
+        normalized_kwargs.setdefault("ppr_post_rerank_fusion", "none")
+        normalized_kwargs.setdefault("ppr_post_rerank_rrf_k", 60)
         normalized_kwargs.setdefault(
             "exclude_synonym_edges", self.settings.exclude_synonym_edges
         )

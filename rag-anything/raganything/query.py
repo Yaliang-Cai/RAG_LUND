@@ -202,6 +202,8 @@ class QueryMixin:
                 "passage_node_weight",
                 "recognition_top_k",
                 "linking_top_k",
+                "ppr_post_rerank_fusion",
+                "ppr_post_rerank_rrf_k",
                 "ppr_synonym_weight_mode",
                 "qdrant_retrieval_mode",
                 "keyword_fanout_mode",

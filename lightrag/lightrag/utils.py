@@ -2816,6 +2816,58 @@ async def process_chunks_unified(
     Returns:
         Processed and filtered list of text chunks
     """
+    def _extract_chunk_ids(items: list[dict]) -> list[str]:
+        chunk_ids: list[str] = []
+        for item in items:
+            chunk_id = item.get("chunk_id") or item.get("id")
+            if chunk_id is None:
+                continue
+            chunk_id_str = str(chunk_id).strip()
+            if chunk_id_str:
+                chunk_ids.append(chunk_id_str)
+        return chunk_ids
+
+    def _merge_chunk_rankings_with_rrf(
+        ranking_lists: list[list[dict]],
+        *,
+        rrf_k: int,
+    ) -> list[dict]:
+        merged_by_chunk_id: dict[str, dict[str, Any]] = {}
+        first_seen_order: dict[str, int] = {}
+        order_counter = 0
+        for ranking in ranking_lists:
+            for rank, item in enumerate(ranking):
+                chunk_id = item.get("chunk_id") or item.get("id")
+                chunk_id_str = str(chunk_id).strip() if chunk_id is not None else ""
+                if not chunk_id_str:
+                    continue
+                rrf_score = 1.0 / (float(rrf_k) + float(rank) + 1.0)
+                if chunk_id_str not in merged_by_chunk_id:
+                    merged_item = dict(item)
+                    merged_item["rrf_score"] = rrf_score
+                    merged_by_chunk_id[chunk_id_str] = merged_item
+                    first_seen_order[chunk_id_str] = order_counter
+                    order_counter += 1
+                    continue
+
+                merged_item = merged_by_chunk_id[chunk_id_str]
+                merged_item["rrf_score"] = float(merged_item.get("rrf_score", 0.0)) + rrf_score
+                for key, value in item.items():
+                    if key == "rrf_score":
+                        continue
+                    merged_item[key] = value
+
+        return sorted(
+            merged_by_chunk_id.values(),
+            key=lambda item: (
+                -float(item.get("rrf_score", 0.0)),
+                first_seen_order.get(
+                    str(item.get("chunk_id") or item.get("id") or "").strip(),
+                    0,
+                ),
+            ),
+        )
+
     if not unique_chunks:
         if rerank_debug is not None:
             rerank_debug.clear()
@@ -2823,11 +2875,14 @@ async def process_chunks_unified(
                 {
                     "enabled": False,
                     "scope": "all",
+                    "fusion_mode": "none",
                     "min_rerank_score": 0.0,
                     "scores_all": [],
                     "scores_after_threshold": [],
                     "scores_final": [],
+                    "chunk_ids_raw_ppr": [],
                     "chunk_ids_all": [],
+                    "chunk_ids_after_rerank_fusion": [],
                     "chunk_ids_after_threshold": [],
                     "chunk_ids_after_chunk_top_k": [],
                     "chunk_ids_final": [],
@@ -2868,26 +2923,22 @@ async def process_chunks_unified(
                 continue
         return scores
 
-    def _extract_chunk_ids(items: list[dict]) -> list[str]:
-        chunk_ids: list[str] = []
-        for item in items:
-            chunk_id = item.get("chunk_id") or item.get("id")
-            if chunk_id is None:
-                continue
-            chunk_id_str = str(chunk_id).strip()
-            if chunk_id_str:
-                chunk_ids.append(chunk_id_str)
-        return chunk_ids
-
     scores_all: list[float] = []
     scores_after_threshold: list[float] = []
+    chunk_ids_raw_ppr: list[str] = []
     chunk_ids_all: list[str] = []
+    chunk_ids_after_rerank_fusion: list[str] = []
     chunk_ids_after_threshold: list[str] = []
     chunk_ids_after_chunk_top_k: list[str] = []
     chunk_ids_final: list[str] = []
     count_after_rerank = len(unique_chunks)
     count_after_threshold = len(unique_chunks)
     count_after_chunk_top_k = len(unique_chunks)
+    fusion_mode = "none"
+    is_ppr_mode = getattr(query_param, "mode", None) in ("ppr", "ppr_local")
+    raw_ppr_chunks = [dict(chunk) for chunk in unique_chunks] if is_ppr_mode else []
+    if raw_ppr_chunks:
+        chunk_ids_raw_ppr = _extract_chunk_ids(raw_ppr_chunks)
 
     # 1. Apply reranking if enabled and query is provided.
     # Candidate selection stays in strict rerank order; multimodal_top_k only
@@ -2912,6 +2963,31 @@ async def process_chunks_unified(
         logger.info("Rerank scores (all reranked chunks): %s", scores_all)
     else:
         chunk_ids_all = _extract_chunk_ids(unique_chunks)
+
+    requested_fusion_mode = str(
+        getattr(query_param, "ppr_post_rerank_fusion", "none") or "none"
+    ).strip().lower()
+    if requested_fusion_mode not in {"none", "raw_rrf"}:
+        logger.warning(
+            "Unknown ppr_post_rerank_fusion '%s', fallback to 'none'",
+            requested_fusion_mode,
+        )
+        requested_fusion_mode = "none"
+    if (
+        rerank_enabled
+        and is_ppr_mode
+        and requested_fusion_mode == "raw_rrf"
+        and raw_ppr_chunks
+        and unique_chunks
+    ):
+        fusion_mode = "raw_rrf"
+        unique_chunks = _merge_chunk_rankings_with_rrf(
+            [raw_ppr_chunks, unique_chunks],
+            rrf_k=int(getattr(query_param, "ppr_post_rerank_rrf_k", 60)),
+        )
+        chunk_ids_after_rerank_fusion = _extract_chunk_ids(unique_chunks)
+    else:
+        chunk_ids_after_rerank_fusion = _extract_chunk_ids(unique_chunks)
 
     # 2. Filter by minimum rerank score if reranking is enabled
     if rerank_enabled and unique_chunks:
@@ -2948,11 +3024,14 @@ async def process_chunks_unified(
                         {
                             "enabled": rerank_enabled,
                             "scope": rerank_scope,
+                            "fusion_mode": fusion_mode,
                             "min_rerank_score": min_rerank_score,
                             "scores_all": scores_all,
                             "scores_after_threshold": scores_after_threshold,
                             "scores_final": [],
+                            "chunk_ids_raw_ppr": chunk_ids_raw_ppr,
                             "chunk_ids_all": chunk_ids_all,
+                            "chunk_ids_after_rerank_fusion": chunk_ids_after_rerank_fusion,
                             "chunk_ids_after_threshold": chunk_ids_after_threshold,
                             "chunk_ids_after_chunk_top_k": [],
                             "chunk_ids_final": [],
@@ -3057,11 +3136,14 @@ async def process_chunks_unified(
             {
                 "enabled": rerank_enabled,
                 "scope": rerank_scope,
+                "fusion_mode": fusion_mode,
                 "min_rerank_score": min_rerank_score,
                 "scores_all": scores_all,
                 "scores_after_threshold": scores_after_threshold,
                 "scores_final": scores_final,
+                "chunk_ids_raw_ppr": chunk_ids_raw_ppr,
                 "chunk_ids_all": chunk_ids_all,
+                "chunk_ids_after_rerank_fusion": chunk_ids_after_rerank_fusion,
                 "chunk_ids_after_threshold": chunk_ids_after_threshold,
                 "chunk_ids_after_chunk_top_k": chunk_ids_after_chunk_top_k,
                 "chunk_ids_final": chunk_ids_final,

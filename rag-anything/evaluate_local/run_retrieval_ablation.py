@@ -35,9 +35,15 @@ DEFAULT_SHARED_PPR_TOP_K = 50
 DEFAULT_SHARED_PPR_QA_TOP_K = 20
 DEFAULT_SURGE_PPR_TOP_K = 50
 DEFAULT_SURGE_PPR_QA_TOP_K = 50
+DEFAULT_REDUCED_V2_SHARED_PPR_TOP_K = 50
+DEFAULT_REDUCED_V2_SHARED_PPR_QA_TOP_K = 20
+DEFAULT_REDUCED_V2_SURGE_PPR_TOP_K = 100
+DEFAULT_REDUCED_V2_SURGE_PPR_QA_TOP_K = 50
 DEFAULT_DOCBENCH_MULTIMODAL_TOP_K = 3
 DEFAULT_KEYWORD_ENTITY_RRF_K = 10
 DEFAULT_KEYWORD_RELATION_RRF_K = 20
+DEFAULT_PPR_POST_RERANK_FUSION = "none"
+DEFAULT_PPR_POST_RERANK_RRF_K = 60
 INDEX_PROFILE_FILE = ".ablation_index_profile.json"
 _PROFILE_HINTS: dict[str, dict[str, bool]] = {
     "v0_v1_v2_v3": {
@@ -152,8 +158,60 @@ def _ppr_experiment(
             "enable_rerank": bool(enable_rerank),
             "ppr_top_k": int(ppr_top_k),
             "ppr_qa_top_k": int(ppr_qa_top_k),
+            "ppr_post_rerank_fusion": DEFAULT_PPR_POST_RERANK_FUSION,
+            "ppr_post_rerank_rrf_k": DEFAULT_PPR_POST_RERANK_RRF_K,
         }
     )
+
+
+def _base_non_ppr_v2_experiment(*, task: str, name: str) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "task": task,
+        "name": name,
+        "query_mode": "hybrid",
+        "keyword_fanout_mode": "joined",
+        "retrieval_mode": "dense",
+        "exclude_synonym_edges": True,
+        "kg_chunk_selection_source": "truncated",
+        "enable_rerank": True,
+        "enable_kg_rerank": False,
+    }
+    if task == "shared":
+        base["answer_context_mode"] = "kg_prompt"
+    else:
+        base["kg_chunk_selection_source"] = "untruncated"
+    return _with_unified_retrieval(base)
+
+
+def _ppr_v2_experiment(
+    *,
+    task: str,
+    name: str,
+    keyword_fanout_mode: str,
+    retrieval_mode: str,
+    enable_rerank: bool,
+    ppr_top_k: int,
+    ppr_qa_top_k: int,
+    ppr_post_rerank_fusion: str = DEFAULT_PPR_POST_RERANK_FUSION,
+    ppr_post_rerank_rrf_k: int = DEFAULT_PPR_POST_RERANK_RRF_K,
+) -> dict[str, Any]:
+    payload = {
+        "task": task,
+        "name": name,
+        "query_mode": "ppr",
+        "keyword_fanout_mode": keyword_fanout_mode,
+        "retrieval_mode": retrieval_mode,
+        "exclude_synonym_edges": False,
+        "enable_rerank": bool(enable_rerank),
+        "enable_kg_rerank": False,
+        "ppr_top_k": int(ppr_top_k),
+        "ppr_qa_top_k": int(ppr_qa_top_k),
+        "ppr_post_rerank_fusion": str(ppr_post_rerank_fusion).strip().lower(),
+        "ppr_post_rerank_rrf_k": int(ppr_post_rerank_rrf_k),
+    }
+    if task == "shared":
+        payload["answer_context_mode"] = "chunk_only_prompt"
+    return _with_unified_retrieval(payload)
 
 
 def _validate_ppr_controls(
@@ -308,6 +366,173 @@ def build_reduced_experiment_matrix(
     raise ValueError(f"Unknown reduced retrieval task: {task!r}")
 
 
+def build_reduced_v2_experiment_matrix(task: str) -> list[dict[str, Any]]:
+    normalized_task = str(task).strip().lower()
+    if normalized_task in {"docbench", "shared"}:
+        task_name = "shared"
+        baseline = _base_non_ppr_v2_experiment(
+            task=task_name,
+            name="baseline_non_ppr",
+        )
+        return [
+            baseline,
+            {
+                **baseline,
+                "name": "non_ppr_per_keyword",
+                "keyword_fanout_mode": "per_keyword_rrf",
+            },
+            {
+                **baseline,
+                "name": "non_ppr_kg_rerank",
+                "enable_kg_rerank": True,
+            },
+            _with_unified_retrieval(
+                {
+                    **baseline,
+                    "name": "non_ppr_retrieval_hybrid",
+                    "retrieval_mode": "hybrid",
+                }
+            ),
+            {
+                **baseline,
+                "name": "non_ppr_untruncated",
+                "kg_chunk_selection_source": "untruncated",
+            },
+            {
+                **baseline,
+                "name": "non_ppr_chunk_only",
+                "answer_context_mode": "chunk_only_prompt",
+            },
+            _ppr_v2_experiment(
+                task=task_name,
+                name="ppr_default",
+                keyword_fanout_mode="joined",
+                retrieval_mode="dense",
+                enable_rerank=False,
+                ppr_top_k=DEFAULT_REDUCED_V2_SHARED_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V2_SHARED_PPR_QA_TOP_K,
+            ),
+            _ppr_v2_experiment(
+                task=task_name,
+                name="ppr_per_keyword_no_rerank",
+                keyword_fanout_mode="per_keyword_rrf",
+                retrieval_mode="dense",
+                enable_rerank=False,
+                ppr_top_k=DEFAULT_REDUCED_V2_SHARED_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V2_SHARED_PPR_QA_TOP_K,
+            ),
+            _ppr_v2_experiment(
+                task=task_name,
+                name="ppr_hybrid_no_rerank",
+                keyword_fanout_mode="joined",
+                retrieval_mode="hybrid",
+                enable_rerank=False,
+                ppr_top_k=DEFAULT_REDUCED_V2_SHARED_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V2_SHARED_PPR_QA_TOP_K,
+            ),
+            _ppr_v2_experiment(
+                task=task_name,
+                name="ppr_rerank",
+                keyword_fanout_mode="joined",
+                retrieval_mode="dense",
+                enable_rerank=True,
+                ppr_top_k=DEFAULT_REDUCED_V2_SHARED_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V2_SHARED_PPR_QA_TOP_K,
+            ),
+            _ppr_v2_experiment(
+                task=task_name,
+                name="ppr_raw_rerank_rrf",
+                keyword_fanout_mode="joined",
+                retrieval_mode="dense",
+                enable_rerank=True,
+                ppr_top_k=DEFAULT_REDUCED_V2_SHARED_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V2_SHARED_PPR_QA_TOP_K,
+                ppr_post_rerank_fusion="raw_rrf",
+                ppr_post_rerank_rrf_k=DEFAULT_PPR_POST_RERANK_RRF_K,
+            ),
+        ]
+
+    if normalized_task == "surge":
+        baseline = _base_non_ppr_v2_experiment(
+            task="surge",
+            name="baseline_non_ppr",
+        )
+        return [
+            baseline,
+            {
+                **baseline,
+                "name": "non_ppr_per_keyword",
+                "keyword_fanout_mode": "per_keyword_rrf",
+            },
+            {
+                **baseline,
+                "name": "non_ppr_kg_rerank",
+                "enable_kg_rerank": True,
+            },
+            _with_unified_retrieval(
+                {
+                    **baseline,
+                    "name": "non_ppr_retrieval_hybrid",
+                    "retrieval_mode": "hybrid",
+                }
+            ),
+            {
+                **baseline,
+                "name": "non_ppr_truncated",
+                "kg_chunk_selection_source": "truncated",
+            },
+            _ppr_v2_experiment(
+                task="surge",
+                name="ppr_default",
+                keyword_fanout_mode="joined",
+                retrieval_mode="dense",
+                enable_rerank=False,
+                ppr_top_k=DEFAULT_REDUCED_V2_SURGE_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V2_SURGE_PPR_QA_TOP_K,
+            ),
+            _ppr_v2_experiment(
+                task="surge",
+                name="ppr_per_keyword_no_rerank",
+                keyword_fanout_mode="per_keyword_rrf",
+                retrieval_mode="dense",
+                enable_rerank=False,
+                ppr_top_k=DEFAULT_REDUCED_V2_SURGE_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V2_SURGE_PPR_QA_TOP_K,
+            ),
+            _ppr_v2_experiment(
+                task="surge",
+                name="ppr_hybrid_no_rerank",
+                keyword_fanout_mode="joined",
+                retrieval_mode="hybrid",
+                enable_rerank=False,
+                ppr_top_k=DEFAULT_REDUCED_V2_SURGE_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V2_SURGE_PPR_QA_TOP_K,
+            ),
+            _ppr_v2_experiment(
+                task="surge",
+                name="ppr_rerank",
+                keyword_fanout_mode="joined",
+                retrieval_mode="dense",
+                enable_rerank=True,
+                ppr_top_k=DEFAULT_REDUCED_V2_SURGE_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V2_SURGE_PPR_QA_TOP_K,
+            ),
+            _ppr_v2_experiment(
+                task="surge",
+                name="ppr_raw_rerank_rrf",
+                keyword_fanout_mode="joined",
+                retrieval_mode="dense",
+                enable_rerank=True,
+                ppr_top_k=DEFAULT_REDUCED_V2_SURGE_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V2_SURGE_PPR_QA_TOP_K,
+                ppr_post_rerank_fusion="raw_rrf",
+                ppr_post_rerank_rrf_k=DEFAULT_PPR_POST_RERANK_RRF_K,
+            ),
+        ]
+
+    raise ValueError(f"Unknown reduced_v2 retrieval task: {task!r}")
+
+
 def build_full_experiment_matrix(
     *,
     query_modes: list[str],
@@ -393,7 +618,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d_%H%M%S"))
     parser.add_argument("--python-exe", default=sys.executable)
     parser.add_argument("--tasks", choices=["both", "shared", "surge"], default="both")
-    parser.add_argument("--matrix-mode", choices=["reduced", "full"], default="reduced")
+    parser.add_argument(
+        "--matrix-mode",
+        choices=["reduced", "reduced_v2", "full"],
+        default="reduced",
+    )
     parser.add_argument("--query-modes", default="hybrid,ppr")
     parser.add_argument("--keyword-fanout-modes", default="joined,per_keyword_rrf")
     parser.add_argument("--retrieval-modes", default="dense,hybrid")
@@ -870,6 +1099,18 @@ def _shared_command(args: argparse.Namespace, experiment: dict[str, Any], output
                 str(experiment["ppr_top_k"]),
                 "--ppr_qa_top_k",
                 str(experiment["ppr_qa_top_k"]),
+                "--ppr_post_rerank_fusion",
+                str(
+                    experiment.get(
+                        "ppr_post_rerank_fusion", DEFAULT_PPR_POST_RERANK_FUSION
+                    )
+                ),
+                "--ppr_post_rerank_rrf_k",
+                str(
+                    experiment.get(
+                        "ppr_post_rerank_rrf_k", DEFAULT_PPR_POST_RERANK_RRF_K
+                    )
+                ),
             ]
         )
     if args.allow_legacy_index_profile_adoption:
@@ -943,6 +1184,18 @@ def _surge_command(args: argparse.Namespace, experiment: dict[str, Any], output_
                 str(experiment["ppr_top_k"]),
                 "--ppr-qa-top-k",
                 str(experiment["ppr_qa_top_k"]),
+                "--ppr_post_rerank_fusion",
+                str(
+                    experiment.get(
+                        "ppr_post_rerank_fusion", DEFAULT_PPR_POST_RERANK_FUSION
+                    )
+                ),
+                "--ppr_post_rerank_rrf_k",
+                str(
+                    experiment.get(
+                        "ppr_post_rerank_rrf_k", DEFAULT_PPR_POST_RERANK_RRF_K
+                    )
+                ),
             ]
         )
     if args.allow_legacy_index_profile_adoption:
@@ -1018,6 +1271,25 @@ def _selected_experiments(args: argparse.Namespace) -> tuple[list[dict[str, Any]
                 item["query_mode"] != "ppr"
                 and item.get("answer_context_mode") == "chunk_only_prompt"
             )
+        ]
+        return shared, surge
+
+    if args.matrix_mode == "reduced_v2":
+        shared = [
+            _finalize_experiment_for_task(
+                task="shared",
+                experiment=item,
+                args=args,
+            )
+            for item in build_reduced_v2_experiment_matrix("shared")
+        ]
+        surge = [
+            _finalize_experiment_for_task(
+                task="surge",
+                experiment=item,
+                args=args,
+            )
+            for item in build_reduced_v2_experiment_matrix("surge")
         ]
         return shared, surge
 

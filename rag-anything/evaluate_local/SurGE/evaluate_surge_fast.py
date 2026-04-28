@@ -293,6 +293,12 @@ def build_query_params(args: argparse.Namespace, *, chunk_top_k: int) -> dict[st
         "recognition_top_k": DEFAULT_RECOGNITION_TOP_K,
         "enable_rerank": bool(getattr(args, "enable_rerank", True)),
         "enable_kg_rerank": bool(getattr(args, "enable_kg_rerank", True)),
+        "ppr_post_rerank_fusion": str(
+            getattr(args, "ppr_post_rerank_fusion", "none")
+        ).strip().lower(),
+        "ppr_post_rerank_rrf_k": int(
+            getattr(args, "ppr_post_rerank_rrf_k", 60)
+        ),
         "rerank_score_scope": "all",
         "keyword_fanout_mode": str(getattr(args, "keyword_fanout_mode", "joined")).strip(),
         "keyword_entity_rrf_k": int(
@@ -2397,6 +2403,20 @@ def build_parser() -> argparse.ArgumentParser:
         dest="enable_kg_rerank",
         type=as_bool,
         default=True,
+    )
+    p.add_argument(
+        "--ppr-post-rerank-fusion",
+        "--ppr_post_rerank_fusion",
+        dest="ppr_post_rerank_fusion",
+        choices=["none", "raw_rrf"],
+        default="none",
+    )
+    p.add_argument(
+        "--ppr-post-rerank-rrf-k",
+        "--ppr_post_rerank_rrf_k",
+        dest="ppr_post_rerank_rrf_k",
+        type=int,
+        default=60,
     )
     p.add_argument(
         "--batch-doc-concurrency",

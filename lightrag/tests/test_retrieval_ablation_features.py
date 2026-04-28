@@ -55,6 +55,8 @@ async def test_query_param_accepts_retrieval_ablation_fields():
         bypass_query_cache=True,
         bypass_keywords_cache=True,
         kg_chunk_selection_source="untruncated",
+        ppr_post_rerank_fusion="raw_rrf",
+        ppr_post_rerank_rrf_k=60,
     )
 
     assert param.keyword_fanout_mode == "per_keyword_rrf"
@@ -66,6 +68,8 @@ async def test_query_param_accepts_retrieval_ablation_fields():
     assert param.bypass_query_cache is True
     assert param.bypass_keywords_cache is True
     assert param.kg_chunk_selection_source == "untruncated"
+    assert param.ppr_post_rerank_fusion == "raw_rrf"
+    assert param.ppr_post_rerank_rrf_k == 60
 
 
 @pytest.mark.asyncio
@@ -298,6 +302,8 @@ def test_query_cache_params_include_kg_chunk_selection_source():
             kg_chunk_selection_source="untruncated",
             keyword_entity_rrf_k=10,
             keyword_relation_rrf_k=20,
+            ppr_post_rerank_fusion="raw_rrf",
+            ppr_post_rerank_rrf_k=60,
         ),
         user_prompt="",
         system_prompt=None,
@@ -309,6 +315,58 @@ def test_query_cache_params_include_kg_chunk_selection_source():
     assert params["kg_chunk_selection_source"] == "untruncated"
     assert params["keyword_entity_rrf_k"] == 10
     assert params["keyword_relation_rrf_k"] == 20
+    assert params["ppr_post_rerank_fusion"] == "raw_rrf"
+    assert params["ppr_post_rerank_rrf_k"] == 60
+
+
+@pytest.mark.asyncio
+async def test_process_chunks_unified_fuses_raw_ppr_and_reranked_order_before_caps():
+    candidate_chunks = [
+        {"chunk_id": "c1", "content": "chunk-1"},
+        {"chunk_id": "c2", "content": "chunk-2"},
+        {"chunk_id": "c3", "content": "chunk-3"},
+    ]
+    reranked_chunks = [
+        {"chunk_id": "c3", "content": "chunk-3", "rerank_score": 0.93},
+        {"chunk_id": "c1", "content": "chunk-1", "rerank_score": 0.91},
+        {"chunk_id": "c2", "content": "chunk-2", "rerank_score": 0.77},
+    ]
+    rerank_debug = {}
+
+    async def fake_apply_rerank_if_enabled(**kwargs):
+        assert [chunk["chunk_id"] for chunk in kwargs["retrieved_docs"]] == [
+            "c1",
+            "c2",
+            "c3",
+        ]
+        return reranked_chunks
+
+    with patch(
+        "lightrag.utils.apply_rerank_if_enabled",
+        new=AsyncMock(side_effect=fake_apply_rerank_if_enabled),
+    ):
+        final_chunks = await process_chunks_unified(
+            query="q",
+            unique_chunks=candidate_chunks,
+            query_param=QueryParam(
+                mode="ppr",
+                ppr_top_k=3,
+                ppr_qa_top_k=2,
+                chunk_top_k=0,
+                enable_rerank=True,
+                rerank_score_scope="all",
+                ppr_post_rerank_fusion="raw_rrf",
+                ppr_post_rerank_rrf_k=0,
+            ),
+            global_config={"min_rerank_score": 0.0},
+            source_type="ppr",
+            rerank_debug=rerank_debug,
+        )
+
+    assert [chunk["chunk_id"] for chunk in final_chunks] == ["c1", "c3"]
+    assert rerank_debug["chunk_ids_raw_ppr"] == ["c1", "c2", "c3"]
+    assert rerank_debug["chunk_ids_after_rerank_fusion"] == ["c1", "c3", "c2"]
+    assert rerank_debug["fusion_mode"] == "raw_rrf"
 
 
 @pytest.mark.asyncio

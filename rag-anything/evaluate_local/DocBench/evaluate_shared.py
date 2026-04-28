@@ -329,6 +329,8 @@ def _build_query_params(
     multimodal_top_k: int | None = None,
     enable_rerank: bool = True,
     enable_kg_rerank: bool = True,
+    ppr_post_rerank_fusion: str = "none",
+    ppr_post_rerank_rrf_k: int = 60,
     bypass_query_cache: bool = False,
     bypass_keywords_cache: bool = False,
 ) -> dict[str, Any]:
@@ -337,6 +339,8 @@ def _build_query_params(
     params.update(flags.to_query_kwargs())
     params["enable_rerank"] = bool(enable_rerank)
     params["enable_kg_rerank"] = bool(enable_kg_rerank)
+    params["ppr_post_rerank_fusion"] = str(ppr_post_rerank_fusion).strip().lower()
+    params["ppr_post_rerank_rrf_k"] = int(ppr_post_rerank_rrf_k)
     if query_mode is not None:
         normalized_mode = str(query_mode).strip()
         if normalized_mode:
@@ -2015,6 +2019,18 @@ async def main() -> None:
         type=as_bool,
         default=True,
     )
+    parser.add_argument(
+        "--ppr_post_rerank_fusion",
+        choices=["none", "raw_rrf"],
+        default="none",
+    )
+    parser.add_argument(
+        "--ppr_post_rerank_rrf_k",
+        "--ppr-post-rerank-rrf-k",
+        dest="ppr_post_rerank_rrf_k",
+        type=int,
+        default=60,
+    )
     parser.add_argument("--bypass_query_cache", action="store_true")
     parser.add_argument("--bypass_keywords_cache", action="store_true")
     add_ablation_arguments(parser)
@@ -2076,6 +2092,8 @@ async def main() -> None:
         multimodal_top_k=args.multimodal_top_k,
         enable_rerank=args.enable_rerank,
         enable_kg_rerank=args.enable_kg_rerank,
+        ppr_post_rerank_fusion=args.ppr_post_rerank_fusion,
+        ppr_post_rerank_rrf_k=args.ppr_post_rerank_rrf_k,
         bypass_query_cache=args.bypass_query_cache,
         bypass_keywords_cache=args.bypass_keywords_cache,
     )

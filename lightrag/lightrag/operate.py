@@ -914,6 +914,12 @@ def _build_query_cache_params(
         "passage_node_weight": query_param.passage_node_weight,
         "recognition_top_k": query_param.recognition_top_k,
         "linking_top_k": query_param.linking_top_k,
+        "ppr_post_rerank_fusion": getattr(
+            query_param, "ppr_post_rerank_fusion", "none"
+        ),
+        "ppr_post_rerank_rrf_k": getattr(
+            query_param, "ppr_post_rerank_rrf_k", 60
+        ),
         "ppr_synonym_weight_mode": query_param.ppr_synonym_weight_mode,
         "qdrant_retrieval_mode": query_param.qdrant_retrieval_mode,
         "keyword_fanout_mode": getattr(query_param, "keyword_fanout_mode", "joined"),
@@ -6061,8 +6067,6 @@ async def _build_context_str(
         global_config.get("max_total_tokens", DEFAULT_MAX_TOTAL_TOKENS),
     )
 
-    # Match the same response prompt template selection used by kg_query so
-    # chunk token budgeting reflects the actual answer prompt.
     sys_prompt_template = _resolve_response_system_prompt_template(
         query_param,
         system_prompt=system_prompt,
