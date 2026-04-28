@@ -8,7 +8,7 @@ from raganything.retrieval.profiles import (
 
 
 def test_all_builtin_profiles_present():
-    assert set(PROFILE_REGISTRY.keys()) == {"precise", "semantic", "local", "multihop", "full"}
+    assert set(PROFILE_REGISTRY.keys()) == {"precise", "semantic", "local", "multihop", "full", "gfm_multihop"}
 
 
 def test_profile_paths_are_known():

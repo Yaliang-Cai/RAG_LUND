@@ -4,6 +4,9 @@ import dataclasses
 import logging
 import time
 
+from raganything.constants import GFM_DATA_DIR, GFM_DATA_NAME, GFM_MODEL_PATH
+from raganything.retrieval.gfm_retriever import GFMRetrieverWrapper
+
 logger = logging.getLogger(__name__)
 
 # path_name → (lightrag_mode, qdrant_retrieval_mode_override_or_None)
@@ -16,6 +19,7 @@ _PATH_CONFIG: dict[str, tuple[str, str | None]] = {
     "qdrant_hybrid":        ("hybrid",  "hybrid"),
     "qdrant_sparse":        ("naive",   "bm25"),
     "qdrant_chunks_hybrid": ("naive",   "hybrid"),  # dense+BM25 chunk search, no KG traversal
+    "gfm":                  ("gfm",     None),
 }
 
 KNOWN_PATHS: frozenset[str] = frozenset(_PATH_CONFIG.keys())
@@ -60,6 +64,15 @@ async def run_path(
     Returns:
         (chunks, latency_seconds). chunks is an empty list on failure.
     """
+    if name == "gfm":
+        wrapper = GFMRetrieverWrapper.get_instance(GFM_DATA_DIR, GFM_DATA_NAME, GFM_MODEL_PATH)
+        t0 = time.monotonic()
+        chunks = await wrapper.retrieve(
+            query, getattr(param, "chunk_top_k", 10), lightrag.text_chunks
+        )
+        latency = time.monotonic() - t0
+        return chunks, latency
+
     if name not in _PATH_CONFIG:
         raise ValueError(f"Unknown path: {name!r}")
 

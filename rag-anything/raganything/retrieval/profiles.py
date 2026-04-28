@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 
 KNOWN_PATHS: frozenset[str] = frozenset(
-    ["naive", "hybrid", "mix", "ppr", "local_kg", "qdrant_hybrid", "qdrant_sparse", "qdrant_chunks_hybrid"]
+    ["naive", "hybrid", "mix", "ppr", "local_kg", "qdrant_hybrid", "qdrant_sparse", "qdrant_chunks_hybrid", "gfm"]
 )
 
 
@@ -75,6 +75,20 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
                 "qdrant_sparse": 0.9,
             },
             max_concurrent_paths=None,
+        ),
+        RetrievalProfile(
+            name="gfm_multihop",
+            description="Multi-hop reasoning via GFM graph + PPR walk (toggle either path below)",
+            paths=[
+                # "gfm",    # uncomment to enable GFM graph retrieval
+                "ppr",
+                "hybrid",
+            ],
+            rrf_weights={
+                # "gfm": 1.0,   # uncomment together with path above
+                "ppr":    0.8,
+                "hybrid": 0.6,
+            },
         ),
     ]
 }

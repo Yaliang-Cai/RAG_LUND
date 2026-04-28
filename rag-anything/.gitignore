@@ -75,6 +75,7 @@ evaluate_local/ablation_runs/_dryrun*
 # unit-test files
 test_*
 !evaluate_local/**/tests/test_*.py
+!tests/**/test_*.py
 
 # Cline files
 memory-bank/
