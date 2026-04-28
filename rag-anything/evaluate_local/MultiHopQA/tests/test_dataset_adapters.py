@@ -5,10 +5,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "rag-anything"))
 
 import pytest
 from evaluate_local.MultiHopQA.dataset_adapters import (
+    dedupe_corpus_paragraphs,
+    paragraph_source_key,
     normalize_answer,
     score_em,
     score_f1,
     score_recall_at_k,
+    score_recall_at_k_by_source_keys,
     get_eval_query_overrides,
 )
 
@@ -85,6 +88,39 @@ def test_recall_at_k_none_facts_returns_none():
 
 def test_score_f1_empty_gold_list():
     assert score_f1("berlin", []) == 0.0
+
+
+def test_paragraph_source_key_distinguishes_same_title_different_paragraphs():
+    first = paragraph_source_key("musique", "Same Title", "First paragraph.")
+    second = paragraph_source_key("musique", "Same Title", "Second paragraph.")
+
+    assert first != second
+
+
+def test_dedupe_corpus_paragraphs_preserves_same_title_different_texts():
+    corpus = dedupe_corpus_paragraphs(
+        dataset="musique",
+        paragraphs=[
+            {"title": "Same Title", "text": "First paragraph."},
+            {"title": "Same Title", "text": "Second paragraph."},
+            {"title": "Same Title", "text": "First paragraph."},
+        ],
+    )
+
+    assert len(corpus) == 2
+    assert [row["text"] for row in corpus] == ["First paragraph.", "Second paragraph."]
+    assert corpus[0]["source_key"] != corpus[1]["source_key"]
+
+
+def test_recall_at_k_by_source_keys_uses_retrieved_source_mapping():
+    retrieved_sources = [
+        {"source_key": "source-a"},
+        {"source_key": "source-b"},
+    ]
+    gold = ["source-b", "source-c"]
+
+    assert score_recall_at_k_by_source_keys(retrieved_sources, gold, k=1) == pytest.approx(0.0)
+    assert score_recall_at_k_by_source_keys(retrieved_sources, gold, k=2) == pytest.approx(0.5)
 
 
 def test_get_eval_query_overrides_hotpotqa():

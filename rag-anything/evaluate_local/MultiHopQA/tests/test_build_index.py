@@ -9,6 +9,7 @@ import pytest
 from evaluate_local.MultiHopQA.build_index import (
     MULTIHOPQA_NEVER_SPLIT_DELIMITER,
     _TeeOutput,
+    _validate_batch_doc_status,
     build_virtual_batches,
     prepare_source_records,
     resolve_safe_split_delimiter,
@@ -31,10 +32,12 @@ def test_prepare_source_records_builds_stable_chunk_source_map():
     assert list(source_records) == ["hotpotqa_000001", "hotpotqa_000002"]
     first = source_records["hotpotqa_000001"]
     assert first["source_paragraph_id"] == "hotpotqa_000001"
+    assert first["source_key"].startswith("hotpotqa:")
     assert first["title"] == "Title A"
     assert first["content"] == "Title A\nFirst paragraph."
     assert first["lightrag_chunk_id"].startswith("chunk-")
     assert chunk_source_map[first["lightrag_chunk_id"]]["source_paragraph_id"] == "hotpotqa_000001"
+    assert chunk_source_map[first["lightrag_chunk_id"]]["source_key"] == first["source_key"]
     assert chunk_source_map[first["lightrag_chunk_id"]]["title"] == "Title A"
     assert stats == {
         "source_paragraph_count": 2,
@@ -93,6 +96,41 @@ def test_build_virtual_batches_preserves_expected_chunk_mapping():
         ]
     )
     assert batches[1]["source_paragraph_ids"] == ["2wiki_000003"]
+
+
+def test_validate_batch_doc_status_rejects_failed_lightrag_doc_status():
+    batch = {
+        "batch_doc_id": "multihopqa_batch_000001",
+        "expected_chunk_count": 2,
+        "expected_chunk_ids": ["chunk-a", "chunk-b"],
+    }
+
+    with pytest.raises(RuntimeError, match="LightRAG marked .* failed"):
+        _validate_batch_doc_status(
+            {
+                "status": "failed",
+                "error_msg": "Chunk token length 1236 exceeds chunk_token_size 1200",
+                "chunks_list": [],
+            },
+            batch,
+        )
+
+
+def test_validate_batch_doc_status_rejects_missing_expected_chunks():
+    batch = {
+        "batch_doc_id": "multihopqa_batch_000001",
+        "expected_chunk_count": 2,
+        "expected_chunk_ids": ["chunk-a", "chunk-b"],
+    }
+
+    with pytest.raises(RuntimeError, match="missing expected chunks"):
+        _validate_batch_doc_status(
+            {
+                "status": "processed",
+                "chunks_list": ["chunk-a"],
+            },
+            batch,
+        )
 
 
 def test_validate_existing_manifest_for_resume_rejects_mismatched_seed(tmp_path):

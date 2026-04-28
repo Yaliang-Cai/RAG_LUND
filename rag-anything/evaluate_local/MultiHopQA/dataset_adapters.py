@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 import string
@@ -18,6 +19,46 @@ def normalize_answer(s: str) -> str:
     s = s.translate(str.maketrans("", "", string.punctuation))
     s = _ARTICLES_RE.sub(" ", s)
     return " ".join(s.split())
+
+
+def _format_paragraph(title: Any, text: Any) -> str:
+    title_text = str(title or "").strip()
+    body_text = str(text or "").strip()
+    if title_text and body_text:
+        return f"{title_text}\n{body_text}"
+    return title_text or body_text
+
+
+def paragraph_source_key(dataset: str, title: Any, text: Any) -> str:
+    """Stable paragraph identity used by indexing and retrieval metrics.
+
+    This intentionally keys on the full formatted paragraph, not only title, so
+    same-title passages from MuSiQue/2Wiki remain distinct.
+    """
+    content = _format_paragraph(title, text).strip()
+    digest = hashlib.sha1(f"{dataset}\n{content}".encode("utf-8")).hexdigest()
+    return f"{dataset}:{digest}"
+
+
+def dedupe_corpus_paragraphs(
+    *,
+    dataset: str,
+    paragraphs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Deduplicate exact paragraphs without collapsing same-title variants."""
+    seen: set[str] = set()
+    corpus: list[dict[str, Any]] = []
+    for row in paragraphs:
+        title = str(row.get("title") or "").strip()
+        text = str(row.get("text") or "").strip()
+        if not _format_paragraph(title, text).strip():
+            continue
+        source_key = paragraph_source_key(dataset, title, text)
+        if source_key in seen:
+            continue
+        seen.add(source_key)
+        corpus.append({"title": title, "text": text, "source_key": source_key})
+    return corpus
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +130,25 @@ def score_recall_at_k(
     return covered / len(supporting_facts)
 
 
+def score_recall_at_k_by_source_keys(
+    retrieved_sources: list[dict[str, Any]],
+    gold_source_keys: list[str] | None,
+    k: int,
+) -> float | None:
+    """Passage recall from stable source keys."""
+    if not gold_source_keys:
+        return None
+    gold = {str(key) for key in gold_source_keys if key}
+    if not gold:
+        return None
+    retrieved = {
+        str(source.get("source_key"))
+        for source in retrieved_sources[:k]
+        if source.get("source_key")
+    }
+    return len(gold & retrieved) / len(gold)
+
+
 # ---------------------------------------------------------------------------
 # Dataset-specific prompt overrides
 # ---------------------------------------------------------------------------
@@ -130,6 +190,30 @@ def _sample(items: list, n: int, seed: int) -> list:
     return rng.sample(items, n)
 
 
+def _unique_preserve_order(values: list[Any]) -> list[str]:
+    seen: dict[str, None] = {}
+    for value in values:
+        key = str(value)
+        seen[key] = None
+    return list(seen)
+
+
+def _join_sentences(sentences: Any) -> str:
+    if hasattr(sentences, "tolist"):
+        sentences = sentences.tolist()
+    return " ".join(str(s) for s in sentences)
+
+
+def _source_record(dataset: str, title: Any, text: Any) -> dict[str, str]:
+    title_text = str(title or "").strip()
+    body_text = str(text or "").strip()
+    return {
+        "source_key": paragraph_source_key(dataset, title_text, body_text),
+        "title": title_text,
+        "text": body_text,
+    }
+
+
 def load_hotpotqa(n: int = 500, seed: int = 42) -> list[dict]:
     """Load HotpotQA distractor dev set. supporting_facts = full paragraph texts for gold titles."""
     from datasets import load_dataset
@@ -138,22 +222,26 @@ def load_hotpotqa(n: int = 500, seed: int = 42) -> list[dict]:
     sampled = _sample(raw, n, seed)
     result = []
     for row in sampled:
-        ctx = {title: sents for title, sents in zip(row["context"]["title"], row["context"]["sentences"])}
+        ctx = {
+            str(title): _join_sentences(sents)
+            for title, sents in zip(row["context"]["title"], row["context"]["sentences"])
+        }
         # Collect unique gold titles (preserving order) and join their sentences into paragraphs.
         # Full-paragraph facts give reliable Recall@K signal at chunk granularity.
-        seen: dict[str, None] = {}
-        for title in row["supporting_facts"]["title"]:
-            seen[title] = None
         facts = []
-        for title in seen:
-            sents = ctx.get(title, [])
-            if sents:
-                facts.append(" ".join(sents))
+        gold_sources = []
+        for title in _unique_preserve_order(list(row["supporting_facts"]["title"])):
+            text = ctx.get(title, "")
+            if text:
+                facts.append(text)
+                gold_sources.append(_source_record("hotpotqa", title, text))
         result.append({
             "id": row["id"],
             "question": row["question"],
             "answer": row["answer"],
             "supporting_facts": facts,
+            "gold_source_keys": [source["source_key"] for source in gold_sources],
+            "gold_sources": gold_sources,
         })
     return result
 
@@ -164,14 +252,11 @@ def extract_corpus_hotpotqa(n: int = 500, seed: int = 42) -> list[dict]:
     ds = load_dataset("hotpot_qa", "distractor", split="validation")
     raw = list(ds)
     sampled = _sample(raw, n, seed)
-    seen: dict[str, None] = {}
-    corpus: list[dict] = []
+    paragraphs: list[dict] = []
     for row in sampled:
         for title, sents in zip(row["context"]["title"], row["context"]["sentences"]):
-            if title not in seen:
-                seen[title] = None
-                corpus.append({"title": title, "text": " ".join(sents)})
-    return corpus
+            paragraphs.append({"title": title, "text": _join_sentences(sents)})
+    return dedupe_corpus_paragraphs(dataset="hotpotqa", paragraphs=paragraphs)
 
 
 def load_musique(n: int = 500, seed: int = 42) -> list[dict]:
@@ -182,16 +267,25 @@ def load_musique(n: int = 500, seed: int = 42) -> list[dict]:
     sampled = _sample(raw, n, seed)
     result = []
     for row in sampled:
-        facts = [
-            p["paragraph_text"]
-            for p in row.get("paragraphs", [])
-            if p.get("is_supporting", False)
-        ]
+        facts = []
+        gold_sources = []
+        seen_gold: set[str] = set()
+        for p in row.get("paragraphs", []):
+            if not p.get("is_supporting", False):
+                continue
+            source = _source_record("musique", p.get("title", ""), p.get("paragraph_text", ""))
+            if source["source_key"] in seen_gold:
+                continue
+            seen_gold.add(source["source_key"])
+            facts.append(source["text"])
+            gold_sources.append(source)
         result.append({
             "id": row["id"],
             "question": row["question"],
             "answer": row["answer"],
             "supporting_facts": facts,
+            "gold_source_keys": [source["source_key"] for source in gold_sources],
+            "gold_sources": gold_sources,
         })
     return result
 
@@ -202,17 +296,13 @@ def extract_corpus_musique(n: int = 500, seed: int = 42) -> list[dict]:
     ds = load_dataset("dgslibisey/MuSiQue", split="validation")
     raw = [row for row in ds if row.get("answerable", True)]
     sampled = _sample(raw, n, seed)
-    seen: dict[str, None] = {}
-    corpus: list[dict] = []
+    paragraphs: list[dict] = []
     for row in sampled:
         for p in row.get("paragraphs", []):
             title = p.get("title", "")
             text = p.get("paragraph_text", "")
-            key = title or text[:80]
-            if key and key not in seen:
-                seen[key] = None
-                corpus.append({"title": title, "text": text})
-    return corpus
+            paragraphs.append({"title": title, "text": text})
+    return dedupe_corpus_paragraphs(dataset="musique", paragraphs=paragraphs)
 
 
 def load_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
@@ -224,20 +314,24 @@ def load_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
     sampled = _sample(raw, n, seed)
     result = []
     for row in sampled:
-        ctx = {title: sents for title, sents in zip(row["context"]["title"], row["context"]["sentences"])}
-        seen: dict[str, None] = {}
-        for title in row["supporting_facts"]["title"]:
-            seen[title] = None
+        ctx = {
+            str(title): _join_sentences(sents)
+            for title, sents in zip(row["context"]["title"], row["context"]["sentences"])
+        }
         facts = []
-        for title in seen:
-            sents = ctx.get(title, [])
-            if sents:
-                facts.append(" ".join(sents))
+        gold_sources = []
+        for title in _unique_preserve_order(list(row["supporting_facts"]["title"])):
+            text = ctx.get(title, "")
+            if text:
+                facts.append(text)
+                gold_sources.append(_source_record("2wiki", title, text))
         result.append({
             "id": row["id"],
             "question": row["question"],
             "answer": row["answer"],
             "supporting_facts": facts,
+            "gold_source_keys": [source["source_key"] for source in gold_sources],
+            "gold_sources": gold_sources,
         })
     return result
 
@@ -248,14 +342,11 @@ def extract_corpus_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
     ds = load_dataset("framolfese/2WikiMultihopQA", split="validation")
     raw = list(ds)
     sampled = _sample(raw, n, seed)
-    seen: dict[str, None] = {}
-    corpus: list[dict] = []
+    paragraphs: list[dict] = []
     for row in sampled:
         for title, sents in zip(row["context"]["title"], row["context"]["sentences"]):
-            if title not in seen:
-                seen[title] = None
-                corpus.append({"title": title, "text": " ".join(sents)})
-    return corpus
+            paragraphs.append({"title": title, "text": _join_sentences(sents)})
+    return dedupe_corpus_paragraphs(dataset="2wiki", paragraphs=paragraphs)
 
 
 def load_simpleqa(n: int = 500, seed: int = 42) -> list[dict]:

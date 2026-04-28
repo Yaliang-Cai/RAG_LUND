@@ -148,6 +148,7 @@ def prepare_source_records(
     insertion.
     """
     from lightrag.utils import compute_mdhash_id, sanitize_text_for_encoding
+    from evaluate_local.MultiHopQA.dataset_adapters import paragraph_source_key
 
     source_records: dict[str, dict[str, Any]] = {}
     chunk_source_map: dict[str, dict[str, Any]] = {}
@@ -162,6 +163,7 @@ def prepare_source_records(
             continue
 
         source_paragraph_id = f"{dataset}_{idx:06d}"
+        source_key = str(row.get("source_key") or paragraph_source_key(dataset, title, text))
         lightrag_chunk_id = compute_mdhash_id(content, prefix="chunk-")
         if lightrag_chunk_id in chunk_source_map:
             existing = chunk_source_map[lightrag_chunk_id]
@@ -173,6 +175,7 @@ def prepare_source_records(
 
         record = {
             "source_paragraph_id": source_paragraph_id,
+            "source_key": source_key,
             "dataset": dataset,
             "title": title,
             "text": text,
@@ -182,6 +185,7 @@ def prepare_source_records(
         source_records[source_paragraph_id] = record
         chunk_source_map[lightrag_chunk_id] = {
             "source_paragraph_id": source_paragraph_id,
+            "source_key": source_key,
             "dataset": dataset,
             "title": title,
             "text": text,
@@ -303,6 +307,55 @@ async def _with_retries(label: str, retries: int, coro_factory):
             await asyncio.sleep(wait_seconds)
 
 
+def _doc_status_field(status_doc: Any, key: str, default: Any = None) -> Any:
+    if isinstance(status_doc, dict):
+        return status_doc.get(key, default)
+    return getattr(status_doc, key, default)
+
+
+def _doc_status_value(status_doc: Any) -> str:
+    raw_status = _doc_status_field(status_doc, "status", "")
+    if hasattr(raw_status, "value"):
+        raw_status = raw_status.value
+    return str(raw_status).lower()
+
+
+def _validate_batch_doc_status(status_doc: Any, batch: dict[str, Any]) -> None:
+    batch_doc_id = str(batch["batch_doc_id"])
+    if not status_doc:
+        raise RuntimeError(f"LightRAG doc_status missing for {batch_doc_id}")
+
+    status = _doc_status_value(status_doc)
+    if "failed" in status:
+        error_msg = str(_doc_status_field(status_doc, "error_msg", "") or "")
+        raise RuntimeError(f"LightRAG marked {batch_doc_id} failed: {error_msg}")
+    if "processed" not in status:
+        raise RuntimeError(f"LightRAG did not finish {batch_doc_id}: status={status!r}")
+
+    expected_chunk_ids = {str(chunk_id) for chunk_id in batch["expected_chunk_ids"]}
+    actual_chunk_ids = {
+        str(chunk_id)
+        for chunk_id in (_doc_status_field(status_doc, "chunks_list", []) or [])
+    }
+    missing = sorted(expected_chunk_ids - actual_chunk_ids)
+    if missing:
+        preview = ", ".join(missing[:5])
+        raise RuntimeError(
+            f"LightRAG doc_status for {batch_doc_id} is missing expected chunks: {preview}"
+        )
+
+
+async def _get_batch_doc_status(
+    *,
+    service: Any,
+    workspace: str,
+    working_dir: str,
+    batch_doc_id: str,
+) -> Any:
+    rag = await service.get_rag(workspace, working_dir=working_dir)
+    return await rag.lightrag.doc_status.get_by_id(batch_doc_id)
+
+
 def _persist_source_artifacts(
     *,
     working_dir: Path,
@@ -389,6 +442,13 @@ async def _ingest_batches(
                     retries=max(0, int(max_retries)),
                     coro_factory=lambda: _insert_one(batch),
                 )
+                status_doc = await _get_batch_doc_status(
+                    service=service,
+                    workspace=workspace,
+                    working_dir=working_dir,
+                    batch_doc_id=batch_doc_id,
+                )
+                _validate_batch_doc_status(status_doc, batch)
                 progress_row = {
                     "timestamp": _utc_now(),
                     "status": "ok",

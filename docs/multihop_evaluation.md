@@ -158,7 +158,10 @@ multihopqa_build_index.log            # terminal output and failure tracebacks
 ```
 
 The source map is what lets evaluation and debugging resolve retrieved chunks
-back to their original dataset paragraph.
+back to their original dataset paragraph.  It includes both a readable
+`source_paragraph_id` and a stable `source_key`; `source_key` is derived from the
+dataset name plus the full formatted paragraph, so same-title but different
+paragraphs are preserved.
 
 ---
 
@@ -250,9 +253,11 @@ When there are multiple gold answers, the maximum F1 over all gold strings is us
 
 Fraction of gold supporting paragraphs that appear in the top-K retrieved chunks.
 
-$$\text{Recall@K} = \frac{|\{p \in \text{gold}\;:\;\exists\,c \in \text{top-}K,\;p \sqsubseteq c\}|}{|\text{gold}|}$$
+$$\text{Recall@K} = \frac{|\text{gold\_source\_keys} \cap \text{topK\_retrieved\_source\_keys}|}{|\text{gold\_source\_keys}|}$$
 
-where $p \sqsubseteq c$ means the first 10 words of paragraph $p$ appear in chunk $c$ (case-insensitive).  Using the first-10-words fingerprint instead of full-text normalization avoids false misses from punctuation stripping on long texts.
+For current workspaces, this is computed from the chunk source map, not from
+substring matching.  The evaluator falls back to the older first-10-words
+fingerprint only when evaluating an old workspace without `source_key` metadata.
 
 K defaults to 5, 10, 20 (configurable via `--recall-k`).
 
@@ -324,7 +329,7 @@ multihop_results/
 | `load_2wiki(n, seed)` | `extract_corpus_2wiki(n, seed)` | Q&A items / unique paragraphs |
 | `load_simpleqa(n, seed)` | — | Q&A items (no corpus; SimpleQA is open-book) |
 
-Both functions accept the same `n` and `seed`, so the corpus exactly covers the evaluation questions.
+Both functions accept the same `n` and `seed`, so the corpus exactly covers the evaluation questions.  Corpus extraction deduplicates exact formatted paragraphs by `source_key`; it does not collapse different paragraphs that share the same title.
 
 ### Supporting facts granularity
 
@@ -332,14 +337,14 @@ Both functions accept the same `n` and `seed`, so the corpus exactly covers the 
 
 ### Recall matching
 
-Because `normalize_answer` (which strips punctuation) is destructive on long paragraph texts, Recall@K uses a fingerprint approach:
+Current workspaces use source-key matching:
 
 ```python
-key = " ".join(fact.lower().split()[:10])   # first 10 words
-covered = any(key in chunk_content.lower() for chunk in top_k_chunks)
+recall = len(set(gold_source_keys) & set(topk_retrieved_source_keys)) / len(set(gold_source_keys))
 ```
 
-Ten words is distinctive enough to avoid false positives while being robust to minor formatting differences between the original dataset text and the indexed chunk text.
+The first-10-words fingerprint matcher remains only as a fallback for legacy
+workspaces that do not have `multihopqa_chunk_source_map.json` with `source_key`.
 
 ### Resume / incremental evaluation
 

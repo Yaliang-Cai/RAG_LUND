@@ -115,10 +115,47 @@ def _resolve_retrieved_sources(
                 "rank": rank,
                 "chunk_id": chunk_id,
                 "source_paragraph_id": source.get("source_paragraph_id"),
+                "source_key": source.get("source_key"),
                 "title": source.get("title"),
             }
         )
     return sources
+
+
+def _score_recall_by_source_keys(
+    retrieved_sources: list[dict[str, Any]],
+    gold_source_keys: list[str] | None,
+    k: int,
+) -> float | None:
+    if not gold_source_keys:
+        return None
+    gold = {str(key) for key in gold_source_keys if key}
+    if not gold:
+        return None
+    retrieved = {
+        str(source.get("source_key"))
+        for source in retrieved_sources[:k]
+        if source.get("source_key")
+    }
+    return len(gold & retrieved) / len(gold)
+
+
+def _score_support_recall(
+    *,
+    chunks: list[dict[str, Any]],
+    item: dict[str, Any],
+    k: int,
+    chunk_source_map: dict[str, dict[str, Any]],
+    fallback_score_recall_at_k: Callable[[list[dict], list[str] | None, int], float | None],
+) -> float | None:
+    if chunk_source_map and item.get("gold_source_keys"):
+        retrieved_sources = _resolve_retrieved_sources(chunks, chunk_source_map)
+        return _score_recall_by_source_keys(
+            retrieved_sources,
+            item.get("gold_source_keys"),
+            k,
+        )
+    return fallback_score_recall_at_k(chunks, item.get("supporting_facts"), k)
 
 
 def _aggregate_jsonl(jsonl_path: Path, recall_ks: list[int]) -> dict[str, Any]:
@@ -217,16 +254,29 @@ async def _run_mode(
             "em": em,
             "f1": f1,
         }
+        if item.get("gold_source_keys"):
+            record["gold_source_keys"] = item["gold_source_keys"]
+        retrieved_sources = _resolve_retrieved_sources(chunks, chunk_source_map)
         for k in recall_ks:
-            r = score_recall_at_k(chunks, item.get("supporting_facts"), k)
+            r = _score_support_recall(
+                chunks=chunks,
+                item=item,
+                k=k,
+                chunk_source_map=chunk_source_map,
+                fallback_score_recall_at_k=score_recall_at_k,
+            )
             record[f"recall@{k}"] = r
 
-        retrieved_sources = _resolve_retrieved_sources(chunks, chunk_source_map)
         if retrieved_sources:
             record["retrieved_source_paragraph_ids"] = [
                 str(s["source_paragraph_id"])
                 for s in retrieved_sources
                 if s.get("source_paragraph_id")
+            ]
+            record["retrieved_source_keys"] = [
+                str(s["source_key"])
+                for s in retrieved_sources
+                if s.get("source_key")
             ]
             record["retrieved_sources"] = retrieved_sources
 
