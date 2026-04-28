@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -10,11 +11,13 @@ from evaluate_local.MultiHopQA.build_index import (
     MULTIHOPQA_NEVER_SPLIT_DELIMITER,
     _TeeOutput,
     _validate_batch_doc_status,
+    apply_multihopqa_index_profile,
     build_virtual_batches,
     prepare_source_records,
     resolve_safe_split_delimiter,
     resolve_log_file,
     validate_existing_manifest_for_resume,
+    validate_or_write_index_profile,
 )
 
 
@@ -98,6 +101,39 @@ def test_build_virtual_batches_preserves_expected_chunk_mapping():
     assert batches[1]["source_paragraph_ids"] == ["2wiki_000003"]
 
 
+class _DummySettings:
+    enable_entity_disambiguation = False
+    enable_synonym_linking = False
+    enable_multi_hop = True
+    multi_hop_depth = 2
+    ppr_damping = 0.5
+    ppr_top_k = 50
+    ppr_qa_top_k = 5
+    passage_node_weight = 0.05
+    synonymy_threshold = 0.8
+    synonymy_topk = 2048
+    synonymy_min_entity_len = 2
+    enable_entity_surface_normalization = False
+    enable_keyword_case_normalization = False
+    strict_relation_endpoint_entity_match = False
+
+
+def test_apply_multihopqa_index_profile_matches_v0_v1_v2_build_settings():
+    settings = _DummySettings()
+
+    metadata = apply_multihopqa_index_profile(settings)
+
+    assert settings.enable_entity_disambiguation is True
+    assert settings.enable_synonym_linking is True
+    assert settings.enable_multi_hop is False
+    assert settings.enable_entity_surface_normalization is True
+    assert settings.enable_keyword_case_normalization is True
+    assert settings.strict_relation_endpoint_entity_match is True
+    assert metadata["ablation_group"] == "DB+V1+V2"
+    assert metadata["index_profile"]["enable_entity_disambiguation"] is True
+    assert metadata["index_profile"]["enable_synonym_linking"] is True
+
+
 def test_validate_batch_doc_status_rejects_failed_lightrag_doc_status():
     batch = {
         "batch_doc_id": "multihopqa_batch_000001",
@@ -174,6 +210,113 @@ def test_validate_existing_manifest_for_resume_accepts_matching_manifest(tmp_pat
         n_samples=500,
         seed=42,
     )
+
+
+def test_validate_existing_manifest_for_resume_rejects_mismatched_index_profile(tmp_path):
+    manifest_path = tmp_path / "multihopqa_ingest_manifest.json"
+    manifest_path.write_text(
+        """{
+  "workspace_id": "hotpotqa_500_seed42",
+  "dataset": "hotpotqa",
+  "n_samples": 500,
+  "seed": 42,
+  "index_profile": {
+    "profile_version": 1,
+    "enable_entity_disambiguation": true,
+    "enable_synonym_linking": false
+  }
+}""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="index_profile"):
+        validate_existing_manifest_for_resume(
+            manifest_path=manifest_path,
+            workspace="hotpotqa_500_seed42",
+            dataset="hotpotqa",
+            n_samples=500,
+            seed=42,
+            expected_index_profile={
+                "profile_version": 1,
+                "enable_entity_disambiguation": True,
+                "enable_synonym_linking": True,
+            },
+        )
+
+
+def test_validate_or_write_index_profile_persists_profile(tmp_path):
+    metadata = {
+        "ablation_profile": "v0_v1_v2",
+        "ablation_group": "DB+V1+V2",
+        "ablation_flags": {"enable_synonym_linking": True},
+        "index_profile": {
+            "profile_version": 1,
+            "enable_entity_disambiguation": True,
+            "enable_synonym_linking": True,
+        },
+    }
+
+    validate_or_write_index_profile(
+        working_dir=tmp_path,
+        index_profile_metadata=metadata,
+    )
+
+    payload = json.loads((tmp_path / "multihopqa_index_profile.json").read_text())
+    assert payload["index_profile"] == metadata["index_profile"]
+    assert payload["ablation_group"] == "DB+V1+V2"
+
+
+def test_validate_or_write_index_profile_rejects_existing_artifacts_without_profile(
+    tmp_path,
+):
+    (tmp_path / "kv_store_doc_status.json").write_text("{}", encoding="utf-8")
+    metadata = {
+        "ablation_profile": "v0_v1_v2",
+        "ablation_group": "DB+V1+V2",
+        "ablation_flags": {"enable_synonym_linking": True},
+        "index_profile": {
+            "profile_version": 1,
+            "enable_entity_disambiguation": True,
+            "enable_synonym_linking": True,
+        },
+    }
+
+    with pytest.raises(ValueError, match="existing artifacts"):
+        validate_or_write_index_profile(
+            working_dir=tmp_path,
+            index_profile_metadata=metadata,
+        )
+
+
+def test_validate_or_write_index_profile_rejects_mismatched_profile(tmp_path):
+    (tmp_path / "multihopqa_index_profile.json").write_text(
+        json.dumps(
+            {
+                "index_profile": {
+                    "profile_version": 1,
+                    "enable_entity_disambiguation": True,
+                    "enable_synonym_linking": False,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    metadata = {
+        "ablation_profile": "v0_v1_v2",
+        "ablation_group": "DB+V1+V2",
+        "ablation_flags": {"enable_synonym_linking": True},
+        "index_profile": {
+            "profile_version": 1,
+            "enable_entity_disambiguation": True,
+            "enable_synonym_linking": True,
+        },
+    }
+
+    with pytest.raises(ValueError, match="index profile"):
+        validate_or_write_index_profile(
+            working_dir=tmp_path,
+            index_profile_metadata=metadata,
+        )
 
 
 def test_resolve_log_file_defaults_inside_working_dir(tmp_path):

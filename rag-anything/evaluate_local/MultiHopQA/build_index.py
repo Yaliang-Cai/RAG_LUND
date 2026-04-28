@@ -45,6 +45,8 @@ INGEST_MANIFEST_FILENAME = "multihopqa_ingest_manifest.json"
 INGEST_PROGRESS_FILENAME = "multihopqa_ingest_progress.jsonl"
 INGEST_FAILURES_FILENAME = "multihopqa_ingest_failures.jsonl"
 BUILD_LOG_FILENAME = "multihopqa_build_index.log"
+INDEX_PROFILE_FILENAME = "multihopqa_index_profile.json"
+MULTIHOPQA_INDEX_PROFILE_KEY = "v0_v1_v2"
 
 
 class _TeeStream:
@@ -101,6 +103,50 @@ def resolve_log_file(working_dir: str | Path, log_file: str | None) -> Path:
         candidate = Path(log_file).expanduser()
         return candidate if candidate.is_absolute() else working_dir_path / candidate
     return working_dir_path / BUILD_LOG_FILENAME
+
+
+def apply_multihopqa_index_profile(settings: Any) -> dict[str, Any]:
+    """Pin MultiHopQA indexing to the same V0+V1+V2 profile as DocBench/SurGE.
+
+    V3 is query-time only, so it is intentionally disabled at index build time.
+    """
+    settings.enable_entity_disambiguation = True
+    settings.enable_synonym_linking = True
+    settings.enable_multi_hop = False
+    settings.enable_entity_surface_normalization = True
+    settings.enable_keyword_case_normalization = True
+    settings.strict_relation_endpoint_entity_match = True
+
+    ablation_flags = {
+        "enable_entity_disambiguation": True,
+        "enable_synonym_linking": True,
+        "enable_multi_hop": False,
+        "multi_hop_depth": int(getattr(settings, "multi_hop_depth", 2)),
+        "ppr_damping": float(getattr(settings, "ppr_damping", 0.85)),
+        "ppr_top_k": int(getattr(settings, "ppr_top_k", 60)),
+        "ppr_qa_top_k": int(getattr(settings, "ppr_qa_top_k", 5)),
+        "passage_node_weight": float(getattr(settings, "passage_node_weight", 0.05)),
+    }
+    index_profile = {
+        "profile_version": 1,
+        "enable_entity_disambiguation": True,
+        "enable_synonym_linking": True,
+    }
+    if hasattr(settings, "synonymy_threshold"):
+        index_profile["synonymy_threshold"] = float(getattr(settings, "synonymy_threshold"))
+    if hasattr(settings, "synonymy_topk"):
+        index_profile["synonymy_topk"] = int(getattr(settings, "synonymy_topk"))
+    if hasattr(settings, "synonymy_min_entity_len"):
+        index_profile["synonymy_min_entity_len"] = int(
+            getattr(settings, "synonymy_min_entity_len")
+        )
+
+    return {
+        "ablation_profile": MULTIHOPQA_INDEX_PROFILE_KEY,
+        "ablation_group": "DB+V1+V2",
+        "ablation_flags": ablation_flags,
+        "index_profile": index_profile,
+    }
 
 
 def _save_json(path: Path, payload: dict[str, Any]) -> None:
@@ -265,6 +311,7 @@ def validate_existing_manifest_for_resume(
     dataset: str,
     n_samples: int,
     seed: int,
+    expected_index_profile: dict[str, Any] | None = None,
 ) -> None:
     """Refuse resume when an existing manifest belongs to another corpus."""
     if not manifest_path.exists():
@@ -285,12 +332,68 @@ def validate_existing_manifest_for_resume(
         actual_value = payload.get(key)
         if actual_value != expected_value:
             mismatches.append(f"{key}: existing={actual_value!r} current={expected_value!r}")
+    if expected_index_profile is not None:
+        actual_profile = payload.get("index_profile")
+        if actual_profile != expected_index_profile:
+            mismatches.append(
+                "index_profile: "
+                f"existing={actual_profile!r} current={expected_index_profile!r}"
+            )
     if mismatches:
         raise ValueError(
             "Existing MultiHopQA ingest manifest does not match this --resume run. "
             "Use the original workspace/dataset/n-samples/seed, or choose a new "
             f"working-dir/workspace. Details: {'; '.join(mismatches)}"
         )
+
+
+def validate_or_write_index_profile(
+    *,
+    working_dir: Path,
+    index_profile_metadata: dict[str, Any],
+) -> None:
+    """Persist index materialization settings before ingest starts.
+
+    This guards interrupted workspaces too: the final manifest is only written
+    after successful ingest, while partial LightRAG artifacts can already exist.
+    """
+    profile_path = working_dir / INDEX_PROFILE_FILENAME
+    expected_profile = index_profile_metadata["index_profile"]
+    if profile_path.exists():
+        try:
+            payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid existing index profile JSON: {profile_path}") from exc
+        actual_profile = payload.get("index_profile")
+        if actual_profile != expected_profile:
+            raise ValueError(
+                "Existing MultiHopQA index profile does not match this run. "
+                "Use a new working-dir/workspace or rebuild cleanly. "
+                f"existing={actual_profile!r} current={expected_profile!r}"
+            )
+        return
+
+    existing_state = [
+        path.name
+        for path in working_dir.iterdir()
+        if path.name != BUILD_LOG_FILENAME and path.suffix != ".log"
+    ]
+    if existing_state:
+        raise ValueError(
+            "Refusing to use a MultiHopQA workspace with existing artifacts "
+            "but no multihopqa_index_profile.json. Use a new clean workspace, "
+            "or rebuild this one from scratch. "
+            f"Existing entries: {existing_state[:10]}"
+        )
+
+    _save_json(
+        profile_path,
+        {
+            "schema_version": "multihopqa_index_profile_v1",
+            "generated_at": _utc_now(),
+            **index_profile_metadata,
+        },
+    )
 
 
 async def _with_retries(label: str, retries: int, coro_factory):
@@ -510,6 +613,13 @@ async def main(args: argparse.Namespace) -> None:
     progress_path = working_dir_path / INGEST_PROGRESS_FILENAME
     failures_path = working_dir_path / INGEST_FAILURES_FILENAME
     manifest_path = working_dir_path / INGEST_MANIFEST_FILENAME
+
+    settings = LocalRagSettings.from_env()
+    index_profile_metadata = apply_multihopqa_index_profile(settings)
+    validate_or_write_index_profile(
+        working_dir=working_dir_path,
+        index_profile_metadata=index_profile_metadata,
+    )
     if args.resume:
         validate_existing_manifest_for_resume(
             manifest_path=manifest_path,
@@ -517,6 +627,7 @@ async def main(args: argparse.Namespace) -> None:
             dataset=args.dataset,
             n_samples=args.n_samples,
             seed=args.seed,
+            expected_index_profile=index_profile_metadata["index_profile"],
         )
 
     print(f"[build_index] Extracting corpus: {args.dataset} n={args.n_samples} seed={args.seed}")
@@ -544,7 +655,6 @@ async def main(args: argparse.Namespace) -> None:
         ingest_batch_size=args.ingest_batch_size,
     )
 
-    settings = LocalRagSettings.from_env()
     # Match SurGE fast-ingest behavior: the virtual batches are independent and
     # LightRAG's own LLM/embedding semaphores remain the real resource guard.
     settings.serialize_ingest_by_workspace_id = False
@@ -560,6 +670,11 @@ async def main(args: argparse.Namespace) -> None:
     print(f"[build_index] Log file:         {args.resolved_log_file}")
     print(f"[build_index] Ingest batch size: {args.ingest_batch_size} paragraphs/virtual-doc")
     print(f"[build_index] LLM max async:     {args.llm_model_max_async}")
+    print(
+        "[build_index] Index profile:     "
+        f"{index_profile_metadata['ablation_profile']} "
+        f"({index_profile_metadata['ablation_group']})"
+    )
     print(f"[build_index] Resume:            {args.resume}")
 
     ingest_stats = await _ingest_batches(
@@ -586,6 +701,10 @@ async def main(args: argparse.Namespace) -> None:
         "ingest_batch_size": args.ingest_batch_size,
         "batch_doc_concurrency": args.batch_doc_concurrency,
         "llm_model_max_async": args.llm_model_max_async,
+        "ablation_profile": index_profile_metadata["ablation_profile"],
+        "ablation_group": index_profile_metadata["ablation_group"],
+        "ablation_flags": index_profile_metadata["ablation_flags"],
+        "index_profile": index_profile_metadata["index_profile"],
         "batch_count": len(batches),
         "expected_chunk_total": len(chunk_source_map),
         "source_stats": source_stats,
@@ -596,6 +715,7 @@ async def main(args: argparse.Namespace) -> None:
             "progress": str(progress_path),
             "failures": str(failures_path),
             "log_file": str(args.resolved_log_file),
+            "index_profile": str(working_dir_path / INDEX_PROFILE_FILENAME),
         },
     }
     _save_json(manifest_path, manifest)
