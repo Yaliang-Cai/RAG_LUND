@@ -24,7 +24,11 @@ from raganything.constants import (
     DEFAULT_CHUNK_TOP_K,
     DEFAULT_QDRANT_RETRIEVAL_MODE,
     SUPPORTED_IMAGE_EXTENSIONS,
+    GFM_DATA_DIR,
+    GFM_DATA_NAME,
+    GFM_MODEL_PATH,
 )
+from raganything.retrieval.gfm_retriever import GFMRetrieverWrapper
 from raganything.query_message_repack import (
     build_answer_suffix,
     repack_query_messages,
@@ -288,6 +292,24 @@ class QueryMixin:
                 }
             return answer
         # ── end mode="auto" ───────────────────────────────────────────────
+
+        # ── mode="gfm": GFM graph neural retrieval ────────────────────────
+        if mode == "gfm":
+            return_trace_gfm = bool(kwargs.pop("return_trace", False))
+            top_k = kwargs.get("chunk_top_k", DEFAULT_CHUNK_TOP_K)
+            wrapper = GFMRetrieverWrapper.get_instance(GFM_DATA_DIR, GFM_DATA_NAME, GFM_MODEL_PATH)
+            chunks = await wrapper.retrieve(query, top_k, self.lightrag.text_chunks)
+            answer = await self._generate_answer_from_chunks(
+                query,
+                chunks,
+                system_prompt=system_prompt,
+                response_type=kwargs.get("response_type", "Multiple Paragraphs"),
+            )
+            answer = answer if isinstance(answer, str) else str(answer)
+            if return_trace_gfm:
+                return {"answer": answer, "trace": {"mode": "gfm", "chunks_retrieved": len(chunks)}}
+            return answer
+        # ── end mode="gfm" ────────────────────────────────────────────────
 
         # Check if VLM enhanced query should be used
         vlm_enhanced = kwargs.pop("vlm_enhanced", None)
