@@ -42,41 +42,31 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
     for p in [
         RetrievalProfile(
             name="precise",
-            description="Exact character-level match queries (error codes, IDs, rare proper nouns)",
+            description="Queries with hard constraints: specific IDs, error codes, rare proper nouns, abbreviations",
             paths=["qdrant_sparse"],
             rrf_weights={"qdrant_sparse": 1.0},
         ),
         RetrievalProfile(
+            name="semantic",
+            description="Default workhorse: factual Q&A, process explanations, concept definitions, summaries — no complex reasoning required",
+            paths=["naive", "qdrant_sparse"],
+            rrf_weights={"naive": 1.0, "qdrant_sparse": 0.8},
+        ),
+        RetrievalProfile(
             name="local",
-            description="Direct query targeting a specific entity or clear single-hop fact",
+            description="Single focal entity: attributes, direct relationships, or status of one specific entity",
             paths=["mix"],
             rrf_weights={"mix": 1.0},
         ),
         RetrievalProfile(
             name="multihop",
-            description="Chain reasoning across multiple entities or documents",
+            description="Multiple entities requiring cross-document logical reasoning, comparison, or causal analysis",
             paths=["ppr", "hybrid"],
             rrf_weights={"ppr": 1.0, "hybrid": 0.8},
         ),
         RetrievalProfile(
-            name="descriptive",
-            description="Open-ended question requiring broad, complete context",
-            paths=["mix", "qdrant_hybrid"],
-            rrf_weights={"mix": 1.0, "qdrant_hybrid": 0.8},
-            path_overrides={
-                "mix": {
-                    "kg_chunk_selection_source": "untruncated",
-                    "answer_context_mode": "kg_prompt",
-                },
-                "qdrant_hybrid": {
-                    "kg_chunk_selection_source": "untruncated",
-                    "answer_context_mode": "kg_prompt",
-                },
-            },
-        ),
-        RetrievalProfile(
             name="full",
-            description="Fallback when query type is unclear or ambiguous",
+            description="Fallback for highly ambiguous queries or semantically diffuse multi-turn conversations",
             paths=["ppr", "hybrid", "naive", "qdrant_sparse"],
             rrf_weights={
                 "ppr":           1.2,

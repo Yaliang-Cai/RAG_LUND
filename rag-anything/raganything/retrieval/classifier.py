@@ -14,26 +14,42 @@ _CLASSIFIER_PROMPT = """\
 You are a retrieval routing classifier. Given a user query, select the most
 appropriate retrieval profile from the list below.
 
-Available profiles and typical examples:
+Available profiles (ordered from narrow to broad):
 
-- precise: Exact character-level match queries (error codes, IDs, rare proper nouns)
+- precise: Query contains hard constraints that require exact lexical matching.
+  Signals: specific IDs, error codes, version numbers, rare proper nouns, abbreviations.
   Examples: "What is the impact scope of CVE-2026-001?"
             "Status of order ID ORD-20260424-8821"
+            "What does the acronym MTTR stand for in this document?"
 
-- local: Direct query targeting a specific entity or clear single-hop fact
-  Examples: "How many parameters does BERT have?"
-            "What are the architectural differences between BERT and GPT?"
-            "When should you use RAG vs fine-tuning?"
+- semantic: Default workhorse for everyday knowledge queries. No graph traversal needed.
+  Signals: factual questions, process/procedure explanations, concept definitions, summaries.
+           Single topic, no multi-entity reasoning, no rare terminology.
+  Examples: "What is the company leave policy?"
+            "How does the attention mechanism work?"
+            "Summarise the key findings of this report."
 
-- multihop: Chain reasoning across multiple entities or documents
-  Examples: "What other papers have been published by the authors cited in HippoRAG2?"
-            "Which components of LightRAG were influenced by HippoRAG2?"
+- local: Query is tightly focused on ONE specific entity and asks about its direct
+  properties, relationships, or current state. Does not require cross-document hops.
+  Signals: "What are the [attributes/dependencies/upstream-downstream] of X?"
+  Examples: "What are the upstream systems of the payment service?"
+            "What configuration parameters does the Redis cluster expose?"
 
-- descriptive: Open-ended question requiring broad, complete context
-  Examples: "Describe the overall architecture of LightRAG."
-            "Provide a survey of PPR algorithms used in RAG systems."
+- multihop: Query involves MULTIPLE distinct entities and requires chaining logic
+  across documents — comparisons, causal chains, impact analysis.
+  Signals: two or more named entities, causal language ("led to", "caused", "resulted in"),
+           comparative language ("difference between", "how does A affect B").
+  Examples: "How did the network partition in region A eventually cause the order service in region B to fail?"
+            "Compare the indexing strategies used by LightRAG and HippoRAG2."
 
-- full: Fallback when query type is unclear or ambiguous
+- full: Use ONLY when the query is genuinely ambiguous or the intent cannot be
+  determined with confidence. Do not use as a safe default.
+
+Key disambiguation rules:
+- If the query asks about one entity → prefer local over multihop.
+- If the query is a plain question with no entity graph needed → prefer semantic over local.
+- If precise terminology appears alongside reasoning → prefer multihop or local, not precise.
+- Reserve full for true ambiguity, not for difficult classification.
 
 First briefly state your reasoning in one sentence, then output JSON.
 Output format: {{"reasoning": "...", "profile": "<name>", "confidence": <0.0-1.0>}}

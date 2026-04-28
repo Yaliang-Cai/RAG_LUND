@@ -25,9 +25,9 @@ query
   ▼
 ┌─────────────────────────────┐
 │    QueryClassifier (LLM)    │  ← skipped if profile= override
-│  "precise" / "local" /      │
-│  "multihop" / "descriptive" │
-│  / "full"                   │
+│  "precise" / "semantic" /   │
+│  "local" / "multihop" /     │
+│  "full"                     │
 └────────────┬────────────────┘
              │ profile name
              ▼
@@ -43,8 +43,8 @@ query
     │                   │
   ppr  hybrid  naive  qdrant_sparse          (full profile)
   ppr  hybrid                                (multihop profile)
-  hybrid  naive                              (local profile)
-  mix  qdrant_hybrid                         (descriptive profile)
+  mix                                        (local profile)
+  naive  qdrant_sparse                       (semantic profile)
   qdrant_sparse                              (precise profile)
     │       │     │    │        │              │
     └───────┴─────┴────┴────────┴──────────────┘
@@ -79,13 +79,13 @@ Each profile encodes a retrieval strategy as a named, reusable configuration. Pr
 
 ### 3.1 Built-in Profiles
 
-| Profile | Paths | Rationale |
-|---------|-------|-----------|
-| `precise` | `qdrant_sparse` (BM25 only) | Exact lexical match for error codes, IDs, rare proper nouns. Avoids semantic drift from vector similarity. |
-| `local` | `hybrid` + `naive` | Single-hop factual queries. Hybrid covers entity-centric KG paths; naive adds dense vector recall for short answer facts. |
-| `multihop` | `ppr` + `hybrid` | Multi-entity chain reasoning. PPR propagates across the KG to surface indirect connections; hybrid anchors on direct mentions. |
-| `descriptive` | `mix` + `qdrant_hybrid` | Open-ended, broad-context questions. `mix` activates untruncated KG context (`kg_chunk_selection_source=untruncated`); Qdrant hybrid adds dense+sparse complementary recall. |
-| `full` | `ppr` + `hybrid` + `naive` + `qdrant_sparse` | Fallback for ambiguous queries. All 4 paths run fully in parallel (no semaphore). Weights are calibrated to counter dense-overlap inflation: `ppr=1.2, hybrid=1.0, qdrant_sparse=0.9, naive=0.7`. |
+| Profile | Paths | Cost | Rationale |
+|---------|-------|------|-----------|
+| `precise` | `qdrant_sparse` | 极低 | Exact lexical match for IDs, error codes, rare proper nouns. Avoids semantic drift from dense similarity. |
+| `semantic` | `naive` + `qdrant_sparse` | 低 | Default workhorse: factual Q&A, process explanations, concept definitions, summaries. Dense recall + BM25 keyword safety net; no graph traversal. |
+| `local` | `mix` | 中 | Single focal entity: attributes, direct relationships, or status. `mix` covers local KG traversal + dense chunks in one call. |
+| `multihop` | `ppr` + `hybrid` | 高 | Multi-entity cross-document reasoning. PPR propagates rank across the KG for indirect connections; hybrid anchors on direct entity mentions. |
+| `full` | `ppr` + `hybrid` + `naive` + `qdrant_sparse` | 极高 | Fallback for genuinely ambiguous queries. All 4 paths in parallel (no semaphore). Calibrated weights: `ppr=1.2, hybrid=1.0, qdrant_sparse=0.9, naive=0.7`. |
 
 ### 3.2 Profile Fields
 
@@ -208,7 +208,7 @@ python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cach
 python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode ppr --trace
 ```
 
-Available `--profile` values: `precise`, `local`, `multihop`, `descriptive`, `full`.  
+Available `--profile` values: `precise`, `semantic`, `local`, `multihop`, `full`.  
 `--profile` is only effective when `--mode auto` is set.
 
 ---
@@ -217,11 +217,11 @@ Available `--profile` values: `precise`, `local`, `multihop`, `descriptive`, `fu
 
 ### 8.1 Motivation
 
-Existing RAG systems apply a single, fixed retrieval strategy to all queries regardless of query type. A factual lookup ("How many parameters does BERT have?") and a multi-document synthesis question ("What architectural choices from HippoRAG2 influenced LightRAG?") have fundamentally different retrieval requirements. The former benefits from high-precision lexical or entity-centric recall; the latter requires propagation across multi-hop relational chains in the knowledge graph. Applying a uniform hybrid retrieval strategy to both introduces unnecessary noise in the first case and insufficient graph traversal depth in the second.
+Existing RAG systems apply a single, fixed retrieval strategy to all queries regardless of query type. Queries differ fundamentally in retrieval requirements. An exact-term lookup ("error code OOM-4291") needs lexical precision; a factual question ("What is the company leave policy?") needs lightweight semantic retrieval; an entity-attribute query ("What are the upstream dependencies of service X?") needs KG traversal anchored on one entity; and a multi-document causal question ("How did event A lead to system B failing?") needs deep graph propagation. Applying a single uniform retrieval strategy across all query types introduces noise in simple cases and insufficient depth in complex ones.
 
 ### 8.2 Adaptive Retrieval Routing
 
-We introduce a **profile-based adaptive retrieval routing** mechanism that selects the retrieval strategy at query time. The system maintains a registry of named retrieval profiles, each specifying: (i) which retrieval paths to activate, (ii) their relative fusion weights, and (iii) per-path parameter overrides. A lightweight LLM classifier maps an incoming query to a profile name by reasoning over query-type signals (specificity, entity count, scope of synthesis required). The classifier uses a structured few-shot prompt and outputs a confidence score; when confidence falls below a threshold (0.6), or when the predicted profile is unrecognized, the system falls back to the full multi-path profile.
+We introduce a **profile-based adaptive retrieval routing** mechanism that selects the retrieval strategy at query time. The system maintains a registry of five named retrieval profiles — `precise`, `semantic`, `local`, `multihop`, `full` — ordered from narrow-and-cheap to broad-and-expensive. Each profile specifies: (i) which retrieval paths to activate, (ii) their relative fusion weights, and (iii) per-path parameter overrides. The five-profile taxonomy is designed for sharp classifier boundaries: `precise` is triggered by hard lexical constraints, `semantic` handles all common knowledge queries with no graph traversal, `local` targets single-entity KG lookups, `multihop` activates graph propagation for multi-entity reasoning, and `full` is reserved for genuinely ambiguous intent. A lightweight LLM classifier maps an incoming query to a profile name; it outputs a confidence score and falls back to `full` when confidence is below 0.6 or the predicted profile is unrecognized.
 
 For evaluation and ablation settings, the classifier can be bypassed by explicitly specifying a profile name, ensuring reproducibility without LLM classification overhead.
 
