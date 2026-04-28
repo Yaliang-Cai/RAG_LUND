@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 # path_name → (lightrag_mode, qdrant_retrieval_mode_override_or_None)
 _PATH_CONFIG: dict[str, tuple[str, str | None]] = {
     "naive":                ("naive",   None),
+    "local_kg":             ("local",   None),   # entity-centric local KG BFS, no global/community
     "hybrid":               ("hybrid",  None),
     "mix":                  ("mix",     None),
     "ppr":                  ("ppr",     None),
