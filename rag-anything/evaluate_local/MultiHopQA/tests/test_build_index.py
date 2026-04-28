@@ -258,10 +258,18 @@ def test_validate_or_write_index_profile_persists_profile(tmp_path):
 
     validate_or_write_index_profile(
         working_dir=tmp_path,
+        workspace="hotpotqa_500_seed42",
+        dataset="hotpotqa",
+        n_samples=500,
+        seed=42,
         index_profile_metadata=metadata,
     )
 
     payload = json.loads((tmp_path / "multihopqa_index_profile.json").read_text())
+    assert payload["workspace_id"] == "hotpotqa_500_seed42"
+    assert payload["dataset"] == "hotpotqa"
+    assert payload["n_samples"] == 500
+    assert payload["seed"] == 42
     assert payload["index_profile"] == metadata["index_profile"]
     assert payload["ablation_group"] == "DB+V1+V2"
 
@@ -284,6 +292,10 @@ def test_validate_or_write_index_profile_rejects_existing_artifacts_without_prof
     with pytest.raises(ValueError, match="existing artifacts"):
         validate_or_write_index_profile(
             working_dir=tmp_path,
+            workspace="hotpotqa_500_seed42",
+            dataset="hotpotqa",
+            n_samples=500,
+            seed=42,
             index_profile_metadata=metadata,
         )
 
@@ -315,6 +327,45 @@ def test_validate_or_write_index_profile_rejects_mismatched_profile(tmp_path):
     with pytest.raises(ValueError, match="index profile"):
         validate_or_write_index_profile(
             working_dir=tmp_path,
+            workspace="hotpotqa_500_seed42",
+            dataset="hotpotqa",
+            n_samples=500,
+            seed=42,
+            index_profile_metadata=metadata,
+        )
+
+
+def test_validate_or_write_index_profile_rejects_mismatched_identity(tmp_path):
+    metadata = {
+        "ablation_profile": "v0_v1_v2",
+        "ablation_group": "DB+V1+V2",
+        "ablation_flags": {"enable_synonym_linking": True},
+        "index_profile": {
+            "profile_version": 1,
+            "enable_entity_disambiguation": True,
+            "enable_synonym_linking": True,
+        },
+    }
+    (tmp_path / "multihopqa_index_profile.json").write_text(
+        json.dumps(
+            {
+                "workspace_id": "hotpotqa_500_seed42",
+                "dataset": "hotpotqa",
+                "n_samples": 500,
+                "seed": 42,
+                **metadata,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="dataset"):
+        validate_or_write_index_profile(
+            working_dir=tmp_path,
+            workspace="musique_500_seed42",
+            dataset="musique",
+            n_samples=500,
+            seed=42,
             index_profile_metadata=metadata,
         )
 

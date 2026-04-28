@@ -350,6 +350,10 @@ def validate_existing_manifest_for_resume(
 def validate_or_write_index_profile(
     *,
     working_dir: Path,
+    workspace: str,
+    dataset: str,
+    n_samples: int,
+    seed: int,
     index_profile_metadata: dict[str, Any],
 ) -> None:
     """Persist index materialization settings before ingest starts.
@@ -359,17 +363,35 @@ def validate_or_write_index_profile(
     """
     profile_path = working_dir / INDEX_PROFILE_FILENAME
     expected_profile = index_profile_metadata["index_profile"]
+    expected_identity = {
+        "workspace_id": workspace,
+        "dataset": dataset,
+        "n_samples": int(n_samples),
+        "seed": int(seed),
+    }
     if profile_path.exists():
         try:
             payload = json.loads(profile_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ValueError(f"invalid existing index profile JSON: {profile_path}") from exc
+        mismatches: list[str] = []
+        for key, expected_value in expected_identity.items():
+            actual_value = payload.get(key)
+            if actual_value != expected_value:
+                mismatches.append(
+                    f"{key}: existing={actual_value!r} current={expected_value!r}"
+                )
         actual_profile = payload.get("index_profile")
         if actual_profile != expected_profile:
+            mismatches.append(
+                "index_profile: "
+                f"existing={actual_profile!r} current={expected_profile!r}"
+            )
+        if mismatches:
             raise ValueError(
                 "Existing MultiHopQA index profile does not match this run. "
                 "Use a new working-dir/workspace or rebuild cleanly. "
-                f"existing={actual_profile!r} current={expected_profile!r}"
+                f"Details: {'; '.join(mismatches)}"
             )
         return
 
@@ -391,6 +413,7 @@ def validate_or_write_index_profile(
         {
             "schema_version": "multihopqa_index_profile_v1",
             "generated_at": _utc_now(),
+            **expected_identity,
             **index_profile_metadata,
         },
     )
@@ -618,6 +641,10 @@ async def main(args: argparse.Namespace) -> None:
     index_profile_metadata = apply_multihopqa_index_profile(settings)
     validate_or_write_index_profile(
         working_dir=working_dir_path,
+        workspace=args.workspace,
+        dataset=args.dataset,
+        n_samples=args.n_samples,
+        seed=args.seed,
         index_profile_metadata=index_profile_metadata,
     )
     if args.resume:
