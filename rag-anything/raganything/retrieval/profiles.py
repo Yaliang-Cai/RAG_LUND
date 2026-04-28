@@ -49,8 +49,8 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
         RetrievalProfile(
             name="semantic",
             description="Default workhorse: factual Q&A, process explanations, concept definitions, summaries — no complex reasoning required",
-            paths=["naive", "qdrant_sparse"],
-            rrf_weights={"naive": 1.0, "qdrant_sparse": 0.8},
+            paths=["qdrant_chunks_hybrid"],
+            rrf_weights={"qdrant_chunks_hybrid": 1.0},
         ),
         RetrievalProfile(
             name="local",

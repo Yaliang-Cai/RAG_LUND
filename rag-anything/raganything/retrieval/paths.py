@@ -8,13 +8,17 @@ logger = logging.getLogger(__name__)
 
 # path_name → (lightrag_mode, qdrant_retrieval_mode_override_or_None)
 _PATH_CONFIG: dict[str, tuple[str, str | None]] = {
-    "naive":         ("naive",   None),
-    "hybrid":        ("hybrid",  None),
-    "mix":           ("mix",     None),
-    "ppr":           ("ppr",     None),
-    "qdrant_hybrid": ("hybrid",  "hybrid"),
-    "qdrant_sparse": ("naive",   "bm25"),
+    "naive":                ("naive",   None),
+    "hybrid":               ("hybrid",  None),
+    "mix":                  ("mix",     None),
+    "ppr":                  ("ppr",     None),
+    "qdrant_hybrid":        ("hybrid",  "hybrid"),
+    "qdrant_sparse":        ("naive",   "bm25"),
+    "qdrant_chunks_hybrid": ("naive",   "hybrid"),  # dense+BM25 chunk search, no KG traversal
 }
+
+KNOWN_PATHS: frozenset[str] = frozenset(_PATH_CONFIG.keys())
+
 
 # Fields that are declared on QueryParam (version-safe lookup performed once)
 def _known_fields(obj) -> set[str]:
