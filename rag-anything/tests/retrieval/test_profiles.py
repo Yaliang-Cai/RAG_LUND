@@ -8,7 +8,7 @@ from raganything.retrieval.profiles import (
 
 
 def test_all_builtin_profiles_present():
-    assert set(PROFILE_REGISTRY.keys()) == {"precise", "local", "multihop", "descriptive", "full"}
+    assert set(PROFILE_REGISTRY.keys()) == {"precise", "semantic", "local", "multihop", "full"}
 
 
 def test_profile_paths_are_known():
@@ -25,19 +25,13 @@ def test_profile_rrf_weights_cover_all_paths():
             )
 
 
-def test_full_profile_has_semaphore():
-    assert PROFILE_REGISTRY["full"].max_concurrent_paths == 3
+def test_full_profile_has_no_semaphore():
+    assert PROFILE_REGISTRY["full"].max_concurrent_paths is None
 
 
 def test_simple_profiles_have_no_semaphore():
-    for name in ("precise", "local", "multihop", "descriptive"):
+    for name in ("precise", "local", "multihop", "semantic"):
         assert PROFILE_REGISTRY[name].max_concurrent_paths is None
-
-
-def test_descriptive_path_overrides():
-    profile = PROFILE_REGISTRY["descriptive"]
-    assert "mix" in profile.path_overrides
-    assert profile.path_overrides["mix"]["kg_chunk_selection_source"] == "untruncated"
 
 
 def test_profile_defaults():

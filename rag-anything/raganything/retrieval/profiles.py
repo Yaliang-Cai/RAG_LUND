@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 
 KNOWN_PATHS: frozenset[str] = frozenset(
-    ["naive", "hybrid", "mix", "ppr", "qdrant_hybrid", "qdrant_sparse"]
+    ["naive", "hybrid", "mix", "ppr", "local_kg", "qdrant_hybrid", "qdrant_sparse", "qdrant_chunks_hybrid"]
 )
 
 
