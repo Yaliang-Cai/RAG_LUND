@@ -338,3 +338,10 @@ DEFAULT_EVAL_RETRY_FAILED_ONLY = False
 # =============================================================================
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 DEFAULT_LOG_BACKUP_COUNT = 5
+
+# =============================================================================
+# GFM-RAG retrieval
+# =============================================================================
+GFM_DATA_DIR = "./data"          # root data dir for GFM-RAG index
+GFM_DATA_NAME = ""               # graph name; empty string disables GFM path
+GFM_MODEL_PATH = "rmanluo/G-reasoner-34M"  # HuggingFace model id or local path
