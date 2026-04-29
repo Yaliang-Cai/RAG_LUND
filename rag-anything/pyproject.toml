@@ -50,6 +50,12 @@ all = [
     "weasyprint>=60.0",
     "pygments>=2.10.0"
 ]
+agentic = [
+    "langgraph>=0.2",
+    "arize-phoenix[otel]>=4.0",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp",
+]
 
 [project.urls]
 Homepage = "https://github.com/HKUDS/RAG-Anything"
