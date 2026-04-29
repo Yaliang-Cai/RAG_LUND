@@ -482,6 +482,45 @@ async def _get_batch_doc_status(
     return await rag.lightrag.doc_status.get_by_id(batch_doc_id)
 
 
+async def _wait_for_batch_doc_status(
+    *,
+    service: Any,
+    workspace: str,
+    working_dir: str,
+    batch: dict[str, Any],
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> Any:
+    """Wait until LightRAG's queue has durably processed this virtual batch."""
+    batch_doc_id = str(batch["batch_doc_id"])
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, float(timeout_seconds))
+    last_error: RuntimeError | None = None
+
+    while True:
+        status_doc = await _get_batch_doc_status(
+            service=service,
+            workspace=workspace,
+            working_dir=working_dir,
+            batch_doc_id=batch_doc_id,
+        )
+        try:
+            _validate_batch_doc_status(status_doc, batch)
+            return status_doc
+        except RuntimeError as exc:
+            last_error = exc
+            status = _doc_status_value(status_doc) if status_doc else ""
+            if "failed" in status or "processed" in status:
+                raise
+            if loop.time() >= deadline:
+                raise RuntimeError(
+                    "LightRAG did not finish "
+                    f"{batch_doc_id} within {timeout_seconds:g}s: "
+                    f"last_status={status!r}"
+                ) from last_error
+            await asyncio.sleep(max(0.1, float(poll_interval_seconds)))
+
+
 def _persist_source_artifacts(
     *,
     working_dir: Path,
@@ -524,6 +563,8 @@ async def _ingest_batches(
     resume: bool,
     batch_doc_concurrency: int,
     max_retries: int,
+    doc_status_timeout: float,
+    doc_status_poll_interval: float,
 ) -> dict[str, Any]:
     successful_before = _load_successful_batch_ids(progress_path) if resume else set()
     if not resume:
@@ -568,13 +609,14 @@ async def _ingest_batches(
                     retries=max(0, int(max_retries)),
                     coro_factory=lambda: _insert_one(batch),
                 )
-                status_doc = await _get_batch_doc_status(
+                status_doc = await _wait_for_batch_doc_status(
                     service=service,
                     workspace=workspace,
                     working_dir=working_dir,
-                    batch_doc_id=batch_doc_id,
+                    batch=batch,
+                    timeout_seconds=doc_status_timeout,
+                    poll_interval_seconds=doc_status_poll_interval,
                 )
-                _validate_batch_doc_status(status_doc, batch)
                 progress_row = {
                     "timestamp": _utc_now(),
                     "status": "ok",
@@ -687,84 +729,91 @@ async def main(args: argparse.Namespace) -> None:
     settings.serialize_ingest_by_workspace_id = False
     service = LocalRagService(settings)
 
-    rag = await service.get_rag(args.workspace, working_dir=str(working_dir_path))
-    kwargs = getattr(rag, "lightrag_kwargs", None)
-    if isinstance(kwargs, dict):
-        kwargs["llm_model_max_async"] = max(1, int(args.llm_model_max_async))
+    try:
+        rag = await service.get_rag(args.workspace, working_dir=str(working_dir_path))
+        kwargs = getattr(rag, "lightrag_kwargs", None)
+        if isinstance(kwargs, dict):
+            kwargs["llm_model_max_async"] = max(1, int(args.llm_model_max_async))
 
-    print(f"[build_index] Target workspace: {args.workspace!r}")
-    print(f"[build_index] Working dir:      {working_dir_path}")
-    print(f"[build_index] Log file:         {args.resolved_log_file}")
-    print(f"[build_index] Ingest batch size: {args.ingest_batch_size} paragraphs/virtual-doc")
-    print(f"[build_index] LLM max async:     {args.llm_model_max_async}")
-    print(
-        "[build_index] Index profile:     "
-        f"{index_profile_metadata['ablation_profile']} "
-        f"({index_profile_metadata['ablation_group']})"
-    )
-    print(f"[build_index] Resume:            {args.resume}")
+        print(f"[build_index] Target workspace: {args.workspace!r}")
+        print(f"[build_index] Working dir:      {working_dir_path}")
+        print(f"[build_index] Log file:         {args.resolved_log_file}")
+        print(f"[build_index] Ingest batch size: {args.ingest_batch_size} paragraphs/virtual-doc")
+        print(f"[build_index] LLM max async:     {args.llm_model_max_async}")
+        print(
+            "[build_index] Index profile:     "
+            f"{index_profile_metadata['ablation_profile']} "
+            f"({index_profile_metadata['ablation_group']})"
+        )
+        print(f"[build_index] Resume:            {args.resume}")
 
-    ingest_stats = await _ingest_batches(
-        service=service,
-        workspace=args.workspace,
-        working_dir=str(working_dir_path),
-        batches=batches,
-        progress_path=progress_path,
-        failures_path=failures_path,
-        resume=args.resume,
-        batch_doc_concurrency=args.batch_doc_concurrency,
-        max_retries=args.max_retries,
-    )
-
-    manifest = {
-        "schema_version": "multihopqa_ingest_manifest_v1",
-        "generated_at": _utc_now(),
-        "workspace_id": args.workspace,
-        "dataset": args.dataset,
-        "n_samples": args.n_samples,
-        "seed": args.seed,
-        "working_dir": str(working_dir_path),
-        "ingest_mode": "virtual_batch",
-        "ingest_batch_size": args.ingest_batch_size,
-        "batch_doc_concurrency": args.batch_doc_concurrency,
-        "llm_model_max_async": args.llm_model_max_async,
-        "ablation_profile": index_profile_metadata["ablation_profile"],
-        "ablation_group": index_profile_metadata["ablation_group"],
-        "ablation_flags": index_profile_metadata["ablation_flags"],
-        "index_profile": index_profile_metadata["index_profile"],
-        "batch_count": len(batches),
-        "expected_chunk_total": len(chunk_source_map),
-        "source_stats": source_stats,
-        "ingest_stats": ingest_stats,
-        "artifacts": {
-            "source_records": str(working_dir_path / SOURCE_RECORDS_FILENAME),
-            "chunk_source_map": str(working_dir_path / SOURCE_MAP_FILENAME),
-            "progress": str(progress_path),
-            "failures": str(failures_path),
-            "log_file": str(args.resolved_log_file),
-            "index_profile": str(working_dir_path / INDEX_PROFILE_FILENAME),
-        },
-    }
-    _save_json(manifest_path, manifest)
-
-    if ingest_stats["failed_now_batch_count"]:
-        raise RuntimeError(
-            f"{ingest_stats['failed_now_batch_count']} virtual batch(es) failed. "
-            f"See {failures_path}"
+        ingest_stats = await _ingest_batches(
+            service=service,
+            workspace=args.workspace,
+            working_dir=str(working_dir_path),
+            batches=batches,
+            progress_path=progress_path,
+            failures_path=failures_path,
+            resume=args.resume,
+            batch_doc_concurrency=args.batch_doc_concurrency,
+            max_retries=args.max_retries,
+            doc_status_timeout=args.doc_status_timeout,
+            doc_status_poll_interval=args.doc_status_poll_interval,
         )
 
-    print("\n[build_index] Indexing complete.")
-    print(f"[build_index] Manifest:         {manifest_path}")
-    print(f"[build_index] Chunk source map: {working_dir_path / SOURCE_MAP_FILENAME}")
-    print("[build_index] Run evaluation with:")
-    print("  python evaluate_local/MultiHopQA/evaluate_multihop.py \\")
-    print(f"    --dataset {args.dataset} \\")
-    print(f"    --workspace {args.workspace} \\")
-    print(f"    --working-dir {working_dir_path} \\")
-    print(f"    --n-samples {args.n_samples} \\")
-    print(f"    --seed {args.seed} \\")
-    print("    --output-dir ./multihop_results \\")
-    print("    --modes naive hybrid ppr auto full")
+        manifest = {
+            "schema_version": "multihopqa_ingest_manifest_v1",
+            "generated_at": _utc_now(),
+            "workspace_id": args.workspace,
+            "dataset": args.dataset,
+            "n_samples": args.n_samples,
+            "seed": args.seed,
+            "working_dir": str(working_dir_path),
+            "ingest_mode": "virtual_batch",
+            "ingest_batch_size": args.ingest_batch_size,
+            "batch_doc_concurrency": args.batch_doc_concurrency,
+            "llm_model_max_async": args.llm_model_max_async,
+            "doc_status_timeout": args.doc_status_timeout,
+            "doc_status_poll_interval": args.doc_status_poll_interval,
+            "ablation_profile": index_profile_metadata["ablation_profile"],
+            "ablation_group": index_profile_metadata["ablation_group"],
+            "ablation_flags": index_profile_metadata["ablation_flags"],
+            "index_profile": index_profile_metadata["index_profile"],
+            "batch_count": len(batches),
+            "expected_chunk_total": len(chunk_source_map),
+            "source_stats": source_stats,
+            "ingest_stats": ingest_stats,
+            "artifacts": {
+                "source_records": str(working_dir_path / SOURCE_RECORDS_FILENAME),
+                "chunk_source_map": str(working_dir_path / SOURCE_MAP_FILENAME),
+                "progress": str(progress_path),
+                "failures": str(failures_path),
+                "log_file": str(args.resolved_log_file),
+                "index_profile": str(working_dir_path / INDEX_PROFILE_FILENAME),
+            },
+        }
+        _save_json(manifest_path, manifest)
+
+        if ingest_stats["failed_now_batch_count"]:
+            raise RuntimeError(
+                f"{ingest_stats['failed_now_batch_count']} virtual batch(es) failed. "
+                f"See {failures_path}"
+            )
+
+        print("\n[build_index] Indexing complete.")
+        print(f"[build_index] Manifest:         {manifest_path}")
+        print(f"[build_index] Chunk source map: {working_dir_path / SOURCE_MAP_FILENAME}")
+        print("[build_index] Run evaluation with:")
+        print("  python evaluate_local/MultiHopQA/evaluate_multihop.py \\")
+        print(f"    --dataset {args.dataset} \\")
+        print(f"    --workspace {args.workspace} \\")
+        print(f"    --working-dir {working_dir_path} \\")
+        print(f"    --n-samples {args.n_samples} \\")
+        print(f"    --seed {args.seed} \\")
+        print("    --output-dir ./multihop_results \\")
+        print("    --modes naive hybrid ppr auto full")
+    finally:
+        await service.cleanup_workspace_instance(args.workspace)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -824,6 +873,23 @@ def _parse_args() -> argparse.Namespace:
         help="Retries per failed virtual batch insert",
     )
     p.add_argument(
+        "--doc-status-timeout",
+        type=float,
+        default=7200.0,
+        dest="doc_status_timeout",
+        help=(
+            "Seconds to wait for a queued LightRAG virtual batch to reach "
+            "processed status before marking it failed"
+        ),
+    )
+    p.add_argument(
+        "--doc-status-poll-interval",
+        type=float,
+        default=5.0,
+        dest="doc_status_poll_interval",
+        help="Seconds between LightRAG doc_status checks",
+    )
+    p.add_argument(
         "--resume",
         action="store_true",
         help="Skip virtual batches already marked ok in the progress JSONL",
@@ -848,6 +914,10 @@ def _parse_args() -> argparse.Namespace:
         raise SystemExit("--llm-model-max-async must be > 0")
     if args.max_retries < 0:
         raise SystemExit("--max-retries must be >= 0")
+    if args.doc_status_timeout <= 0:
+        raise SystemExit("--doc-status-timeout must be > 0")
+    if args.doc_status_poll_interval <= 0:
+        raise SystemExit("--doc-status-poll-interval must be > 0")
     working_dir_path = Path(args.working_dir).resolve()
     args.working_dir = str(working_dir_path)
     args.resolved_log_file = resolve_log_file(working_dir_path, args.log_file)

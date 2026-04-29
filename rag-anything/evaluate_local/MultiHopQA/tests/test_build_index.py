@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -7,10 +8,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "rag-anything"))
 
 import pytest
 
+import evaluate_local.MultiHopQA.build_index as build_index_module
 from evaluate_local.MultiHopQA.build_index import (
     MULTIHOPQA_NEVER_SPLIT_DELIMITER,
     _TeeOutput,
     _validate_batch_doc_status,
+    _wait_for_batch_doc_status,
     apply_multihopqa_index_profile,
     build_virtual_batches,
     prepare_source_records,
@@ -166,6 +169,72 @@ def test_validate_batch_doc_status_rejects_missing_expected_chunks():
                 "chunks_list": ["chunk-a"],
             },
             batch,
+        )
+
+
+def test_wait_for_batch_doc_status_polls_until_processed(monkeypatch):
+    batch = {
+        "batch_doc_id": "multihopqa_batch_000001",
+        "expected_chunk_ids": ["chunk-a"],
+    }
+    statuses = [
+        {"status": "pending", "chunks_list": []},
+        {"status": "processed", "chunks_list": ["chunk-a"]},
+    ]
+
+    async def fake_get_batch_doc_status(**_kwargs):
+        return statuses.pop(0)
+
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(
+        build_index_module,
+        "_get_batch_doc_status",
+        fake_get_batch_doc_status,
+    )
+    monkeypatch.setattr(build_index_module.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(
+        _wait_for_batch_doc_status(
+            service=object(),
+            workspace="hotpotqa_500_seed42",
+            working_dir="/tmp/workspace",
+            batch=batch,
+            timeout_seconds=10,
+            poll_interval_seconds=0.1,
+        )
+    )
+
+    assert result["status"] == "processed"
+    assert statuses == []
+
+
+def test_wait_for_batch_doc_status_raises_on_processed_missing_chunks(monkeypatch):
+    batch = {
+        "batch_doc_id": "multihopqa_batch_000001",
+        "expected_chunk_ids": ["chunk-a", "chunk-b"],
+    }
+
+    async def fake_get_batch_doc_status(**_kwargs):
+        return {"status": "processed", "chunks_list": ["chunk-a"]}
+
+    monkeypatch.setattr(
+        build_index_module,
+        "_get_batch_doc_status",
+        fake_get_batch_doc_status,
+    )
+
+    with pytest.raises(RuntimeError, match="missing expected chunks"):
+        asyncio.run(
+            _wait_for_batch_doc_status(
+                service=object(),
+                workspace="hotpotqa_500_seed42",
+                working_dir="/tmp/workspace",
+                batch=batch,
+                timeout_seconds=10,
+                poll_interval_seconds=0.1,
+            )
         )
 
 
