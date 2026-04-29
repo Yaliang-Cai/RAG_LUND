@@ -12,6 +12,12 @@ python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cach
 # 强制指定 profile=precise（绕过分类器）
 python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode auto --profile precise --trace
 
+# agentic 模式：自适应复杂度路由（simple/medium/complex 三轨）
+python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode agentic --trace
+
+# agentic 模式 + Phoenix 监控（浏览器打开 http://localhost:6006）
+python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode agentic --trace --phoenix
+
 # ppr 模式对比基线
 python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode ppr --trace
 
@@ -107,9 +113,10 @@ def _parse_args():
     p.add_argument(
         "--mode",
         default="ppr",
-        choices=["ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto"],
+        choices=["ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto", "agentic"],
         help="Query mode (default: ppr = global PPR with recognition memory). "
-             "Use 'auto' for LLM-based profile routing.",
+             "Use 'auto' for LLM-based profile routing. "
+             "Use 'agentic' for adaptive complexity-aware agentic retrieval.",
     )
     p.add_argument(
         "--profile",
@@ -147,10 +154,18 @@ def _parse_args():
     p.add_argument("--no-kg-rerank", action="store_true",
                    help="Disable entity/relation KG reranking (independent of --no-rerank)")
     p.add_argument("--trace", action="store_true", help="Print retrieval trace JSON")
+    p.add_argument("--phoenix", action="store_true",
+                   help="Enable Arize Phoenix local OTEL tracing (http://localhost:6006). "
+                        "Requires: pip install 'raganything[agentic]'")
     return p.parse_args()
 
 
 async def run(args):
+    if args.phoenix:
+        from raganything.observability import setup_phoenix
+        setup_phoenix()
+        print("[Phoenix] Tracing enabled → http://localhost:6006")
+
     print(f"\n[Init] Loading LocalRagSettings from env...")
     settings = LocalRagSettings.from_env()
     service = LocalRagService(settings)
@@ -175,6 +190,8 @@ async def run(args):
         query_kwargs["ppr_qa_top_k"] = max(1, args.ppr_qa_top_k)
     if args.mode == "auto" and args.profile:
         query_kwargs["profile"] = args.profile
+    if args.mode == "agentic":
+        query_kwargs["return_trace"] = True  # always fetch trace; display controlled by --trace flag
 
     print(f"\n[Query] workspace={workspace_id}")
     print(f"        mode={args.mode}  rerank={not args.no_rerank}  kg_rerank={not args.no_kg_rerank}")
@@ -201,7 +218,19 @@ async def run(args):
     print(answer)
 
     if trace:
-        if "routing" in trace:
+        if args.mode == "agentic":
+            # agentic mode: complexity-aware trace
+            complexity = trace.get("complexity", "?")
+            eval_score = trace.get("eval_score", 0.0)
+            iteration = trace.get("iteration", 0)
+            print(f"\n[Agentic trace]  complexity={complexity}  eval_score={eval_score:.2f}  retry_iterations={iteration}")
+            rt = trace.get("routing", {})
+            if rt:
+                clf = rt.get("complexity", {})
+                if clf:
+                    print(f"  classifier: confidence={clf.get('confidence', '?'):.2f}  latency={clf.get('latency', '?')}s")
+                    print(f"  reasoning: {clf.get('reasoning', '')}")
+        elif "routing" in trace:
             # auto mode: routing trace
             rt = trace["routing"]
             print(f"\n[Routing trace]  profile={rt.get('profile')}  confidence={rt.get('confidence')}  paths={rt.get('paths_activated')}")
