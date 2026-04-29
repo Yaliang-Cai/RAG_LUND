@@ -153,7 +153,7 @@ setup_phoenix()   # Phoenix UI at http://localhost:6006
 Dependencies for the agentic mode are declared as an optional extras group and are not required for other query modes:
 
 ```
-pip install "raganything[agentic]"
+ pip install "langgraph>=0.2" "arize-phoenix[otel]>=4.0" opentelemetry-sdk opentelemetry-exporter-otlp
 ```
 
 ---
