@@ -178,7 +178,7 @@ class AdaptiveAgentGraph:
             "eval_score": 0.0,
             "eval_gap": "",
             "current_search_query": query,
-            "iteration": 0,
+            "iteration": 0,  # overwritten to 0 by _node_classify; kept for LangGraph state completeness
             "routing_trace": {},
         }
         final = await self._graph.ainvoke(initial)
@@ -236,6 +236,7 @@ def _dedup_chunks(chunks: list[dict]) -> list[dict]:
     for c in chunks:
         cid = c.get("chunk_id") or c.get("id", "")
         if not cid:
+            logger.debug("_dedup_chunks: dropping chunk with no chunk_id or id: %r", c)
             continue
         if cid not in seen or c.get("rrf_score", 0.0) > seen[cid].get("rrf_score", 0.0):
             seen[cid] = c
