@@ -293,6 +293,14 @@ class QueryMixin:
             return answer
         # ── end mode="auto" ───────────────────────────────────────────────
 
+        # ── mode="agentic": adaptive LangGraph agent ─────────────────────
+        if mode == "agentic":
+            from raganything.retrieval.agent_graph import AdaptiveAgentGraph
+            return_trace_agentic = bool(kwargs.pop("return_trace", False))
+            graph = AdaptiveAgentGraph(self.lightrag)
+            return await graph.run(query, return_trace=return_trace_agentic)
+        # ── end mode="agentic" ────────────────────────────────────────────
+
         # ── mode="gfm": GFM graph neural retrieval ────────────────────────
         if mode == "gfm":
             return_trace_gfm = bool(kwargs.pop("return_trace", False))
