@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-27  
 **Branch:** `feat/retrieval-router`  
-**Status:** Implemented, 37 tests passing
+**Status:** Implemented, 49 tests passing
 
 ---
 
@@ -82,10 +82,11 @@ Each profile encodes a retrieval strategy as a named, reusable configuration. Pr
 | Profile | Paths | Cost | Rationale |
 |---------|-------|------|-----------|
 | `precise` | `qdrant_sparse` | 极低 | Exact lexical match for IDs, error codes, rare proper nouns. Avoids semantic drift from dense similarity. |
-| `semantic` | `naive` + `qdrant_sparse` | 低 | Default workhorse: factual Q&A, process explanations, concept definitions, summaries. Dense recall + BM25 keyword safety net; no graph traversal. |
-| `local` | `mix` | 中 | Single focal entity: attributes, direct relationships, or status. `mix` covers local KG traversal + dense chunks in one call. |
-| `multihop` | `ppr` + `hybrid` | 高 | Multi-entity cross-document reasoning. PPR propagates rank across the KG for indirect connections; hybrid anchors on direct entity mentions. |
+| `semantic` | `qdrant_chunks_hybrid` | 低 | Default workhorse: factual Q&A, process explanations, concept definitions, summaries. Dense + BM25 hybrid chunk search; no graph traversal. |
+| `local` | `local_kg` + `qdrant_chunks_hybrid` | 中 | Single focal entity: attributes, direct relationships, or status. Entity-centric local KG BFS + dense chunk hybrid search. |
+| `multihop` | `ppr` + `hybrid` | 高 | Multi-entity cross-document reasoning. PPR propagates rank across the KG for indirect connections; hybrid anchors on direct entity mentions. Weights: `ppr=1.0, hybrid=0.8`. |
 | `full` | `ppr` + `hybrid` + `naive` + `qdrant_sparse` | 极高 | Fallback for genuinely ambiguous queries. All 4 paths in parallel (no semaphore). Calibrated weights: `ppr=1.2, hybrid=1.0, qdrant_sparse=0.9, naive=0.7`. |
+| `gfm_multihop` | `ppr` + `hybrid` (GFM togglable) | 高 | Multi-hop reasoning via GFM graph + PPR walk. `gfm` path is commented out by default; toggle in profiles.py to enable. Weights: `ppr=0.8, hybrid=0.6`. |
 
 ### 3.2 Profile Fields
 
@@ -227,7 +228,7 @@ For evaluation and ablation settings, the classifier can be bypassed by explicit
 
 ### 8.3 Parallel Multi-Path Recall
 
-Once a profile is selected, all configured retrieval paths are executed concurrently via asynchronous parallel dispatch. The system supports four retrieval paths in the full profile: Personalized PageRank over the knowledge graph (PPR), entity-centric KG retrieval with dense entity seeds (hybrid), dense vector chunk retrieval (naive), and BM25 sparse chunk retrieval (qdrant_sparse). `mix` and `qdrant_hybrid` are available for targeted profiles (`descriptive`) but excluded from `full` to avoid redundant dense overlap. All four `full` paths run in fully parallel dispatch with no concurrency semaphore.
+Once a profile is selected, all configured retrieval paths are executed concurrently via asynchronous parallel dispatch. The system supports four retrieval paths in the full profile: Personalized PageRank over the knowledge graph (PPR), entity-centric KG retrieval with dense entity seeds (hybrid), dense vector chunk retrieval (naive), and BM25 sparse chunk retrieval (qdrant_sparse). The `local` profile uses `local_kg` (entity-centric local KG BFS) and `qdrant_chunks_hybrid` (dense + BM25 chunk search without KG traversal); the `semantic` profile uses `qdrant_chunks_hybrid` alone. All four `full` paths run in fully parallel dispatch with no concurrency semaphore.
 
 Individual path failures are isolated: a failed path is recorded in the routing trace but does not abort the overall retrieval. The system raises an error only if all paths fail simultaneously.
 
@@ -261,4 +262,4 @@ Every query in auto mode produces a structured routing trace recording: the sele
 - **`raganything/retrieval/router.py`** — `RetrievalRouter`, `_weighted_rrf_merge`, `RetrievalError`
 - **`raganything/query.py`** — `mode="auto"` branches in `aquery()` and `aquery_vlm_enhanced()`
 
-All modules have full unit and integration test coverage (37 tests, `tests/retrieval/`).
+All modules have full unit and integration test coverage (49 tests, `tests/retrieval/`).
