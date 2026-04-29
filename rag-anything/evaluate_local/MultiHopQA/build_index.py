@@ -567,9 +567,9 @@ async def _ingest_batches(
     doc_status_poll_interval: float,
 ) -> dict[str, Any]:
     successful_before = _load_successful_batch_ids(progress_path) if resume else set()
+    failures_path.unlink(missing_ok=True)
     if not resume:
         progress_path.unlink(missing_ok=True)
-        failures_path.unlink(missing_ok=True)
 
     pending_batches = [
         batch for batch in batches if str(batch["batch_doc_id"]) not in successful_before

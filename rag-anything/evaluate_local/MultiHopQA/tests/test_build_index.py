@@ -12,6 +12,7 @@ import evaluate_local.MultiHopQA.build_index as build_index_module
 from evaluate_local.MultiHopQA.build_index import (
     MULTIHOPQA_NEVER_SPLIT_DELIMITER,
     _TeeOutput,
+    _ingest_batches,
     _validate_batch_doc_status,
     _wait_for_batch_doc_status,
     apply_multihopqa_index_profile,
@@ -236,6 +237,31 @@ def test_wait_for_batch_doc_status_raises_on_processed_missing_chunks(monkeypatc
                 poll_interval_seconds=0.1,
             )
         )
+
+
+def test_ingest_batches_clears_stale_failures_on_resume(tmp_path):
+    progress_path = tmp_path / "multihopqa_ingest_progress.jsonl"
+    failures_path = tmp_path / "multihopqa_ingest_failures.jsonl"
+    failures_path.write_text('{"status":"failed"}\n', encoding="utf-8")
+
+    stats = asyncio.run(
+        _ingest_batches(
+            service=object(),
+            workspace="hotpotqa_500_seed42",
+            working_dir=str(tmp_path),
+            batches=[],
+            progress_path=progress_path,
+            failures_path=failures_path,
+            resume=True,
+            batch_doc_concurrency=2,
+            max_retries=0,
+            doc_status_timeout=1,
+            doc_status_poll_interval=0.1,
+        )
+    )
+
+    assert not failures_path.exists()
+    assert stats["failed_now_batch_count"] == 0
 
 
 def test_validate_existing_manifest_for_resume_rejects_mismatched_seed(tmp_path):
