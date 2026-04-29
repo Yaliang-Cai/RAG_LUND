@@ -155,7 +155,15 @@ Dependencies for the agentic mode are declared as an optional extras group and a
 ```
  pip install "langgraph>=0.2" "arize-phoenix[otel]>=4.0" opentelemetry-sdk opentelemetry-exporter-otlp
 ```
+启动 Phoenix 服务端：
+你需要打开另一个终端窗口，在同一个虚拟环境下运行：
 
+Bash
+```
+python -m phoenix.server.main serve
+# 或者如果安装了 CLI 工具：
+phoenix serve
+```
 ---
 
 ## 10. Complexity and Latency Characteristics
