@@ -51,3 +51,38 @@ async def test_metadata_contains_latency():
     _, meta = await clf.classify("test")
     assert "latency" in meta
     assert meta["latency"] >= 0.0
+
+
+async def test_arithmetic_query_returns_medium():
+    """Prompt now instructs LLM to classify arithmetic/aggregation as medium."""
+    clf = ComplexityClassifier(_llm(json.dumps({
+        "reasoning": "requires summing wins + ties from table",
+        "complexity": "medium",
+        "confidence": 0.9,
+    })))
+    level, _ = await clf.classify(
+        "How many total evaluations were collected for RetrieveNRefine++ vs. Seq2Seq?"
+    )
+    assert level == "medium"
+
+
+async def test_score_difference_query_returns_medium():
+    clf = ComplexityClassifier(_llm(json.dumps({
+        "reasoning": "requires subtracting two scores",
+        "complexity": "medium",
+        "confidence": 0.88,
+    })))
+    level, _ = await clf.classify(
+        "How much did the Engagingness score improve from Seq2Seq to RetrieveNRefine++?"
+    )
+    assert level == "medium"
+
+
+async def test_simple_single_fact_still_returns_simple():
+    clf = ComplexityClassifier(_llm(json.dumps({
+        "reasoning": "direct lookup, no calculation",
+        "complexity": "simple",
+        "confidence": 0.92,
+    })))
+    level, _ = await clf.classify("What does BERT stand for?")
+    assert level == "simple"

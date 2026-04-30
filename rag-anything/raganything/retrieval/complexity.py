@@ -14,11 +14,23 @@ _PROMPT = """\
 You are a query complexity classifier for a RAG system.
 Classify the query into one complexity level:
 
-- simple: Single-hop factual question; one retrieval pass is sufficient.
-  Examples: "What does BERT stand for?", "What is the capital of France?"
+- simple: Single-hop factual question answered by directly reading one fact.
+  The answer requires NO calculation, NO combining of multiple values, and NO reading
+  across multiple table cells or document sections.
+  Examples: "What does BERT stand for?", "What is the capital of France?",
+            "Which model has the highest accuracy?"
 
-- medium: Moderate depth; one entity or topic, may need one follow-up retrieval.
-  Examples: "What are all the config options for the Redis module?",
+- medium: Requires calculation, aggregation, or synthesis — even if it involves only
+  one topic. Assign medium whenever ANY of the following signals appear:
+    * Arithmetic over multiple values ("how many total", "sum of", "difference between",
+      "how much did X improve", "average of")
+    * Reading multiple cells from a table and combining them
+    * Comparison of a specific metric across two named items
+    * Questions whose answer cannot be read verbatim from a single sentence
+  Examples: "How many total evaluations were collected for A vs. B?" (requires summing
+            wins + losses + ties from a table),
+            "How much did the Engagingness score improve from X to Y?",
+            "What are all the config options for the Redis module?",
             "Explain the attention mechanism in detail."
 
 - complex: Multi-entity; requires decomposition, causal chains, or cross-document
@@ -29,6 +41,7 @@ Classify the query into one complexity level:
 Rules:
 - When unsure between simple and medium → choose medium.
 - When unsure between medium and complex → choose medium.
+- ANY question involving summing, counting, or arithmetic → at least medium.
 - Only choose complex when multiple distinct entities clearly need cross-document reasoning.
 
 Output JSON: {{"reasoning": "...", "complexity": "<simple|medium|complex>", "confidence": <0.0-1.0>}}
