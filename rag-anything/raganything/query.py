@@ -299,7 +299,30 @@ class QueryMixin:
         if mode == "agentic":
             from raganything.retrieval.agent_graph import AdaptiveAgentGraph
             return_trace_agentic = bool(kwargs.pop("return_trace", False))
-            graph = AdaptiveAgentGraph(self.lightrag)
+
+            vlm_generate_fn = None
+            _vision_func = getattr(self, "vision_model_func", None)
+            if _vision_func is not None:
+                _cap = DEFAULT_MULTIMODAL_TOP_K
+                _sp = system_prompt
+
+                async def _vlm_generate(q: str, chunks: list) -> str | None:
+                    context_str = "\n\n---\n\n".join(
+                        c.get("content", "") for c in chunks
+                    )
+                    enhanced_prompt, images_b64 = await self._process_image_paths_for_vlm(
+                        context_str, max_images=_cap
+                    )
+                    if not images_b64:
+                        return None  # no images → caller falls back to text LLM
+                    messages = self._build_vlm_messages_with_images(
+                        enhanced_prompt, q, _sp, images_base64=images_b64
+                    )
+                    return await self._call_vlm_with_multimodal_content(messages)
+
+                vlm_generate_fn = _vlm_generate
+
+            graph = AdaptiveAgentGraph(self.lightrag, vlm_generate_fn=vlm_generate_fn)
             return await graph.run(query, return_trace=return_trace_agentic)
         # ── end mode="agentic" ────────────────────────────────────────────
 

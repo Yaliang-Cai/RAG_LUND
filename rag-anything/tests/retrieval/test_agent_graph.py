@@ -179,3 +179,45 @@ async def test_chunks_deduplicated_keeping_highest_rrf():
     # The final generate prompt should list c1 only once
     last_prompt = captured[-1]
     assert last_prompt.count("[1] Source:") == 1
+
+
+# ── VLM generate_fn ──────────────────────────────────────────────────────────
+
+async def test_vlm_generate_fn_called_when_provided():
+    """When vlm_generate_fn is set and returns a string, it is used as the answer."""
+    vlm_fn = AsyncMock(return_value="vlm answer")
+    graph = AdaptiveAgentGraph(
+        _lightrag("text answer"),
+        vlm_generate_fn=vlm_fn,
+        _complexity_clf=_clf("simple"),
+        _router=_router(),
+    )
+    result = await graph.run("question with image context")
+    assert result == "vlm answer"
+    vlm_fn.assert_called_once()
+
+
+async def test_vlm_generate_fn_fallback_to_text_when_none_returned():
+    """When vlm_generate_fn returns None (no images), text LLM is used."""
+    vlm_fn = AsyncMock(return_value=None)
+    graph = AdaptiveAgentGraph(
+        _lightrag("text fallback answer"),
+        vlm_generate_fn=vlm_fn,
+        _complexity_clf=_clf("simple"),
+        _router=_router(),
+    )
+    result = await graph.run("question without images")
+    assert result == "text fallback answer"
+    vlm_fn.assert_called_once()
+
+
+async def test_vlm_generate_fn_not_called_when_none():
+    """When vlm_generate_fn is None, text LLM is used directly."""
+    graph = AdaptiveAgentGraph(
+        _lightrag("text answer"),
+        vlm_generate_fn=None,
+        _complexity_clf=_clf("simple"),
+        _router=_router(),
+    )
+    result = await graph.run("question")
+    assert result == "text answer"

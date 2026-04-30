@@ -57,12 +57,16 @@ class AdaptiveAgentGraph:
         lightrag: Any,
         llm_func: Any = None,
         *,
+        vlm_generate_fn: Any = None,
         _complexity_clf: ComplexityClassifier | None = None,
         _evaluator: AnswerEvaluator | None = None,
         _router: RetrievalRouter | None = None,
     ) -> None:
         self._lightrag = lightrag
         self._llm = llm_func or lightrag.llm_model_func
+        # Optional: async callable (query, chunks) -> str | None.
+        # None return means no images found; caller falls back to text LLM.
+        self._vlm_generate_fn = vlm_generate_fn
         self._complexity_clf = _complexity_clf or ComplexityClassifier(self._llm)
         self._evaluator = _evaluator or AnswerEvaluator(self._llm)
         self._router = _router or RetrievalRouter(lightrag, self._llm)
@@ -123,7 +127,13 @@ class AdaptiveAgentGraph:
             deduped = _dedup_chunks(state["retrieved_chunks"])
             span.set_attribute("chunks_after_dedup", len(deduped))
             span.set_attribute("iteration", state["iteration"])
-            answer = await self._generate_answer(state["query"], deduped)
+            span.set_attribute("vlm_enabled", self._vlm_generate_fn is not None)
+            answer = None
+            if self._vlm_generate_fn is not None:
+                answer = await self._vlm_generate_fn(state["query"], deduped)
+                span.set_attribute("vlm_used", answer is not None)
+            if answer is None:
+                answer = await self._generate_answer(state["query"], deduped)
         return {"answer": answer}
 
     async def _node_evaluate(self, state: AgentState) -> dict:
