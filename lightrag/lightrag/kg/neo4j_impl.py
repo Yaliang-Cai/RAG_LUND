@@ -1150,7 +1150,7 @@ class Neo4JStorage(BaseGraphStorage):
                              )
                          ) AS incoming_is_synonym
                     MERGE (source)-[r:DIRECTED]-(target)
-                    WITH r, incoming_is_synonym,
+                    WITH source, target, r, incoming_is_synonym,
                          (
                              toUpper(coalesce(r.edge_type, '')) = 'SYNONYM'
                              OR toLower(coalesce(r.provenance, '')) = 'synonym_detection'
