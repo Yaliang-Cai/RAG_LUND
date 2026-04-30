@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 DocBench Evaluation Script for RAG-Anything Local (Manual Server Mode)
@@ -14,7 +14,7 @@ Quick workflow:
    python evaluate.py --mode generate
    or: nohup python evaluate.py --mode generate > run_generate.log 2>&1 &
 
-3. Stop Qwen3-VL service, then start Qwen2.5-32B (port 8002)
+3. Stop Qwen3-VL service, then start Qwen2.5-32B (port 8008)
    # press Ctrl+C in the server terminal
    bash start_server_qwen2.5_32b_awq.sh
 
@@ -47,7 +47,14 @@ from openai import AsyncOpenAI
 # Add parent directory to path to import local_rag
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from evaluate_local.ablation_flags import as_bool
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
+from raganything.constants import (
+    DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
+    DEFAULT_PPR_QA_TOP_K,
+    DEFAULT_PPR_TOP_K,
+    DEFAULT_RECOGNITION_TOP_K,
+)
 
 # ==========================================
 # Configuration (absolute paths for running from any directory)
@@ -67,6 +74,9 @@ PROMPT_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 FINAL_MESSAGES_DUMP_DIR = OUTPUT_DIR / "final_vlm_messages"
 FINAL_MESSAGES_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 GENERATION_CONFIG_FILE = OUTPUT_DIR / "generation_config.json"
+SINGLE_INGEST_MANIFEST_FILE = OUTPUT_DIR / "single_ingest_manifest.json"
+SINGLE_INGEST_FAILURES_FILE = OUTPUT_DIR / "single_ingest_failures.jsonl"
+DOCBENCH_INDEX_PROFILE_FILE = ".docbench_index_profile.json"
 
 # RAG working directory (one isolated graph per document)
 # Example output: docbench_results/rag_workspaces/docbench_0/, docbench_1/, ...
@@ -80,7 +90,7 @@ OUTPUT_MD_DIR.mkdir(parents=True, exist_ok=True)
 
 # API settings
 RAG_API_BASE = "http://localhost:8001/v1"      # Qwen3-VL-30B-A3B-Instruct-FP8 (answer generation)
-JUDGE_API_BASE = "http://localhost:8002/v1"    # Qwen2.5-32B (evaluation)
+JUDGE_API_BASE = "http://localhost:8008/v1"    # Qwen2.5-32B (evaluation)
 RAG_API_KEY = "EMPTY"
 RAG_VISION_MODEL_PATH = "/data/y50056788/Yaliang/models/Qwen3-VL-30B-A3B-Instruct-FP8"
 
@@ -94,12 +104,27 @@ DOCBENCH_QUERY_PARAMS = {
     "mode": "hybrid",
     "top_k": 40,
     "chunk_top_k": 20,
+    "enable_rerank": True,
+    "rerank_score_scope": "all",
     "vlm_enhanced": True,
-    "multimodal_top_k": 5,
+    "multimodal_top_k": 3,
     "image_token_estimate_method": "qwen_vl",
     "image_token_model_name_or_path": RAG_VISION_MODEL_PATH,
     "image_wrapper_tokens_per_image": 2,
+    "keyword_entity_rrf_k": 10,
+    "keyword_relation_rrf_k": 20,
 }
+DOCBENCH_QUERY_MODE_CHOICES = (
+    "local",
+    "global",
+    "hybrid",
+    "naive",
+    "mix",
+    "bypass",
+    "rrf",
+    "ppr_local",
+    "ppr",
+)
 
 ONE_SENTENCE_USER_PROMPT = (
     "Provide the final answer in exactly one sentence. "
@@ -115,8 +140,85 @@ _JSON_FENCE_RE = re.compile(
 )
 
 
-def _build_docbench_query_params(one_sentence: bool = False) -> dict[str, Any]:
+def _build_docbench_query_params(
+    one_sentence: bool = False,
+    *,
+    query_mode: str | None = None,
+    recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K,
+    keyword_fanout_mode: str = "joined",
+    keyword_entity_rrf_k: int = 10,
+    keyword_relation_rrf_k: int = 20,
+    entity_retrieval_mode: str = "dense",
+    chunk_retrieval_mode: str = "dense",
+    exclude_synonym_edges: bool | None = None,
+    answer_context_mode: str = "kg_prompt",
+    kg_chunk_selection_source: str = "truncated",
+    max_total_tokens: int | None = None,
+    multimodal_top_k: int | None = None,
+    enable_rerank: bool = True,
+    enable_kg_rerank: bool = True,
+    ppr_top_k: int | None = None,
+    ppr_qa_top_k: int | None = None,
+    ppr_post_rerank_fusion: str = "none",
+    ppr_post_rerank_rrf_k: int = 60,
+    bypass_query_cache: bool = False,
+    bypass_keywords_cache: bool = False,
+) -> dict[str, Any]:
     query_params = dict(DOCBENCH_QUERY_PARAMS)
+    if query_mode is not None:
+        normalized_mode = str(query_mode).strip()
+        if normalized_mode:
+            query_params["mode"] = normalized_mode
+
+    mode = str(query_params.get("mode", "")).strip()
+    query_params["enable_rerank"] = bool(enable_rerank)
+    query_params["enable_kg_rerank"] = bool(enable_kg_rerank)
+    query_params["keyword_fanout_mode"] = str(keyword_fanout_mode).strip()
+    query_params["keyword_entity_rrf_k"] = int(keyword_entity_rrf_k)
+    query_params["keyword_relation_rrf_k"] = int(keyword_relation_rrf_k)
+    query_params["entity_qdrant_retrieval_mode"] = str(entity_retrieval_mode).strip()
+    query_params["chunk_qdrant_retrieval_mode"] = str(chunk_retrieval_mode).strip()
+    query_params["kg_chunk_selection_source"] = str(kg_chunk_selection_source).strip()
+    query_params["ppr_post_rerank_fusion"] = str(ppr_post_rerank_fusion).strip().lower()
+    query_params["ppr_post_rerank_rrf_k"] = int(ppr_post_rerank_rrf_k)
+    query_params["bypass_query_cache"] = bool(bypass_query_cache)
+    query_params["bypass_keywords_cache"] = bool(bypass_keywords_cache)
+    if max_total_tokens is not None:
+        query_params["max_total_tokens"] = int(max_total_tokens)
+    if multimodal_top_k is not None:
+        query_params["multimodal_top_k"] = int(multimodal_top_k)
+
+    if ppr_top_k is not None:
+        query_params["ppr_top_k"] = int(ppr_top_k)
+    else:
+        query_params["ppr_top_k"] = int(query_params.get("ppr_top_k", DEFAULT_PPR_TOP_K))
+    if ppr_qa_top_k is not None:
+        query_params["ppr_qa_top_k"] = int(ppr_qa_top_k)
+    else:
+        query_params["ppr_qa_top_k"] = int(
+            query_params.get("ppr_qa_top_k", DEFAULT_PPR_QA_TOP_K)
+        )
+
+    if mode == "ppr":
+        query_params["recognition_top_k"] = max(0, int(recognition_top_k))
+        query_params["answer_context_mode"] = "chunk_only_prompt"
+        ppr_limit = int(query_params.get("ppr_top_k", 0) or 0)
+        ppr_qa_limit = int(query_params.get("ppr_qa_top_k", 0) or 0)
+        if ppr_limit <= 0:
+            raise ValueError(f"ppr_top_k must be > 0, got {ppr_limit}")
+        if ppr_qa_limit <= 0:
+            raise ValueError(f"ppr_qa_top_k must be > 0, got {ppr_qa_limit}")
+        if ppr_qa_limit > ppr_limit:
+            raise ValueError(
+                f"ppr_qa_top_k must be <= ppr_top_k, got {ppr_qa_limit} > {ppr_limit}"
+            )
+    else:
+        query_params.pop("recognition_top_k", None)
+        query_params["answer_context_mode"] = str(answer_context_mode).strip()
+
+    query_params["exclude_synonym_edges"] = (
+        mode != "ppr" if exclude_synonym_edges is None else bool(exclude_synonym_edges)
+    )
     if one_sentence:
         query_params["user_prompt"] = ONE_SENTENCE_USER_PROMPT
         query_params["response_type"] = "Single Sentence"
@@ -149,11 +251,14 @@ def _save_generation_config(
     *,
     one_sentence: bool,
     max_async_docs: int,
+    max_async_ingest_docs: int,
+    max_async_query_docs: int,
     max_async_generate: int,
     doc_flush_every: int,
     profile_name: str,
     eval_prompt_filename: str,
     effective_query_params: dict[str, Any],
+    index_profile: dict[str, Any],
     start_id: int,
     end_id: int,
     resume: bool,
@@ -162,10 +267,13 @@ def _save_generation_config(
         "profile_name": profile_name,
         "one_sentence": bool(one_sentence),
         "max_async_docs": int(max_async_docs),
+        "max_async_ingest_docs": int(max_async_ingest_docs),
+        "max_async_query_docs": int(max_async_query_docs),
         "max_async_generate": int(max_async_generate),
         "doc_flush_every": int(doc_flush_every),
         "eval_prompt_filename": eval_prompt_filename,
         "effective_query_params": dict(effective_query_params),
+        "index_profile": dict(index_profile),
         "start_id": int(start_id),
         "end_id": int(end_id),
         "resume": bool(resume),
@@ -265,6 +373,230 @@ def _find_doc_files(folder_path: Path) -> tuple[Path | None, Path | None]:
         elif file.name.endswith("_qa.jsonl"):
             qa_file = file
     return pdf_file, qa_file
+
+
+def _workspace_id_for_doc(doc_name: str) -> str:
+    return f"docbench_{doc_name}"
+
+
+def _load_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.exists():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return payload
+    except Exception as exc:
+        logger.warning(f"Failed to load JSON file {path}: {exc}")
+    return None
+
+
+def _save_json_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _build_docbench_index_profile(settings: LocalRagSettings) -> dict[str, Any]:
+    profile: dict[str, Any] = {
+        "schema_version": "docbench_single_index_profile_v1",
+        "profile_version": 1,
+        "enable_entity_disambiguation": bool(settings.enable_entity_disambiguation),
+        "enable_synonym_linking": bool(settings.enable_synonym_linking),
+        "enable_multi_hop": bool(settings.enable_multi_hop),
+        "enable_entity_surface_normalization": bool(
+            settings.enable_entity_surface_normalization
+        ),
+        "enable_keyword_case_normalization": bool(
+            settings.enable_keyword_case_normalization
+        ),
+        "strict_relation_endpoint_entity_match": bool(
+            settings.strict_relation_endpoint_entity_match
+        ),
+        "qdrant_enable_sparse_bm25": bool(settings.qdrant_enable_sparse_bm25),
+        "qdrant_retrieval_mode": str(settings.qdrant_retrieval_mode),
+        "context_zero_window_content_types": str(
+            DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES
+        ),
+    }
+    if hasattr(settings, "synonymy_threshold"):
+        profile["synonymy_threshold"] = float(settings.synonymy_threshold)
+    if hasattr(settings, "synonymy_topk"):
+        profile["synonymy_topk"] = int(settings.synonymy_topk)
+    if hasattr(settings, "synonymy_min_entity_len"):
+        profile["synonymy_min_entity_len"] = int(settings.synonymy_min_entity_len)
+    return profile
+
+
+def _workspace_profile_path(workspace_id: str) -> Path:
+    return WORKING_DIR_ROOT / workspace_id / DOCBENCH_INDEX_PROFILE_FILE
+
+
+def _workspace_has_artifacts(workspace_dir: Path) -> bool:
+    if not workspace_dir.exists():
+        return False
+    for entry in workspace_dir.rglob("*"):
+        if not entry.is_file():
+            continue
+        if entry.name == DOCBENCH_INDEX_PROFILE_FILE:
+            continue
+        return True
+    return False
+
+
+def _ensure_docbench_workspace_index_profile(
+    *,
+    workspace_id: str,
+    index_profile: dict[str, Any],
+) -> None:
+    workspace_dir = WORKING_DIR_ROOT / workspace_id
+    profile_path = _workspace_profile_path(workspace_id)
+    existing_profile = _load_json_file(profile_path)
+    if isinstance(existing_profile, dict):
+        if existing_profile != index_profile:
+            raise RuntimeError(
+                "DocBench single-doc workspace index profile mismatch: "
+                f"workspace_id={workspace_id}, existing={existing_profile}, "
+                f"current={index_profile}. Use a new workspace or rebuild cleanly."
+            )
+        return
+
+    if _workspace_has_artifacts(workspace_dir):
+        raise RuntimeError(
+            "DocBench single-doc workspace contains existing artifacts but no "
+            f"{DOCBENCH_INDEX_PROFILE_FILE}: {workspace_dir}. Use a new workspace "
+            "or rebuild cleanly to avoid mixed index settings."
+        )
+
+    _save_json_file(profile_path, index_profile)
+
+
+def _load_single_ingest_manifest() -> dict[str, Any]:
+    payload = _load_json_file(SINGLE_INGEST_MANIFEST_FILE)
+    if isinstance(payload, dict):
+        docs = payload.get("docs")
+        if isinstance(docs, dict):
+            return payload
+    return {
+        "schema_version": "docbench_single_ingest_manifest_v1",
+        "docs": {},
+    }
+
+
+def _save_single_ingest_manifest(manifest: dict[str, Any]) -> None:
+    manifest["schema_version"] = "docbench_single_ingest_manifest_v1"
+    manifest["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    _save_json_file(SINGLE_INGEST_MANIFEST_FILE, manifest)
+
+
+def _single_ingest_record_matches(
+    *,
+    manifest: dict[str, Any],
+    doc_name: str,
+    workspace_id: str,
+    index_profile: dict[str, Any],
+) -> bool:
+    docs = manifest.get("docs")
+    if not isinstance(docs, dict):
+        return False
+    record = docs.get(str(doc_name))
+    if not isinstance(record, dict):
+        return False
+    if record.get("status") != "ok":
+        return False
+    if str(record.get("workspace_id", "")) != workspace_id:
+        return False
+    if record.get("index_profile") != index_profile:
+        return False
+    existing_profile = _load_json_file(_workspace_profile_path(workspace_id))
+    if existing_profile is not None and existing_profile != index_profile:
+        raise RuntimeError(
+            "DocBench single-doc profile mismatch between manifest and workspace: "
+            f"workspace_id={workspace_id}, manifest={index_profile}, "
+            f"workspace={existing_profile}."
+        )
+    return True
+
+
+def _validate_resume_processed_doc_profile(
+    *,
+    manifest: dict[str, Any],
+    doc_name: str,
+    workspace_id: str,
+    index_profile: dict[str, Any],
+) -> None:
+    existing_profile = _load_json_file(_workspace_profile_path(workspace_id))
+    if existing_profile != index_profile:
+        raise RuntimeError(
+            "DocBench resume processed-doc index profile mismatch: "
+            f"doc_id={doc_name}, workspace_id={workspace_id}, "
+            f"existing={existing_profile}, current={index_profile}. "
+            "Use a new output file/workspace or rebuild cleanly."
+        )
+
+    if not _single_ingest_record_matches(
+        manifest=manifest,
+        doc_name=doc_name,
+        workspace_id=workspace_id,
+        index_profile=index_profile,
+    ):
+        raise RuntimeError(
+            "DocBench resume processed-doc manifest mismatch: "
+            f"doc_id={doc_name}, workspace_id={workspace_id}. "
+            "Use a new output file/workspace or rebuild cleanly."
+        )
+
+
+def _record_single_ingest_success(
+    *,
+    manifest: dict[str, Any],
+    doc_name: str,
+    workspace_id: str,
+    pdf_file: Path,
+    index_profile: dict[str, Any],
+) -> None:
+    docs = manifest.setdefault("docs", {})
+    docs[str(doc_name)] = {
+        "status": "ok",
+        "doc_id": str(doc_name),
+        "workspace_id": workspace_id,
+        "file_name": pdf_file.name,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "index_profile": dict(index_profile),
+    }
+    _save_single_ingest_manifest(manifest)
+
+
+def _append_single_ingest_failure(payload: dict[str, Any]) -> None:
+    SINGLE_INGEST_FAILURES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(SINGLE_INGEST_FAILURES_FILE, "a", encoding="utf-8") as f:
+        _append_jsonl_record(f, payload)
+
+
+def _validate_per_doc_workspace_env_isolation(workspace_ids: list[str]) -> None:
+    unique_workspace_ids = {str(workspace_id).strip() for workspace_id in workspace_ids}
+    unique_workspace_ids.discard("")
+    if not unique_workspace_ids:
+        return
+
+    conflicts: list[str] = []
+    for env_name in ("NEO4J_WORKSPACE", "QDRANT_WORKSPACE"):
+        env_value_raw = os.getenv(env_name)
+        if env_value_raw is None:
+            continue
+        env_value = str(env_value_raw).strip()
+        if not env_value:
+            continue
+        if len(unique_workspace_ids) != 1 or env_value not in unique_workspace_ids:
+            conflicts.append(
+                f"{env_name}={env_value!r} conflicts with per-doc workspaces "
+                f"{sorted(unique_workspace_ids)!r}"
+            )
+    if conflicts:
+        raise ValueError(
+            "Per-document workspace isolation check failed. Unset "
+            "NEO4J_WORKSPACE/QDRANT_WORKSPACE or run a single matching doc. "
+            f"Details: {'; '.join(conflicts)}"
+        )
 
 
 def _build_generation_result(
@@ -573,6 +905,11 @@ def _bridge_lightrag_logs_to_run_file() -> None:
 
 
 def _build_docbench_settings() -> LocalRagSettings:
+    os.environ["ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE"] = "true"
+    os.environ["CONTEXT_ZERO_WINDOW_CONTENT_TYPES"] = str(
+        DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES
+    )
+
     settings = LocalRagSettings.from_env()
     settings.working_dir_root = str(WORKING_DIR_ROOT)
     settings.output_dir = str(OUTPUT_MD_DIR)
@@ -590,30 +927,61 @@ def _build_docbench_settings() -> LocalRagSettings:
     settings.query_max_tokens = 2048
     settings.ingest_max_tokens = 8192
     settings.vlm_enable_json_schema = True
+    settings.enable_entity_disambiguation = True
+    settings.enable_synonym_linking = True
+    settings.enable_multi_hop = False
+    settings.enable_entity_surface_normalization = True
+    settings.enable_keyword_case_normalization = True
+    settings.strict_relation_endpoint_entity_match = True
+    settings.qdrant_enable_sparse_bm25 = True
+    settings.qdrant_retrieval_mode = "dense"
     return settings
 
 
-def _build_raw_prompt_query_kwargs() -> dict[str, Any]:
+def _build_raw_prompt_query_kwargs(
+    query_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    effective_query_params = dict(query_params or DOCBENCH_QUERY_PARAMS)
     raw_prompt_kwargs: dict[str, Any] = {
-        "mode": DOCBENCH_QUERY_PARAMS["mode"],
-        "top_k": DOCBENCH_QUERY_PARAMS["top_k"],
-        "chunk_top_k": DOCBENCH_QUERY_PARAMS["chunk_top_k"],
+        "mode": effective_query_params["mode"],
+        "top_k": effective_query_params["top_k"],
+        "chunk_top_k": effective_query_params["chunk_top_k"],
         "rerank_score_scope": "all",
-        "multimodal_top_k": DOCBENCH_QUERY_PARAMS.get("multimodal_top_k"),
-        "image_token_estimate_method": DOCBENCH_QUERY_PARAMS[
+        "multimodal_top_k": effective_query_params.get("multimodal_top_k"),
+        "image_token_estimate_method": effective_query_params[
             "image_token_estimate_method"
         ],
-        "image_token_model_name_or_path": DOCBENCH_QUERY_PARAMS[
+        "image_token_model_name_or_path": effective_query_params[
             "image_token_model_name_or_path"
         ],
-        "image_wrapper_tokens_per_image": DOCBENCH_QUERY_PARAMS[
+        "image_wrapper_tokens_per_image": effective_query_params[
             "image_wrapper_tokens_per_image"
         ],
         "only_need_prompt": True,
     }
-    for key in ("max_total_tokens", "max_entity_tokens", "max_relation_tokens"):
-        if key in DOCBENCH_QUERY_PARAMS:
-            raw_prompt_kwargs[key] = DOCBENCH_QUERY_PARAMS[key]
+    passthrough_keys = (
+        "max_total_tokens",
+        "max_entity_tokens",
+        "max_relation_tokens",
+        "entity_qdrant_retrieval_mode",
+        "chunk_qdrant_retrieval_mode",
+        "exclude_synonym_edges",
+        "answer_context_mode",
+        "kg_chunk_selection_source",
+        "enable_rerank",
+        "enable_kg_rerank",
+        "keyword_fanout_mode",
+        "keyword_entity_rrf_k",
+        "keyword_relation_rrf_k",
+        "ppr_top_k",
+        "ppr_qa_top_k",
+        "recognition_top_k",
+        "ppr_post_rerank_fusion",
+        "ppr_post_rerank_rrf_k",
+    )
+    for key in passthrough_keys:
+        if key in effective_query_params:
+            raw_prompt_kwargs[key] = effective_query_params[key]
     return raw_prompt_kwargs
 
 
@@ -628,11 +996,33 @@ async def generate_answers(
     dump_raw_prompt: bool = False,
     dump_final_messages: bool = False,
     max_async_generate: int = 1,
-    max_async_docs: int = 4,
+    max_async_docs: int | None = None,
+    max_async_ingest_docs: int | None = None,
+    max_async_query_docs: int | None = None,
     doc_flush_every: int = 4,
     one_sentence: bool = False,
     profile_name: str = "docbench_official",
     eval_prompt_filename: str = DOCBENCH_EVAL_PROMPT_FILENAME,
+    query_mode: str | None = None,
+    recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K,
+    keyword_fanout_mode: str = "joined",
+    keyword_entity_rrf_k: int = 10,
+    keyword_relation_rrf_k: int = 20,
+    entity_retrieval_mode: str = "dense",
+    chunk_retrieval_mode: str = "dense",
+    exclude_synonym_edges: bool | None = None,
+    answer_context_mode: str = "kg_prompt",
+    kg_chunk_selection_source: str = "truncated",
+    max_total_tokens: int | None = None,
+    multimodal_top_k: int | None = None,
+    enable_rerank: bool = True,
+    enable_kg_rerank: bool = True,
+    ppr_top_k: int | None = None,
+    ppr_qa_top_k: int | None = None,
+    ppr_post_rerank_fusion: str = "none",
+    ppr_post_rerank_rrf_k: int = 60,
+    bypass_query_cache: bool = False,
+    bypass_keywords_cache: bool = False,
 ):
     """
     Generate system answers for DocBench.
@@ -646,50 +1036,92 @@ async def generate_answers(
         dump_raw_prompt: Dump per-question raw retrieval prompt for debugging.
         dump_final_messages: Dump final VLM messages for debugging.
         max_async_generate: Max concurrent questions per document.
-        max_async_docs: Max concurrent documents in generate mode.
+        max_async_docs: Backward-compatible doc concurrency alias.
+        max_async_ingest_docs: Max concurrent documents in ingest phase.
+        max_async_query_docs: Max concurrent document workspaces in query phase.
         doc_flush_every: Recycle service every N docs; 0 disables recycle.
     """
     output_file = OUTPUT_DIR / "system_answers.jsonl"
     max_async_generate = _normalize_max_async(max_async_generate, default=1)
-    max_async_docs = _normalize_max_async(max_async_docs, default=4)
+    if max_async_docs is not None:
+        if max_async_ingest_docs is None:
+            max_async_ingest_docs = max_async_docs
+        if max_async_query_docs is None:
+            max_async_query_docs = max_async_docs
+    max_async_ingest_docs = _normalize_max_async(
+        max_async_ingest_docs if max_async_ingest_docs is not None else 2,
+        default=2,
+    )
+    max_async_query_docs = _normalize_max_async(
+        max_async_query_docs if max_async_query_docs is not None else 1,
+        default=1,
+    )
+    max_async_docs_config = (
+        int(max_async_docs)
+        if max_async_docs is not None
+        else max(max_async_ingest_docs, max_async_query_docs)
+    )
     doc_flush_every = _normalize_flush_every(doc_flush_every, default=4)
     if (dump_raw_prompt or dump_final_messages) and max_async_generate > 1:
         logger.warning(
             "dump_raw_prompt/dump_final_messages is enabled, force max_async_generate=1."
         )
         max_async_generate = 1
-    if (dump_raw_prompt or dump_final_messages) and max_async_docs > 1:
+    if (dump_raw_prompt or dump_final_messages) and (
+        max_async_ingest_docs > 1 or max_async_query_docs > 1
+    ):
         logger.warning(
-            "dump_raw_prompt/dump_final_messages is enabled, force max_async_docs=1."
+            "dump_raw_prompt/dump_final_messages is enabled, force doc concurrency=1."
         )
-        max_async_docs = 1
-    if max_async_docs > 1:
-        logger.info(
-            "max_async_docs > 1: skip global WORKSPACE switching to avoid cross-task races."
-        )
-    query_params = _build_docbench_query_params(one_sentence=one_sentence)
+        max_async_ingest_docs = 1
+        max_async_query_docs = 1
+
+    query_params = _build_docbench_query_params(
+        one_sentence=one_sentence,
+        query_mode=query_mode,
+        recognition_top_k=recognition_top_k,
+        keyword_fanout_mode=keyword_fanout_mode,
+        keyword_entity_rrf_k=keyword_entity_rrf_k,
+        keyword_relation_rrf_k=keyword_relation_rrf_k,
+        entity_retrieval_mode=entity_retrieval_mode,
+        chunk_retrieval_mode=chunk_retrieval_mode,
+        exclude_synonym_edges=exclude_synonym_edges,
+        answer_context_mode=answer_context_mode,
+        kg_chunk_selection_source=kg_chunk_selection_source,
+        max_total_tokens=max_total_tokens,
+        multimodal_top_k=multimodal_top_k,
+        enable_rerank=enable_rerank,
+        enable_kg_rerank=enable_kg_rerank,
+        ppr_top_k=ppr_top_k,
+        ppr_qa_top_k=ppr_qa_top_k,
+        ppr_post_rerank_fusion=ppr_post_rerank_fusion,
+        ppr_post_rerank_rrf_k=ppr_post_rerank_rrf_k,
+        bypass_query_cache=bypass_query_cache,
+        bypass_keywords_cache=bypass_keywords_cache,
+    )
+
+    settings = _build_docbench_settings()
+    index_profile = _build_docbench_index_profile(settings)
+
     _save_generation_config(
         one_sentence=one_sentence,
-        max_async_docs=max_async_docs,
+        max_async_docs=max_async_docs_config,
+        max_async_ingest_docs=max_async_ingest_docs,
+        max_async_query_docs=max_async_query_docs,
         max_async_generate=max_async_generate,
         doc_flush_every=doc_flush_every,
         profile_name=profile_name,
         eval_prompt_filename=eval_prompt_filename,
         effective_query_params=query_params,
+        index_profile=index_profile,
         start_id=start_id,
         end_id=end_id,
         resume=resume,
     )
     logger.info(f"Generation config saved: {GENERATION_CONFIG_FILE}")
-    
-    # Build explicit settings so output/log paths remain controlled.
-    settings = _build_docbench_settings()
-    
-    # Initialize service once.
-    service = LocalRagService(settings)
+
     _ensure_master_log_handler()
     _bridge_lightrag_logs_to_run_file()
-    logger.info("RAG service initialized")
     
     # Load processed docs for resume mode.
     processed_docs = set()
@@ -704,18 +1136,30 @@ async def generate_answers(
     logger.info(f"Generating answers for documents {start_id} to {end_id-1}")
     logger.info(f"Output: {output_file}")
     logger.info(
-        "max_async_docs=%d, max_async_generate=%d, doc_flush_every=%d",
-        max_async_docs,
+        "max_async_ingest_docs=%d, max_async_query_docs=%d, "
+        "max_async_generate=%d, doc_flush_every=%d",
+        max_async_ingest_docs,
+        max_async_query_docs,
         max_async_generate,
         doc_flush_every,
     )
+    logger.info(f"Index profile: {index_profile}")
+    logger.info(f"Query params: {query_params}")
     logger.info(f"{'='*80}\n")
 
+    single_ingest_manifest = _load_single_ingest_manifest()
     doc_jobs: list[tuple[int, str, Path, Path]] = []
     for doc_id in range(start_id, end_id):
         doc_name = str(doc_id)
 
         if resume and doc_name in processed_docs:
+            workspace_id = _workspace_id_for_doc(doc_name)
+            _validate_resume_processed_doc_profile(
+                manifest=single_ingest_manifest,
+                doc_name=doc_name,
+                workspace_id=workspace_id,
+                index_profile=index_profile,
+            )
             logger.info(f"[skip] [{doc_id}] Already processed")
             continue
 
@@ -731,22 +1175,48 @@ async def generate_answers(
 
         doc_jobs.append((doc_id, doc_name, pdf_file, qa_file))
 
+    _validate_per_doc_workspace_env_isolation(
+        [_workspace_id_for_doc(doc_name) for _, doc_name, _, _ in doc_jobs]
+    )
     logger.info(f"Pending docs: {len(doc_jobs)}")
 
+    manifest_lock = asyncio.Lock()
+    ingested_docs: set[str] = set()
+    ingested_docs_lock = asyncio.Lock()
+
+    def _new_service(label: str) -> LocalRagService:
+        service = LocalRagService(settings)
+        logger.info("RAG service initialized for %s", label)
+        _ensure_master_log_handler()
+        _bridge_lightrag_logs_to_run_file()
+        return service
+
     async def _ingest_single_doc(
+        service: LocalRagService,
         doc_id: int,
         doc_name: str,
         pdf_file: Path,
     ) -> tuple[str, bool]:
-        workspace_id = f"docbench_{doc_name}"
+        workspace_id = _workspace_id_for_doc(doc_name)
 
         logger.info(f"\n{'='*80}")
         logger.info(f"[{doc_id}/{end_id-1}] Ingesting: {pdf_file.name}")
         logger.info(f"{'='*80}")
 
         try:
-            if max_async_docs == 1:
-                _set_doc_workspace(workspace_id)
+            _ensure_docbench_workspace_index_profile(
+                workspace_id=workspace_id,
+                index_profile=index_profile,
+            )
+
+            if resume and _single_ingest_record_matches(
+                manifest=single_ingest_manifest,
+                doc_name=doc_name,
+                workspace_id=workspace_id,
+                index_profile=index_profile,
+            ):
+                logger.info("[%s] Single-doc ingest already done, skip", doc_name)
+                return doc_name, True
 
             logger.info(f"Processing: {pdf_file.name} -> workspace_id: {workspace_id}")
             doc_output_dir = str(OUTPUT_MD_DIR / f"docbench_{doc_name}")
@@ -757,30 +1227,52 @@ async def generate_answers(
                 output_dir=doc_output_dir,
                 workspace_id=workspace_id,
             )
+            if settings.enable_synonym_linking:
+                await service.finalize_workspace_synonyms(
+                    workspace_id,
+                    force=False,
+                    reset_existing=True,
+                )
             logger.info(f"Ingestion complete, workspace_id: {returned_workspace_id}")
+            async with manifest_lock:
+                _record_single_ingest_success(
+                    manifest=single_ingest_manifest,
+                    doc_name=doc_name,
+                    workspace_id=workspace_id,
+                    pdf_file=pdf_file,
+                    index_profile=index_profile,
+                )
             return doc_name, True
         except Exception as exc:
             logger.exception(f"[{doc_id}] Ingest error: {exc}")
+            _append_single_ingest_failure(
+                {
+                    "time": datetime.now().isoformat(timespec="seconds"),
+                    "doc_id": doc_name,
+                    "workspace_id": workspace_id,
+                    "file_name": pdf_file.name,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "index_profile": dict(index_profile),
+                }
+            )
             return doc_name, False
         finally:
             await _cleanup_rag_instance(service, workspace_id)
             _clear_cuda_cache(doc_id)
 
     async def _query_single_doc(
+        service: LocalRagService,
         doc_id: int,
         doc_name: str,
         qa_file: Path,
     ) -> tuple[str, list[dict[str, Any]]]:
-        workspace_id = f"docbench_{doc_name}"
+        workspace_id = _workspace_id_for_doc(doc_name)
 
         logger.info(f"\n{'='*80}")
         logger.info(f"[{doc_id}/{end_id-1}] Querying: {workspace_id}")
         logger.info(f"{'='*80}")
 
         try:
-            if max_async_docs == 1:
-                _set_doc_workspace(workspace_id)
-
             with open(qa_file, 'r', encoding='utf-8') as f_qa:
                 qa_list = [json.loads(line) for line in f_qa]
 
@@ -807,7 +1299,7 @@ async def generate_answers(
 
                                 rag = await service.get_rag(workspace_id)
                                 raw_prompt_param = QueryParam(
-                                    **_build_raw_prompt_query_kwargs()
+                                    **_build_raw_prompt_query_kwargs(query_params)
                                 )
                                 raw_prompt_result = await rag.lightrag.aquery(
                                     question, param=raw_prompt_param
@@ -958,104 +1450,107 @@ async def generate_answers(
             await _cleanup_rag_instance(service, workspace_id)
             _clear_cuda_cache(doc_id)
 
-    try:
-        # Phase A: all ingest first (doc-level concurrent).
-        logger.info(f"\n{'='*80}")
-        logger.info("Phase A: ingest all pending documents")
-        logger.info(f"{'='*80}")
-        ingested_docs: set[str] = set()
+    # Phase A: all ingest first. Each worker owns one LocalRagService instance.
+    logger.info(f"\n{'='*80}")
+    logger.info("Phase A: ingest all pending documents")
+    logger.info(f"{'='*80}")
+
+    ingest_queue: asyncio.Queue[tuple[int, str, Path, Path]] = asyncio.Queue()
+    for job in doc_jobs:
+        ingest_queue.put_nowait(job)
+
+    async def _ingest_worker(worker_id: int) -> None:
+        service = _new_service(f"ingest-worker-{worker_id}")
         completed_since_flush = 0
+        try:
+            while True:
+                try:
+                    doc_id, doc_name, pdf_file, _ = ingest_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
 
-        for batch_start in range(0, len(doc_jobs), max_async_docs):
-            batch = doc_jobs[batch_start : batch_start + max_async_docs]
-            logger.info(
-                f"[Ingest] Running doc batch {batch_start + 1}-{batch_start + len(batch)}/{len(doc_jobs)}"
-            )
-            batch_results = await asyncio.gather(
-                *[
-                    asyncio.create_task(_ingest_single_doc(doc_id, doc_name, pdf_file))
-                    for doc_id, doc_name, pdf_file, _ in batch
-                ]
-            )
-
-            for doc_name, ok in batch_results:
-                if ok:
-                    ingested_docs.add(doc_name)
-                    completed_since_flush += 1
-
-            if doc_flush_every > 0 and completed_since_flush >= doc_flush_every:
-                logger.info(
-                    f"[Ingest] Recycle LocalRagService after {completed_since_flush} docs."
-                )
-                service = await _recycle_local_rag_service(
-                    service,
-                    settings,
-                    clear_model_cache=False,
-                )
-                _bridge_lightrag_logs_to_run_file()
-                completed_since_flush = 0
-
-        logger.info(f"[Ingest] Completed docs: {len(ingested_docs)}/{len(doc_jobs)}")
-
-        # Keep existing recycle behavior and add one phase-boundary recycle.
-        if ingested_docs:
-            logger.info("Recycle LocalRagService at phase boundary (Ingest -> Query).")
-            service = await _recycle_local_rag_service(
-                service,
-                settings,
-                clear_model_cache=False,
-            )
-            _bridge_lightrag_logs_to_run_file()
-
-        # Phase B: all query after ingest (doc-level concurrent).
-        query_jobs = [
-            (doc_id, doc_name, qa_file)
-            for doc_id, doc_name, _, qa_file in doc_jobs
-            if doc_name in ingested_docs
-        ]
-        logger.info(f"\n{'='*80}")
-        logger.info("Phase B: query all ingested documents")
-        logger.info(f"{'='*80}")
-        logger.info(f"Pending query docs: {len(query_jobs)}")
-
-        with open(output_file, 'a', encoding='utf-8') as f_out:
-            completed_since_flush = 0
-
-            for batch_start in range(0, len(query_jobs), max_async_docs):
-                batch = query_jobs[batch_start : batch_start + max_async_docs]
-                logger.info(
-                    f"[Query] Running doc batch {batch_start + 1}-{batch_start + len(batch)}/{len(query_jobs)}"
-                )
-
-                batch_results = await asyncio.gather(
-                    *[
-                        asyncio.create_task(_query_single_doc(doc_id, doc_name, qa_file))
-                        for doc_id, doc_name, qa_file in batch
-                    ]
-                )
-
-                for _, doc_records in batch_results:
-                    for record in doc_records:
-                        _append_jsonl_record(f_out, record)
-                    if doc_records:
+                try:
+                    completed_doc_name, ok = await _ingest_single_doc(
+                        service, doc_id, doc_name, pdf_file
+                    )
+                    if ok:
+                        async with ingested_docs_lock:
+                            ingested_docs.add(completed_doc_name)
                         completed_since_flush += 1
+                finally:
+                    ingest_queue.task_done()
 
                 if doc_flush_every > 0 and completed_since_flush >= doc_flush_every:
                     logger.info(
-                        f"[Query] Recycle LocalRagService after {completed_since_flush} docs."
+                        "[Ingest worker %d] Recycle LocalRagService after %d docs.",
+                        worker_id,
+                        completed_since_flush,
                     )
                     service = await _recycle_local_rag_service(
                         service,
                         settings,
                         clear_model_cache=False,
                     )
-                    _bridge_lightrag_logs_to_run_file()
                     completed_since_flush = 0
-    finally:
-        await _finalize_local_rag_service(
-            service,
-            clear_model_cache=False,
+        finally:
+            await _finalize_local_rag_service(service, clear_model_cache=False)
+
+    ingest_worker_count = min(max_async_ingest_docs, len(doc_jobs))
+    if ingest_worker_count > 0:
+        await asyncio.gather(
+            *[
+                asyncio.create_task(_ingest_worker(worker_id))
+                for worker_id in range(ingest_worker_count)
+            ]
         )
+    logger.info(f"[Ingest] Completed docs: {len(ingested_docs)}/{len(doc_jobs)}")
+
+    # Phase B: query after ingest. Default query doc concurrency is one, so only
+    # questions from a single document graph run concurrently unless requested.
+    query_jobs = [
+        (doc_id, doc_name, qa_file)
+        for doc_id, doc_name, _, qa_file in doc_jobs
+        if doc_name in ingested_docs
+    ]
+    logger.info(f"\n{'='*80}")
+    logger.info("Phase B: query all ingested documents")
+    logger.info(f"{'='*80}")
+    logger.info(f"Pending query docs: {len(query_jobs)}")
+
+    with open(output_file, 'a', encoding='utf-8') as f_out:
+        for batch_start in range(0, len(query_jobs), max_async_query_docs):
+            batch = query_jobs[batch_start : batch_start + max_async_query_docs]
+            logger.info(
+                f"[Query] Running doc batch {batch_start + 1}-{batch_start + len(batch)}/{len(query_jobs)}"
+            )
+            services = [
+                _new_service(f"query-doc-{doc_name}")
+                for _, doc_name, _ in batch
+            ]
+            try:
+                batch_results = await asyncio.gather(
+                    *[
+                        asyncio.create_task(
+                            _query_single_doc(service, doc_id, doc_name, qa_file)
+                        )
+                        for service, (doc_id, doc_name, qa_file) in zip(services, batch)
+                    ]
+                )
+            finally:
+                await asyncio.gather(
+                    *[
+                        _finalize_local_rag_service(
+                            service,
+                            clear_model_cache=False,
+                        )
+                        for service in services
+                    ],
+                    return_exceptions=True,
+                )
+
+            for _, doc_records in batch_results:
+                for record in doc_records:
+                    _append_jsonl_record(f_out, record)
     
     logger.info(f"\n{'='*80}")
     logger.info("Answer generation complete!")
@@ -1075,7 +1570,7 @@ async def evaluate_answers(
     """
     Evaluate system answers with Qwen2.5-32B judge model.
 
-    Prerequisite: Qwen2.5-32B service is running on port 8002.
+    Prerequisite: Qwen2.5-32B service is running on port 8008.
 
     Args:
         resume: Skip already-evaluated records.
@@ -1210,9 +1705,12 @@ def _build_experiment_config(
     profile_name = "docbench_official"
     one_sentence = None
     max_async_docs = None
+    max_async_ingest_docs = None
+    max_async_query_docs = None
     max_async_generate = None
     doc_flush_every = None
     eval_prompt_filename = DOCBENCH_EVAL_PROMPT_FILENAME
+    index_profile = None
     if generation_config:
         cfg_query_params = generation_config.get("effective_query_params")
         if isinstance(cfg_query_params, dict):
@@ -1221,6 +1719,10 @@ def _build_experiment_config(
             one_sentence = generation_config["one_sentence"]
         if isinstance(generation_config.get("max_async_docs"), int):
             max_async_docs = generation_config["max_async_docs"]
+        if isinstance(generation_config.get("max_async_ingest_docs"), int):
+            max_async_ingest_docs = generation_config["max_async_ingest_docs"]
+        if isinstance(generation_config.get("max_async_query_docs"), int):
+            max_async_query_docs = generation_config["max_async_query_docs"]
         if isinstance(generation_config.get("max_async_generate"), int):
             max_async_generate = generation_config["max_async_generate"]
         if isinstance(generation_config.get("doc_flush_every"), int):
@@ -1229,6 +1731,8 @@ def _build_experiment_config(
             profile_name = generation_config["profile_name"]
         if isinstance(generation_config.get("eval_prompt_filename"), str):
             eval_prompt_filename = generation_config["eval_prompt_filename"]
+        if isinstance(generation_config.get("index_profile"), dict):
+            index_profile = dict(generation_config["index_profile"])
 
     return {
         "rag_generation": {
@@ -1260,9 +1764,12 @@ def _build_experiment_config(
         },
         "one_sentence": one_sentence,
         "max_async_docs": max_async_docs,
+        "max_async_ingest_docs": max_async_ingest_docs,
+        "max_async_query_docs": max_async_query_docs,
         "max_async_generate": max_async_generate,
         "doc_flush_every": doc_flush_every,
         "query_params": effective_query_params,
+        "index_profile": index_profile,
         "paths": {
             "script_dir": str(SCRIPT_DIR),
             "data_root": str(DATA_ROOT),
@@ -1499,8 +2006,20 @@ Examples:
     parser.add_argument(
         "--max_async_docs",
         type=int,
-        default=4,
-        help="Max concurrent documents in generate mode.",
+        default=None,
+        help="Deprecated alias for both ingest/query document concurrency.",
+    )
+    parser.add_argument(
+        "--max_async_ingest_docs",
+        type=int,
+        default=2,
+        help="Max concurrent document graph builds in generate mode.",
+    )
+    parser.add_argument(
+        "--max_async_query_docs",
+        type=int,
+        default=1,
+        help="Max concurrent document workspaces in query phase.",
     )
     parser.add_argument(
         "--doc_flush_every",
@@ -1508,6 +2027,82 @@ Examples:
         default=4,
         help="Recycle LocalRagService every N completed docs in generate mode; 0 disables.",
     )
+    parser.add_argument(
+        "--query_mode",
+        choices=DOCBENCH_QUERY_MODE_CHOICES,
+        default=DOCBENCH_QUERY_PARAMS["mode"],
+    )
+    parser.add_argument(
+        "--entity_retrieval_mode",
+        choices=["dense", "bm25", "hybrid"],
+        default="dense",
+    )
+    parser.add_argument(
+        "--chunk_retrieval_mode",
+        choices=["dense", "bm25", "hybrid"],
+        default="dense",
+    )
+    parser.add_argument(
+        "--exclude_synonym_edges",
+        choices=["true", "false", "none"],
+        default="none",
+        help=(
+            "Query-time synonym-edge filtering. 'none' means auto: true for "
+            "non-PPR, false for PPR."
+        ),
+    )
+    parser.add_argument("--max_total_tokens", type=int, default=None)
+    parser.add_argument(
+        "--multimodal_top_k",
+        type=int,
+        default=DOCBENCH_QUERY_PARAMS["multimodal_top_k"],
+    )
+    parser.add_argument(
+        "--enable_rerank",
+        type=as_bool,
+        default=DOCBENCH_QUERY_PARAMS["enable_rerank"],
+    )
+    parser.add_argument("--enable_kg_rerank", type=as_bool, default=True)
+    parser.add_argument("--recognition_top_k", type=int, default=DEFAULT_RECOGNITION_TOP_K)
+    parser.add_argument("--ppr_top_k", type=int, default=DEFAULT_PPR_TOP_K)
+    parser.add_argument("--ppr_qa_top_k", type=int, default=DEFAULT_PPR_QA_TOP_K)
+    parser.add_argument(
+        "--ppr_post_rerank_fusion",
+        choices=["none", "raw_rrf"],
+        default="none",
+    )
+    parser.add_argument("--ppr_post_rerank_rrf_k", type=int, default=60)
+    parser.add_argument(
+        "--keyword_fanout_mode",
+        choices=["joined", "per_keyword_rrf"],
+        default="joined",
+    )
+    parser.add_argument(
+        "--keyword_entity_rrf_k",
+        "--keyword-entity-rrf-k",
+        dest="keyword_entity_rrf_k",
+        type=int,
+        default=DOCBENCH_QUERY_PARAMS["keyword_entity_rrf_k"],
+    )
+    parser.add_argument(
+        "--keyword_relation_rrf_k",
+        "--keyword-relation-rrf-k",
+        dest="keyword_relation_rrf_k",
+        type=int,
+        default=DOCBENCH_QUERY_PARAMS["keyword_relation_rrf_k"],
+    )
+    parser.add_argument(
+        "--answer_context_mode",
+        choices=["kg_prompt", "chunk_only_prompt"],
+        default="kg_prompt",
+    )
+    parser.add_argument(
+        "--kg_chunk_selection_source",
+        choices=["truncated", "untruncated"],
+        default="truncated",
+    )
+    parser.add_argument("--bypass_query_cache", action="store_true")
+    parser.add_argument("--bypass_keywords_cache", action="store_true")
 
     args = parser.parse_args()
     
@@ -1529,7 +2124,13 @@ Examples:
     logger.info(f"MaxAsyncJudge: {args.max_async_judge}")
     logger.info(f"MaxAsyncGenerate: {args.max_async_generate}")
     logger.info(f"MaxAsyncDocs: {args.max_async_docs}")
+    logger.info(f"MaxAsyncIngestDocs: {args.max_async_ingest_docs}")
+    logger.info(f"MaxAsyncQueryDocs: {args.max_async_query_docs}")
     logger.info(f"DocFlushEvery: {args.doc_flush_every}")
+    logger.info(f"QueryMode: {args.query_mode}")
+    logger.info(f"EntityRetrievalMode: {args.entity_retrieval_mode}")
+    logger.info(f"ChunkRetrievalMode: {args.chunk_retrieval_mode}")
+    logger.info(f"ExcludeSynonymEdges: {args.exclude_synonym_edges}")
     logger.info(f"{'='*80}\n")
     
     # Run selected mode.
@@ -1544,15 +2145,41 @@ Examples:
             dump_final_messages=args.dump_final_messages,
             max_async_generate=args.max_async_generate,
             max_async_docs=args.max_async_docs,
+            max_async_ingest_docs=args.max_async_ingest_docs,
+            max_async_query_docs=args.max_async_query_docs,
             doc_flush_every=args.doc_flush_every,
             one_sentence=effective_one_sentence,
             profile_name=profile_name,
             eval_prompt_filename=eval_prompt_filename,
+            query_mode=args.query_mode,
+            recognition_top_k=args.recognition_top_k,
+            keyword_fanout_mode=args.keyword_fanout_mode,
+            keyword_entity_rrf_k=args.keyword_entity_rrf_k,
+            keyword_relation_rrf_k=args.keyword_relation_rrf_k,
+            entity_retrieval_mode=args.entity_retrieval_mode,
+            chunk_retrieval_mode=args.chunk_retrieval_mode,
+            exclude_synonym_edges=(
+                None
+                if args.exclude_synonym_edges == "none"
+                else args.exclude_synonym_edges == "true"
+            ),
+            answer_context_mode=args.answer_context_mode,
+            kg_chunk_selection_source=args.kg_chunk_selection_source,
+            max_total_tokens=args.max_total_tokens,
+            multimodal_top_k=args.multimodal_top_k,
+            enable_rerank=args.enable_rerank,
+            enable_kg_rerank=args.enable_kg_rerank,
+            ppr_top_k=args.ppr_top_k,
+            ppr_qa_top_k=args.ppr_qa_top_k,
+            ppr_post_rerank_fusion=args.ppr_post_rerank_fusion,
+            ppr_post_rerank_rrf_k=args.ppr_post_rerank_rrf_k,
+            bypass_query_cache=args.bypass_query_cache,
+            bypass_keywords_cache=args.bypass_keywords_cache,
         )
     
     elif args.mode == 'evaluate':
-        logger.info("Please ensure Qwen2.5-32B is running on port 8002")
-        logger.info(f"   Check: curl http://localhost:8002/v1/models\n")
+        logger.info("Please ensure Qwen2.5-32B is running on port 8008")
+        logger.info(f"   Check: curl http://localhost:8008/v1/models\n")
         await evaluate_answers(
             resume=not args.no_resume,
             max_async_judge=args.max_async_judge,

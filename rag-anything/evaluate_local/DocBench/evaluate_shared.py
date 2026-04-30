@@ -101,7 +101,7 @@ INGEST_MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
 INGEST_FAILURES_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 RAG_API_BASE = "http://localhost:8001/v1"
-JUDGE_API_BASE = "http://localhost:8002/v1"
+JUDGE_API_BASE = "http://localhost:8008/v1"
 RAG_API_KEY = "EMPTY"
 RAG_VISION_MODEL_PATH = "/data/y50056788/Yaliang/models/Qwen3-VL-30B-A3B-Instruct-FP8"
 RAG_MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
@@ -1437,6 +1437,18 @@ async def generate_answers_shared(
                 "Cleared %d resolved ingest failure entries.",
                 len(resolved_failure_docs),
             )
+
+    if ablation_flags.enable_synonym_linking:
+        synonym_result = await service.finalize_workspace_synonyms(
+            shared_workspace_id,
+            force=False,
+            reset_existing=True,
+        )
+        logger.info(
+            "Shared workspace synonym finalize: workspace_id=%s result=%s",
+            shared_workspace_id,
+            synonym_result,
+        )
 
     # Ensure ingest-phase temporary memory is released before query phase.
     service = await _recycle_local_rag_service(

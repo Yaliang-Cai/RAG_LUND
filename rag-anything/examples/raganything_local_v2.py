@@ -24,6 +24,12 @@ async def process_with_rag(
 ) -> None:
     # Ingest first, then run the query set on the same workspace.
     final_workspace_id = await service.ingest(file_path, workspace_id=workspace_id)
+    if service.settings.enable_synonym_linking:
+        await service.finalize_workspace_synonyms(
+            final_workspace_id,
+            force=False,
+            reset_existing=True,
+        )
 
     queries = [
         "According to the paper, what are the specific visual encoder and language model (LLM) backbones used in the PaddleOCR-VL-1.5 architecture, and why was the 0.9B parameter size chosen?",

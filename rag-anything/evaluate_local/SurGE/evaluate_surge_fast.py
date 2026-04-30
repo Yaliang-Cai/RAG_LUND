@@ -1214,6 +1214,20 @@ async def ensure_workspace_index(
     missing_after_chunks = sorted(list(after_state["missing_chunk_set"]), key=sort_key)
     missing_after_vdb = sorted(list(after_state["missing_vdb_set"]), key=sort_key)
     missing_after_chunk_mismatch = sorted(list(after_state["chunk_count_mismatch_set"]), key=sort_key)
+
+    synonym_summary: dict[str, Any] | None = None
+    if ablation_flags.enable_synonym_linking:
+        synonym_summary = await service.finalize_workspace_synonyms(
+            workspace_id,
+            force=False,
+            reset_existing=True,
+        )
+        logger.info(
+            "Workspace synonym finalize complete: workspace_id=%s result=%s",
+            workspace_id,
+            synonym_summary,
+        )
+
     ingest_attempt_source_doc_count = sum(
         int(batch_by_id[batch_doc_id]["expected_chunk_count"])
         for batch_doc_id in to_ingest
@@ -1283,6 +1297,7 @@ async def ensure_workspace_index(
         "missing_after_vdb_doc_sample": missing_after_vdb[:20],
         "chunk_count_mismatch_batch_sample": missing_after_chunk_mismatch[:20],
         "missing_after_multi_chunk_doc_sample": missing_after_chunk_mismatch[:20],
+        "synonym_linking": synonym_summary or {},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     save_json(INGEST_MANIFEST, summary)

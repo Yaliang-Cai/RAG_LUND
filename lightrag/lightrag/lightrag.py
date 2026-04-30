@@ -200,7 +200,7 @@ class LightRAG:
     """V1 base toggle: use composite key (name|type) as entity ID to resolve homonym ambiguity. V2/V3 depend on this."""
 
     enable_synonym_linking: bool = field(default=False)
-    """V2 orthogonal toggle: build SYNONYM edges during ingestion."""
+    """V2 orthogonal toggle: enable workspace-level SYNONYM edge rebuilding."""
 
     synonymy_threshold: float = field(default=0.8)
     """Cosine similarity threshold for synonym detection (aligned with HippoRAG2 default)."""
@@ -2139,26 +2139,6 @@ class LightRAG:
                                     file_path=file_path,
                                 )
 
-                                # V2: Synonym linking (ingestion-only, orthogonal to V3)
-                                if self.enable_synonym_linking:
-                                    from lightrag.synonym_linking import build_synonym_edges
-
-                                    changed_entity_ids = []
-                                    if merge_result:
-                                        changed_entity_ids = merge_result.get(
-                                            "changed_entity_ids", []
-                                        )
-
-                                    await build_synonym_edges(
-                                        entities_vdb=self.entities_vdb,
-                                        knowledge_graph_inst=self.chunk_entity_relation_graph,
-                                        new_entity_ids=changed_entity_ids,
-                                        synonymy_threshold=self.synonymy_threshold,
-                                        synonymy_topk=self.synonymy_topk,
-                                        min_entity_len=self.synonymy_min_entity_len,
-                                        enable_entity_disambiguation=self.enable_entity_disambiguation,
-                                    )
-
                                 # Record processing end time
                                 processing_end_time = int(time.time())
 
@@ -2373,6 +2353,42 @@ class LightRAG:
             async with pipeline_status_lock:
                 pipeline_status["latest_message"] = log_message
                 pipeline_status["history_messages"].append(log_message)
+
+    async def rebuild_synonym_edges(
+        self,
+        *,
+        reset_existing: bool = True,
+    ) -> dict[str, int | bool]:
+        """Rebuild workspace-level SYNONYM edges after factual ingest is complete."""
+        if not self.enable_synonym_linking:
+            return {
+                "success": True,
+                "skipped": True,
+                "cleared_edges": 0,
+                "created_edges": 0,
+            }
+
+        from lightrag.synonym_linking import build_synonym_edges, clear_synonym_edges
+
+        cleared_edges = 0
+        if reset_existing:
+            cleared_edges = await clear_synonym_edges(self.chunk_entity_relation_graph)
+
+        created_edges = await build_synonym_edges(
+            entities_vdb=self.entities_vdb,
+            knowledge_graph_inst=self.chunk_entity_relation_graph,
+            new_entity_ids=None,
+            synonymy_threshold=self.synonymy_threshold,
+            synonymy_topk=self.synonymy_topk,
+            min_entity_len=self.synonymy_min_entity_len,
+            enable_entity_disambiguation=self.enable_entity_disambiguation,
+        )
+        return {
+            "success": True,
+            "skipped": False,
+            "cleared_edges": int(cleared_edges),
+            "created_edges": int(created_edges),
+        }
 
     def insert_custom_kg(
         self, custom_kg: dict[str, Any], full_doc_id: str = None

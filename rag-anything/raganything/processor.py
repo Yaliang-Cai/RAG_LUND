@@ -21,6 +21,7 @@ from raganything.utils import (
 )
 import asyncio
 from lightrag.constants import GRAPH_FIELD_SEP
+from lightrag.kg.shared_storage import get_storage_keyed_lock
 from lightrag.utils import (
     apply_source_ids_limit,
     compute_mdhash_id,
@@ -462,8 +463,9 @@ class ProcessorMixin:
         if not entities_to_store:
             return
 
-        entities_vdb_payload: Dict[str, Dict[str, Any]] = {}
-        entity_chunks_payload: Dict[str, Dict[str, Any]] = {}
+        did_upsert_entities_vdb = False
+        workspace = getattr(self.lightrag, "workspace", "") or ""
+        graph_lock_namespace = f"{workspace}:GraphDB" if workspace else "GraphDB"
 
         for entity_vdb_id, entity_data in entities_to_store.items():
             entity_name = str(entity_data.get("entity_name", "")).strip()
@@ -482,78 +484,88 @@ class ProcessorMixin:
             description = str(entity_data.get("content", "")).strip()
             new_source_id = str(entity_data.get("source_id", "")).strip()
 
-            existing_node = await self.lightrag.chunk_entity_relation_graph.get_node(
-                composite_id
-            )
-
-            existing_full_source_ids: List[str] = []
-            if self.lightrag.entity_chunks:
-                stored_chunks = await self.lightrag.entity_chunks.get_by_id(composite_id)
-                if isinstance(stored_chunks, dict):
-                    existing_full_source_ids = [
-                        chunk_id
-                        for chunk_id in stored_chunks.get("chunk_ids", [])
-                        if chunk_id
-                    ]
-            if not existing_full_source_ids and isinstance(existing_node, dict):
-                existing_full_source_ids = self._split_source_ids(
-                    existing_node.get("source_id", "")
+            async with get_storage_keyed_lock(
+                [composite_id], namespace=graph_lock_namespace, enable_logging=False
+            ):
+                existing_node = await self.lightrag.chunk_entity_relation_graph.get_node(
+                    composite_id
                 )
 
-            merged_full_source_ids = merge_source_ids(
-                existing_full_source_ids, [new_source_id]
-            )
-            limited_source_ids = self._limit_entity_source_ids(
-                composite_id, merged_full_source_ids
-            )
-            limited_source_id_str = GRAPH_FIELD_SEP.join(limited_source_ids)
+                existing_full_source_ids: List[str] = []
+                if self.lightrag.entity_chunks:
+                    stored_chunks = await self.lightrag.entity_chunks.get_by_id(
+                        composite_id
+                    )
+                    if isinstance(stored_chunks, dict):
+                        existing_full_source_ids = [
+                            chunk_id
+                            for chunk_id in stored_chunks.get("chunk_ids", [])
+                            if chunk_id
+                        ]
+                if not existing_full_source_ids and isinstance(existing_node, dict):
+                    existing_full_source_ids = self._split_source_ids(
+                        existing_node.get("source_id", "")
+                    )
 
-            node_created_at = (
-                existing_node.get("created_at")
-                if isinstance(existing_node, dict)
-                and existing_node.get("created_at") is not None
-                else int(time.time())
-            )
+                merged_full_source_ids = merge_source_ids(
+                    existing_full_source_ids, [new_source_id]
+                )
+                limited_source_ids = self._limit_entity_source_ids(
+                    composite_id, merged_full_source_ids
+                )
+                limited_source_id_str = GRAPH_FIELD_SEP.join(limited_source_ids)
 
-            node_data = {
-                "entity_id": composite_id,
-                "entity_name": entity_name,
-                "entity_type": entity_type,
-                "description": description,
-                "source_id": limited_source_id_str,
-                "file_path": file_path,
-                "created_at": node_created_at,
-                "truncate": (
-                    existing_node.get("truncate", "")
+                node_created_at = (
+                    existing_node.get("created_at")
                     if isinstance(existing_node, dict)
-                    else ""
-                ),
-            }
-            await self.lightrag.chunk_entity_relation_graph.upsert_node(
-                composite_id, node_data
-            )
+                    and existing_node.get("created_at") is not None
+                    else int(time.time())
+                )
 
-            if self.lightrag.entity_chunks and merged_full_source_ids:
-                entity_chunks_payload[composite_id] = {
-                    "chunk_ids": merged_full_source_ids,
-                    "count": len(merged_full_source_ids),
+                node_data = {
+                    "entity_id": composite_id,
+                    "entity_name": entity_name,
+                    "entity_type": entity_type,
+                    "description": description,
+                    "source_id": limited_source_id_str,
+                    "file_path": file_path,
+                    "created_at": node_created_at,
+                    "truncate": (
+                        existing_node.get("truncate", "")
+                        if isinstance(existing_node, dict)
+                        else ""
+                    ),
                 }
+                await self.lightrag.chunk_entity_relation_graph.upsert_node(
+                    composite_id, node_data
+                )
 
-            entities_vdb_payload[entity_vdb_id] = {
-                "entity_name": entity_name,
-                "entity_type": entity_type,
-                "entity_id": composite_id,
-                "content": description,
-                "source_id": limited_source_id_str,
-                "file_path": file_path,
-            }
+                if self.lightrag.entity_chunks and merged_full_source_ids:
+                    await self.lightrag.entity_chunks.upsert(
+                        {
+                            composite_id: {
+                                "chunk_ids": merged_full_source_ids,
+                                "count": len(merged_full_source_ids),
+                            }
+                        }
+                    )
 
-        if entities_vdb_payload:
-            await self.lightrag.entities_vdb.upsert(entities_vdb_payload)
+                await self.lightrag.entities_vdb.upsert(
+                    {
+                        entity_vdb_id: {
+                            "entity_name": entity_name,
+                            "entity_type": entity_type,
+                            "entity_id": composite_id,
+                            "content": description,
+                            "source_id": limited_source_id_str,
+                            "file_path": file_path,
+                        }
+                    }
+                )
+                did_upsert_entities_vdb = True
+
+        if did_upsert_entities_vdb:
             await self.lightrag.entities_vdb.index_done_callback()
-
-        if self.lightrag.entity_chunks and entity_chunks_payload:
-            await self.lightrag.entity_chunks.upsert(entity_chunks_payload)
 
     async def _store_multimodal_main_entities_from_stored_chunks(
         self, lightrag_chunks: Dict[str, Any], doc_id: str

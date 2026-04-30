@@ -50,6 +50,12 @@ async def process_with_rag(
     final_workspace_id = await service.ingest(
         file_path, workspace_id=workspace_id
     )
+    if service.settings.enable_synonym_linking:
+        await service.finalize_workspace_synonyms(
+            final_workspace_id,
+            force=False,
+            reset_existing=True,
+        )
 
     queries = [
         "What is the paper's main contribution?",

@@ -292,6 +292,12 @@ async def ingest(
             output_dir=workspace_output,
             chunking_strategy=chunking_strategy or None,
         )
+        if service.settings.enable_synonym_linking:
+            await service.finalize_workspace_synonyms(
+                final_id,
+                force=False,
+                reset_existing=True,
+            )
     finally:
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
 
@@ -364,6 +370,12 @@ async def ingest_batch(
             output_dir=workspace_output,
             chunking_strategy=chunking_strategy or None,
         )
+        if service.settings.enable_synonym_linking:
+            await service.finalize_workspace_synonyms(
+                final_id,
+                force=False,
+                reset_existing=True,
+            )
     finally:
         shutil.rmtree(str(tmp_dir), ignore_errors=True)
 
@@ -399,6 +411,12 @@ async def retry_ingest(
                 )
             except Exception as exc:
                 logger.warning("retry_ingest %s/%s failed: %s", workspace_id, file_path.name, exc)
+        if service.settings.enable_synonym_linking:
+            await service.finalize_workspace_synonyms(
+                workspace_id,
+                force=False,
+                reset_existing=True,
+            )
 
     background_tasks.add_task(_do_retry)
     return {"status": "queued", "workspace_id": workspace_id, "files": [f.name for f in files]}

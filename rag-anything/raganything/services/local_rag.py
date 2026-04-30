@@ -1653,6 +1653,8 @@ class LocalRagService:
         self._ingest_locks: Dict[str, asyncio.Lock] = {}
         self._workspace_warmup_locks: Dict[str, asyncio.Lock] = {}
         self._warmed_workspaces: set[str] = set()
+        self._workspace_synonym_locks: Dict[str, asyncio.Lock] = {}
+        self._workspace_synonym_ready: set[str] = set()
 
         st_model, reranker_model = load_models(self.settings)
         self.embedding_func = build_embedding_func(self.settings, st_model)
@@ -1796,7 +1798,131 @@ class LocalRagService:
             await rag.finalize_storages()
             self._rag_instances.pop(workspace_id, None)
         self._warmed_workspaces.discard(workspace_id)
+        self._workspace_synonym_ready.discard(workspace_id)
         self._workspace_warmup_locks.pop(workspace_id, None)
+        self._workspace_synonym_locks.pop(workspace_id, None)
+
+    def _workspace_state_dir(self, workspace_id: str) -> Path:
+        return Path(self.settings.working_dir_root) / workspace_id
+
+    def _synonym_manifest_path(self, workspace_id: str) -> Path:
+        return self._workspace_state_dir(workspace_id) / "synonym_linking_manifest.json"
+
+    def _current_synonym_manifest(self, workspace_id: str) -> dict[str, Any]:
+        return {
+            "workspace_id": workspace_id,
+            "mode": "workspace_global",
+            "enable_entity_disambiguation": bool(
+                self.settings.enable_entity_disambiguation
+            ),
+            "synonymy_threshold": float(self.settings.synonymy_threshold),
+            "synonymy_topk": int(self.settings.synonymy_topk),
+            "synonymy_min_entity_len": int(self.settings.synonymy_min_entity_len),
+        }
+
+    def _load_synonym_manifest(self, workspace_id: str) -> dict[str, Any] | None:
+        manifest_path = self._synonym_manifest_path(workspace_id)
+        if not manifest_path.exists():
+            return None
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to read synonym manifest for workspace %s: %s",
+                workspace_id,
+                exc,
+            )
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _synonym_manifest_matches(self, workspace_id: str) -> bool:
+        manifest = self._load_synonym_manifest(workspace_id)
+        if not isinstance(manifest, dict):
+            return False
+        current = self._current_synonym_manifest(workspace_id)
+        return all(manifest.get(key) == value for key, value in current.items())
+
+    def _write_synonym_manifest(
+        self,
+        workspace_id: str,
+        *,
+        cleared_edges: int,
+        created_edges: int,
+    ) -> None:
+        manifest_path = self._synonym_manifest_path(workspace_id)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self._current_synonym_manifest(workspace_id)
+        payload.update(
+            {
+                "status": "completed",
+                "cleared_edges": int(cleared_edges),
+                "created_edges": int(created_edges),
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+        manifest_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _invalidate_synonym_manifest(self, workspace_id: str) -> None:
+        self._workspace_synonym_ready.discard(workspace_id)
+        manifest_path = self._synonym_manifest_path(workspace_id)
+        if manifest_path.exists():
+            try:
+                manifest_path.unlink()
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to remove synonym manifest for workspace %s: %s",
+                    workspace_id,
+                    exc,
+                )
+
+    async def finalize_workspace_synonyms(
+        self,
+        workspace_id: str,
+        *,
+        force: bool = False,
+        reset_existing: bool = True,
+    ) -> dict[str, Any]:
+        if not self.settings.enable_synonym_linking:
+            return {"success": True, "skipped": True, "reason": "disabled"}
+
+        if workspace_id not in self._workspace_synonym_locks:
+            self._workspace_synonym_locks[workspace_id] = asyncio.Lock()
+
+        async with self._workspace_synonym_locks[workspace_id]:
+            if not force and self._synonym_manifest_matches(workspace_id):
+                self._workspace_synonym_ready.add(workspace_id)
+                return {"success": True, "skipped": True, "reason": "up_to_date"}
+
+            rag = await self.get_rag(workspace_id)
+            await self._ensure_workspace_warmed(workspace_id)
+            if getattr(rag, "lightrag", None) is None:
+                raise RuntimeError(
+                    f"Cannot rebuild synonym edges for workspace '{workspace_id}': LightRAG not initialized"
+                )
+
+            result = await rag.lightrag.rebuild_synonym_edges(
+                reset_existing=reset_existing
+            )
+            cleared_edges = int(result.get("cleared_edges", 0))
+            created_edges = int(result.get("created_edges", 0))
+            self._write_synonym_manifest(
+                workspace_id,
+                cleared_edges=cleared_edges,
+                created_edges=created_edges,
+            )
+            self._workspace_synonym_ready.add(workspace_id)
+            self.logger.info(
+                "Workspace synonym linking complete: workspace_id=%s cleared=%d created=%d",
+                workspace_id,
+                cleared_edges,
+                created_edges,
+            )
+            response = dict(result)
+            response["manifest_path"] = str(self._synonym_manifest_path(workspace_id))
+            return response
 
     def _apply_multimodal_guardrails_to_rag(self, rag: RAGAnything) -> None:
         """
@@ -2005,6 +2131,7 @@ class LocalRagService:
         else:
             await self._safe_ingest_call(_run_ingest)
 
+        self._invalidate_synonym_manifest(workspace_id)
         return workspace_id
 
     async def lightrag_ainsert(
@@ -2035,9 +2162,12 @@ class LocalRagService:
             if workspace_id not in self._ingest_locks:
                 self._ingest_locks[workspace_id] = asyncio.Lock()
             async with self._ingest_locks[workspace_id]:
-                return await self._safe_ingest_call(_run_insert)
+                result = await self._safe_ingest_call(_run_insert)
+        else:
+            result = await self._safe_ingest_call(_run_insert)
 
-        return await self._safe_ingest_call(_run_insert)
+        self._invalidate_synonym_manifest(workspace_id)
+        return result
 
     async def lightrag_adelete_by_doc_id(
         self,
@@ -2055,7 +2185,9 @@ class LocalRagService:
                 doc_id, delete_llm_cache=delete_llm_cache
             )
 
-        return await self._safe_ingest_call(_run_delete)
+        result = await self._safe_ingest_call(_run_delete)
+        self._invalidate_synonym_manifest(workspace_id)
+        return result
 
     async def lightrag_aquery_data(
         self,
@@ -2333,6 +2465,12 @@ if __name__ == "__main__":
                     workspace_id=workspace_name,
                     output_dir=workspace_output,
                 )
+                if settings.enable_synonym_linking:
+                    await service.finalize_workspace_synonyms(
+                        workspace_name,
+                        force=False,
+                        reset_existing=True,
+                    )
                 print(f"\n 入库成功！")
                 print(f"知识图谱已更新: {settings.working_dir_root}/{workspace_name}/graph_chunk_entity_relation.graphml")
                 print(f"Markdown 已生成: {workspace_output}/")
@@ -2377,6 +2515,13 @@ if __name__ == "__main__":
                     else:
                         print(f"  [完成] {f.name}")
                         success_count += 1
+
+            if settings.enable_synonym_linking and success_count > 0:
+                await service.finalize_workspace_synonyms(
+                    workspace_name,
+                    force=False,
+                    reset_existing=True,
+                )
 
             print(f"\n 入库完成：成功 {success_count} / 共 {len(ingest_jobs)} 个文件")
             if failed_files:

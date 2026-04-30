@@ -922,6 +922,18 @@ async def ensure_workspace_index(
     missing_after_chunks = sorted(list(after_state["missing_chunk_set"]), key=sort_key)
     missing_after_vdb = sorted(list(after_state["missing_vdb_set"]), key=sort_key)
     missing_after_multi_chunks = sorted(list(after_state["multi_chunk_set"]), key=sort_key)
+    synonym_summary: dict[str, Any] | None = None
+    if service.settings.enable_synonym_linking:
+        synonym_summary = await service.finalize_workspace_synonyms(
+            workspace_id,
+            force=False,
+            reset_existing=True,
+        )
+        logger.info(
+            "Workspace synonym finalize complete: workspace_id=%s result=%s",
+            workspace_id,
+            synonym_summary,
+        )
     summary = {
         "workspace_id": workspace_id,
         "target_doc_count": len(target),
@@ -962,6 +974,7 @@ async def ensure_workspace_index(
         "missing_after_chunk_doc_sample": missing_after_chunks[:20],
         "missing_after_vdb_doc_sample": missing_after_vdb[:20],
         "missing_after_multi_chunk_doc_sample": missing_after_multi_chunks[:20],
+        "synonym_linking": synonym_summary or {},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     save_json(INGEST_MANIFEST, summary)

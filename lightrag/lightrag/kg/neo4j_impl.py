@@ -1137,7 +1137,38 @@ class Neo4JStorage(BaseGraphStorage):
                     MATCH (source:`{workspace_label}` {{entity_id: $source_entity_id}})
                     WITH source
                     MATCH (target:`{workspace_label}` {{entity_id: $target_entity_id}})
+                    WITH source, target,
+                         (
+                             toUpper(coalesce($properties.edge_type, '')) = 'SYNONYM'
+                             OR toLower(coalesce($properties.provenance, '')) = 'synonym_detection'
+                             OR (
+                                 coalesce($properties.source_id, '') = ''
+                                 AND (
+                                     toLower(coalesce($properties.keywords, '')) CONTAINS 'synonym'
+                                     OR toLower(coalesce($properties.keywords, '')) CONTAINS 'alias'
+                                 )
+                             )
+                         ) AS incoming_is_synonym
                     MERGE (source)-[r:DIRECTED]-(target)
+                    WITH r, incoming_is_synonym,
+                         (
+                             toUpper(coalesce(r.edge_type, '')) = 'SYNONYM'
+                             OR toLower(coalesce(r.provenance, '')) = 'synonym_detection'
+                             OR (
+                                 coalesce(r.source_id, '') = ''
+                                 AND (
+                                     toLower(coalesce(r.keywords, '')) CONTAINS 'synonym'
+                                     OR toLower(coalesce(r.keywords, '')) CONTAINS 'alias'
+                                 )
+                             )
+                         ) AS current_is_synonym,
+                         (
+                             r.edge_type IS NULL
+                             AND r.provenance IS NULL
+                             AND r.source_id IS NULL
+                             AND r.keywords IS NULL
+                         ) AS current_is_empty
+                    WHERE NOT incoming_is_synonym OR current_is_synonym OR current_is_empty
                     SET r = {{}}
                     SET r += $properties
                     RETURN r, source, target
@@ -1198,7 +1229,38 @@ class Neo4JStorage(BaseGraphStorage):
         ORDER BY row.src, row.tgt
         MATCH (source:`{workspace_label}` {{entity_id: row.src}})
         MATCH (target:`{workspace_label}` {{entity_id: row.tgt}})
+        WITH row, source, target,
+             (
+                 toUpper(coalesce(row.properties.edge_type, '')) = 'SYNONYM'
+                 OR toLower(coalesce(row.properties.provenance, '')) = 'synonym_detection'
+                 OR (
+                     coalesce(row.properties.source_id, '') = ''
+                     AND (
+                         toLower(coalesce(row.properties.keywords, '')) CONTAINS 'synonym'
+                         OR toLower(coalesce(row.properties.keywords, '')) CONTAINS 'alias'
+                     )
+             )
+         ) AS incoming_is_synonym
         MERGE (source)-[r:DIRECTED]-(target)
+        WITH row, r, incoming_is_synonym,
+             (
+                 toUpper(coalesce(r.edge_type, '')) = 'SYNONYM'
+                 OR toLower(coalesce(r.provenance, '')) = 'synonym_detection'
+                 OR (
+                     coalesce(r.source_id, '') = ''
+                     AND (
+                         toLower(coalesce(r.keywords, '')) CONTAINS 'synonym'
+                         OR toLower(coalesce(r.keywords, '')) CONTAINS 'alias'
+                     )
+                 )
+             ) AS current_is_synonym,
+             (
+                 r.edge_type IS NULL
+                 AND r.provenance IS NULL
+                 AND r.source_id IS NULL
+                 AND r.keywords IS NULL
+             ) AS current_is_empty
+        WHERE NOT incoming_is_synonym OR current_is_synonym OR current_is_empty
         SET r = {{}}
         SET r += row.properties
         RETURN count(r) AS affected

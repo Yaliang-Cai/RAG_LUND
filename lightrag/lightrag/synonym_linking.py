@@ -19,6 +19,7 @@ import numpy as np
 
 from lightrag.base import BaseVectorStorage, BaseGraphStorage
 from lightrag.utils import logger, compute_entity_vdb_id
+from lightrag.kg.shared_storage import get_storage_keyed_lock
 
 # Rows processed per matmul batch.  1 000 rows 脳 100 000 cols 脳 float32 鈮?400 MB peak.
 # Reduce if memory is constrained; increase for throughput on large corpora.
@@ -66,6 +67,39 @@ def _graph_id_to_vdb_id(graph_id: str, enable_disambiguation: bool) -> str:
 def _passes_length_filter(graph_id: str, min_entity_len: int) -> bool:
     name = graph_id.split("|")[0] if "|" in graph_id else graph_id
     return len(re.sub(r'[^A-Za-z0-9\u4e00-\u9fff]', '', name)) > min_entity_len
+
+
+def _should_upsert_synonym_edge(
+    existing: dict[str, Any] | None,
+    edge_data: dict[str, Any],
+) -> bool:
+    """Return True when a SYNONYM edge may be written without overriding FACTUAL."""
+    if not existing:
+        return True
+
+    # FACTUAL > SYNONYM: never overwrite factual edges.
+    # Untyped legacy extraction edges are also treated as factual.
+    if not _is_synonym_edge(existing):
+        return False
+
+    existing_weight = existing.get("weight")
+    new_weight = edge_data.get("weight")
+    try:
+        existing_weight_float = float(existing_weight)
+        new_weight_float = float(new_weight)
+    except (TypeError, ValueError):
+        existing_weight_float = None
+        new_weight_float = None
+
+    if (
+        existing_weight_float is not None
+        and new_weight_float is not None
+        and abs(existing_weight_float - new_weight_float) <= 1e-5
+        and existing.get("provenance") == edge_data.get("provenance")
+    ):
+        return False
+
+    return True
 
 
 async def build_synonym_edges(
@@ -255,32 +289,47 @@ async def build_synonym_edges(
         }
 
         existing = existing_edges.get((src_id, tgt_id))
-        if existing:
-            # FACTUAL > SYNONYM: never overwrite factual edges.
-            # Untyped legacy extraction edges are also treated as factual.
-            if not _is_synonym_edge(existing):
-                continue
-
-            existing_weight = existing.get("weight")
-            try:
-                existing_weight_float = float(existing_weight)
-            except (TypeError, ValueError):
-                existing_weight_float = None
-
-            if (
-                existing_weight_float is not None
-                and abs(existing_weight_float - distance) <= 1e-5
-                and existing.get("provenance") == edge_data["provenance"]
-            ):
-                continue
+        if not _should_upsert_synonym_edge(existing, edge_data):
+            continue
 
         edges_to_upsert.append((src_id, tgt_id, edge_data))
 
     if not edges_to_upsert:
         return 0
 
-    await knowledge_graph_inst.upsert_edges_batch(edges_to_upsert)
-    created = len(edges_to_upsert)
+    # Factual relation merging locks the same endpoint keys before writing a
+    # pair. Re-check under that lock so a concurrent factual write cannot land
+    # between the optimistic pre-check above and the SYNONYM batch upsert.
+    workspace = str(getattr(knowledge_graph_inst, "workspace", "") or "")
+    namespace = f"{workspace}:GraphDB" if workspace else "GraphDB"
+    lock_keys = sorted(
+        {
+            endpoint
+            for src_id, tgt_id, _ in edges_to_upsert
+            for endpoint in (src_id, tgt_id)
+            if endpoint
+        }
+    )
+    async with get_storage_keyed_lock(
+        lock_keys, namespace=namespace, enable_logging=False
+    ):
+        latest_existing_edges = await knowledge_graph_inst.get_edges_batch(
+            [{"src": src_id, "tgt": tgt_id} for src_id, tgt_id, _ in edges_to_upsert]
+        )
+        locked_edges_to_upsert = [
+            (src_id, tgt_id, edge_data)
+            for src_id, tgt_id, edge_data in edges_to_upsert
+            if _should_upsert_synonym_edge(
+                latest_existing_edges.get((src_id, tgt_id)),
+                edge_data,
+            )
+        ]
+
+        if not locked_edges_to_upsert:
+            return 0
+
+        await knowledge_graph_inst.upsert_edges_batch(locked_edges_to_upsert)
+        created = len(locked_edges_to_upsert)
 
     logger.info(
         "Synonym linking: upserted %d SYNONYM edges (candidates=%d)",
@@ -288,3 +337,38 @@ async def build_synonym_edges(
         len(best_similarity_by_pair),
     )
     return created
+
+
+async def clear_synonym_edges(
+    knowledge_graph_inst: BaseGraphStorage,
+) -> int:
+    """Remove all currently materialized SYNONYM edges from the graph.
+
+    This is intended for workspace-level rebuilds where synonym parameters may
+    have changed. FACTUAL edges are never touched because filtering is based on
+    the current edge payload, not on endpoint pairs alone.
+    """
+    all_edges = await knowledge_graph_inst.get_all_edges()
+    if not all_edges:
+        return 0
+
+    synonym_pairs: set[tuple[str, str]] = set()
+    for edge_data in all_edges:
+        if not _is_synonym_edge(edge_data):
+            continue
+        source = str(edge_data.get("source", "") or "").strip()
+        target = str(edge_data.get("target", "") or "").strip()
+        if not source or not target or source == target:
+            continue
+        src_id, tgt_id = (source, target) if source < target else (target, source)
+        synonym_pairs.add((src_id, tgt_id))
+
+    if not synonym_pairs:
+        return 0
+
+    await knowledge_graph_inst.remove_edges(sorted(synonym_pairs))
+    logger.info(
+        "Synonym linking: cleared %d existing SYNONYM edges before rebuild",
+        len(synonym_pairs),
+    )
+    return len(synonym_pairs)

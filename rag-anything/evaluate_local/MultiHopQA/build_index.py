@@ -760,6 +760,13 @@ async def main(args: argparse.Namespace) -> None:
             doc_status_timeout=args.doc_status_timeout,
             doc_status_poll_interval=args.doc_status_poll_interval,
         )
+        if settings.enable_synonym_linking:
+            synonym_result = await service.finalize_workspace_synonyms(
+                args.workspace,
+                force=False,
+                reset_existing=True,
+            )
+            print(f"[build_index] Synonym finalize: {synonym_result}")
 
         manifest = {
             "schema_version": "multihopqa_ingest_manifest_v1",
