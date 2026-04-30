@@ -9,6 +9,7 @@ from typing import Annotated, Any
 
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, END
+from opentelemetry import trace as otel_trace
 
 from lightrag import QueryParam
 from .complexity import ComplexityClassifier
@@ -16,6 +17,7 @@ from .evaluator import AnswerEvaluator
 from .router import RetrievalRouter
 
 logger = logging.getLogger(__name__)
+_tracer = otel_trace.get_tracer("raganything.agentic")
 
 MAX_CONCURRENT_SUBQUESTIONS = 3
 MAX_ITER_BY_COMPLEXITY: dict[str, int] = {"simple": 0, "medium": 1, "complex": 2}
@@ -69,7 +71,12 @@ class AdaptiveAgentGraph:
     # ── Nodes ───────────────────────────────────────────────────────────────
 
     async def _node_classify(self, state: AgentState) -> dict:
-        complexity, meta = await self._complexity_clf.classify(state["query"])
+        with _tracer.start_as_current_span("agentic.classify_complexity") as span:
+            complexity, meta = await self._complexity_clf.classify(state["query"])
+            span.set_attribute("complexity", complexity)
+            span.set_attribute("confidence", meta.get("confidence", 0.0))
+            span.set_attribute("latency_s", meta.get("latency", 0.0))
+            span.set_attribute("reasoning", meta.get("reasoning", ""))
         return {
             "complexity": complexity,
             "current_search_query": state["query"],
@@ -78,42 +85,65 @@ class AdaptiveAgentGraph:
         }
 
     async def _node_retrieve(self, state: AgentState) -> dict:
-        param = QueryParam(mode="hybrid")
-        chunks, trace = await self._router.route(state["current_search_query"], param)
+        with _tracer.start_as_current_span("agentic.retrieve") as span:
+            param = QueryParam(mode="hybrid")
+            chunks, trace = await self._router.route(state["current_search_query"], param)
+            span.set_attribute("chunks_retrieved", len(chunks))
+            span.set_attribute("profile", trace.get("profile", ""))
         return {
             "retrieved_chunks": chunks,
             "routing_trace": {**state.get("routing_trace", {}), "retrieve": trace},
         }
 
     async def _node_decompose(self, state: AgentState) -> dict:
-        sub_questions = await self._decompose_query(state["query"])
+        with _tracer.start_as_current_span("agentic.decompose") as span:
+            sub_questions = await self._decompose_query(state["query"])
+            span.set_attribute("sub_questions_count", len(sub_questions))
+            span.set_attribute("sub_questions", str(sub_questions))
         return {"sub_questions": sub_questions}
 
     async def _node_parallel_retrieve(self, state: AgentState) -> dict:
-        sem = asyncio.Semaphore(MAX_CONCURRENT_SUBQUESTIONS)
-        param = QueryParam(mode="hybrid")
+        with _tracer.start_as_current_span("agentic.parallel_retrieve") as span:
+            span.set_attribute("sub_questions_count", len(state["sub_questions"]))
+            sem = asyncio.Semaphore(MAX_CONCURRENT_SUBQUESTIONS)
+            param = QueryParam(mode="hybrid")
 
-        async def _one(sub_q: str) -> list[dict]:
-            async with sem:
-                chunks, _ = await self._router.route(sub_q, param)
-                return chunks
+            async def _one(sub_q: str) -> list[dict]:
+                async with sem:
+                    chunks, _ = await self._router.route(sub_q, param)
+                    return chunks
 
-        results = await asyncio.gather(*[_one(q) for q in state["sub_questions"]])
-        return {"retrieved_chunks": [c for batch in results for c in batch]}
+            results = await asyncio.gather(*[_one(q) for q in state["sub_questions"]])
+            all_chunks = [c for batch in results for c in batch]
+            span.set_attribute("total_chunks_retrieved", len(all_chunks))
+        return {"retrieved_chunks": all_chunks}
 
     async def _node_generate(self, state: AgentState) -> dict:
-        deduped = _dedup_chunks(state["retrieved_chunks"])
-        answer = await self._generate_answer(state["query"], deduped)
+        with _tracer.start_as_current_span("agentic.generate") as span:
+            deduped = _dedup_chunks(state["retrieved_chunks"])
+            span.set_attribute("chunks_after_dedup", len(deduped))
+            span.set_attribute("iteration", state["iteration"])
+            answer = await self._generate_answer(state["query"], deduped)
         return {"answer": answer}
 
     async def _node_evaluate(self, state: AgentState) -> dict:
-        result = await self._evaluator.evaluate(state["query"], state["answer"])
+        with _tracer.start_as_current_span("agentic.evaluate") as span:
+            result = await self._evaluator.evaluate(state["query"], state["answer"])
+            span.set_attribute("eval_score", result["score"])
+            span.set_attribute("eval_gap", result["gap"])
+            span.set_attribute("iteration", state["iteration"])
+            span.set_attribute("will_retry", result["score"] < EVAL_PASS_THRESHOLD
+                               and state["iteration"] < MAX_ITER_BY_COMPLEXITY.get(state["complexity"], 1))
         return {"eval_score": result["score"], "eval_gap": result["gap"]}
 
     async def _node_targeted_retrieve(self, state: AgentState) -> dict:
-        new_query = f"{state['query']} — supplementary retrieval: {state['eval_gap']}"
-        param = QueryParam(mode="hybrid")
-        chunks, trace = await self._router.route(new_query, param)
+        with _tracer.start_as_current_span("agentic.targeted_retrieve") as span:
+            new_query = f"{state['query']} — supplementary retrieval: {state['eval_gap']}"
+            span.set_attribute("iteration", state["iteration"])
+            span.set_attribute("eval_gap", state["eval_gap"])
+            param = QueryParam(mode="hybrid")
+            chunks, trace = await self._router.route(new_query, param)
+            span.set_attribute("chunks_retrieved", len(chunks))
         iter_key = f"targeted_retrieve_{state['iteration']}"
         return {
             "retrieved_chunks": chunks,
@@ -169,6 +199,8 @@ class AdaptiveAgentGraph:
     # ── Public API ───────────────────────────────────────────────────────────
 
     async def run(self, query: str, return_trace: bool = False, **kwargs: Any) -> str | dict:
+        with _tracer.start_as_current_span("agentic.run") as span:
+            span.set_attribute("query", query[:200])
         initial: AgentState = {
             "query": query,
             "complexity": "medium",
