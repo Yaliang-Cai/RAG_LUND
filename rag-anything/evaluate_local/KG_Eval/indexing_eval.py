@@ -1,10 +1,11 @@
 import argparse
 import asyncio
+import configparser
 import os
 import pickle
+import re
 import sys
 import warnings
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -290,19 +291,6 @@ def _resolve_neo4j_workspace_specs(
     return [Neo4JWorkspaceSpec(working_dir=working_dir, workspace_id=working_dir.name)]
 
 
-@contextmanager
-def _temporary_neo4j_workspace(workspace_id: str):
-    previous = os.environ.get("NEO4J_WORKSPACE")
-    os.environ["NEO4J_WORKSPACE"] = workspace_id
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop("NEO4J_WORKSPACE", None)
-        else:
-            os.environ["NEO4J_WORKSPACE"] = previous
-
-
 def _build_igraph_from_neo4j_records(
     nodes: List[Dict[str, object]], edges: List[Dict[str, object]]
 ) -> ig.Graph:
@@ -357,35 +345,135 @@ def _build_igraph_from_neo4j_records(
     return g
 
 
+def _safe_neo4j_label(label: str) -> str:
+    return str(label).replace("`", "``")
+
+
+def _neo4j_connection_config() -> Dict[str, object]:
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(dotenv_path=".env", override=False)
+    except ImportError:
+        pass
+
+    config = configparser.ConfigParser()
+    config.read("config.ini", "utf-8")
+
+    uri = os.environ.get("NEO4J_URI", config.get("neo4j", "uri", fallback=None))
+    username = os.environ.get(
+        "NEO4J_USERNAME", config.get("neo4j", "username", fallback=None)
+    )
+    password = os.environ.get(
+        "NEO4J_PASSWORD", config.get("neo4j", "password", fallback=None)
+    )
+    if not uri:
+        raise ValueError("NEO4J_URI is not set and config.ini has no [neo4j].uri")
+
+    default_database = re.sub(r"[^a-zA-Z0-9-]", "-", "chunk_entity_relation")
+    database = os.environ.get("NEO4J_DATABASE", default_database)
+
+    return {
+        "uri": uri,
+        "auth": (username, password),
+        "database": database,
+        "max_connection_pool_size": int(
+            os.environ.get(
+                "NEO4J_MAX_CONNECTION_POOL_SIZE",
+                config.get("neo4j", "connection_pool_size", fallback=100),
+            )
+        ),
+        "connection_timeout": float(
+            os.environ.get(
+                "NEO4J_CONNECTION_TIMEOUT",
+                config.get("neo4j", "connection_timeout", fallback=120.0),
+            )
+        ),
+        "connection_acquisition_timeout": float(
+            os.environ.get(
+                "NEO4J_CONNECTION_ACQUISITION_TIMEOUT",
+                config.get(
+                    "neo4j", "connection_acquisition_timeout", fallback=120.0
+                ),
+            )
+        ),
+        "max_transaction_retry_time": float(
+            os.environ.get(
+                "NEO4J_MAX_TRANSACTION_RETRY_TIME",
+                config.get("neo4j", "max_transaction_retry_time", fallback=120.0),
+            )
+        ),
+        "max_connection_lifetime": float(
+            os.environ.get(
+                "NEO4J_MAX_CONNECTION_LIFETIME",
+                config.get("neo4j", "max_connection_lifetime", fallback=300.0),
+            )
+        ),
+        "liveness_check_timeout": float(
+            os.environ.get(
+                "NEO4J_LIVENESS_CHECK_TIMEOUT",
+                config.get("neo4j", "liveness_check_timeout", fallback=120.0),
+            )
+        ),
+        "keep_alive": os.environ.get(
+            "NEO4J_KEEP_ALIVE",
+            config.get("neo4j", "keep_alive", fallback="true"),
+        ).lower()
+        in ("true", "1", "yes", "on"),
+    }
+
+
+async def _read_neo4j_nodes_and_edges(workspace_id: str) -> tuple[List[Dict], List[Dict]]:
+    try:
+        from neo4j import AsyncGraphDatabase
+    except ImportError as exc:
+        raise ImportError("neo4j package required. Install with: pip install neo4j") from exc
+
+    cfg = _neo4j_connection_config()
+    database = cfg.pop("database")
+    uri = cfg.pop("uri")
+    auth = cfg.pop("auth")
+    workspace_label = _safe_neo4j_label(workspace_id)
+
+    driver = AsyncGraphDatabase.driver(uri, auth=auth, **cfg)
+    try:
+        async with driver.session(
+            database=database, default_access_mode="READ"
+        ) as session:
+            node_result = await session.run(
+                f"MATCH (n:`{workspace_label}`) "
+                f"WHERE n.entity_id IS NOT NULL "
+                f"RETURN n.entity_id AS entity_id, "
+                f"       n.source_id AS source_id"
+            )
+            nodes = await node_result.data()
+
+        async with driver.session(
+            database=database, default_access_mode="READ"
+        ) as session:
+            edge_result = await session.run(
+                f"MATCH (a:`{workspace_label}`)-[r]->(b:`{workspace_label}`) "
+                f"WHERE a.entity_id IS NOT NULL AND b.entity_id IS NOT NULL "
+                f"RETURN a.entity_id AS src, b.entity_id AS tgt, "
+                f"       r.weight AS weight, r.weight_raw AS weight_raw, "
+                f"       r.source_id AS source_id, "
+                f"       r.edge_type AS edge_type, r.provenance AS provenance"
+            )
+            edges = await edge_result.data()
+    finally:
+        await driver.close()
+
+    return nodes, edges
+
+
 async def _load_graph_from_neo4j_workspace(
     workspace_dir: Path, workspace_id: Optional[str] = None
 ) -> ig.Graph:
-    from lightrag.kg.neo4j_impl import Neo4JStorage
-    from lightrag.kg.shared_storage import initialize_share_data
-    from lightrag.namespace import NameSpace
-
     final_workspace_id = str(workspace_id or workspace_dir.name).strip()
     if not final_workspace_id:
         raise ValueError("Neo4j workspace_id cannot be empty")
 
-    initialize_share_data()
-    with _temporary_neo4j_workspace(final_workspace_id):
-        storage = Neo4JStorage(
-            namespace=NameSpace.GRAPH_STORE_CHUNK_ENTITY_RELATION,
-            workspace=final_workspace_id,
-            global_config={"working_dir": str(workspace_dir)},
-            embedding_func=None,
-        )
-        await storage.initialize()
-        try:
-            if hasattr(storage, "get_all_nodes_and_edges"):
-                nodes, edges = await storage.get_all_nodes_and_edges()
-            else:
-                nodes = await storage.get_all_nodes()
-                edges = await storage.get_all_edges()
-        finally:
-            await storage.finalize()
-
+    nodes, edges = await _read_neo4j_nodes_and_edges(final_workspace_id)
     return _build_igraph_from_neo4j_records(nodes, edges)
 
 
