@@ -39,8 +39,61 @@ load_dotenv()
 VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto", "full")
 VALID_DATASETS = ("hotpotqa", "musique", "2wiki", "simpleqa")
 SOURCE_MAP_FILENAME = "multihopqa_chunk_source_map.json"
+PPR_MODES = {"ppr", "ppr_local"}
 
 _REFERENCES_RE = re.compile(r"#+\s*references?.*", re.IGNORECASE | re.DOTALL)
+
+
+class _TeeStream:
+    def __init__(self, *streams: Any):
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self._streams:
+            stream.write(data)
+            stream.flush()
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+    def isatty(self) -> bool:
+        primary = self._streams[0] if self._streams else None
+        return bool(getattr(primary, "isatty", lambda: False)())
+
+
+class _TeeOutput:
+    def __init__(self, log_file: Path):
+        self.log_file = log_file
+        self._file = None
+        self._stdout = None
+        self._stderr = None
+
+    def __enter__(self) -> "_TeeOutput":
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.log_file.open("w", encoding="utf-8")
+        self._stdout = sys.stdout
+        self._stderr = sys.stderr
+        sys.stdout = _TeeStream(self._stdout, self._file)
+        sys.stderr = _TeeStream(self._stderr, self._file)
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if self._stdout is not None:
+            sys.stdout = self._stdout
+        if self._stderr is not None:
+            sys.stderr = self._stderr
+        if self._file is not None:
+            self._file.close()
+
+
+def _resolve_log_file(output_dir: str | Path, log_file: str | None, dataset: str) -> Path:
+    output_dir_path = Path(output_dir)
+    if log_file:
+        candidate = Path(log_file).expanduser()
+        return candidate if candidate.is_absolute() else output_dir_path / candidate
+    return output_dir_path / f"{dataset}_evaluate_multihop.log"
 
 
 def _strip_references(text: str) -> str:
@@ -67,18 +120,106 @@ def _append_jsonl(path: Path, record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _load_chunk_source_map(working_dir: str | Path) -> dict[str, dict[str, Any]]:
+def _load_chunk_source_map(
+    working_dir: str | Path,
+    *,
+    dataset: str | None = None,
+    workspace: str | None = None,
+    n_samples: int | None = None,
+    seed: int | None = None,
+    strict: bool = False,
+) -> dict[str, dict[str, Any]]:
     source_map_path = Path(working_dir) / SOURCE_MAP_FILENAME
     if not source_map_path.exists():
+        if strict:
+            raise FileNotFoundError(f"Missing chunk source map: {source_map_path}")
         return {}
     try:
         payload = json.loads(source_map_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        if strict:
+            raise ValueError(f"Invalid chunk source map JSON: {source_map_path}") from exc
         return {}
+
+    if strict:
+        expected = {
+            "workspace_id": workspace,
+            "dataset": dataset,
+            "n_samples": n_samples,
+            "seed": seed,
+        }
+        mismatches = []
+        for key, expected_value in expected.items():
+            if expected_value is None:
+                continue
+            actual_value = payload.get(key)
+            if actual_value != expected_value:
+                mismatches.append(f"{key}: expected={expected_value!r}, actual={actual_value!r}")
+        if mismatches:
+            raise ValueError(
+                "Chunk source map identity mismatch. "
+                f"Use the workspace built for this dataset/sample/seed. Details: {'; '.join(mismatches)}"
+            )
+
     mapping = payload.get("map", {})
     if not isinstance(mapping, dict):
+        if strict:
+            raise ValueError(f"Chunk source map has no object 'map': {source_map_path}")
         return {}
+    if strict and "map_size" in payload and int(payload["map_size"]) != len(mapping):
+        raise ValueError(
+            "Chunk source map size mismatch. "
+            f"map_size={payload['map_size']!r}, actual={len(mapping)}"
+        )
     return {str(k): v for k, v in mapping.items() if isinstance(v, dict)}
+
+
+def _build_query_kwargs(
+    *,
+    query_overrides: dict[str, Any],
+    wire_profile: str | None,
+    top_k: int | None = None,
+    chunk_top_k: int | None = None,
+    max_total_tokens: int | None = None,
+    **extra_query_kwargs: Any,
+) -> dict[str, Any]:
+    kwargs = dict(query_overrides)
+    if wire_profile is not None:
+        kwargs["profile"] = wire_profile
+    if top_k is not None:
+        kwargs["top_k"] = int(top_k)
+    if chunk_top_k is not None:
+        kwargs["chunk_top_k"] = int(chunk_top_k)
+    if max_total_tokens is not None:
+        kwargs["max_total_tokens"] = int(max_total_tokens)
+    for key, value in extra_query_kwargs.items():
+        if value is not None:
+            kwargs[key] = value
+    return kwargs
+
+
+def _mode_query_kwargs(
+    query_kwargs: dict[str, Any] | None,
+    mode: str,
+    *,
+    hybrid_enable_rerank: bool = True,
+    ppr_enable_rerank: bool = False,
+) -> dict[str, Any]:
+    kwargs = {k: v for k, v in dict(query_kwargs or {}).items() if v is not None}
+    if mode in PPR_MODES:
+        kwargs["enable_rerank"] = bool(ppr_enable_rerank)
+        kwargs["answer_context_mode"] = "chunk_only_prompt"
+        kwargs["ppr_post_rerank_fusion"] = str(
+            kwargs.get("ppr_post_rerank_fusion", "none")
+        ).strip().lower()
+        kwargs["ppr_post_rerank_rrf_k"] = int(
+            kwargs.get("ppr_post_rerank_rrf_k", 60)
+        )
+    else:
+        kwargs["enable_rerank"] = bool(hybrid_enable_rerank)
+        if mode == "hybrid":
+            kwargs.setdefault("answer_context_mode", "kg_prompt")
+    return kwargs
 
 
 def _trace_chunk_id(chunk: dict[str, Any]) -> str:
@@ -203,7 +344,12 @@ async def _run_mode(
     score_recall_at_k: Callable[[list[dict], list[str] | None, int], float | None],
     get_eval_query_overrides: Callable[[str], dict[str, str]],
     chunk_source_map: dict[str, dict[str, Any]],
+    query_kwargs: dict[str, Any] | None = None,
+    concurrency: int = 1,
+    hybrid_enable_rerank: bool = True,
+    ppr_enable_rerank: bool = False,
 ) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = output_dir / f"{dataset}_{mode}_results.jsonl"
     existing_ids = _load_existing_ids(jsonl_path) if resume else set()
     if not resume and jsonl_path.exists():
@@ -212,6 +358,14 @@ async def _run_mode(
     query_overrides = get_eval_query_overrides(dataset)
     done = len(existing_ids)
     total = len(items)
+    last_reported = done
+    effective_concurrency = max(1, int(concurrency))
+    query_kwargs = _mode_query_kwargs(
+        query_kwargs,
+        mode,
+        hybrid_enable_rerank=hybrid_enable_rerank,
+        ppr_enable_rerank=ppr_enable_rerank,
+    )
 
     # "full" is a pseudo-mode: forces the router's "full" profile (all paths, RRF fusion).
     # "auto" lets the router classify per query and pick the best profile.
@@ -219,14 +373,13 @@ async def _run_mode(
     wire_mode = "auto" if mode in ("auto", "full") else mode
     wire_profile = "full" if mode == "full" else None
 
-    for item in items:
-        if item["id"] in existing_ids:
-            continue
-
+    async def _evaluate_item(item: dict) -> dict[str, Any]:
         try:
-            call_kwargs = dict(query_overrides)
-            if wire_profile is not None:
-                call_kwargs["profile"] = wire_profile
+            call_kwargs = _build_query_kwargs(
+                query_overrides=query_overrides,
+                wire_profile=wire_profile,
+                **query_kwargs,
+            )
             result = await service.query_with_trace(
                 workspace_id=workspace_id,
                 query=item["question"],
@@ -280,10 +433,19 @@ async def _run_mode(
             ]
             record["retrieved_sources"] = retrieved_sources
 
-        _append_jsonl(jsonl_path, record)
-        done += 1
-        if done % 50 == 0 or done == total:
+        return record
+
+    pending_items = [item for item in items if item["id"] not in existing_ids]
+    for start in range(0, len(pending_items), effective_concurrency):
+        batch = pending_items[start : start + effective_concurrency]
+        records = await asyncio.gather(*(_evaluate_item(item) for item in batch))
+
+        for record in records:
+            _append_jsonl(jsonl_path, record)
+        done += len(records)
+        if done == total or done - last_reported >= 50:
             print(f"  [{mode}] {done}/{total}")
+            last_reported = done
 
     return _aggregate_jsonl(jsonl_path, recall_ks)
 
@@ -312,15 +474,75 @@ async def main(args: argparse.Namespace) -> None:
 
     settings = LocalRagSettings.from_env()
     service = LocalRagService(settings)
-    chunk_source_map = _load_chunk_source_map(args.working_dir)
+    strict_source_map = args.dataset != "simpleqa" and not args.allow_missing_source_map
+    chunk_source_map = _load_chunk_source_map(
+        args.working_dir,
+        dataset=args.dataset,
+        workspace=args.workspace,
+        n_samples=args.n_samples,
+        seed=args.seed,
+        strict=strict_source_map,
+    )
+    if args.dataset == "simpleqa":
+        print("[eval] SimpleQA has no supporting facts/source corpus; Recall@K will be N/A")
     if chunk_source_map:
         print(f"[eval] Loaded chunk source map: {len(chunk_source_map)} chunks")
     else:
         print("[eval] No chunk source map found; JSONL will not include retrieved source ids")
 
+    base_query_kwargs = {
+        "top_k": args.top_k,
+        "chunk_top_k": args.chunk_top_k,
+        "max_total_tokens": args.max_total_tokens,
+        "qdrant_retrieval_mode": args.qdrant_retrieval_mode,
+        "entity_qdrant_retrieval_mode": args.qdrant_retrieval_mode,
+        "chunk_qdrant_retrieval_mode": args.qdrant_retrieval_mode,
+        "keyword_fanout_mode": args.keyword_fanout_mode,
+        "keyword_entity_rrf_k": args.keyword_entity_rrf_k,
+        "keyword_relation_rrf_k": args.keyword_relation_rrf_k,
+        "answer_context_mode": args.answer_context_mode,
+        "kg_chunk_selection_source": args.kg_chunk_selection_source,
+        "enable_kg_rerank": args.enable_kg_rerank,
+        "rerank_score_scope": "all",
+        "ppr_damping": args.ppr_damping,
+        "ppr_top_k": args.ppr_top_k,
+        "ppr_qa_top_k": args.ppr_qa_top_k,
+        "ppr_post_rerank_fusion": args.ppr_post_rerank_fusion,
+        "ppr_post_rerank_rrf_k": args.ppr_post_rerank_rrf_k,
+        "passage_node_weight": args.passage_node_weight,
+        "recognition_top_k": args.recognition_top_k,
+        "linking_top_k": args.linking_top_k,
+        "ppr_synonym_weight_mode": args.ppr_synonym_weight_mode,
+        "exclude_synonym_edges": args.exclude_synonym_edges,
+        "bypass_query_cache": args.bypass_query_cache,
+        "bypass_keywords_cache": args.bypass_keywords_cache,
+        "vlm_enhanced": args.vlm_enhanced,
+    }
+    print(
+        "[eval] Query controls: "
+        f"top_k={args.top_k}, chunk_top_k={args.chunk_top_k}, "
+        f"max_total_tokens={args.max_total_tokens}, concurrency={args.concurrency}, "
+        f"qdrant_retrieval_mode={args.qdrant_retrieval_mode}, "
+        f"ppr_top_k={args.ppr_top_k}, ppr_qa_top_k={args.ppr_qa_top_k}, "
+        f"enable_kg_rerank={args.enable_kg_rerank}, "
+        f"bypass_query_cache={args.bypass_query_cache}, vlm_enhanced={args.vlm_enhanced}"
+    )
+
     results: dict[str, dict] = {}
+    query_kwargs_by_mode: dict[str, dict[str, Any]] = {}
     for mode in args.modes:
         print(f"\n[eval] Running mode: {mode}")
+        mode_query_kwargs = _mode_query_kwargs(
+            base_query_kwargs,
+            mode,
+            hybrid_enable_rerank=args.hybrid_enable_rerank,
+            ppr_enable_rerank=args.ppr_enable_rerank,
+        )
+        query_kwargs_by_mode[mode] = mode_query_kwargs
+        print(
+            f"  [{mode}] enable_rerank={mode_query_kwargs.get('enable_rerank')}, "
+            f"answer_context_mode={mode_query_kwargs.get('answer_context_mode')}"
+        )
         metrics = await _run_mode(
             service=service,
             workspace_id=args.workspace,
@@ -336,6 +558,10 @@ async def main(args: argparse.Namespace) -> None:
             score_recall_at_k=score_recall_at_k,
             get_eval_query_overrides=get_eval_query_overrides,
             chunk_source_map=chunk_source_map,
+            query_kwargs=base_query_kwargs,
+            concurrency=args.concurrency,
+            hybrid_enable_rerank=args.hybrid_enable_rerank,
+            ppr_enable_rerank=args.ppr_enable_rerank,
         )
         results[mode] = metrics
         print(f"  [{mode}] EM={metrics.get('em', 0):.4f}  F1={metrics.get('f1', 0):.4f}")
@@ -346,6 +572,9 @@ async def main(args: argparse.Namespace) -> None:
         "n_samples": args.n_samples,
         "seed": args.seed,
         "recall_k": args.recall_k,
+        "concurrency": args.concurrency,
+        "base_query_kwargs": {k: v for k, v in base_query_kwargs.items() if v is not None},
+        "query_kwargs_by_mode": query_kwargs_by_mode,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "results": results,
     }
@@ -368,6 +597,15 @@ async def main(args: argparse.Namespace) -> None:
     print(f"\nSummary saved to: {summary_path}")
 
 
+async def main_with_logging(args: argparse.Namespace) -> None:
+    log_path = _resolve_log_file(args.output_dir, args.log_file, args.dataset)
+    with _TeeOutput(log_path):
+        print(f"[eval] Log file: {log_path}")
+        print(f"[eval] Started at: {datetime.now(timezone.utc).isoformat()}")
+        print(f"[eval] CLI args: {json.dumps(vars(args), ensure_ascii=False, sort_keys=True)}")
+        await main(args)
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Multi-hop QA query-mode evaluator")
     p.add_argument("--dataset",     required=True, choices=VALID_DATASETS)
@@ -378,10 +616,67 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--n-samples",   type=int, default=500, dest="n_samples")
     p.add_argument("--recall-k",    type=int, nargs="+", default=[5, 10, 20], dest="recall_k")
     p.add_argument("--output-dir",  required=True, dest="output_dir")
+    p.add_argument("--log-file", default=None, dest="log_file")
     p.add_argument("--resume",      action="store_true")
     p.add_argument("--seed",        type=int, default=42)
-    return p.parse_args()
+    p.add_argument("--concurrency", type=int, default=16)
+    p.add_argument("--top-k", type=int, default=40, dest="top_k")
+    p.add_argument("--chunk-top-k", type=int, default=20, dest="chunk_top_k")
+    p.add_argument("--max-total-tokens", type=int, default=45000, dest="max_total_tokens")
+    p.add_argument("--qdrant-retrieval-mode", default="dense", choices=["dense", "bm25", "hybrid"], dest="qdrant_retrieval_mode")
+    p.add_argument("--keyword-fanout-mode", default="joined", choices=["joined", "per_keyword_rrf"], dest="keyword_fanout_mode")
+    p.add_argument("--keyword-entity-rrf-k", type=int, default=10, dest="keyword_entity_rrf_k")
+    p.add_argument("--keyword-relation-rrf-k", type=int, default=20, dest="keyword_relation_rrf_k")
+    p.add_argument("--answer-context-mode", default="kg_prompt", choices=["kg_prompt", "chunk_only_prompt"], dest="answer_context_mode")
+    p.add_argument("--kg-chunk-selection-source", default="truncated", choices=["truncated", "untruncated"], dest="kg_chunk_selection_source")
+    p.add_argument("--enable-kg-rerank", action=argparse.BooleanOptionalAction, default=False, dest="enable_kg_rerank")
+    p.add_argument("--hybrid-enable-rerank", action=argparse.BooleanOptionalAction, default=True, dest="hybrid_enable_rerank")
+    p.add_argument("--ppr-enable-rerank", action=argparse.BooleanOptionalAction, default=False, dest="ppr_enable_rerank")
+    p.add_argument("--ppr-damping", type=float, default=0.5, dest="ppr_damping")
+    p.add_argument("--ppr-top-k", type=int, default=50, dest="ppr_top_k")
+    p.add_argument("--ppr-qa-top-k", type=int, default=20, dest="ppr_qa_top_k")
+    p.add_argument("--ppr-post-rerank-fusion", "--ppr_post_rerank_fusion", default="none", choices=["none", "raw_rrf"], dest="ppr_post_rerank_fusion")
+    p.add_argument("--ppr-post-rerank-rrf-k", "--ppr_post_rerank_rrf_k", type=int, default=60, dest="ppr_post_rerank_rrf_k")
+    p.add_argument("--passage-node-weight", type=float, default=0.05, dest="passage_node_weight")
+    p.add_argument("--recognition-top-k", type=int, default=20, dest="recognition_top_k")
+    p.add_argument("--linking-top-k", type=int, default=5, dest="linking_top_k")
+    p.add_argument("--ppr-synonym-weight-mode", default="raw", choices=["raw", "plus_one"], dest="ppr_synonym_weight_mode")
+    p.add_argument("--exclude-synonym-edges", action=argparse.BooleanOptionalAction, default=None, dest="exclude_synonym_edges")
+    p.add_argument("--bypass-query-cache", "--bypass_query_cache", action=argparse.BooleanOptionalAction, default=True, dest="bypass_query_cache")
+    p.add_argument("--bypass-keywords-cache", "--bypass_keywords_cache", action=argparse.BooleanOptionalAction, default=False, dest="bypass_keywords_cache")
+    p.add_argument("--vlm-enhanced", action=argparse.BooleanOptionalAction, default=False, dest="vlm_enhanced")
+    p.add_argument("--allow-missing-source-map", action="store_true", dest="allow_missing_source_map")
+    args = p.parse_args()
+    if args.concurrency <= 0:
+        raise SystemExit("--concurrency must be > 0")
+    if args.top_k <= 0:
+        raise SystemExit("--top-k must be > 0")
+    if args.chunk_top_k <= 0:
+        raise SystemExit("--chunk-top-k must be > 0")
+    if args.max_total_tokens <= 0:
+        raise SystemExit("--max-total-tokens must be > 0")
+    if args.ppr_top_k <= 0:
+        raise SystemExit("--ppr-top-k must be > 0")
+    if args.ppr_qa_top_k <= 0:
+        raise SystemExit("--ppr-qa-top-k must be > 0")
+    if args.ppr_qa_top_k > args.ppr_top_k:
+        raise SystemExit("--ppr-qa-top-k must be <= --ppr-top-k")
+    if args.ppr_post_rerank_rrf_k <= 0:
+        raise SystemExit("--ppr-post-rerank-rrf-k must be > 0")
+    if not (0.0 < args.ppr_damping < 1.0):
+        raise SystemExit("--ppr-damping must be in (0,1)")
+    if args.keyword_entity_rrf_k <= 0:
+        raise SystemExit("--keyword-entity-rrf-k must be > 0")
+    if args.keyword_relation_rrf_k <= 0:
+        raise SystemExit("--keyword-relation-rrf-k must be > 0")
+    if args.passage_node_weight < 0:
+        raise SystemExit("--passage-node-weight must be >= 0")
+    if args.recognition_top_k < 0:
+        raise SystemExit("--recognition-top-k must be >= 0")
+    if args.linking_top_k < 0:
+        raise SystemExit("--linking-top-k must be >= 0")
+    return args
 
 
 if __name__ == "__main__":
-    asyncio.run(main(_parse_args()))
+    asyncio.run(main_with_logging(_parse_args()))
