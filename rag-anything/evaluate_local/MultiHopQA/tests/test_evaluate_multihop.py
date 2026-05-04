@@ -42,6 +42,28 @@ def test_resolve_retrieved_sources_uses_chunk_id_map():
     ]
 
 
+def test_resolve_retrieved_sources_prefers_lightrag_chunk_id_over_display_id():
+    source_map = {
+        "chunk-abc": {
+            "source_paragraph_id": "hotpotqa_000001",
+            "title": "Article A",
+        }
+    }
+    chunks = [{"id": "DC1", "chunk_id": "chunk-abc", "content": "Article A\nText"}]
+
+    sources = _resolve_retrieved_sources(chunks, source_map)
+
+    assert sources == [
+        {
+            "rank": 1,
+            "chunk_id": "chunk-abc",
+            "source_paragraph_id": "hotpotqa_000001",
+            "source_key": None,
+            "title": "Article A",
+        }
+    ]
+
+
 def test_resolve_retrieved_sources_falls_back_to_content_hash():
     chunk_id = "chunk-" + hashlib.md5("Article C\nText".encode("utf-8")).hexdigest()
     source_map = {
@@ -88,14 +110,14 @@ def test_build_query_kwargs_pins_eval_retrieval_controls():
     kwargs = _build_query_kwargs(
         query_overrides={"response_type": "Short Answer"},
         wire_profile=None,
-        top_k=40,
-        chunk_top_k=20,
+        top_k=10,
+        chunk_top_k=5,
         max_total_tokens=45000,
     )
 
     assert kwargs["response_type"] == "Short Answer"
-    assert kwargs["top_k"] == 40
-    assert kwargs["chunk_top_k"] == 20
+    assert kwargs["top_k"] == 10
+    assert kwargs["chunk_top_k"] == 5
     assert kwargs["max_total_tokens"] == 45000
 
 
@@ -119,7 +141,9 @@ def test_parse_args_defaults_match_shared_retrieval_ablation(monkeypatch):
     args = _parse_args()
 
     assert args.concurrency == 16
-    assert args.ppr_qa_top_k == 20
+    assert args.top_k == 10
+    assert args.chunk_top_k == 5
+    assert args.ppr_qa_top_k == 5
     assert args.enable_kg_rerank is False
     assert args.hybrid_enable_rerank is True
     assert args.ppr_enable_rerank is False
@@ -206,15 +230,15 @@ def test_run_mode_uses_bounded_concurrency_and_preserves_jsonl_order(tmp_path):
             score_recall_at_k=lambda chunks, facts, k: 1.0,
             get_eval_query_overrides=lambda dataset: {"response_type": "Short Answer"},
             chunk_source_map={},
-            query_kwargs={"top_k": 40, "chunk_top_k": 20, "max_total_tokens": 45000},
+            query_kwargs={"top_k": 10, "chunk_top_k": 5, "max_total_tokens": 45000},
             concurrency=2,
         )
     )
 
     assert metrics["n"] == 4
     assert service.max_active == 2
-    assert all(call["top_k"] == 40 for call in service.calls)
-    assert all(call["chunk_top_k"] == 20 for call in service.calls)
+    assert all(call["top_k"] == 10 for call in service.calls)
+    assert all(call["chunk_top_k"] == 5 for call in service.calls)
     assert all(call["max_total_tokens"] == 45000 for call in service.calls)
 
     rows = [
@@ -262,10 +286,10 @@ def test_run_mode_applies_mode_specific_rerank_and_cache_defaults(tmp_path):
             get_eval_query_overrides=lambda dataset: {"response_type": "Short Answer"},
             chunk_source_map={},
             query_kwargs={
-                "top_k": 40,
-                "chunk_top_k": 20,
+                "top_k": 10,
+                "chunk_top_k": 5,
                 "max_total_tokens": 45000,
-                "ppr_qa_top_k": 20,
+                "ppr_qa_top_k": 5,
                 "enable_kg_rerank": False,
                 "ppr_post_rerank_fusion": "none",
                 "ppr_post_rerank_rrf_k": 60,
@@ -284,7 +308,7 @@ def test_run_mode_applies_mode_specific_rerank_and_cache_defaults(tmp_path):
     assert ppr_call["enable_rerank"] is False
     assert hybrid_call["enable_kg_rerank"] is False
     assert ppr_call["enable_kg_rerank"] is False
-    assert ppr_call["ppr_qa_top_k"] == 20
+    assert ppr_call["ppr_qa_top_k"] == 5
     assert ppr_call["ppr_post_rerank_fusion"] == "none"
     assert ppr_call["bypass_query_cache"] is True
     assert ppr_call["bypass_keywords_cache"] is False

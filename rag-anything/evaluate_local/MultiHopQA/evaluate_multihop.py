@@ -223,10 +223,13 @@ def _mode_query_kwargs(
 
 
 def _trace_chunk_id(chunk: dict[str, Any]) -> str:
-    for key in ("id", "chunk_id", "_id", "__id__", "key"):
+    for key in ("chunk_id", "_id", "__id__", "key"):
         value = str(chunk.get(key) or "").strip()
         if value:
             return value
+    value = str(chunk.get("id") or "").strip()
+    if value and not re.fullmatch(r"DC\d+", value, flags=re.IGNORECASE):
+        return value
     content = str(chunk.get("content") or "").strip()
     if not content:
         return ""
@@ -620,8 +623,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--resume",      action="store_true")
     p.add_argument("--seed",        type=int, default=42)
     p.add_argument("--concurrency", type=int, default=16)
-    p.add_argument("--top-k", type=int, default=40, dest="top_k")
-    p.add_argument("--chunk-top-k", type=int, default=20, dest="chunk_top_k")
+    p.add_argument("--top-k", type=int, default=10, dest="top_k")
+    p.add_argument("--chunk-top-k", type=int, default=5, dest="chunk_top_k")
     p.add_argument("--max-total-tokens", type=int, default=45000, dest="max_total_tokens")
     p.add_argument("--qdrant-retrieval-mode", default="dense", choices=["dense", "bm25", "hybrid"], dest="qdrant_retrieval_mode")
     p.add_argument("--keyword-fanout-mode", default="joined", choices=["joined", "per_keyword_rrf"], dest="keyword_fanout_mode")
@@ -634,7 +637,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--ppr-enable-rerank", action=argparse.BooleanOptionalAction, default=False, dest="ppr_enable_rerank")
     p.add_argument("--ppr-damping", type=float, default=0.5, dest="ppr_damping")
     p.add_argument("--ppr-top-k", type=int, default=50, dest="ppr_top_k")
-    p.add_argument("--ppr-qa-top-k", type=int, default=20, dest="ppr_qa_top_k")
+    p.add_argument("--ppr-qa-top-k", type=int, default=5, dest="ppr_qa_top_k")
     p.add_argument("--ppr-post-rerank-fusion", "--ppr_post_rerank_fusion", default="none", choices=["none", "raw_rrf"], dest="ppr_post_rerank_fusion")
     p.add_argument("--ppr-post-rerank-rrf-k", "--ppr_post_rerank_rrf_k", type=int, default=60, dest="ppr_post_rerank_rrf_k")
     p.add_argument("--passage-node-weight", type=float, default=0.05, dest="passage_node_weight")

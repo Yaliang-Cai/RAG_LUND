@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 import importlib.util
@@ -25,6 +26,10 @@ from evaluate_local.SurGE import evaluate_surge_fast
 from evaluate_local.ablation_flags import AblationFlags
 from evaluate_local import run_retrieval_ablation
 from raganything.constants import DEFAULT_KG_CHUNK_SELECTION_SOURCE
+
+
+def _flag_value(command: list[str], flag: str) -> str:
+    return command[command.index(flag) + 1]
 
 
 def test_docbench_build_query_params_ppr_forces_chunk_only_prompt():
@@ -383,6 +388,31 @@ def test_debug_script_resolves_working_dir_from_run_root():
     )
 
 
+def test_shared_workspace_layout_uses_outer_workspace_when_nested_kv_dir_exists(tmp_path):
+    workspace_id = "ws"
+    run_root = tmp_path / "graphbm25_20260421"
+    outer = (
+        run_root
+        / "_workspace_cache"
+        / "docbench_shared"
+        / "v0_v1_v2"
+        / "rag_workspaces"
+        / workspace_id
+    )
+    inner = outer / workspace_id
+    inner.mkdir(parents=True)
+    (inner / "kv_store_doc_status.json").write_text("{}", encoding="utf-8")
+
+    layout = run_retrieval_ablation.resolve_shared_workspace_layout(
+        run_root=run_root,
+        workspace_id=workspace_id,
+        require_existing=True,
+    )
+
+    assert layout["workspace_dir"] == str(outer.resolve())
+    assert layout["working_dir_root"] == str(outer.parent.resolve())
+
+
 def test_debug_script_group_matrix_matches_runner_group_names():
     script_path = PROJECT_ROOT / "scripts" / "debug_retrieval_ablation.py"
     spec = importlib.util.spec_from_file_location(
@@ -624,3 +654,175 @@ def test_selected_experiments_support_reduced_v2():
     assert len(surge) == 10
     assert next(item for item in shared if item["name"] == "ppr_default")["ppr_qa_top_k"] == 20
     assert next(item for item in surge if item["name"] == "ppr_default")["ppr_top_k"] == 100
+
+
+def test_retrieval_ablation_parser_accepts_reduced_v3_and_survey_ppr_defaults():
+    args = run_retrieval_ablation.build_parser().parse_args(["--matrix-mode", "reduced_v3"])
+
+    assert args.matrix_mode == "reduced_v3"
+    assert args.surge_survey_ppr_top_k == 500
+    assert args.surge_survey_ppr_qa_top_k == 500
+
+
+def test_retrieval_ablation_reduced_v3_docbench_matrix_is_cartesian():
+    experiments = run_retrieval_ablation.build_reduced_v3_experiment_matrix("shared")
+
+    hybrid_rows = [item for item in experiments if item["query_mode"] == "hybrid"]
+    ppr_rows = [item for item in experiments if item["query_mode"] == "ppr"]
+
+    assert len(experiments) == 45
+    assert len(hybrid_rows) == 32
+    assert len(ppr_rows) == 13
+    assert all(item["exclude_synonym_edges"] is True for item in hybrid_rows)
+    assert all(item["enable_rerank"] is True for item in hybrid_rows)
+    assert {item["enable_kg_rerank"] for item in hybrid_rows} == {False, True}
+    assert {item["kg_chunk_selection_source"] for item in hybrid_rows} == {
+        "truncated",
+        "untruncated",
+    }
+    assert {item["answer_context_mode"] for item in hybrid_rows} == {
+        "kg_prompt",
+        "chunk_only_prompt",
+    }
+
+    no_synonym_ppr = next(
+        item for item in ppr_rows if item["name"] == "v3_ppr_default_no_synonym_edges"
+    )
+    assert no_synonym_ppr["keyword_fanout_mode"] == "joined"
+    assert no_synonym_ppr["retrieval_mode"] == "dense"
+    assert no_synonym_ppr["enable_rerank"] is False
+    assert no_synonym_ppr["exclude_synonym_edges"] is True
+    assert sum(item["exclude_synonym_edges"] is True for item in ppr_rows) == 1
+    assert all(item["enable_kg_rerank"] is False for item in ppr_rows)
+    assert all("kg_chunk_selection_source" not in item for item in ppr_rows)
+    assert {item["enable_rerank"] for item in ppr_rows} == {False, True}
+    assert {item["ppr_post_rerank_fusion"] for item in ppr_rows} == {"none", "raw_rrf"}
+    assert all(item["ppr_top_k"] == 50 for item in ppr_rows)
+    assert all(item["ppr_qa_top_k"] == 20 for item in ppr_rows)
+
+
+def test_retrieval_ablation_reduced_v3_surge_matrix_is_query_survey_ready():
+    experiments = run_retrieval_ablation.build_reduced_v3_experiment_matrix("surge")
+
+    hybrid_rows = [item for item in experiments if item["query_mode"] == "hybrid"]
+    ppr_rows = [item for item in experiments if item["query_mode"] == "ppr"]
+
+    assert len(experiments) == 29
+    assert len(hybrid_rows) == 16
+    assert len(ppr_rows) == 13
+    assert all(item["exclude_synonym_edges"] is True for item in hybrid_rows)
+    assert all(item["enable_rerank"] is True for item in hybrid_rows)
+    assert {item["kg_chunk_selection_source"] for item in hybrid_rows} == {
+        "truncated",
+        "untruncated",
+    }
+    assert all("answer_context_mode" not in item for item in experiments)
+
+    no_synonym_ppr = next(
+        item for item in ppr_rows if item["name"] == "v3_ppr_default_no_synonym_edges"
+    )
+    assert no_synonym_ppr["keyword_fanout_mode"] == "joined"
+    assert no_synonym_ppr["retrieval_mode"] == "dense"
+    assert no_synonym_ppr["enable_rerank"] is False
+    assert no_synonym_ppr["exclude_synonym_edges"] is True
+    assert sum(item["exclude_synonym_edges"] is True for item in ppr_rows) == 1
+    assert all(item["enable_kg_rerank"] is False for item in ppr_rows)
+    assert all("kg_chunk_selection_source" not in item for item in ppr_rows)
+    assert all(item["ppr_top_k"] == 100 for item in ppr_rows)
+    assert all(item["ppr_qa_top_k"] == 50 for item in ppr_rows)
+
+
+def test_reduced_v3_selected_experiment_groups_include_surge_survey_overrides():
+    args = run_retrieval_ablation.build_parser().parse_args(["--matrix-mode", "reduced_v3"])
+
+    groups = run_retrieval_ablation._selected_experiment_groups(args)
+
+    assert len(groups["shared"]) == 45
+    assert len(groups["surge_query"]) == 29
+    assert len(groups["surge_survey"]) == 29
+    assert next(item for item in groups["surge_query"] if item["query_mode"] == "ppr")[
+        "ppr_top_k"
+    ] == 100
+    assert next(item for item in groups["surge_query"] if item["query_mode"] == "ppr")[
+        "ppr_qa_top_k"
+    ] == 50
+    assert next(item for item in groups["surge_survey"] if item["query_mode"] == "ppr")[
+        "ppr_top_k"
+    ] == 500
+    assert next(item for item in groups["surge_survey"] if item["query_mode"] == "ppr")[
+        "ppr_qa_top_k"
+    ] == 500
+
+
+def test_reduced_v3_surge_survey_command_uses_survey_stage_and_ppr_500():
+    args = run_retrieval_ablation.build_parser().parse_args(["--matrix-mode", "reduced_v3"])
+    groups = run_retrieval_ablation._selected_experiment_groups(args)
+    survey_ppr = next(item for item in groups["surge_survey"] if item["query_mode"] == "ppr")
+    survey_hybrid = next(
+        item
+        for item in groups["surge_survey"]
+        if item["query_mode"] == "hybrid"
+        and item["kg_chunk_selection_source"] == "untruncated"
+    )
+
+    ppr_cmd = run_retrieval_ablation._surge_command(
+        args,
+        survey_ppr,
+        Path("out"),
+        mode="survey",
+    )
+    hybrid_cmd = run_retrieval_ablation._surge_command(
+        args,
+        survey_hybrid,
+        Path("out"),
+        mode="survey",
+    )
+
+    assert _flag_value(ppr_cmd, "--mode") == "survey"
+    assert _flag_value(ppr_cmd, "--survey-stage") == "retrieval"
+    assert _flag_value(ppr_cmd, "--ppr-top-k") == "500"
+    assert _flag_value(ppr_cmd, "--ppr-qa-top-k") == "500"
+    assert "--kg-chunk-selection-source" not in ppr_cmd
+    assert _flag_value(hybrid_cmd, "--kg-chunk-selection-source") == "untruncated"
+
+
+def test_reduced_v3_dry_run_writes_config_with_survey_groups(tmp_path):
+    output_root = tmp_path / "retrieval_outputs"
+    run_root = tmp_path / "ablation_runs" / "graphbm25_20260431"
+
+    code = run_retrieval_ablation.main(
+        [
+            "--matrix-mode",
+            "reduced_v3",
+            "--run-id",
+            "dry_v3",
+            "--run-root",
+            str(run_root),
+            "--output-root",
+            str(output_root),
+            "--shared-workspace-id",
+            "docbench_shared_graphbm25_20260431_v0_v1_v2",
+            "--surge-workspace-id",
+            "surge_fast_graphbm25_20260431_v0_v1_v2",
+            "--no-require-existing-workspaces",
+            "--dry-run",
+        ]
+    )
+
+    assert code == 0
+    config = json.loads((output_root / "dry_v3" / "config.json").read_text(encoding="utf-8"))
+    progress_rows = [
+        json.loads(line)
+        for line in (output_root / "dry_v3" / "progress.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+
+    assert len(config["shared_experiments"]) == 45
+    assert len(config["surge_query_experiments"]) == 29
+    assert len(config["surge_survey_experiments"]) == 29
+    assert {row["task"] for row in progress_rows if row["status"] == "completed"} == {
+        "shared",
+        "surge_query",
+        "surge_survey",
+    }
