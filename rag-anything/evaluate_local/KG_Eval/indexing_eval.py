@@ -361,12 +361,14 @@ async def _load_graph_from_neo4j_workspace(
     workspace_dir: Path, workspace_id: Optional[str] = None
 ) -> ig.Graph:
     from lightrag.kg.neo4j_impl import Neo4JStorage
+    from lightrag.kg.shared_storage import initialize_share_data
     from lightrag.namespace import NameSpace
 
     final_workspace_id = str(workspace_id or workspace_dir.name).strip()
     if not final_workspace_id:
         raise ValueError("Neo4j workspace_id cannot be empty")
 
+    initialize_share_data()
     with _temporary_neo4j_workspace(final_workspace_id):
         storage = Neo4JStorage(
             namespace=NameSpace.GRAPH_STORE_CHUNK_ENTITY_RELATION,
