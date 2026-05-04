@@ -462,6 +462,14 @@ def parse_args() -> argparse.Namespace:
             "and you only want evaluate/stats."
         ),
     )
+    parser.add_argument(
+        "--index-only",
+        action="store_true",
+        help=(
+            "Build DocBench/SurGE shared indexes only. Skips DocBench answering, "
+            "DocBench judging/stats, SurGE retrieval, and SurGE survey retrieval."
+        ),
+    )
 
     parser.add_argument(
         "--shared-workspace-prefix",
@@ -558,6 +566,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.index_only and (
+        args.run_shared_evaluate
+        or args.run_shared_stats
+        or args.skip_shared_generate
+    ):
+        raise ValueError(
+            "--index-only cannot be combined with --run-shared-evaluate, "
+            "--run-shared-stats, or --skip-shared-generate."
+        )
     if args.run_shared_stats and not args.run_shared_evaluate:
         raise ValueError("--run-shared-stats requires --run-shared-evaluate.")
     if (
@@ -631,6 +648,7 @@ def main() -> int:
             "run_shared_evaluate": bool(args.run_shared_evaluate),
             "run_shared_stats": bool(args.run_shared_stats),
             "skip_shared_generate": bool(args.skip_shared_generate),
+            "index_only": bool(args.index_only),
             "shared_mineru_output_dir": (
                 str(shared_mineru_output_dir) if shared_mineru_output_dir else ""
             ),
@@ -691,6 +709,7 @@ def main() -> int:
             "surge_output_dir": str(surge_output_dir),
             "shared_workspace_state_dir": str(shared_workspace_state_dir),
             "surge_workspace_state_dir": str(surge_workspace_state_dir),
+            "index_only": bool(args.index_only),
             "shared_mineru_output_dir": (
                 str(shared_mineru_output_dir) if shared_mineru_output_dir else ""
             ),
@@ -735,8 +754,27 @@ def main() -> int:
                 args=args,
             )
 
-            run_shared_generate = not bool(args.skip_shared_generate)
-            if run_shared_generate:
+            run_shared_generate = (
+                not bool(args.skip_shared_generate) and not bool(args.index_only)
+            )
+            if args.index_only:
+                shared_index = list(shared_base) + ["--mode", "index"]
+                ok, _ = _run_one_stage(
+                    run_id=run_id,
+                    progress_file=progress_file,
+                    latest_file=latest_file,
+                    profile_key=profile.key,
+                    stage_name="shared_index",
+                    command=shared_index,
+                    cwd=project_root,
+                    env=env_shared,
+                    log_file=profile_log_dir / "shared_index.log",
+                    dry_run=bool(args.dry_run),
+                )
+                profile_ok = profile_ok and ok
+                if not ok and not args.continue_on_error:
+                    abort_run = True
+            elif run_shared_generate:
                 shared_generate = list(shared_base) + ["--mode", "generate"]
                 ok, _ = _run_one_stage(
                     run_id=run_id,
@@ -765,7 +803,11 @@ def main() -> int:
                     extra={"shared_workspace_id": shared_workspace_id},
                 )
 
-            if profile_ok and bool(args.run_shared_evaluate):
+            if (
+                profile_ok
+                and not bool(args.index_only)
+                and bool(args.run_shared_evaluate)
+            ):
                 shared_evaluate = list(shared_base) + ["--mode", "evaluate"]
                 ok, _ = _run_one_stage(
                     run_id=run_id,
@@ -783,7 +825,7 @@ def main() -> int:
                 if not ok and not args.continue_on_error:
                     abort_run = True
 
-            if profile_ok and bool(args.run_shared_stats):
+            if profile_ok and not bool(args.index_only) and bool(args.run_shared_stats):
                 shared_stats = list(shared_base) + ["--mode", "stats"]
                 ok, _ = _run_one_stage(
                     run_id=run_id,
@@ -820,24 +862,42 @@ def main() -> int:
                 args=args,
             )
 
-            surge_retrieval = list(surge_base) + ["--mode", "retrieval"]
-            ok, _ = _run_one_stage(
-                run_id=run_id,
-                progress_file=progress_file,
-                latest_file=latest_file,
-                profile_key=profile.key,
-                stage_name="surge_retrieval",
-                command=surge_retrieval,
-                cwd=project_root,
-                env=env_surge,
-                log_file=profile_log_dir / "surge_retrieval.log",
-                dry_run=bool(args.dry_run),
-            )
-            profile_ok = profile_ok and ok
-            if not ok and not args.continue_on_error:
-                abort_run = True
+            if args.index_only:
+                surge_index = list(surge_base) + ["--mode", "index"]
+                ok, _ = _run_one_stage(
+                    run_id=run_id,
+                    progress_file=progress_file,
+                    latest_file=latest_file,
+                    profile_key=profile.key,
+                    stage_name="surge_index",
+                    command=surge_index,
+                    cwd=project_root,
+                    env=env_surge,
+                    log_file=profile_log_dir / "surge_index.log",
+                    dry_run=bool(args.dry_run),
+                )
+                profile_ok = profile_ok and ok
+                if not ok and not args.continue_on_error:
+                    abort_run = True
+            else:
+                surge_retrieval = list(surge_base) + ["--mode", "retrieval"]
+                ok, _ = _run_one_stage(
+                    run_id=run_id,
+                    progress_file=progress_file,
+                    latest_file=latest_file,
+                    profile_key=profile.key,
+                    stage_name="surge_retrieval",
+                    command=surge_retrieval,
+                    cwd=project_root,
+                    env=env_surge,
+                    log_file=profile_log_dir / "surge_retrieval.log",
+                    dry_run=bool(args.dry_run),
+                )
+                profile_ok = profile_ok and ok
+                if not ok and not args.continue_on_error:
+                    abort_run = True
 
-            if profile_ok:
+            if profile_ok and not args.index_only:
                 surge_survey = list(surge_base) + ["--mode", "survey", "--survey-stage", "retrieval"]
                 ok, _ = _run_one_stage(
                     run_id=run_id,

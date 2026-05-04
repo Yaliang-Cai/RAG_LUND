@@ -4107,6 +4107,10 @@ async def merge_nodes_and_edges(
     # Collect all nodes and edges from all chunks
     all_nodes = defaultdict(list)
     all_edges = defaultdict(list)
+    entity_surface_to_composite_ids: dict[str, set[str]] = defaultdict(set)
+    chunk_entity_surface_to_composite_ids: dict[str, dict[str, set[str]]] = defaultdict(
+        lambda: defaultdict(set)
+    )
 
     _disambig = global_config.get("enable_entity_disambiguation", True)
     for maybe_nodes, maybe_edges in chunk_results:
@@ -4121,6 +4125,16 @@ async def merge_nodes_and_edges(
                         True,
                     )
                     all_nodes[group_key].append(entity)
+                    surface_name = str(
+                        entity.get("entity_name", entity_name) or ""
+                    ).strip()
+                    if surface_name and group_key:
+                        entity_surface_to_composite_ids[surface_name].add(group_key)
+                        source_id = str(entity.get("source_id", "") or "").strip()
+                        if source_id:
+                            chunk_entity_surface_to_composite_ids[source_id][
+                                surface_name
+                            ].add(group_key)
         else:
             # Original path: batch extend by entity_name — identical to upstream
             for entity_name, entities in maybe_nodes.items():
@@ -4247,25 +4261,61 @@ async def merge_nodes_and_edges(
             raise first_exception
 
     # Build name→composite_id mapping for edge key resolution
-    _entity_name_to_composite = {}
+    # Relationships do not carry entity_type, so V1 resolves each endpoint by
+    # source chunk first. This avoids arbitrarily choosing one type when the same
+    # surface form appears as multiple entity types in one document.
+    _entity_name_to_composite: dict[str, str] = {}
     doc_relation_endpoint_ids: set[str] = set()
     if _disambig:
         for ent in processed_entities:
             if ent and isinstance(ent, dict):
-                ename = ent.get("entity_name", "")
-                eid = ent.get("entity_id", ename)
-                if ename and eid:
-                    _entity_name_to_composite[ename] = eid
+                eid = ent.get("entity_id") or ent.get("entity_name")
                 if eid:
                     doc_relation_endpoint_ids.add(eid)
 
-        # Remap edge keys to use composite IDs
+        for surface_name, composite_ids in entity_surface_to_composite_ids.items():
+            processed_candidates = {
+                composite_id
+                for composite_id in composite_ids
+                if composite_id in doc_relation_endpoint_ids
+            }
+            if len(processed_candidates) == 1:
+                _entity_name_to_composite[surface_name] = next(
+                    iter(processed_candidates)
+                )
+
+        def _resolve_relation_endpoint(surface_name: str, source_id: str) -> str | None:
+            chunk_candidates = set()
+            if source_id:
+                chunk_candidates = set(
+                    chunk_entity_surface_to_composite_ids.get(source_id, {}).get(
+                        surface_name, set()
+                    )
+                )
+                chunk_candidates &= doc_relation_endpoint_ids
+            if len(chunk_candidates) == 1:
+                return next(iter(chunk_candidates))
+            if len(chunk_candidates) > 1:
+                return None
+
+            return _entity_name_to_composite.get(surface_name)
+
+        # Remap edge keys to use composite IDs. Split records from the same
+        # surface-level edge when different chunks resolve to different types.
         remapped_edges = defaultdict(list)
         for edge_key, edges in all_edges.items():
-            new_src = _entity_name_to_composite.get(edge_key[0], edge_key[0])
-            new_tgt = _entity_name_to_composite.get(edge_key[1], edge_key[1])
-            new_key = tuple(sorted((new_src, new_tgt)))
-            remapped_edges[new_key].extend(edges)
+            for edge in edges:
+                source_id = (
+                    str(edge.get("source_id", "") or "").strip()
+                    if isinstance(edge, dict)
+                    else ""
+                )
+                new_src = _resolve_relation_endpoint(edge_key[0], source_id)
+                new_tgt = _resolve_relation_endpoint(edge_key[1], source_id)
+                new_key = tuple(
+                    sorted((new_src or edge_key[0], new_tgt or edge_key[1]))
+                )
+                remapped_edges[new_key].append(edge)
         all_edges = remapped_edges
         total_relations_count = len(all_edges)
         total_relation_records_count = sum(len(edges) for edges in all_edges.values())

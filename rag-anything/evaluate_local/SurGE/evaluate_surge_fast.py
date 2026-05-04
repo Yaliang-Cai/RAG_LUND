@@ -77,6 +77,7 @@ SURGE_MIN_RERANK_SCORE = 0.0
 
 PER_QUERY_FILE = RETRIEVAL_DIR / "retrieval_per_query.jsonl"
 SUMMARY_FILE = RETRIEVAL_DIR / "retrieval_summary.json"
+INDEX_SUMMARY_FILE = RETRIEVAL_DIR / "index_summary.json"
 RERANK_STATS_FILE = RETRIEVAL_DIR / "rerank_chunk_stats.jsonl"
 RERANK_SUMMARY_FILE = RETRIEVAL_DIR / "rerank_chunk_summary.json"
 WARNINGS_FILE = RETRIEVAL_DIR / "mapping_warnings.jsonl"
@@ -1925,7 +1926,42 @@ async def run_retrieval(args: argparse.Namespace) -> int:
             "threshold_retention_overall": summarize_threshold_retention(rerank_rows),
         })
         logger.info("Retrieval complete: %s", SUMMARY_FILE)
-        return 0
+    return 0
+
+
+async def run_index(args: argparse.Namespace) -> int:
+    data_root = Path(args.data_root)
+    subset = data_root / args.subset_dir
+    chunks_by_doc, chunk_stats = load_chunks(subset / args.chunks_file)
+    source_records, chunk_source_map, source_map_stats = prepare_source_records(
+        chunks_by_doc
+    )
+    persist_chunk_source_map(chunk_source_map, source_map_stats)
+    async with prepared_workspace_service(
+        args,
+        source_records,
+        stage="index build",
+    ) as (_service, ablation_flags, ensured_index_profile, ingest_summary):
+        save_json(
+            INDEX_SUMMARY_FILE,
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "mode": "index",
+                "workspace_id": args.workspace_id,
+                "data_root": str(data_root),
+                "subset_dir": str(subset),
+                "chunks_file": str(subset / args.chunks_file),
+                "corpus_file": str(subset / args.corpus_file),
+                "chunk_stats": chunk_stats,
+                "source_map_stats": source_map_stats,
+                "ablation_group": ablation_flags.ablation_group(),
+                "ablation_flags": ablation_flags.to_dict(),
+                "index_profile": ensured_index_profile,
+                "ingest_summary": ingest_summary,
+            },
+        )
+    logger.info("SurGE index build complete: %s", INDEX_SUMMARY_FILE)
+    return 0
 
 
 async def run_survey_retrieval(args: argparse.Namespace) -> int:
@@ -2257,6 +2293,8 @@ async def run_survey(args: argparse.Namespace) -> int:
 def resolve_log_mode(args: argparse.Namespace) -> str:
     if args.mode == "survey":
         return f"survey_{args.survey_stage}"
+    if args.mode == "index":
+        return "index"
     return "retrieval"
 
 
@@ -2274,6 +2312,8 @@ def resolve_log_mode_from_argv(argv: list[str]) -> str:
             survey_stage = argv[i + 1].strip() or survey_stage
     if mode == "survey":
         return f"survey_{survey_stage}"
+    if mode == "index":
+        return "index"
     return "retrieval"
 
 
@@ -2341,7 +2381,7 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="SurGE evaluation for RAGAnything")
-    p.add_argument("--mode", choices=["retrieval", "survey"], default="retrieval")
+    p.add_argument("--mode", choices=["index", "retrieval", "survey"], default="retrieval")
     p.add_argument("--survey-stage", choices=["retrieval", "generate"], default="retrieval")
     p.add_argument("--data-root", default=DEFAULT_DATA_ROOT)
     p.add_argument("--subset-dir", default=DEFAULT_SUBSET_DIR)
@@ -2480,6 +2520,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def amain(args: argparse.Namespace) -> int:
     validate_args(args)
+    if args.mode == "index":
+        return await run_index(args)
     if args.mode == "retrieval":
         return await run_retrieval(args)
     return await run_survey(args)

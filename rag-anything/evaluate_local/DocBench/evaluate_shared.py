@@ -1186,6 +1186,7 @@ async def generate_answers_shared(
     query_params: dict[str, Any],
     experiment_id: str,
     allow_legacy_index_profile_adoption: bool,
+    index_only: bool = False,
 ) -> None:
     max_async_ingest = _normalize_max_async(max_async_ingest, default=4)
     max_async_generate = _normalize_max_async(max_async_generate, default=6)
@@ -1220,19 +1221,20 @@ async def generate_answers_shared(
     _refresh_master_logging()
 
     if not resume:
-        for stale_output in (
-            SYSTEM_ANSWERS_FILE,
-            RERANK_CHUNK_STATS_FILE,
-            RERANK_CHUNK_SUMMARY_FILE,
-        ):
-            if stale_output.exists():
-                stale_output.unlink()
+        if not index_only:
+            for stale_output in (
+                SYSTEM_ANSWERS_FILE,
+                RERANK_CHUNK_STATS_FILE,
+                RERANK_CHUNK_SUMMARY_FILE,
+            ):
+                if stale_output.exists():
+                    stale_output.unlink()
         # Keep failure manifest when retry_failed_only is requested, even with no_resume.
         if INGEST_FAILURES_FILE.exists() and not retry_failed_only:
             INGEST_FAILURES_FILE.unlink()
 
     processed_keys: set[str] = set()
-    if resume and SYSTEM_ANSWERS_FILE.exists():
+    if resume and not index_only and SYSTEM_ANSWERS_FILE.exists():
         ignored_answer_records = 0
         with open(SYSTEM_ANSWERS_FILE, "r", encoding="utf-8") as f:
             for line in f:
@@ -1257,7 +1259,7 @@ async def generate_answers_shared(
             )
 
     processed_rerank_keys: set[str] = set()
-    if resume and RERANK_CHUNK_STATS_FILE.exists():
+    if resume and not index_only and RERANK_CHUNK_STATS_FILE.exists():
         ignored_rerank_records = 0
         with open(RERANK_CHUNK_STATS_FILE, "r", encoding="utf-8") as f:
             for line in f:
@@ -1449,6 +1451,25 @@ async def generate_answers_shared(
             shared_workspace_id,
             synonym_result,
         )
+
+    if index_only:
+        service = await _recycle_local_rag_service(
+            service,
+            settings,
+            shared_workspace_id,
+            clear_model_cache=False,
+        )
+        del service
+        gc.collect()
+        _clear_cuda_cache()
+        logger.info("Shared index build complete. Skipped question answering.")
+        if failed_ingest_docs:
+            logger.info(
+                "Shared ingest failures recorded: %d (file: %s)",
+                len(failed_ingest_docs),
+                INGEST_FAILURES_FILE,
+            )
+        return
 
     # Ensure ingest-phase temporary memory is released before query phase.
     service = await _recycle_local_rag_service(
@@ -1929,7 +1950,11 @@ async def main() -> None:
         description="DocBench shared-storage evaluation script",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--mode", required=True, choices=["generate", "evaluate", "stats"])
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=["index", "generate", "evaluate", "stats"],
+    )
     parser.add_argument("--start_id", type=int, default=0)
     parser.add_argument("--end_id", type=int, default=49)
     parser.add_argument(
@@ -2144,7 +2169,7 @@ async def main() -> None:
         experiment_id,
     )
 
-    if args.mode == "generate":
+    if args.mode in ("index", "generate"):
         await generate_answers_shared(
             start_id=args.start_id,
             end_id=args.end_id,
@@ -2161,6 +2186,7 @@ async def main() -> None:
             query_params=query_params,
             experiment_id=experiment_id,
             allow_legacy_index_profile_adoption=args.allow_legacy_index_profile_adoption,
+            index_only=args.mode == "index",
         )
     elif args.mode == "evaluate":
         await evaluate_answers(
