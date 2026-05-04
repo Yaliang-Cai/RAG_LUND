@@ -4,6 +4,8 @@ import os
 import pickle
 import sys
 import warnings
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -13,13 +15,20 @@ import pandas as pd
 
 # -----------------------------------------------------------------------------
 # Optional in-file run config
-# Set USE_INLINE_CONFIG=True to run without CLI args and use paths below.
+# Run `python evaluate_local/KG_Eval/indexing_eval.py` with no CLI args to use
+# these defaults. Any explicit CLI arg overrides the matching value below.
 # -----------------------------------------------------------------------------
 USE_INLINE_CONFIG = True
-INLINE_FRAMEWORK = "lightrag"  # choices: microsoft_graphrag, lightrag, fast_graphrag, hipporag2, graphml, neo4j
-INLINE_BASE_PATH = ""          # e.g. /data/.../rag_workspaces
-INLINE_FOLDER_NAME = None      # only needed for hipporag2
-INLINE_OUTPUT = None           # e.g. /data/.../indexing_metrics.txt
+INLINE_FRAMEWORK = "neo4j"  # choices: microsoft_graphrag, lightrag, fast_graphrag, hipporag2, graphml, neo4j
+INLINE_BASE_PATH = (
+    "/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/"
+    "graphbm25_20260421/_workspace_cache/docbench_shared/v0_v1_v2/rag_workspaces"
+)
+INLINE_FOLDER_NAME = "docbench_shared_graphbm25_20260421_v0_v1_v2"
+INLINE_OUTPUT = (
+    "/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/"
+    "graphbm25_20260421/indexing_metrics_neo4j.txt"
+)
 
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -39,6 +48,12 @@ WORKSPACE_MARKERS = (
     "vdb_relationships.json",
     "graph_chunk_entity_relation.graphml",
 )
+
+
+@dataclass(frozen=True)
+class Neo4JWorkspaceSpec:
+    working_dir: Path
+    workspace_id: str
 
 
 def analyze_graph(g: ig.Graph) -> Dict[str, float]:
@@ -222,6 +237,72 @@ def _resolve_workspace_dirs(base_path: str, workspace_name: Optional[str] = None
     return workspaces
 
 
+def _collapse_repeated_workspace_dir(path: Path) -> Path:
+    """
+    DocBench cache-only workspaces can look like:
+      rag_workspaces/<workspace_id>/<workspace_id>/llm_cache
+
+    LightRAG's JSON KV storage adds the inner workspace directory, while the
+    service-level working_dir remains the outer <workspace_id> directory.
+    """
+    if (
+        path.parent.name == path.name
+        and path.parent.parent.name in {"rag_workspaces", "rag_storage"}
+    ):
+        return path.parent
+    return path
+
+
+def _resolve_neo4j_workspace_specs(
+    base_path: str, workspace_name: Optional[str] = None
+) -> List[Neo4JWorkspaceSpec]:
+    base = Path(base_path).resolve()
+    if not base.exists():
+        raise FileNotFoundError(f"Base path does not exist: {base}")
+
+    normalized_workspace = str(workspace_name or "").strip()
+    if normalized_workspace:
+        candidate = (base / normalized_workspace).resolve()
+        if candidate.exists() and candidate.is_dir():
+            working_dir = _collapse_repeated_workspace_dir(candidate)
+        else:
+            working_dir = _collapse_repeated_workspace_dir(base)
+            if working_dir.name != normalized_workspace:
+                working_dir = candidate
+        return [
+            Neo4JWorkspaceSpec(
+                working_dir=working_dir,
+                workspace_id=normalized_workspace,
+            )
+        ]
+
+    if base.name in {"rag_workspaces", "rag_storage"}:
+        return [
+            Neo4JWorkspaceSpec(
+                working_dir=_collapse_repeated_workspace_dir(path.resolve()),
+                workspace_id=path.name,
+            )
+            for path in sorted(base.iterdir())
+            if path.is_dir()
+        ]
+
+    working_dir = _collapse_repeated_workspace_dir(base)
+    return [Neo4JWorkspaceSpec(working_dir=working_dir, workspace_id=working_dir.name)]
+
+
+@contextmanager
+def _temporary_neo4j_workspace(workspace_id: str):
+    previous = os.environ.get("NEO4J_WORKSPACE")
+    os.environ["NEO4J_WORKSPACE"] = workspace_id
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("NEO4J_WORKSPACE", None)
+        else:
+            os.environ["NEO4J_WORKSPACE"] = previous
+
+
 def _build_igraph_from_neo4j_records(
     nodes: List[Dict[str, object]], edges: List[Dict[str, object]]
 ) -> ig.Graph:
@@ -244,8 +325,8 @@ def _build_igraph_from_neo4j_records(
     edge_pairs: List[tuple[str, str]] = []
     edge_weights: List[float] = []
     for edge in edges:
-        source = edge.get("source")
-        target = edge.get("target")
+        source = edge.get("source") or edge.get("src")
+        target = edge.get("target") or edge.get("tgt")
         if source is None or target is None:
             continue
 
@@ -258,7 +339,7 @@ def _build_igraph_from_neo4j_records(
             g.add_vertex(name=target_name)
             seen_nodes.add(target_name)
 
-        properties = edge.get("properties") or {}
+        properties = edge.get("properties") or edge
         weight = 1.0
         if isinstance(properties, dict):
             try:
@@ -276,22 +357,32 @@ def _build_igraph_from_neo4j_records(
     return g
 
 
-async def _load_graph_from_neo4j_workspace(workspace_dir: Path) -> ig.Graph:
+async def _load_graph_from_neo4j_workspace(
+    workspace_dir: Path, workspace_id: Optional[str] = None
+) -> ig.Graph:
     from lightrag.kg.neo4j_impl import Neo4JStorage
     from lightrag.namespace import NameSpace
 
-    storage = Neo4JStorage(
-        namespace=NameSpace.GRAPH_STORE_CHUNK_ENTITY_RELATION,
-        workspace=workspace_dir.name,
-        global_config={"working_dir": str(workspace_dir)},
-        embedding_func=None,
-    )
-    await storage.initialize()
-    try:
-        nodes = await storage.get_all_nodes()
-        edges = await storage.get_all_edges()
-    finally:
-        await storage.finalize()
+    final_workspace_id = str(workspace_id or workspace_dir.name).strip()
+    if not final_workspace_id:
+        raise ValueError("Neo4j workspace_id cannot be empty")
+
+    with _temporary_neo4j_workspace(final_workspace_id):
+        storage = Neo4JStorage(
+            namespace=NameSpace.GRAPH_STORE_CHUNK_ENTITY_RELATION,
+            workspace=final_workspace_id,
+            global_config={"working_dir": str(workspace_dir)},
+            embedding_func=None,
+        )
+        await storage.initialize()
+        try:
+            if hasattr(storage, "get_all_nodes_and_edges"):
+                nodes, edges = await storage.get_all_nodes_and_edges()
+            else:
+                nodes = await storage.get_all_nodes()
+                edges = await storage.get_all_edges()
+        finally:
+            await storage.finalize()
 
     return _build_igraph_from_neo4j_records(nodes, edges)
 
@@ -300,13 +391,16 @@ async def _process_graphs_neo4j_async(
     base_path: str, workspace_name: Optional[str] = None
 ) -> List[Dict]:
     results: List[Dict] = []
-    for workspace_dir in _resolve_workspace_dirs(base_path, workspace_name):
+    for spec in _resolve_neo4j_workspace_specs(base_path, workspace_name):
         try:
-            g = await _load_graph_from_neo4j_workspace(workspace_dir)
+            g = await _load_graph_from_neo4j_workspace(
+                spec.working_dir,
+                spec.workspace_id,
+            )
             result = analyze_graph(g)
             results.append(result)
         except Exception as e:
-            print(f"Error processing Neo4j workspace {workspace_dir.name}: {e}")
+            print(f"Error processing Neo4j workspace {spec.workspace_id}: {e}")
     return results
 
 
@@ -503,12 +597,10 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     
-    required_cli = not USE_INLINE_CONFIG
-
     parser.add_argument(
         '--framework', 
         type=str, 
-        required=required_cli,
+        required=False,
         default=None,
         choices=['microsoft_graphrag', 'lightrag', 'fast_graphrag', 'hipporag2', 'graphml', 'neo4j'],
         help='Framework to analyze'
@@ -517,16 +609,19 @@ def parse_args():
     parser.add_argument(
         '--base_path', 
         type=str, 
-        required=required_cli,
+        required=False,
         default=None,
         help='Root path containing graph data'
     )
     
     parser.add_argument(
-        '--folder_name', 
+        '--folder_name',
+        '--workspace-id',
+        '--workspace_id',
+        dest='folder_name',
         type=str, 
         default=None,
-        help='Subdirectory name (required for hipporag2; for neo4j it filters a single workspace name)'
+        help='Subdirectory name (required for hipporag2; for neo4j this is the workspace label)'
     )
     
     parser.add_argument(
@@ -538,16 +633,23 @@ def parse_args():
     
     args = parser.parse_args()
 
-    if USE_INLINE_CONFIG:
-        args.framework = INLINE_FRAMEWORK
-        args.base_path = INLINE_BASE_PATH
-        args.folder_name = INLINE_FOLDER_NAME
-        args.output = INLINE_OUTPUT
+    env_inline_config = os.getenv("INDEXING_EVAL_USE_INLINE_CONFIG", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    if USE_INLINE_CONFIG or env_inline_config:
+        args.framework = args.framework or INLINE_FRAMEWORK
+        args.base_path = args.base_path or INLINE_BASE_PATH
+        args.folder_name = args.folder_name or INLINE_FOLDER_NAME
+        args.output = args.output if args.output is not None else INLINE_OUTPUT
 
     if not args.framework or not args.base_path:
         raise ValueError(
-            "framework/base_path is empty. Set CLI args, or set USE_INLINE_CONFIG=True "
-            "and fill INLINE_FRAMEWORK/INLINE_BASE_PATH in indexing_eval.py."
+            "framework/base_path is empty. Set CLI args, or fill "
+            "INLINE_FRAMEWORK/INLINE_BASE_PATH in indexing_eval.py."
         )
 
     return args
