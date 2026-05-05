@@ -325,6 +325,9 @@ def _build_query_params(
     exclude_synonym_edges: bool | None = None,
     answer_context_mode: str = "kg_prompt",
     kg_chunk_selection_source: str = "truncated",
+    top_k: int | None = None,
+    chunk_top_k: int | None = None,
+    naive_top_k: int | None = None,
     max_total_tokens: int | None = None,
     multimodal_top_k: int | None = None,
     enable_rerank: bool = True,
@@ -345,7 +348,8 @@ def _build_query_params(
         normalized_mode = str(query_mode).strip()
         if normalized_mode:
             params["mode"] = normalized_mode
-    if str(params.get("mode", "")).strip() == "ppr":
+    normalized_query_mode = str(params.get("mode", "")).strip()
+    if normalized_query_mode == "ppr":
         params["recognition_top_k"] = max(0, int(recognition_top_k))
         params["answer_context_mode"] = "chunk_only_prompt"
         ppr_top_k = int(params.get("ppr_top_k", 0) or 0)
@@ -358,6 +362,9 @@ def _build_query_params(
             raise ValueError(
                 f"ppr_qa_top_k must be <= ppr_top_k, got {ppr_qa_top_k} > {ppr_top_k}"
             )
+    elif normalized_query_mode == "naive":
+        params.pop("recognition_top_k", None)
+        params["answer_context_mode"] = "chunk_only_prompt"
     else:
         params.pop("recognition_top_k", None)
         params["answer_context_mode"] = str(answer_context_mode).strip()
@@ -367,6 +374,12 @@ def _build_query_params(
     params["keyword_relation_rrf_k"] = int(keyword_relation_rrf_k)
     params["entity_qdrant_retrieval_mode"] = str(entity_retrieval_mode).strip()
     params["kg_chunk_selection_source"] = str(kg_chunk_selection_source).strip()
+    if top_k is not None:
+        params["top_k"] = int(top_k)
+    if chunk_top_k is not None:
+        params["chunk_top_k"] = int(chunk_top_k)
+    if naive_top_k is not None:
+        params["naive_top_k"] = int(naive_top_k)
     if max_total_tokens is not None:
         params["max_total_tokens"] = int(max_total_tokens)
     if multimodal_top_k is not None:
@@ -2038,6 +2051,27 @@ async def main() -> None:
         choices=["truncated", "untruncated"],
         default="truncated",
     )
+    parser.add_argument(
+        "--top_k",
+        "--top-k",
+        dest="top_k",
+        type=int,
+        default=DOCBENCH_QUERY_PARAMS["top_k"],
+    )
+    parser.add_argument(
+        "--chunk_top_k",
+        "--chunk-top-k",
+        dest="chunk_top_k",
+        type=int,
+        default=DOCBENCH_QUERY_PARAMS["chunk_top_k"],
+    )
+    parser.add_argument(
+        "--naive_top_k",
+        "--naive-top-k",
+        dest="naive_top_k",
+        type=int,
+        default=None,
+    )
     parser.add_argument("--max_total_tokens", type=int, default=45000)
     parser.add_argument(
         "--multimodal_top_k",
@@ -2125,6 +2159,9 @@ async def main() -> None:
         ),
         answer_context_mode=args.answer_context_mode,
         kg_chunk_selection_source=args.kg_chunk_selection_source,
+        top_k=args.top_k,
+        chunk_top_k=args.chunk_top_k,
+        naive_top_k=args.naive_top_k,
         max_total_tokens=args.max_total_tokens,
         multimodal_top_k=args.multimodal_top_k,
         enable_rerank=args.enable_rerank,

@@ -608,7 +608,7 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         self._client_timeout = _normalize_timeout_seconds(
             os.environ.get(
                 "QDRANT_CLIENT_TIMEOUT",
-                config.get("qdrant", "timeout", fallback=240),
+                config.get("qdrant", "timeout", fallback=1200),
             ),
             "QDRANT_CLIENT_TIMEOUT",
         )
