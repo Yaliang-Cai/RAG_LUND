@@ -290,16 +290,21 @@ def _score_support_recall(
     item: dict[str, Any],
     k: int,
     chunk_source_map: dict[str, dict[str, Any]],
-    fallback_score_recall_at_k: Callable[[list[dict], list[str] | None, int], float | None],
 ) -> float | None:
-    if chunk_source_map and item.get("gold_source_keys"):
-        retrieved_sources = _resolve_retrieved_sources(chunks, chunk_source_map)
-        return _score_recall_by_source_keys(
-            retrieved_sources,
-            item.get("gold_source_keys"),
-            k,
-        )
-    return fallback_score_recall_at_k(chunks, item.get("supporting_facts"), k)
+    """Passage-level Recall@K via source_map.
+
+    Returns None when source_map or gold_source_keys are absent — callers
+    should record this as N/A rather than substitute a chunk-level proxy,
+    which would not be comparable to HippoRAG2 / GFM-RAG passage recall.
+    """
+    if not chunk_source_map or not item.get("gold_source_keys"):
+        return None
+    retrieved_sources = _resolve_retrieved_sources(chunks, chunk_source_map)
+    return _score_recall_by_source_keys(
+        retrieved_sources,
+        item.get("gold_source_keys"),
+        k,
+    )
 
 
 def _aggregate_jsonl(jsonl_path: Path, recall_ks: list[int]) -> dict[str, Any]:
@@ -344,7 +349,6 @@ async def _run_mode(
     resume: bool,
     score_em: Callable[[str, str | list[str]], float],
     score_f1: Callable[[str, str | list[str]], float],
-    score_recall_at_k: Callable[[list[dict], list[str] | None, int], float | None],
     get_eval_query_overrides: Callable[[str], dict[str, str]],
     chunk_source_map: dict[str, dict[str, Any]],
     query_kwargs: dict[str, Any] | None = None,
@@ -413,13 +417,15 @@ async def _run_mode(
         if item.get("gold_source_keys"):
             record["gold_source_keys"] = item["gold_source_keys"]
         retrieved_sources = _resolve_retrieved_sources(chunks, chunk_source_map)
+        if chunks:
+            hits = sum(1 for c in chunks if _trace_chunk_id(c) in chunk_source_map)
+            record["source_map_coverage"] = round(hits / len(chunks), 4)
         for k in recall_ks:
             r = _score_support_recall(
                 chunks=chunks,
                 item=item,
                 k=k,
                 chunk_source_map=chunk_source_map,
-                fallback_score_recall_at_k=score_recall_at_k,
             )
             record[f"recall@{k}"] = r
 
@@ -458,21 +464,43 @@ async def main(args: argparse.Namespace) -> None:
     from raganything.services.local_rag import LocalRagService, LocalRagSettings
     from evaluate_local.MultiHopQA.dataset_adapters import (
         load_hotpotqa, load_musique, load_2wiki, load_simpleqa,
-        score_em, score_f1, score_recall_at_k,
+        load_hotpotqa_hipporag2, load_musique_hipporag2, load_2wiki_hipporag2,
+        score_em, score_f1,
         get_eval_query_overrides,
     )
+
+    hipporag2_dir = Path(args.hipporag2_data_dir).resolve() if args.hipporag2_data_dir else None
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[eval] Loading dataset: {args.dataset} (n={args.n_samples}, seed={args.seed})")
-    loaders = {
-        "hotpotqa": load_hotpotqa,
-        "musique":  load_musique,
-        "2wiki":    load_2wiki,
-        "simpleqa": load_simpleqa,
-    }
-    items = loaders[args.dataset](n=args.n_samples, seed=args.seed)
+    if hipporag2_dir:
+        hr2_loaders = {
+            "hotpotqa": lambda **_: load_hotpotqa_hipporag2(hipporag2_dir),
+            "musique":  lambda **_: load_musique_hipporag2(hipporag2_dir),
+            "2wiki":    lambda **_: load_2wiki_hipporag2(hipporag2_dir),
+        }
+        if args.dataset not in hr2_loaders:
+            raise SystemExit(
+                f"--hipporag2-data-dir is not supported for dataset={args.dataset!r}. "
+                "Supported: hotpotqa, musique, 2wiki"
+            )
+        print(f"[eval] HippoRAG2 mode: loading {args.dataset} from {hipporag2_dir}")
+        items = hr2_loaders[args.dataset]()
+        effective_n_samples = 0
+        effective_seed = 0
+    else:
+        loaders = {
+            "hotpotqa": load_hotpotqa,
+            "musique":  load_musique,
+            "2wiki":    load_2wiki,
+            "simpleqa": load_simpleqa,
+        }
+        print(f"[eval] Loading dataset: {args.dataset} (n={args.n_samples}, seed={args.seed})")
+        items = loaders[args.dataset](n=args.n_samples, seed=args.seed)
+        effective_n_samples = args.n_samples
+        effective_seed = args.seed
+
     print(f"[eval] Loaded {len(items)} questions")
 
     settings = LocalRagSettings.from_env()
@@ -482,8 +510,8 @@ async def main(args: argparse.Namespace) -> None:
         args.working_dir,
         dataset=args.dataset,
         workspace=args.workspace,
-        n_samples=args.n_samples,
-        seed=args.seed,
+        n_samples=effective_n_samples,
+        seed=effective_seed,
         strict=strict_source_map,
     )
     if args.dataset == "simpleqa":
@@ -491,7 +519,7 @@ async def main(args: argparse.Namespace) -> None:
     if chunk_source_map:
         print(f"[eval] Loaded chunk source map: {len(chunk_source_map)} chunks")
     else:
-        print("[eval] No chunk source map found; JSONL will not include retrieved source ids")
+        print("[eval] No chunk source map found; Recall@K will be N/A (passage-level recall requires source map)")
 
     base_query_kwargs = {
         "top_k": args.top_k,
@@ -558,7 +586,6 @@ async def main(args: argparse.Namespace) -> None:
             resume=args.resume,
             score_em=score_em,
             score_f1=score_f1,
-            score_recall_at_k=score_recall_at_k,
             get_eval_query_overrides=get_eval_query_overrides,
             chunk_source_map=chunk_source_map,
             query_kwargs=base_query_kwargs,
@@ -572,8 +599,11 @@ async def main(args: argparse.Namespace) -> None:
     summary_path = output_dir / f"{args.dataset}_summary.json"
     summary = {
         "dataset": args.dataset,
-        "n_samples": args.n_samples,
-        "seed": args.seed,
+        "corpus_source": "hipporag2" if hipporag2_dir else "huggingface",
+        "hipporag2_data_dir": str(hipporag2_dir) if hipporag2_dir else None,
+        "n_queries": len(items),
+        "n_samples": effective_n_samples,
+        "seed": effective_seed,
         "recall_k": args.recall_k,
         "concurrency": args.concurrency,
         "base_query_kwargs": {k: v for k, v in base_query_kwargs.items() if v is not None},
@@ -614,10 +644,20 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--dataset",     required=True, choices=VALID_DATASETS)
     p.add_argument("--workspace",   required=True, help="Pre-built workspace ID")
     p.add_argument("--working-dir", required=True, dest="working_dir")
+    p.add_argument(
+        "--hipporag2-data-dir",
+        default=None,
+        dest="hipporag2_data_dir",
+        help=(
+            "Path to HippoRAG2 dataset directory (from download_hipporag2_datasets.py). "
+            "When set, uses the exact 1 000 HippoRAG2 queries and ignores --n-samples/--seed."
+        ),
+    )
     p.add_argument("--modes",       nargs="+", default=["naive", "hybrid", "ppr", "auto", "full"],
                    choices=VALID_MODES, metavar="MODE")
-    p.add_argument("--n-samples",   type=int, default=500, dest="n_samples")
-    p.add_argument("--recall-k",    type=int, nargs="+", default=[5, 10, 20], dest="recall_k")
+    p.add_argument("--n-samples",   type=int, default=1000, dest="n_samples",
+                   help="Questions to sample when NOT using --hipporag2-data-dir (default 1000)")
+    p.add_argument("--recall-k",    type=int, nargs="+", default=[2, 5], dest="recall_k")
     p.add_argument("--output-dir",  required=True, dest="output_dir")
     p.add_argument("--log-file", default=None, dest="log_file")
     p.add_argument("--resume",      action="store_true")

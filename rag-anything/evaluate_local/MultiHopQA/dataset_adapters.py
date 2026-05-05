@@ -5,6 +5,7 @@ import random
 import re
 import string
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -348,6 +349,183 @@ def extract_corpus_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
             paragraphs.append({"title": title, "text": _join_sentences(sents)})
     return dedupe_corpus_paragraphs(dataset="2wiki", paragraphs=paragraphs)
 
+
+# ---------------------------------------------------------------------------
+# HippoRAG2-aligned loaders (osunlp/HippoRAG_v2)
+# ---------------------------------------------------------------------------
+# These functions load from the exact JSON files distributed by HippoRAG2 so
+# that corpus size, query set, and text content match the published baselines.
+#
+# File layout expected under data_dir:
+#   hotpotqa.json / hotpotqa_corpus.json
+#   musique.json  / musique_corpus.json
+#   2wikimultihopqa.json / 2wikimultihopqa_corpus.json
+#
+# Download with:
+#   python evaluate_local/MultiHopQA/download_hipporag2_datasets.py
+# ---------------------------------------------------------------------------
+
+def _load_json(path: "Path") -> list:
+    import json
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _build_corpus_lookup(corpus: list[dict]) -> dict[str, str]:
+    """title -> text mapping from a HippoRAG2 corpus list."""
+    return {str(row["title"]): str(row.get("text", "")) for row in corpus}
+
+
+def _corpus_to_paragraphs(dataset: str, corpus: list[dict]) -> list[dict]:
+    """Convert HippoRAG2 corpus list to {title, text, source_key} dicts."""
+    paragraphs = [
+        {"title": str(row["title"]), "text": str(row.get("text", ""))}
+        for row in corpus
+        if str(row.get("title", "")).strip() or str(row.get("text", "")).strip()
+    ]
+    return dedupe_corpus_paragraphs(dataset=dataset, paragraphs=paragraphs)
+
+
+# ── HotpotQA ────────────────────────────────────────────────────────────────
+
+def load_hotpotqa_hipporag2(data_dir: "Path | str") -> list[dict]:
+    """Load HippoRAG2's exact 1 000 HotpotQA queries with passage-level gold keys.
+
+    Gold keys are derived from the corpus file text (not re-joined from raw
+    sentences) so they match the chunk IDs built by build_index in hipporag2 mode.
+    """
+    data_dir = Path(data_dir)
+    queries = _load_json(data_dir / "hotpotqa.json")
+    corpus = _load_json(data_dir / "hotpotqa_corpus.json")
+    title_to_text = _build_corpus_lookup(corpus)
+
+    result = []
+    for row in queries:
+        gold_titles = {sf[0] for sf in row.get("supporting_facts", [])}
+        gold_sources = []
+        facts = []
+        for title in _unique_preserve_order(list(gold_titles)):
+            text = title_to_text.get(title, "")
+            if not text:
+                continue
+            facts.append(text)
+            gold_sources.append(_source_record("hotpotqa", title, text))
+        result.append({
+            "id": row.get("_id", row.get("id", "")),
+            "question": row["question"],
+            "answer": row["answer"],
+            "supporting_facts": facts,
+            "gold_source_keys": [s["source_key"] for s in gold_sources],
+            "gold_sources": gold_sources,
+        })
+    return result
+
+
+def extract_corpus_hotpotqa_hipporag2(data_dir: "Path | str") -> list[dict]:
+    """Return the 9 221 corpus paragraphs from HippoRAG2's hotpotqa_corpus.json."""
+    data_dir = Path(data_dir)
+    corpus = _load_json(data_dir / "hotpotqa_corpus.json")
+    return _corpus_to_paragraphs("hotpotqa", corpus)
+
+
+# ── MuSiQue ─────────────────────────────────────────────────────────────────
+
+def load_musique_hipporag2(data_dir: "Path | str") -> list[dict]:
+    """Load HippoRAG2's exact 1 000 MuSiQue queries with passage-level gold keys."""
+    data_dir = Path(data_dir)
+    queries = _load_json(data_dir / "musique.json")
+    corpus = _load_json(data_dir / "musique_corpus.json")
+    title_to_text = _build_corpus_lookup(corpus)
+
+    result = []
+    for row in queries:
+        gold_sources = []
+        facts = []
+        seen: set[str] = set()
+        for p in row.get("paragraphs", []):
+            if not p.get("is_supporting", False):
+                continue
+            title = str(p.get("title", "")).strip()
+            # Prefer corpus-file text for exact hash alignment
+            text = title_to_text.get(title) or str(
+                p.get("paragraph_text") or p.get("text", "")
+            ).strip()
+            if not text:
+                continue
+            src = _source_record("musique", title, text)
+            if src["source_key"] in seen:
+                continue
+            seen.add(src["source_key"])
+            facts.append(text)
+            gold_sources.append(src)
+        answer = row.get("answer", "")
+        if isinstance(answer, list):
+            answer = answer[0] if answer else ""
+        result.append({
+            "id": row.get("id", ""),
+            "question": row["question"],
+            "answer": answer,
+            "supporting_facts": facts,
+            "gold_source_keys": [s["source_key"] for s in gold_sources],
+            "gold_sources": gold_sources,
+        })
+    return result
+
+
+def extract_corpus_musique_hipporag2(data_dir: "Path | str") -> list[dict]:
+    """Return the 6 119 corpus paragraphs from HippoRAG2's musique_corpus.json."""
+    data_dir = Path(data_dir)
+    corpus = _load_json(data_dir / "musique_corpus.json")
+    return _corpus_to_paragraphs("musique", corpus)
+
+
+# ── 2WikiMultiHopQA ─────────────────────────────────────────────────────────
+
+def load_2wiki_hipporag2(data_dir: "Path | str") -> list[dict]:
+    """Load HippoRAG2's exact 1 000 2WikiMultiHopQA queries with passage-level gold keys."""
+    data_dir = Path(data_dir)
+    queries = _load_json(data_dir / "2wikimultihopqa.json")
+    corpus = _load_json(data_dir / "2wikimultihopqa_corpus.json")
+    title_to_text = _build_corpus_lookup(corpus)
+
+    result = []
+    for row in queries:
+        gold_titles = {sf[0] for sf in row.get("supporting_facts", [])}
+        # Build context lookup from this query's context list
+        ctx: dict[str, str] = {}
+        for item in row.get("context", []):
+            t = str(item[0])
+            sents = item[1] if len(item) > 1 else []
+            ctx[t] = " ".join(str(s) for s in sents)
+        gold_sources = []
+        facts = []
+        for title in _unique_preserve_order(list(gold_titles)):
+            # Prefer corpus-file text for hash alignment; fall back to context
+            text = title_to_text.get(title) or ctx.get(title, "")
+            if not text:
+                continue
+            facts.append(text)
+            gold_sources.append(_source_record("2wiki", title, text))
+        result.append({
+            "id": row.get("_id", row.get("id", "")),
+            "question": row["question"],
+            "answer": row.get("answer", ""),
+            "supporting_facts": facts,
+            "gold_source_keys": [s["source_key"] for s in gold_sources],
+            "gold_sources": gold_sources,
+        })
+    return result
+
+
+def extract_corpus_2wiki_hipporag2(data_dir: "Path | str") -> list[dict]:
+    """Return the 11 656 corpus paragraphs from HippoRAG2's 2wikimultihopqa_corpus.json."""
+    data_dir = Path(data_dir)
+    corpus = _load_json(data_dir / "2wikimultihopqa_corpus.json")
+    return _corpus_to_paragraphs("2wiki", corpus)
+
+
+# ---------------------------------------------------------------------------
+# SimpleQA (no hipporag2 variant — dataset not in HippoRAG2 benchmark)
+# ---------------------------------------------------------------------------
 
 def load_simpleqa(n: int = 500, seed: int = 42) -> list[dict]:
     """Load SimpleQA test set. No supporting facts."""

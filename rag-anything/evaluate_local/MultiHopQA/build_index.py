@@ -665,13 +665,30 @@ async def main(args: argparse.Namespace) -> None:
         extract_corpus_hotpotqa,
         extract_corpus_musique,
         extract_corpus_2wiki,
+        extract_corpus_hotpotqa_hipporag2,
+        extract_corpus_musique_hipporag2,
+        extract_corpus_2wiki_hipporag2,
     )
 
-    extractors = {
-        "hotpotqa": extract_corpus_hotpotqa,
-        "musique": extract_corpus_musique,
-        "2wiki": extract_corpus_2wiki,
-    }
+    hipporag2_dir = Path(args.hipporag2_data_dir).resolve() if args.hipporag2_data_dir else None
+
+    if hipporag2_dir:
+        extractors = {
+            "hotpotqa": lambda **_: extract_corpus_hotpotqa_hipporag2(hipporag2_dir),
+            "musique":  lambda **_: extract_corpus_musique_hipporag2(hipporag2_dir),
+            "2wiki":    lambda **_: extract_corpus_2wiki_hipporag2(hipporag2_dir),
+        }
+    else:
+        extractors = {
+            "hotpotqa": extract_corpus_hotpotqa,
+            "musique":  extract_corpus_musique,
+            "2wiki":    extract_corpus_2wiki,
+        }
+
+    # In hipporag2 mode the corpus is fixed; use sentinel n_samples=0 so the
+    # manifest identity key still stores a meaningful value.
+    effective_n_samples = 0 if hipporag2_dir else args.n_samples
+    effective_seed      = 0 if hipporag2_dir else args.seed
 
     working_dir_path = Path(args.working_dir).resolve()
     working_dir_path.mkdir(parents=True, exist_ok=True)
@@ -685,8 +702,8 @@ async def main(args: argparse.Namespace) -> None:
         working_dir=working_dir_path,
         workspace=args.workspace,
         dataset=args.dataset,
-        n_samples=args.n_samples,
-        seed=args.seed,
+        n_samples=effective_n_samples,
+        seed=effective_seed,
         index_profile_metadata=index_profile_metadata,
     )
     if args.resume:
@@ -694,13 +711,17 @@ async def main(args: argparse.Namespace) -> None:
             manifest_path=manifest_path,
             workspace=args.workspace,
             dataset=args.dataset,
-            n_samples=args.n_samples,
-            seed=args.seed,
+            n_samples=effective_n_samples,
+            seed=effective_seed,
             expected_index_profile=index_profile_metadata["index_profile"],
         )
 
-    print(f"[build_index] Extracting corpus: {args.dataset} n={args.n_samples} seed={args.seed}")
-    corpus = extractors[args.dataset](n=args.n_samples, seed=args.seed)
+    if hipporag2_dir:
+        print(f"[build_index] HippoRAG2 mode: loading corpus from {hipporag2_dir}")
+        corpus = extractors[args.dataset]()
+    else:
+        print(f"[build_index] Extracting corpus: {args.dataset} n={args.n_samples} seed={args.seed}")
+        corpus = extractors[args.dataset](n=args.n_samples, seed=args.seed)
     print(f"[build_index] Corpus size: {len(corpus)} unique paragraphs")
 
     source_records, chunk_source_map, source_stats = prepare_source_records(
@@ -712,8 +733,8 @@ async def main(args: argparse.Namespace) -> None:
         working_dir=working_dir_path,
         workspace=args.workspace,
         dataset=args.dataset,
-        n_samples=args.n_samples,
-        seed=args.seed,
+        n_samples=effective_n_samples,
+        seed=effective_seed,
         source_records=source_records,
         chunk_source_map=chunk_source_map,
         source_stats=source_stats,
@@ -773,8 +794,10 @@ async def main(args: argparse.Namespace) -> None:
             "generated_at": _utc_now(),
             "workspace_id": args.workspace,
             "dataset": args.dataset,
-            "n_samples": args.n_samples,
-            "seed": args.seed,
+            "corpus_source": "hipporag2" if hipporag2_dir else "huggingface",
+            "hipporag2_data_dir": str(hipporag2_dir) if hipporag2_dir else None,
+            "n_samples": effective_n_samples,
+            "seed": effective_seed,
             "working_dir": str(working_dir_path),
             "ingest_mode": "virtual_batch",
             "ingest_batch_size": args.ingest_batch_size,
@@ -841,17 +864,28 @@ def _parse_args() -> argparse.Namespace:
         help="Directory where LightRAG stores this workspace index and source-map files",
     )
     p.add_argument(
+        "--hipporag2-data-dir",
+        default=None,
+        dest="hipporag2_data_dir",
+        help=(
+            "Path to HippoRAG2 dataset directory containing *_corpus.json files. "
+            "When set, uses the exact HippoRAG2 corpus (9221/6119/11656 paragraphs) "
+            "instead of sampling from HuggingFace. Download with "
+            "download_hipporag2_datasets.py. Overrides --n-samples and --seed."
+        ),
+    )
+    p.add_argument(
         "--n-samples",
         type=int,
-        default=500,
+        default=1000,
         dest="n_samples",
-        help="Number of questions to sample (must match evaluate_multihop.py)",
+        help="Number of questions to sample when NOT using --hipporag2-data-dir",
     )
     p.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="Random seed (must match evaluate_multihop.py)",
+        help="Random seed when NOT using --hipporag2-data-dir",
     )
     p.add_argument(
         "--ingest-batch-size",
