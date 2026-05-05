@@ -1,0 +1,220 @@
+\section{Methodology}
+\label{sec:methodology}
+
+We propose an agentic retrieval-augmented generation framework that
+addresses three failure modes endemic to single-pass retrieval pipelines:
+mis-targeted retrieval strategies, generation grounded in irrelevant
+context, and unverified hallucinated content. The framework is realised
+as a deterministic finite-state controller orchestrating five
+specialised components: an adaptive router, a multi-path retriever, a
+sufficiency grader, a generator, and a hallucination verifier. Two
+auxiliary components, a query rewriter and a decomposer, are invoked
+under failure-driven escalation. The complete control flow is bounded
+by hard iteration limits, ensuring tractable worst-case latency and
+cost.
+
+\subsection{System Overview}
+\label{sec:overview}
+
+Let $q$ denote a user query and $\mathcal{C}$ a corpus indexed under a
+hybrid representation comprising dense passage embeddings, sparse
+lexical signals, and a knowledge graph $\mathcal{G}=(V,E)$ derived from
+entity and relation extraction over $\mathcal{C}$. The system maintains
+a state vector
+$s = (q, q', \pi, K, a, \gamma, U, c_r, c_v)$
+where $q'$ is the active retrieval query (initially $q'=q$), $\pi$ is
+the active retrieval profile, $K$ is the accumulated chunk set, $a$ is
+the candidate answer, $\gamma \in \{0,1\}$ is the grounding indicator,
+$U$ is the set of ungrounded claims, and $c_r, c_v$ are independent
+counters bounding the retrieval and verification loops respectively.
+State transitions are governed by a graph $\mathcal{T}$ in which each
+node corresponds to a single component invocation and each edge encodes
+a deterministic decision rule.
+
+\subsection{Adaptive Query Routing}
+\label{sec:router}
+
+The router maps an incoming query to a retrieval profile
+$\pi \in \Pi = \{\textsc{precise}, \textsc{semantic}, \textsc{local},
+\textsc{multihop}\}$. Each profile encodes a distinct combination of
+retrieval paths and rank-fusion weights tailored to a class of query
+intents: lexical exact match, dense semantic similarity, single-entity
+graph neighbourhood, and multi-entity cross-document reasoning. A fifth
+profile, \textsc{full}, executes the union of all paths but is excluded
+from the router's choice set; it is reserved for terminal escalation
+described in Section~\ref{sec:escalation}.
+
+Routing is performed by a language model classifier conditioned on a
+prompt that enumerates each profile, its activating signals, and
+representative examples. The classifier emits a JSON object
+$\{\pi, \rho\}$ where $\rho \in [0,1]$ is a self-reported confidence.
+When $\rho$ falls below a threshold $\tau_\rho$, the router falls back
+to the \textsc{semantic} profile, which functions as the modal default
+across query distributions observed in pilot deployments. To amortise
+classifier cost, decisions are cached in a fixed-capacity LRU keyed by
+the SHA-256 prefix of the normalised query concatenated with a hash of
+the classifier prompt template. Cache entries carry a tri-state outcome
+field updated by downstream signals: a successful verification marks
+the entry as confirming, while terminal failure marks it as discrediting
+and excludes the cached profile from subsequent classifications of the
+same query.
+
+\subsection{Multi-Path Retrieval with Weighted Reciprocal Rank Fusion}
+\label{sec:retrieval}
+
+Each profile $\pi$ specifies a set of retrieval paths
+$P_\pi \subseteq \mathcal{P}$ and a weight function
+$w_\pi: \mathcal{P} \to \mathbb{R}_{>0}$. Paths execute concurrently
+under a semaphore that bounds simultaneous load on shared backends.
+Failed paths are dropped silently provided at least one path returns
+results; complete failure raises a controlled exception that triggers
+the terminal insufficiency state described in Section~\ref{sec:termination}.
+
+Per-path ranked outputs are fused via weighted reciprocal rank fusion.
+For a chunk $d$ appearing at rank $r_p(d)$ in path $p$,
+\begin{equation}
+S(d) = \sum_{p \in P_\pi} w_\pi(p) \cdot \frac{1}{k + r_p(d)}
+\end{equation}
+where $k$ is a stability constant. The fused list is filtered by a
+minimum score threshold $\tau_{\text{rrf}}$ to remove the long tail of
+low-confidence candidates, then truncated to a profile-specific cap
+$\kappa$. The truncated set is reranked by a cross-encoder model whose
+pairwise scores yield a final ordering, after which a relevance
+threshold $\tau_{\text{rerank}}$ removes residual noise. The resulting
+chunk set $K$ satisfies $|K| \le \chi$ where $\chi$ is the global
+context budget. The cap $\kappa$ is chosen such that reranker batches
+fit within available accelerator memory, eliminating the need for
+runtime batch-size backoff.
+
+\subsection{Sufficiency Assessment}
+\label{sec:grader}
+
+Prior to generation, a grader assesses whether the retrieved set $K$
+contains adequate evidence to answer $q$. The grader is implemented as
+a single language model invocation whose prompt comprises the full text
+of all chunks in $K$ followed by a task-specific suffix. Output is a
+binary judgment $\sigma \in \{0, 1\}$ accompanied by a one-sentence
+diagnostic rationale used by downstream rewriting. We denote the
+grader's mapping by $G(q, K) \mapsto (\sigma, \delta)$ where $\delta$ is
+the diagnostic.
+
+Critically, the grader, generator, and hallucination verifier share an
+identical prompt prefix consisting of the full chunk corpus. Under
+inference engines supporting automatic prefix caching, this enables the
+attention KV cache computed during the grader's forward pass to be
+reused by the subsequent generator and verifier invocations,
+amortising the prefill cost of the largest prompt segment across three
+calls. A grader yielding $\sigma = 1$ transitions the controller to
+generation; otherwise the system enters the iterative refinement
+regime.
+
+\subsection{Iterative Refinement and Failure-Driven Escalation}
+\label{sec:escalation}
+
+When the grader returns insufficiency, the controller selects a
+remediation strategy as a deterministic function of the retrieval
+counter $c_r$. We adopt a two-stage escalation policy motivated by
+distinct hypotheses about the cause of failure.
+
+At $c_r = 0$, the system invokes a query rewriter that conditions on
+the original query and the grader's diagnostic to produce a reformulated
+query $q'$. The rewriter targets surface-level mismatches between
+user vocabulary and corpus vocabulary, including synonym substitution,
+disambiguation of polysemous terms, and decomposition of compound noun
+phrases. Crucially, the active profile $\pi$ is held constant: the
+hypothesis under test is that the query is poorly formulated, not that
+the retrieval strategy is wrong.
+
+At $c_r = 1$, the rewriter has failed to elicit sufficient evidence,
+permitting the controller to discard the query-formulation hypothesis.
+The system then invokes a decomposer that partitions the original
+query into a small set of independent sub-queries
+$\{q^{(1)}, \ldots, q^{(m)}\}$ where $m \le 4$. Each sub-query is
+retrieved concurrently under the \textsc{full} profile, which activates
+the union of all retrieval paths to maximise recall. Sub-query results
+are fused, deduplicated, and capped to prevent unbounded growth of the
+context set. This cycle constitutes the system's terminal retrieval
+attempt; subsequent failure triggers controlled abstention rather than
+further escalation.
+
+\subsection{Grounded Generation}
+\label{sec:generation}
+
+When sufficiency is established, the generator produces a candidate
+answer $a$ conditioned on $K$ and $q$ via a prompt that constrains the
+model to draw exclusively from the provided evidence. The prompt
+includes an explicit honesty directive instructing the model to declare
+inability when the evidence is inadequate, rather than fabricating.
+This directive interacts productively with the downstream verifier:
+declarations of inability contain no factual claims and therefore pass
+verification trivially, providing a low-overhead path for genuinely
+unanswerable queries.
+
+\subsection{Hallucination Verification}
+\label{sec:verification}
+
+The verifier examines $a$ against $K$ and emits a binary grounding
+judgment $\gamma \in \{0, 1\}$ together with the set
+$U = \{u_1, \ldots, u_\ell\}$ of claims appearing in $a$ but unsupported
+by $K$. We deliberately reject continuous grounding scores and
+threshold-based partial acceptance. The motivating assumption is that
+in regulated application domains, even a single fabricated claim can
+propagate into downstream decisions with high cost, and post-hoc
+filtering of partial fabrications cannot reliably separate the
+unsupported fragment from the surrounding text.
+
+When $\gamma = 1$, the answer is returned with high confidence. When
+$\gamma = 0$ and the verification counter satisfies $c_v < c_v^{\max}$,
+the system invokes a targeted retriever that uses $U$ as a query to
+augment $K$ with evidence directly addressing the unsupported claims.
+Generation is then re-executed against the enlarged context. This
+inner loop is bounded by $c_v^{\max}$ and accumulates retrieved
+chunks across iterations, subject to a deduplication and capping rule.
+
+\subsection{Termination and Confidence Reporting}
+\label{sec:termination}
+
+The controller admits exactly two terminal failure states. The first,
+denoted $\textsc{end}_{\text{insufficient}}$, is entered when either
+the retrieval loop exhausts its iteration budget without achieving
+sufficiency, or the verification loop exhausts its budget without
+achieving grounding. In both cases the system returns no answer; the
+generator output, if any, is suppressed to prevent propagation of
+unverified content. The second, denoted $\textsc{end}_{\text{degraded}}$,
+fires only when the verifier itself fails due to an infrastructure
+fault such as a malformed model response. In this case the generator's
+last output is returned with a confidence indicator marking the answer
+as unverified, allowing calling systems to apply domain-specific
+filtering policies.
+
+System output is therefore a triple $(a^\star, \gamma^\star, U^\star)$
+augmented with a confidence label
+$\zeta \in \{\textsc{high}, \textsc{degraded}, \textsc{none}\}$ and a
+trace record sufficient for post-hoc analysis. This separation between
+inability and uncertainty enables downstream consumers, including human
+reviewers and automated decision pipelines, to apply differentiated
+handling: a $\zeta = \textsc{none}$ result is a categorical refusal and
+should never be presented as an answer, whereas a $\zeta = \textsc{high}$
+result carries the system's strongest grounding guarantee.
+
+\subsection{Cost and Latency Bounds}
+\label{sec:bounds}
+
+The framework's worst-case behaviour is fully characterised by the
+iteration limits $c_r^{\max}$ and $c_v^{\max}$. Let $L_R$, $L_G$,
+$L_V$, $L_W$, and $L_D$ denote the language model invocation counts
+for the router, grader, verifier, rewriter, and decomposer respectively,
+each equal to one per invocation, and let $L_E$ denote the generator
+count. The total invocation count for a query traversing the worst
+admissible path is
+\begin{equation}
+L_{\text{worst}} = L_R + (c_r^{\max}+1) L_G + L_W + L_D + (c_v^{\max}+1)(L_E + L_V)
+\end{equation}
+which under the chosen limits $c_r^{\max}=2$ and $c_v^{\max}=1$ yields
+nine model invocations. Empirically observed latencies on the optimal
+path lie within the range required for interactive use, while pathological
+queries terminate cleanly within a bounded multiple thereof. The hard
+upper bound on cost, in conjunction with the explicit abstention
+mechanism, distinguishes this framework from open-ended agent loops
+whose cost is governed by emergent heuristics rather than analytic
+guarantees.
