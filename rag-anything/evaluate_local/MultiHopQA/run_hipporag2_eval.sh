@@ -18,8 +18,8 @@ INDEX_PROFILE="v0"
 CHUNK_SIZE="${CHUNK_SIZE:-4096}"
 export CHUNK_SIZE
 
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-/data/workspaces/multihopqa_hr2_v0}"
-RESULTS_ROOT="${RESULTS_ROOT:-${RAGANYTHING_ROOT}/results/multihopqa_hr2_v0}"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/workspaces/multihopqa_hr2_v0}"
+RESULTS_ROOT="${RESULTS_ROOT:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/results/multihopqa_hr2_v0}"
 
 MODES="${MODES:-naive hybrid ppr}"
 RECALL_K="${RECALL_K:-2 5}"
