@@ -44,7 +44,8 @@ def test_profile_defaults():
     assert p.rrf_k == 60
     assert p.enable_rerank is True
     assert p.min_rerank_score == 0.3
-    assert p.rerank_candidate_cap == 60
+    assert p.rerank_candidate_cap == 30
+    assert p.min_rrf_score == 0.01
     assert p.max_concurrent_paths is None
     assert p.path_overrides == {}
 

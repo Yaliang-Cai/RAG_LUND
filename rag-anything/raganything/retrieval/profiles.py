@@ -15,7 +15,8 @@ class RetrievalProfile:
     rrf_k: int = 60
     enable_rerank: bool = True
     min_rerank_score: float = 0.3
-    rerank_candidate_cap: int = 60
+    rerank_candidate_cap: int = 30      # was 60
+    min_rrf_score: float = 0.01         # NEW
     max_concurrent_paths: int | None = None
     path_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
 

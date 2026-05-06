@@ -113,8 +113,8 @@ DEFAULT_KG_CHUNK_SELECTION_SOURCE = "truncated"  # "truncated" | "untruncated"
 # Reranker score 过滤阈值：rerank 完成后，得分低于此值的 chunk 会被丢弃。
 # 0.3：过滤 rerank 分数断崖后的低质量 chunk，避免噪声 chunk 干扰 LLM。
 DEFAULT_MIN_RERANK_SCORE = 0.3
-DEFAULT_RERANK_BATCH_SIZE = 32
-DEFAULT_RERANK_ENABLE_OOM_BACKOFF = True
+DEFAULT_RERANK_BATCH_SIZE = 8           # was 32 — locks batch, eliminates OOM backoff
+DEFAULT_RERANK_ENABLE_OOM_BACKOFF = False  # was True
 DEFAULT_RERANK_MIN_BATCH_SIZE = 4
 
 # =============================================================================
@@ -345,3 +345,14 @@ DEFAULT_LOG_BACKUP_COUNT = 5
 GFM_DATA_DIR = "./data"          # root data dir for GFM-RAG index
 GFM_DATA_NAME = ""               # graph name; empty string disables GFM path
 GFM_MODEL_PATH = "rmanluo/G-reasoner-34M"  # HuggingFace model id or local path
+
+# =============================================================================
+# Agentic RAG (V4)
+# =============================================================================
+DEFAULT_AGENTIC_MAX_RETRIEVE_CYCLES = 3
+DEFAULT_AGENTIC_MAX_CHECK_CYCLES = 2
+DEFAULT_AGENTIC_ROUTER_CACHE_SIZE = 2048
+DEFAULT_AGENTIC_ROUTER_FALLBACK_PROFILE = "semantic"
+DEFAULT_AGENTIC_DECOMPOSE_MAX_SUBQUESTIONS = 4
+DEFAULT_AGENTIC_PARALLEL_RETRIEVE_CONCURRENCY = 3
+DEFAULT_AGENTIC_GRADER_FALLBACK_SUFFICIENT = True

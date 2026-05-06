@@ -91,6 +91,9 @@ class RetrievalRouter:
             profile.rrf_weights,
             profile.rrf_k,
         )
+        # Filter long-tail low-confidence candidates
+        if profile.min_rrf_score > 0.0:
+            merged = [c for c in merged if c.get("rrf_score", 0.0) >= profile.min_rrf_score]
         chunks_after_rrf = len(merged)
 
         # 5. Rerank (capped at rerank_candidate_cap)
