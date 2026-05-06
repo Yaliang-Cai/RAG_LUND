@@ -941,6 +941,61 @@ def build_reduced_v4_experiment_matrix(task: str) -> list[dict[str, Any]]:
     raise ValueError(f"Unknown reduced_v4 retrieval task: {task!r}")
 
 
+def build_reduced_v6_experiment_matrix(task: str) -> list[dict[str, Any]]:
+    normalized_task = str(task).strip().lower()
+    if normalized_task not in {"docbench", "shared"}:
+        raise ValueError(f"reduced_v6 is DocBench-only, got task: {task!r}")
+
+    baseline = _with_unified_retrieval(
+        {
+            "task": "shared",
+            "name": "baseline_non_ppr_all_on",
+            "query_mode": "hybrid",
+            "keyword_fanout_mode": "per_keyword_rrf",
+            "retrieval_mode": "hybrid",
+            "exclude_synonym_edges": True,
+            "kg_chunk_selection_source": "truncated",
+            "answer_context_mode": "chunk_only_prompt",
+            "enable_rerank": True,
+            "enable_kg_rerank": True,
+        }
+    )
+    groups = [
+        baseline,
+        {
+            **baseline,
+            "name": "non_ppr_no_chunk_only",
+            "answer_context_mode": "kg_prompt",
+        },
+        {
+            **baseline,
+            "name": "non_ppr_no_kg_rerank",
+            "enable_kg_rerank": False,
+        },
+        {
+            **baseline,
+            "name": "non_ppr_no_per_keyword",
+            "keyword_fanout_mode": "joined",
+        },
+        _with_unified_retrieval(
+            {
+                **baseline,
+                "name": "non_ppr_no_retrieval_hybrid",
+                "retrieval_mode": "dense",
+            }
+        ),
+    ]
+    return [
+        _with_v4_windows(
+            item,
+            top_k=DEFAULT_REDUCED_V4_SHARED_TOP_K,
+            chunk_top_k=DEFAULT_REDUCED_V4_SHARED_CHUNK_TOP_K,
+            naive_top_k=DEFAULT_REDUCED_V4_SHARED_NAIVE_TOP_K,
+        )
+        for item in groups
+    ]
+
+
 def build_reduced_v3_experiment_matrix(task: str) -> list[dict[str, Any]]:
     normalized_task = str(task).strip().lower()
     if normalized_task in {"docbench", "shared"}:
@@ -1157,7 +1212,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tasks", choices=["both", "shared", "surge"], default="both")
     parser.add_argument(
         "--matrix-mode",
-        choices=["reduced", "reduced_v2", "reduced_v3", "reduced_v4", "v5_synonym", "full"],
+        choices=[
+            "reduced",
+            "reduced_v2",
+            "reduced_v3",
+            "reduced_v4",
+            "reduced_v6",
+            "v5_synonym",
+            "full",
+        ],
         default="reduced",
     )
     parser.add_argument("--query-modes", default="hybrid,ppr")
@@ -1318,7 +1381,7 @@ def _apply_inferred_ablation_flag_defaults(
 
 def _apply_matrix_mode_defaults(args: argparse.Namespace, argv: list[str] | None) -> None:
     raw_argv = list(argv or [])
-    if args.matrix_mode not in {"reduced_v4", "v5_synonym"}:
+    if args.matrix_mode not in {"reduced_v4", "reduced_v6", "v5_synonym"}:
         return
     if not _argv_mentions_option(raw_argv, "--run-root"):
         args.run_root = DEFAULT_REDUCED_V4_RUN_ROOT
@@ -2027,6 +2090,21 @@ def _selected_experiment_groups(args: argparse.Namespace) -> dict[str, list[dict
             "surge_survey": surge_survey,
         }
 
+    if args.matrix_mode == "reduced_v6":
+        shared = [
+            _finalize_experiment_for_task(
+                task="shared",
+                experiment=item,
+                args=args,
+            )
+            for item in build_reduced_v6_experiment_matrix("shared")
+        ]
+        return {
+            "shared": shared,
+            "surge_query": [],
+            "surge_survey": [],
+        }
+
     if args.matrix_mode == "v5_synonym":
         thresholds = _parse_synonym_thresholds(args.v5_synonym_thresholds)
         shared = [
@@ -2159,6 +2237,8 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(raw_argv)
     _apply_matrix_mode_defaults(args, raw_argv)
+    if args.matrix_mode == "reduced_v6" and args.tasks == "surge":
+        raise ValueError("reduced_v6 is DocBench-only; use --tasks shared or --tasks both")
     _apply_inferred_ablation_flag_defaults(args, raw_argv)
     args.ablation_flags = validate_ablation_flags(args, naming_style="hyphen")
     if args.surge_survey_ppr_top_k <= 0:
