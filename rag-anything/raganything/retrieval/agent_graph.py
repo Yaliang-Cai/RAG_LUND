@@ -121,12 +121,16 @@ class AdaptiveAgentGraph:
 
     async def _node_retriever(self, state: AgentState) -> dict:
         param = QueryParam(mode="hybrid")
-        chunks, trace = await self._router.route(
-            state["current_query"], param, profile_name=state["profile"]
-        )
         routing_trace = dict(state.get("routing_trace", {}))
         routing_trace.setdefault("chunks_per_path", {})
-        routing_trace["chunks_per_path"].update(trace.get("chunks_per_path", {}))
+        try:
+            chunks, trace = await self._router.route(
+                state["current_query"], param, profile_name=state["profile"]
+            )
+            routing_trace["chunks_per_path"].update(trace.get("chunks_per_path", {}))
+        except Exception:
+            logger.warning("Retriever failed (all paths failed), returning empty chunks", exc_info=True)
+            chunks = []
         return {"chunks": chunks, "routing_trace": routing_trace}
 
     async def _node_grader(self, state: AgentState) -> dict:

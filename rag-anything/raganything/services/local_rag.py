@@ -2312,7 +2312,10 @@ class LocalRagService:
             result = await rag.aquery(query, **normalized_kwargs)
             if isinstance(result, dict):
                 return {
-                    "answer": str(result.get("answer", "")),
+                    "answer": str(result.get("answer", "") or ""),
+                    "confidence": result.get("confidence"),
+                    "grounded": result.get("grounded"),
+                    "ungrounded_claims": result.get("ungrounded_claims", []),
                     "trace": result.get("trace", {}),
                 }
             return {"answer": str(result), "trace": {}}

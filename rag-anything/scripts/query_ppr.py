@@ -219,17 +219,21 @@ async def run(args):
 
     if trace:
         if args.mode == "agentic":
-            # agentic mode: complexity-aware trace
-            complexity = trace.get("complexity", "?")
-            eval_score = trace.get("eval_score", 0.0)
-            iteration = trace.get("iteration", 0)
-            print(f"\n[Agentic trace]  complexity={complexity}  eval_score={eval_score:.2f}  retry_iterations={iteration}")
-            rt = trace.get("routing", {})
-            if rt:
-                clf = rt.get("complexity", {})
-                if clf:
-                    print(f"  classifier: confidence={clf.get('confidence', '?'):.2f}  latency={clf.get('latency', '?')}s")
-                    print(f"  reasoning: {clf.get('reasoning', '')}")
+            # agentic mode: V4 trace fields
+            confidence = response.get("confidence", "?")
+            grounded = response.get("grounded", "?")
+            profile = trace.get("profile", "?")
+            cache_hit = trace.get("router_cache_hit", False)
+            retrieve_cycles = trace.get("retrieve_cycles_used", 0)
+            check_cycles = trace.get("check_cycles_used", 0)
+            print(f"\n[Agentic trace]  confidence={confidence}  grounded={grounded}  profile={profile}  cache_hit={cache_hit}")
+            print(f"  retrieve_cycles={retrieve_cycles}  check_cycles={check_cycles}")
+            rewrite_history = trace.get("rewrite_history", [])
+            if len(rewrite_history) > 1:
+                print(f"  rewrite_history: {rewrite_history}")
+            sub_qs = trace.get("sub_questions")
+            if sub_qs:
+                print(f"  sub_questions: {sub_qs}")
         elif "routing" in trace:
             # auto mode: routing trace
             rt = trace["routing"]
