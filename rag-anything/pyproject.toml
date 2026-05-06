@@ -55,7 +55,6 @@ agentic = [
     "arize-phoenix[otel]>=4.0",
     "opentelemetry-sdk",
     "opentelemetry-exporter-otlp",
-    "openinference-instrumentation-langchain",
 ]
 
 [project.urls]
