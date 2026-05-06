@@ -351,7 +351,7 @@ def extract_corpus_2wiki(n: int = 500, seed: int = 42) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# HippoRAG2-aligned loaders (osunlp/HippoRAG_v2)
+# HippoRAG2-aligned loaders (osunlp/HippoRAG_2)
 # ---------------------------------------------------------------------------
 # These functions load from the exact JSON files distributed by HippoRAG2 so
 # that corpus size, query set, and text content match the published baselines.
@@ -421,7 +421,7 @@ def load_hotpotqa_hipporag2(data_dir: "Path | str") -> list[dict]:
 
 
 def extract_corpus_hotpotqa_hipporag2(data_dir: "Path | str") -> list[dict]:
-    """Return the 9 221 corpus paragraphs from HippoRAG2's hotpotqa_corpus.json."""
+    """Return the 9 811 corpus paragraphs from HippoRAG2's hotpotqa_corpus.json."""
     data_dir = Path(data_dir)
     corpus = _load_json(data_dir / "hotpotqa_corpus.json")
     return _corpus_to_paragraphs("hotpotqa", corpus)
@@ -472,7 +472,7 @@ def load_musique_hipporag2(data_dir: "Path | str") -> list[dict]:
 
 
 def extract_corpus_musique_hipporag2(data_dir: "Path | str") -> list[dict]:
-    """Return the 6 119 corpus paragraphs from HippoRAG2's musique_corpus.json."""
+    """Return the 11 656 corpus paragraphs from HippoRAG2's musique_corpus.json."""
     data_dir = Path(data_dir)
     corpus = _load_json(data_dir / "musique_corpus.json")
     return _corpus_to_paragraphs("musique", corpus)
@@ -517,7 +517,7 @@ def load_2wiki_hipporag2(data_dir: "Path | str") -> list[dict]:
 
 
 def extract_corpus_2wiki_hipporag2(data_dir: "Path | str") -> list[dict]:
-    """Return the 11 656 corpus paragraphs from HippoRAG2's 2wikimultihopqa_corpus.json."""
+    """Return the 6 119 corpus paragraphs from HippoRAG2's 2wikimultihopqa_corpus.json."""
     data_dir = Path(data_dir)
     corpus = _load_json(data_dir / "2wikimultihopqa_corpus.json")
     return _corpus_to_paragraphs("2wiki", corpus)

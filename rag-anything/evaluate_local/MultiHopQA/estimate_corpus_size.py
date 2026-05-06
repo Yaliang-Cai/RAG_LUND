@@ -79,7 +79,7 @@ def main() -> None:
     }
 
     # HippoRAG2 reference numbers (1000 queries)
-    hipporag2_docs = {"hotpotqa": 9221, "musique": 6119, "2wiki": 11656}
+    hipporag2_docs = {"hotpotqa": 9811, "musique": 11656, "2wiki": 6119}
 
     print(f"\nCorpus size analysis — n_samples={args.n_samples}, seed={args.seed}, "
           f"tokens_per_chunk={args.tokens_per_chunk}\n")

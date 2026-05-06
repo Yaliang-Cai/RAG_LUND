@@ -3,15 +3,15 @@
 """
 Download the exact HippoRAG2 evaluation datasets from HuggingFace.
 
-Source: https://huggingface.co/datasets/osunlp/HippoRAG_v2
+Source: https://huggingface.co/datasets/osunlp/HippoRAG_2
 
 Downloads 6 files into --output-dir:
   hotpotqa.json              (1 000 queries)
-  hotpotqa_corpus.json       (9 221 paragraphs)
+  hotpotqa_corpus.json       (9 811 paragraphs)
   musique.json               (1 000 queries)
-  musique_corpus.json        (6 119 paragraphs)
+  musique_corpus.json        (11 656 paragraphs)
   2wikimultihopqa.json       (1 000 queries)
-  2wikimultihopqa_corpus.json (11 656 paragraphs)
+  2wikimultihopqa_corpus.json (6 119 paragraphs)
 
 Usage:
     python evaluate_local/MultiHopQA/download_hipporag2_datasets.py \
@@ -24,8 +24,9 @@ import json
 import sys
 from pathlib import Path
 
-_HF_REPO = "osunlp/HippoRAG_v2"
-_HF_SUBFOLDER = "reproduce/dataset"
+_HF_REPO = "osunlp/HippoRAG_2"
+_HF_LEGACY_REPO = "osunlp/HippoRAG_v2"
+_HF_SUBFOLDERS = ("", "reproduce/dataset")
 
 _FILES = [
     "hotpotqa.json",
@@ -39,12 +40,20 @@ _FILES = [
 # Expected sizes for a basic sanity check after download
 _EXPECTED_SIZES = {
     "hotpotqa.json":               1_000,
-    "hotpotqa_corpus.json":        9_221,
+    "hotpotqa_corpus.json":        9_811,
     "musique.json":                1_000,
-    "musique_corpus.json":         6_119,
+    "musique_corpus.json":         11_656,
     "2wikimultihopqa.json":        1_000,
-    "2wikimultihopqa_corpus.json": 11_656,
+    "2wikimultihopqa_corpus.json": 6_119,
 }
+
+
+def _candidate_hf_paths(filename: str) -> list[str]:
+    paths: list[str] = []
+    for subfolder in _HF_SUBFOLDERS:
+        prefix = str(subfolder).strip("/")
+        paths.append(f"{prefix}/{filename}" if prefix else filename)
+    return paths
 
 
 def _download_with_huggingface_hub(output_dir: Path, force: bool) -> None:
@@ -56,13 +65,26 @@ def _download_with_huggingface_hub(output_dir: Path, force: bool) -> None:
             print(f"  [skip] {filename} already exists")
             continue
         print(f"  [download] {filename} ...", end="", flush=True)
-        local_path = hf_hub_download(
-            repo_id=_HF_REPO,
-            filename=f"{_HF_SUBFOLDER}/{filename}",
-            repo_type="dataset",
-            local_dir=str(output_dir),
-            local_dir_use_symlinks=False,
-        )
+        last_error: Exception | None = None
+        local_path: str | None = None
+        for repo_id in (_HF_REPO, _HF_LEGACY_REPO):
+            for hf_filename in _candidate_hf_paths(filename):
+                try:
+                    local_path = hf_hub_download(
+                        repo_id=repo_id,
+                        filename=hf_filename,
+                        repo_type="dataset",
+                        local_dir=str(output_dir),
+                        local_dir_use_symlinks=False,
+                    )
+                    last_error = None
+                    break
+                except Exception as exc:  # noqa: PERF203
+                    last_error = exc
+            if local_path is not None:
+                break
+        if local_path is None:
+            raise RuntimeError(f"failed to download {filename}") from last_error
         # hf_hub_download may place the file in a subfolder; move if needed
         downloaded = Path(local_path)
         if downloaded != dest:
@@ -73,18 +95,28 @@ def _download_with_huggingface_hub(output_dir: Path, force: bool) -> None:
 
 def _download_with_requests(output_dir: Path, force: bool) -> None:
     import urllib.request
+    import urllib.error
 
-    base_url = (
-        f"https://huggingface.co/datasets/{_HF_REPO}/resolve/main/{_HF_SUBFOLDER}"
-    )
     for filename in _FILES:
         dest = output_dir / filename
         if dest.exists() and not force:
             print(f"  [skip] {filename} already exists")
             continue
-        url = f"{base_url}/{filename}"
-        print(f"  [download] {filename} from {url} ...", end="", flush=True)
-        urllib.request.urlretrieve(url, dest)
+        print(f"  [download] {filename} ...", end="", flush=True)
+        last_error: Exception | None = None
+        for repo_id in (_HF_REPO, _HF_LEGACY_REPO):
+            for hf_filename in _candidate_hf_paths(filename):
+                url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/{hf_filename}"
+                try:
+                    urllib.request.urlretrieve(url, dest)
+                    last_error = None
+                    break
+                except urllib.error.HTTPError as exc:
+                    last_error = exc
+            if dest.exists() and last_error is None:
+                break
+        if not dest.exists():
+            raise RuntimeError(f"failed to download {filename}") from last_error
         print(f" done ({dest.stat().st_size // 1024} KB)")
 
 
@@ -150,10 +182,12 @@ def main() -> None:
     print("\nVerifying downloads:")
     ok = _verify(output_dir)
     if ok:
-        print("\nAll files verified. Run evaluation with:")
+        print("\nAll files verified. Run the full MultiHopQA pipeline with:")
+        print("  bash evaluate_local/MultiHopQA/run_hipporag2_eval.sh")
+        print("\nOr build one workspace manually with:")
         print("  python evaluate_local/MultiHopQA/build_index.py \\")
         print("    --dataset hotpotqa \\")
-        print("    --workspace hotpotqa_hr2 \\")
+        print("    --workspace hotpotqa_hr2_v0 \\")
         print("    --working-dir /path/to/workspace \\")
         print(f"    --hipporag2-data-dir {output_dir}")
     else:

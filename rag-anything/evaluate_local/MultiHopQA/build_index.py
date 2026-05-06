@@ -893,7 +893,7 @@ def _parse_args() -> argparse.Namespace:
         dest="hipporag2_data_dir",
         help=(
             "Path to HippoRAG2 dataset directory containing *_corpus.json files. "
-            "When set, uses the exact HippoRAG2 corpus (9221/6119/11656 paragraphs) "
+            "When set, uses the exact HippoRAG2 corpus (9811/11656/6119 paragraphs) "
             "instead of sampling from HuggingFace. Download with "
             "download_hipporag2_datasets.py. Overrides --n-samples and --seed."
         ),
