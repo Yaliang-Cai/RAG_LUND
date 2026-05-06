@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import json
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -437,7 +438,11 @@ def main() -> int:
     try:
         payload = asyncio.run(_amain(args))
     except Exception as exc:
-        error_payload = {"success": False, "error": str(exc)}
+        error_payload = {
+            "success": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
         print(json.dumps(error_payload, ensure_ascii=False, indent=2))
         return 1
     print(json.dumps(payload, ensure_ascii=False, indent=2))

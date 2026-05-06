@@ -1574,6 +1574,16 @@ def _run_command(*, command: list[str], cwd: Path, env: dict[str, str], log_file
     return int(proc.returncode)
 
 
+def _read_log_tail(log_file: Path, *, max_lines: int = 80) -> str:
+    if not log_file.exists():
+        return ""
+    try:
+        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(lines[-max_lines:])
+
+
 def _apply_workspace_synonyms(
     *,
     args: argparse.Namespace,
@@ -1623,8 +1633,12 @@ def _apply_workspace_synonyms(
         log_file=log_file,
     )
     if code != 0:
+        log_tail = _read_log_tail(log_file)
+        detail = f"Synonym apply failed for {workspace_label} threshold={threshold}: exit {code}. Log: {log_file}"
+        if log_tail:
+            detail = f"{detail}\n--- log tail ---\n{log_tail}"
         raise RuntimeError(
-            f"Synonym apply failed for {workspace_label} threshold={threshold}: exit {code}"
+            detail
         )
 
 
