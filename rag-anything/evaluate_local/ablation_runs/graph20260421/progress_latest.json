@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-04-21T15:07:35.073775+00:00",
+  "run_id": "graph20260421",
+  "profile": null,
+  "stage": "finish",
+  "status": "ok",
+  "message": "ablation runner finished",
+  "extra": {
+    "summary_file": "E:\\RAG\\Data\\y50056788\\Yaliang\\projects\\rag-anything\\evaluate_local\\ablation_runs\\graph20260421\\summary.json",
+    "failed_profiles": []
+  }
+}

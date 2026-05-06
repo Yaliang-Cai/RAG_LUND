@@ -326,6 +326,9 @@ def build_query_params(args: argparse.Namespace, *, chunk_top_k: int) -> dict[st
             getattr(args, "bypass_keywords_cache", False)
         ),
     }
+    naive_top_k = getattr(args, "naive_top_k", None)
+    if naive_top_k is not None:
+        query_params["naive_top_k"] = int(naive_top_k)
     exclude_synonym_edges = getattr(args, "exclude_synonym_edges", None)
     if exclude_synonym_edges is not None:
         query_params["exclude_synonym_edges"] = bool(exclude_synonym_edges)
@@ -2357,6 +2360,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError(
             f"--chunk-top-k must be > 0 or 0(disabled), got {args.chunk_top_k}"
         )
+    if args.naive_top_k is not None and args.naive_top_k <= 0:
+        raise ValueError(f"--naive-top-k must be > 0, got {args.naive_top_k}")
     if args.max_concurrency <= 0:
         raise ValueError(
             f"--max-concurrency must be > 0, got {args.max_concurrency}"
@@ -2447,6 +2452,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="0 disables chunk_top_k truncation; >0 keeps only top-k chunks before final token budgeting.",
+    )
+    p.add_argument(
+        "--naive-top-k",
+        "--naive_top_k",
+        dest="naive_top_k",
+        type=int,
+        default=None,
     )
     p.add_argument("--max-total-tokens", type=int, default=45000)
     p.add_argument("--k-list", default="5,10,20,30,50")

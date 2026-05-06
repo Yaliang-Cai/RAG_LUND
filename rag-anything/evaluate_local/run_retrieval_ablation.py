@@ -30,6 +30,11 @@ DEFAULT_RUN_ROOT = (
 )
 DEFAULT_SHARED_WORKSPACE_ID = "docbench_shared_graphbm25_20260421_v0_v1_v2"
 DEFAULT_SURGE_WORKSPACE_ID = "surge_fast_graphbm25_20260421_v0_v1_v2"
+DEFAULT_REDUCED_V4_RUN_ROOT = (
+    "/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/graphbm25_20260504"
+)
+DEFAULT_REDUCED_V4_SHARED_WORKSPACE_ID = "docbench_shared_graphbm25_20260504_v0"
+DEFAULT_REDUCED_V4_SURGE_WORKSPACE_ID = "surge_fast_graphbm25_20260504_v0"
 DEFAULT_OUTPUT_ROOT = str(PROJECT_ROOT / "evaluate_local" / "retrieval_ablation_runs")
 DEFAULT_SHARED_PPR_TOP_K = 50
 DEFAULT_SHARED_PPR_QA_TOP_K = 20
@@ -41,6 +46,21 @@ DEFAULT_REDUCED_V2_SURGE_PPR_TOP_K = 100
 DEFAULT_REDUCED_V2_SURGE_PPR_QA_TOP_K = 50
 DEFAULT_REDUCED_V3_SURGE_SURVEY_PPR_TOP_K = 500
 DEFAULT_REDUCED_V3_SURGE_SURVEY_PPR_QA_TOP_K = 500
+DEFAULT_REDUCED_V4_SHARED_TOP_K = 20
+DEFAULT_REDUCED_V4_SHARED_CHUNK_TOP_K = 10
+DEFAULT_REDUCED_V4_SHARED_NAIVE_TOP_K = 20
+DEFAULT_REDUCED_V4_SHARED_PPR_TOP_K = 50
+DEFAULT_REDUCED_V4_SHARED_PPR_QA_TOP_K = 10
+DEFAULT_REDUCED_V4_SURGE_QUERY_TOP_K = 20
+DEFAULT_REDUCED_V4_SURGE_QUERY_CHUNK_TOP_K = 50
+DEFAULT_REDUCED_V4_SURGE_QUERY_NAIVE_TOP_K = 75
+DEFAULT_REDUCED_V4_SURGE_QUERY_PPR_TOP_K = 100
+DEFAULT_REDUCED_V4_SURGE_QUERY_PPR_QA_TOP_K = 50
+DEFAULT_REDUCED_V4_SURGE_SURVEY_TOP_K = 20
+DEFAULT_REDUCED_V4_SURGE_SURVEY_CHUNK_TOP_K = 500
+DEFAULT_REDUCED_V4_SURGE_SURVEY_NAIVE_TOP_K = 750
+DEFAULT_REDUCED_V4_SURGE_SURVEY_PPR_TOP_K = 750
+DEFAULT_REDUCED_V4_SURGE_SURVEY_PPR_QA_TOP_K = 500
 DEFAULT_DOCBENCH_MULTIMODAL_TOP_K = 3
 DEFAULT_KEYWORD_ENTITY_RRF_K = 10
 DEFAULT_KEYWORD_RELATION_RRF_K = 20
@@ -578,6 +598,240 @@ def build_reduced_v2_experiment_matrix(task: str) -> list[dict[str, Any]]:
     raise ValueError(f"Unknown reduced_v2 retrieval task: {task!r}")
 
 
+def _with_v4_windows(
+    item: dict[str, Any],
+    *,
+    top_k: int,
+    chunk_top_k: int,
+    naive_top_k: int,
+) -> dict[str, Any]:
+    return {
+        **item,
+        "top_k": int(top_k),
+        "chunk_top_k": int(chunk_top_k),
+        "naive_top_k": int(naive_top_k),
+    }
+
+
+def _naive_dense_v4_experiment(*, task: str) -> dict[str, Any]:
+    return _with_unified_retrieval(
+        {
+            "task": task,
+            "name": "naive_dense",
+            "query_mode": "naive",
+            "keyword_fanout_mode": "joined",
+            "retrieval_mode": "dense",
+            "exclude_synonym_edges": True,
+            "enable_rerank": True,
+            "enable_kg_rerank": False,
+        }
+    )
+
+
+def _ppr_v4_experiment(
+    *,
+    task: str,
+    name: str,
+    keyword_fanout_mode: str,
+    retrieval_mode: str,
+    enable_rerank: bool,
+    ppr_top_k: int,
+    ppr_qa_top_k: int,
+    ppr_post_rerank_fusion: str = DEFAULT_PPR_POST_RERANK_FUSION,
+    ppr_post_rerank_rrf_k: int = DEFAULT_PPR_POST_RERANK_RRF_K,
+) -> dict[str, Any]:
+    experiment = _ppr_v2_experiment(
+        task=task,
+        name=name,
+        keyword_fanout_mode=keyword_fanout_mode,
+        retrieval_mode=retrieval_mode,
+        enable_rerank=enable_rerank,
+        ppr_top_k=ppr_top_k,
+        ppr_qa_top_k=ppr_qa_top_k,
+        ppr_post_rerank_fusion=ppr_post_rerank_fusion,
+        ppr_post_rerank_rrf_k=ppr_post_rerank_rrf_k,
+    )
+    experiment["exclude_synonym_edges"] = True
+    return experiment
+
+
+def _reduced_v4_non_ppr_groups(*, task: str) -> list[dict[str, Any]]:
+    baseline = {
+        "task": task,
+        "name": "baseline_non_ppr",
+        "query_mode": "hybrid",
+        "keyword_fanout_mode": "joined",
+        "retrieval_mode": "dense",
+        "exclude_synonym_edges": True,
+        "kg_chunk_selection_source": "truncated",
+        "enable_rerank": True,
+        "enable_kg_rerank": False,
+    }
+    if task == "shared":
+        baseline["answer_context_mode"] = "kg_prompt"
+    baseline = _with_unified_retrieval(baseline)
+
+    groups: list[dict[str, Any]] = [
+        baseline,
+        {
+            **baseline,
+            "name": "non_ppr_per_keyword",
+            "keyword_fanout_mode": "per_keyword_rrf",
+        },
+        {
+            **baseline,
+            "name": "non_ppr_kg_rerank",
+            "enable_kg_rerank": True,
+        },
+        _with_unified_retrieval(
+            {
+                **baseline,
+                "name": "non_ppr_retrieval_hybrid",
+                "retrieval_mode": "hybrid",
+            }
+        ),
+        {
+            **baseline,
+            "name": "non_ppr_untruncated",
+            "kg_chunk_selection_source": "untruncated",
+        },
+    ]
+    if task == "shared":
+        groups.append(
+            {
+                **baseline,
+                "name": "non_ppr_chunk_only",
+                "answer_context_mode": "chunk_only_prompt",
+            }
+        )
+    return groups
+
+
+def _reduced_v4_ppr_groups(
+    *,
+    task: str,
+    ppr_top_k: int,
+    ppr_qa_top_k: int,
+) -> list[dict[str, Any]]:
+    return [
+        _ppr_v4_experiment(
+            task=task,
+            name="ppr_default",
+            keyword_fanout_mode="joined",
+            retrieval_mode="dense",
+            enable_rerank=False,
+            ppr_top_k=ppr_top_k,
+            ppr_qa_top_k=ppr_qa_top_k,
+        ),
+        _ppr_v4_experiment(
+            task=task,
+            name="ppr_per_keyword_no_rerank",
+            keyword_fanout_mode="per_keyword_rrf",
+            retrieval_mode="dense",
+            enable_rerank=False,
+            ppr_top_k=ppr_top_k,
+            ppr_qa_top_k=ppr_qa_top_k,
+        ),
+        _ppr_v4_experiment(
+            task=task,
+            name="ppr_hybrid_no_rerank",
+            keyword_fanout_mode="joined",
+            retrieval_mode="hybrid",
+            enable_rerank=False,
+            ppr_top_k=ppr_top_k,
+            ppr_qa_top_k=ppr_qa_top_k,
+        ),
+        _ppr_v4_experiment(
+            task=task,
+            name="ppr_rerank",
+            keyword_fanout_mode="joined",
+            retrieval_mode="dense",
+            enable_rerank=True,
+            ppr_top_k=ppr_top_k,
+            ppr_qa_top_k=ppr_qa_top_k,
+        ),
+        _ppr_v4_experiment(
+            task=task,
+            name="ppr_raw_rerank_rrf",
+            keyword_fanout_mode="joined",
+            retrieval_mode="dense",
+            enable_rerank=True,
+            ppr_top_k=ppr_top_k,
+            ppr_qa_top_k=ppr_qa_top_k,
+            ppr_post_rerank_fusion="raw_rrf",
+            ppr_post_rerank_rrf_k=DEFAULT_PPR_POST_RERANK_RRF_K,
+        ),
+    ]
+
+
+def build_reduced_v4_experiment_matrix(task: str) -> list[dict[str, Any]]:
+    normalized_task = str(task).strip().lower()
+    if normalized_task in {"docbench", "shared"}:
+        task_name = "shared"
+        groups = [
+            _naive_dense_v4_experiment(task=task_name),
+            *_reduced_v4_non_ppr_groups(task=task_name),
+            *_reduced_v4_ppr_groups(
+                task=task_name,
+                ppr_top_k=DEFAULT_REDUCED_V4_SHARED_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V4_SHARED_PPR_QA_TOP_K,
+            ),
+        ]
+        return [
+            _with_v4_windows(
+                item,
+                top_k=DEFAULT_REDUCED_V4_SHARED_TOP_K,
+                chunk_top_k=DEFAULT_REDUCED_V4_SHARED_CHUNK_TOP_K,
+                naive_top_k=DEFAULT_REDUCED_V4_SHARED_NAIVE_TOP_K,
+            )
+            for item in groups
+        ]
+
+    if normalized_task in {"surge", "surge_query"}:
+        task_name = "surge"
+        groups = [
+            _naive_dense_v4_experiment(task=task_name),
+            *_reduced_v4_non_ppr_groups(task=task_name),
+            *_reduced_v4_ppr_groups(
+                task=task_name,
+                ppr_top_k=DEFAULT_REDUCED_V4_SURGE_QUERY_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V4_SURGE_QUERY_PPR_QA_TOP_K,
+            ),
+        ]
+        return [
+            _with_v4_windows(
+                item,
+                top_k=DEFAULT_REDUCED_V4_SURGE_QUERY_TOP_K,
+                chunk_top_k=DEFAULT_REDUCED_V4_SURGE_QUERY_CHUNK_TOP_K,
+                naive_top_k=DEFAULT_REDUCED_V4_SURGE_QUERY_NAIVE_TOP_K,
+            )
+            for item in groups
+        ]
+
+    if normalized_task == "surge_survey":
+        task_name = "surge"
+        groups = [
+            _naive_dense_v4_experiment(task=task_name),
+            *_reduced_v4_non_ppr_groups(task=task_name),
+            *_reduced_v4_ppr_groups(
+                task=task_name,
+                ppr_top_k=DEFAULT_REDUCED_V4_SURGE_SURVEY_PPR_TOP_K,
+                ppr_qa_top_k=DEFAULT_REDUCED_V4_SURGE_SURVEY_PPR_QA_TOP_K,
+            ),
+        ]
+        return [
+            _with_v4_windows(
+                item,
+                top_k=DEFAULT_REDUCED_V4_SURGE_SURVEY_TOP_K,
+                chunk_top_k=DEFAULT_REDUCED_V4_SURGE_SURVEY_CHUNK_TOP_K,
+                naive_top_k=DEFAULT_REDUCED_V4_SURGE_SURVEY_NAIVE_TOP_K,
+            )
+            for item in groups
+        ]
+
+    raise ValueError(f"Unknown reduced_v4 retrieval task: {task!r}")
+
+
 def build_reduced_v3_experiment_matrix(task: str) -> list[dict[str, Any]]:
     normalized_task = str(task).strip().lower()
     if normalized_task in {"docbench", "shared"}:
@@ -794,7 +1048,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tasks", choices=["both", "shared", "surge"], default="both")
     parser.add_argument(
         "--matrix-mode",
-        choices=["reduced", "reduced_v2", "reduced_v3", "full"],
+        choices=["reduced", "reduced_v2", "reduced_v3", "reduced_v4", "full"],
         default="reduced",
     )
     parser.add_argument("--query-modes", default="hybrid,ppr")
@@ -934,6 +1188,18 @@ def _apply_inferred_ablation_flag_defaults(
         args.enable_synonym_linking = bool(first["enable_synonym_linking"])
     if not explicit_multi_hop:
         args.enable_multi_hop = bool(first["enable_multi_hop"])
+
+
+def _apply_matrix_mode_defaults(args: argparse.Namespace, argv: list[str] | None) -> None:
+    raw_argv = list(argv or [])
+    if args.matrix_mode != "reduced_v4":
+        return
+    if not _argv_mentions_option(raw_argv, "--run-root"):
+        args.run_root = DEFAULT_REDUCED_V4_RUN_ROOT
+    if not _argv_mentions_option(raw_argv, "--shared-workspace-id"):
+        args.shared_workspace_id = DEFAULT_REDUCED_V4_SHARED_WORKSPACE_ID
+    if not _argv_mentions_option(raw_argv, "--surge-workspace-id"):
+        args.surge_workspace_id = DEFAULT_REDUCED_V4_SURGE_WORKSPACE_ID
 
 
 def _bool_tokens(raw: str) -> list[bool]:
@@ -1244,6 +1510,10 @@ def _shared_command(args: argparse.Namespace, experiment: dict[str, Any], output
         str(args.recognition_top_k),
         "--multimodal_top_k",
         str(args.docbench_multimodal_top_k),
+        "--top_k",
+        str(experiment.get("top_k", args.top_k)),
+        "--chunk_top_k",
+        str(experiment.get("chunk_top_k", args.shared_chunk_top_k)),
         "--max_total_tokens",
         str(args.max_total_tokens),
         "--keyword_fanout_mode",
@@ -1263,6 +1533,8 @@ def _shared_command(args: argparse.Namespace, experiment: dict[str, Any], output
         "--enable_kg_rerank",
         "true" if experiment.get("enable_kg_rerank", True) else "false",
     ]
+    if "naive_top_k" in experiment:
+        cmd.extend(["--naive_top_k", str(experiment["naive_top_k"])])
     if args.bypass_query_cache:
         cmd.append("--bypass_query_cache")
     if args.bypass_keywords_cache:
@@ -1274,7 +1546,7 @@ def _shared_command(args: argparse.Namespace, experiment: dict[str, Any], output
                 str(experiment["kg_chunk_selection_source"]),
             ]
         )
-    if experiment["query_mode"] != "ppr":
+    if experiment["query_mode"] != "ppr" and "answer_context_mode" in experiment:
         cmd.extend(["--answer_context_mode", str(experiment["answer_context_mode"])])
     if experiment["query_mode"] == "ppr":
         cmd.extend(
@@ -1325,9 +1597,9 @@ def _surge_command(
         "--query-mode",
         str(experiment["query_mode"]),
         "--top-k",
-        str(args.top_k),
+        str(experiment.get("top_k", args.top_k)),
         "--chunk-top-k",
-        str(args.surge_chunk_top_k),
+        str(experiment.get("chunk_top_k", args.surge_chunk_top_k)),
         "--max-total-tokens",
         str(args.max_total_tokens),
         "--k-list",
@@ -1362,6 +1634,8 @@ def _surge_command(
         "true" if experiment.get("enable_kg_rerank", True) else "false",
         ]
     )
+    if "naive_top_k" in experiment:
+        cmd.extend(["--naive-top-k", str(experiment["naive_top_k"])])
     if args.bypass_query_cache:
         cmd.append("--bypass_query_cache")
     if args.bypass_keywords_cache:
@@ -1528,6 +1802,37 @@ def _selected_experiment_groups(args: argparse.Namespace) -> dict[str, list[dict
             "surge_survey": surge_survey,
         }
 
+    if args.matrix_mode == "reduced_v4":
+        shared = [
+            _finalize_experiment_for_task(
+                task="shared",
+                experiment=item,
+                args=args,
+            )
+            for item in build_reduced_v4_experiment_matrix("shared")
+        ]
+        surge_query = [
+            _finalize_experiment_for_task(
+                task="surge",
+                experiment=item,
+                args=args,
+            )
+            for item in build_reduced_v4_experiment_matrix("surge_query")
+        ]
+        surge_survey = [
+            _finalize_experiment_for_task(
+                task="surge",
+                experiment=item,
+                args=args,
+            )
+            for item in build_reduced_v4_experiment_matrix("surge_survey")
+        ]
+        return {
+            "shared": shared,
+            "surge_query": surge_query,
+            "surge_survey": surge_survey,
+        }
+
     shared = [
         _finalize_experiment_for_task(
             task="shared",
@@ -1575,9 +1880,11 @@ def _run_one(
 ) -> dict[str, Any]:
     name = _experiment_name(experiment)
     prefix = "docbench" if task == "shared" else "surge"
-    if task == "surge_survey" and experiment.get("query_mode") == "ppr":
-        # Survey PPR intentionally uses a larger PPR window than query-level
-        # retrieval, so keep its auto-generated query retrieval artifacts separate.
+    if task == "surge_survey" and (
+        args.matrix_mode == "reduced_v4" or experiment.get("query_mode") == "ppr"
+    ):
+        # Survey retrieval can use a larger final window than query-level
+        # retrieval, so keep its auto-generated query artifacts separate.
         prefix = "surge_survey"
     output_dir = run_root / f"{prefix}__{name}"
     status_row = {
@@ -1619,6 +1926,7 @@ def _run_one(
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(raw_argv)
+    _apply_matrix_mode_defaults(args, raw_argv)
     _apply_inferred_ablation_flag_defaults(args, raw_argv)
     args.ablation_flags = validate_ablation_flags(args, naming_style="hyphen")
     if args.surge_survey_ppr_top_k <= 0:
@@ -1729,7 +2037,11 @@ def main(argv: list[str] | None = None) -> int:
                     env=env,
                     run_root=run_root,
                     progress_file=progress_file,
-                    task="surge_query" if args.matrix_mode == "reduced_v3" else "surge",
+                    task=(
+                        "surge_query"
+                        if args.matrix_mode in {"reduced_v3", "reduced_v4"}
+                        else "surge"
+                    ),
                     experiment=experiment,
                 )
             )

@@ -1,0 +1,17 @@
+{
+  "profile": "v0_v1_v2",
+  "description": "V0+V1+V2 (V1=on,V2=on,V3=off)",
+  "workspace_key": "v0_v1_v2",
+  "shared_workspace_id": "docbench_shared_graph20260421_v0_v1_v2",
+  "surge_workspace_id": "surge_fast_graph20260421_v0_v1_v2",
+  "enable_entity_disambiguation": true,
+  "enable_synonym_linking": true,
+  "enable_multi_hop": false,
+  "shared_query_mode": "hybrid",
+  "shared_recognition_top_k": 20,
+  "shared_output_dir": "E:\\RAG\\Data\\y50056788\\Yaliang\\projects\\rag-anything\\evaluate_local\\ablation_runs\\graph20260421\\v0_v1_v2\\evaluate_shared",
+  "surge_output_dir": "E:\\RAG\\Data\\y50056788\\Yaliang\\projects\\rag-anything\\evaluate_local\\ablation_runs\\graph20260421\\v0_v1_v2\\evaluate_surge_fast",
+  "shared_workspace_state_dir": "E:\\RAG\\Data\\y50056788\\Yaliang\\projects\\rag-anything\\evaluate_local\\ablation_runs\\graph20260421\\_workspace_cache\\docbench_shared\\v0_v1_v2",
+  "surge_workspace_state_dir": "E:\\RAG\\Data\\y50056788\\Yaliang\\projects\\rag-anything\\evaluate_local\\ablation_runs\\graph20260421\\_workspace_cache\\surge_fast\\v0_v1_v2",
+  "shared_mineru_output_dir": "E:\\RAG\\Data\\y50056788\\Yaliang\\projects\\rag-anything\\evaluate_local\\DocBench\\docbench_shared_results\\mineru_outputs"
+}
