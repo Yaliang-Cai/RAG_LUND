@@ -55,6 +55,7 @@ class AgentState(TypedDict):
     profile: str
     chunks: list[dict]
     grader_sufficient: bool
+    grader_unanswerable: bool
     grader_reason: str
     answer: str
     grounded: bool
@@ -135,7 +136,11 @@ class AdaptiveAgentGraph:
 
     async def _node_grader(self, state: AgentState) -> dict:
         result = await self._grader.grade(state["current_query"], state["chunks"])
-        return {"grader_sufficient": result["sufficient"], "grader_reason": result["reason"]}
+        return {
+            "grader_sufficient": result["sufficient"],
+            "grader_unanswerable": result.get("unanswerable", False),
+            "grader_reason": result["reason"],
+        }
 
     async def _node_rewriter(self, state: AgentState) -> dict:
         new_q = await self._rewriter.rewrite(state["current_query"], state["grader_reason"])
@@ -226,6 +231,8 @@ class AdaptiveAgentGraph:
     def _after_grade(self, state: AgentState) -> str:
         if state["grader_sufficient"]:
             return "generate"
+        if state.get("grader_unanswerable"):
+            return "end_insufficient"
         if state["retrieve_cycle"] < 1:
             return "rewrite"
         if state["retrieve_cycle"] < 2:
@@ -289,6 +296,7 @@ class AdaptiveAgentGraph:
             "profile": "semantic",
             "chunks": [],
             "grader_sufficient": False,
+            "grader_unanswerable": False,
             "grader_reason": "",
             "answer": "",
             "grounded": False,
