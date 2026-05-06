@@ -2285,7 +2285,6 @@ async def run_survey_generate_placeholder(args: argparse.Namespace) -> int:
 
 
 async def run_survey(args: argparse.Namespace) -> int:
-    await ensure_query_retrieval_for_survey(args)
     if args.survey_stage == "retrieval":
         return await run_survey_retrieval(args)
     if args.survey_stage == "generate":
