@@ -20,12 +20,15 @@ export CHUNK_SIZE
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-/data/workspaces/multihopqa_hr2_v0}"
 RESULTS_ROOT="${RESULTS_ROOT:-${RAGANYTHING_ROOT}/results/multihopqa_hr2_v0}"
 
-MODES="${MODES:-naive hybrid ppr}"
+# PPR is intentionally deferred while PPR ablations are still being selected.
+# Re-enable later with: MODES="naive hybrid ppr"
+MODES="${MODES:-naive hybrid}"
 RECALL_K="${RECALL_K:-2 5}"
 
-CONCURRENCY="${CONCURRENCY:-16}"
+CONCURRENCY="${CONCURRENCY:-32}"
 TOP_K="${TOP_K:-10}"
 CHUNK_TOP_K="${CHUNK_TOP_K:-5}"
+NAIVE_TOP_K="${NAIVE_TOP_K:-10}"
 MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-45000}"
 
 PPR_DAMPING="${PPR_DAMPING:-0.5}"
@@ -220,6 +223,7 @@ for DATASET in "${DATASETS[@]}"; do
         --concurrency "${CONCURRENCY}" \
         --top-k "${TOP_K}" \
         --chunk-top-k "${CHUNK_TOP_K}" \
+        --naive-top-k "${NAIVE_TOP_K}" \
         --max-total-tokens "${MAX_TOTAL_TOKENS}" \
         --ppr-damping "${PPR_DAMPING}" \
         --ppr-top-k "${PPR_TOP_K}" \

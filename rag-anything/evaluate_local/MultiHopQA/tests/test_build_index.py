@@ -109,6 +109,7 @@ class _DummySettings:
     enable_entity_disambiguation = False
     enable_synonym_linking = False
     enable_multi_hop = True
+    chunk_token_size = 4096
     multi_hop_depth = 2
     ppr_damping = 0.5
     ppr_top_k = 50
@@ -122,20 +123,23 @@ class _DummySettings:
     strict_relation_endpoint_entity_match = False
 
 
-def test_apply_multihopqa_index_profile_matches_v0_v1_v2_build_settings():
+def test_apply_multihopqa_index_profile_matches_v0_build_settings():
     settings = _DummySettings()
 
     metadata = apply_multihopqa_index_profile(settings)
 
-    assert settings.enable_entity_disambiguation is True
-    assert settings.enable_synonym_linking is True
+    assert settings.enable_entity_disambiguation is False
+    assert settings.enable_synonym_linking is False
     assert settings.enable_multi_hop is False
     assert settings.enable_entity_surface_normalization is True
     assert settings.enable_keyword_case_normalization is True
     assert settings.strict_relation_endpoint_entity_match is True
-    assert metadata["ablation_group"] == "DB+V1+V2"
-    assert metadata["index_profile"]["enable_entity_disambiguation"] is True
-    assert metadata["index_profile"]["enable_synonym_linking"] is True
+    assert metadata["ablation_profile"] == "v0"
+    assert metadata["ablation_group"] == "DB-only"
+    assert metadata["index_profile"]["profile_key"] == "v0"
+    assert metadata["index_profile"]["chunk_token_size"] == 4096
+    assert metadata["index_profile"]["enable_entity_disambiguation"] is False
+    assert metadata["index_profile"]["enable_synonym_linking"] is False
 
 
 def test_validate_batch_doc_status_rejects_failed_lightrag_doc_status():
@@ -332,22 +336,26 @@ def test_validate_existing_manifest_for_resume_rejects_mismatched_index_profile(
             n_samples=500,
             seed=42,
             expected_index_profile={
-                "profile_version": 1,
-                "enable_entity_disambiguation": True,
-                "enable_synonym_linking": True,
+                "profile_version": 2,
+                "profile_key": "v0",
+                "chunk_token_size": 4096,
+                "enable_entity_disambiguation": False,
+                "enable_synonym_linking": False,
             },
         )
 
 
 def test_validate_or_write_index_profile_persists_profile(tmp_path):
     metadata = {
-        "ablation_profile": "v0_v1_v2",
-        "ablation_group": "DB+V1+V2",
-        "ablation_flags": {"enable_synonym_linking": True},
+        "ablation_profile": "v0",
+        "ablation_group": "DB-only",
+        "ablation_flags": {"enable_synonym_linking": False},
         "index_profile": {
-            "profile_version": 1,
-            "enable_entity_disambiguation": True,
-            "enable_synonym_linking": True,
+            "profile_version": 2,
+            "profile_key": "v0",
+            "chunk_token_size": 4096,
+            "enable_entity_disambiguation": False,
+            "enable_synonym_linking": False,
         },
     }
 
@@ -366,7 +374,7 @@ def test_validate_or_write_index_profile_persists_profile(tmp_path):
     assert payload["n_samples"] == 500
     assert payload["seed"] == 42
     assert payload["index_profile"] == metadata["index_profile"]
-    assert payload["ablation_group"] == "DB+V1+V2"
+    assert payload["ablation_group"] == "DB-only"
 
 
 def test_validate_or_write_index_profile_rejects_existing_artifacts_without_profile(
@@ -374,13 +382,15 @@ def test_validate_or_write_index_profile_rejects_existing_artifacts_without_prof
 ):
     (tmp_path / "kv_store_doc_status.json").write_text("{}", encoding="utf-8")
     metadata = {
-        "ablation_profile": "v0_v1_v2",
-        "ablation_group": "DB+V1+V2",
-        "ablation_flags": {"enable_synonym_linking": True},
+        "ablation_profile": "v0",
+        "ablation_group": "DB-only",
+        "ablation_flags": {"enable_synonym_linking": False},
         "index_profile": {
-            "profile_version": 1,
-            "enable_entity_disambiguation": True,
-            "enable_synonym_linking": True,
+            "profile_version": 2,
+            "profile_key": "v0",
+            "chunk_token_size": 4096,
+            "enable_entity_disambiguation": False,
+            "enable_synonym_linking": False,
         },
     }
 
@@ -409,13 +419,15 @@ def test_validate_or_write_index_profile_rejects_mismatched_profile(tmp_path):
         encoding="utf-8",
     )
     metadata = {
-        "ablation_profile": "v0_v1_v2",
-        "ablation_group": "DB+V1+V2",
-        "ablation_flags": {"enable_synonym_linking": True},
+        "ablation_profile": "v0",
+        "ablation_group": "DB-only",
+        "ablation_flags": {"enable_synonym_linking": False},
         "index_profile": {
-            "profile_version": 1,
-            "enable_entity_disambiguation": True,
-            "enable_synonym_linking": True,
+            "profile_version": 2,
+            "profile_key": "v0",
+            "chunk_token_size": 4096,
+            "enable_entity_disambiguation": False,
+            "enable_synonym_linking": False,
         },
     }
 
@@ -432,13 +444,15 @@ def test_validate_or_write_index_profile_rejects_mismatched_profile(tmp_path):
 
 def test_validate_or_write_index_profile_rejects_mismatched_identity(tmp_path):
     metadata = {
-        "ablation_profile": "v0_v1_v2",
-        "ablation_group": "DB+V1+V2",
-        "ablation_flags": {"enable_synonym_linking": True},
+        "ablation_profile": "v0",
+        "ablation_group": "DB-only",
+        "ablation_flags": {"enable_synonym_linking": False},
         "index_profile": {
-            "profile_version": 1,
-            "enable_entity_disambiguation": True,
-            "enable_synonym_linking": True,
+            "profile_version": 2,
+            "profile_key": "v0",
+            "chunk_token_size": 4096,
+            "enable_entity_disambiguation": False,
+            "enable_synonym_linking": False,
         },
     }
     (tmp_path / "multihopqa_index_profile.json").write_text(

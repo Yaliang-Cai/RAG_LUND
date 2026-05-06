@@ -180,6 +180,7 @@ def _build_query_kwargs(
     wire_profile: str | None,
     top_k: int | None = None,
     chunk_top_k: int | None = None,
+    naive_top_k: int | None = None,
     max_total_tokens: int | None = None,
     **extra_query_kwargs: Any,
 ) -> dict[str, Any]:
@@ -190,6 +191,8 @@ def _build_query_kwargs(
         kwargs["top_k"] = int(top_k)
     if chunk_top_k is not None:
         kwargs["chunk_top_k"] = int(chunk_top_k)
+    if naive_top_k is not None:
+        kwargs["naive_top_k"] = int(naive_top_k)
     if max_total_tokens is not None:
         kwargs["max_total_tokens"] = int(max_total_tokens)
     for key, value in extra_query_kwargs.items():
@@ -524,6 +527,7 @@ async def main(args: argparse.Namespace) -> None:
     base_query_kwargs = {
         "top_k": args.top_k,
         "chunk_top_k": args.chunk_top_k,
+        "naive_top_k": args.naive_top_k,
         "max_total_tokens": args.max_total_tokens,
         "qdrant_retrieval_mode": args.qdrant_retrieval_mode,
         "entity_qdrant_retrieval_mode": args.qdrant_retrieval_mode,
@@ -552,6 +556,7 @@ async def main(args: argparse.Namespace) -> None:
     print(
         "[eval] Query controls: "
         f"top_k={args.top_k}, chunk_top_k={args.chunk_top_k}, "
+        f"naive_top_k={args.naive_top_k}, "
         f"max_total_tokens={args.max_total_tokens}, concurrency={args.concurrency}, "
         f"qdrant_retrieval_mode={args.qdrant_retrieval_mode}, "
         f"ppr_top_k={args.ppr_top_k}, ppr_qa_top_k={args.ppr_qa_top_k}, "
@@ -665,6 +670,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--concurrency", type=int, default=16)
     p.add_argument("--top-k", type=int, default=10, dest="top_k")
     p.add_argument("--chunk-top-k", type=int, default=5, dest="chunk_top_k")
+    p.add_argument(
+        "--naive-top-k",
+        type=int,
+        default=None,
+        dest="naive_top_k",
+        help="Naive chunks VDB retrieval count before reranking. Omit to use LightRAG default.",
+    )
     p.add_argument("--max-total-tokens", type=int, default=45000, dest="max_total_tokens")
     p.add_argument("--qdrant-retrieval-mode", default="dense", choices=["dense", "bm25", "hybrid"], dest="qdrant_retrieval_mode")
     p.add_argument("--keyword-fanout-mode", default="joined", choices=["joined", "per_keyword_rrf"], dest="keyword_fanout_mode")
@@ -696,6 +708,8 @@ def _parse_args() -> argparse.Namespace:
         raise SystemExit("--top-k must be > 0")
     if args.chunk_top_k <= 0:
         raise SystemExit("--chunk-top-k must be > 0")
+    if args.naive_top_k is not None and args.naive_top_k <= 0:
+        raise SystemExit("--naive-top-k must be > 0")
     if args.max_total_tokens <= 0:
         raise SystemExit("--max-total-tokens must be > 0")
     if args.ppr_top_k <= 0:

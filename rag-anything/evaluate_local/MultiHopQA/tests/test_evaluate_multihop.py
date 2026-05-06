@@ -102,7 +102,6 @@ def test_score_support_recall_prefers_source_keys_over_text_fingerprint():
         item=item,
         k=1,
         chunk_source_map=source_map,
-        fallback_score_recall_at_k=lambda _chunks, _facts, _k: 0.0,
     ) == 1.0
 
 
@@ -112,12 +111,14 @@ def test_build_query_kwargs_pins_eval_retrieval_controls():
         wire_profile=None,
         top_k=10,
         chunk_top_k=5,
+        naive_top_k=10,
         max_total_tokens=45000,
     )
 
     assert kwargs["response_type"] == "Short Answer"
     assert kwargs["top_k"] == 10
     assert kwargs["chunk_top_k"] == 5
+    assert kwargs["naive_top_k"] == 10
     assert kwargs["max_total_tokens"] == 45000
 
 
@@ -143,6 +144,7 @@ def test_parse_args_defaults_match_shared_retrieval_ablation(monkeypatch):
     assert args.concurrency == 16
     assert args.top_k == 10
     assert args.chunk_top_k == 5
+    assert args.naive_top_k is None
     assert args.ppr_qa_top_k == 5
     assert args.enable_kg_rerank is False
     assert args.hybrid_enable_rerank is True
@@ -151,6 +153,30 @@ def test_parse_args_defaults_match_shared_retrieval_ablation(monkeypatch):
     assert args.bypass_keywords_cache is False
     assert args.vlm_enhanced is False
     assert args.log_file is None
+
+
+def test_parse_args_accepts_naive_top_k(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate_multihop.py",
+            "--dataset",
+            "2wiki",
+            "--workspace",
+            "2wiki_500_seed42_0428",
+            "--working-dir",
+            "/tmp/2wiki_500_seed42_0428",
+            "--output-dir",
+            "/tmp/out",
+            "--naive-top-k",
+            "10",
+        ],
+    )
+
+    args = _parse_args()
+
+    assert args.naive_top_k == 10
 
 
 def test_resolve_log_file_defaults_to_dataset_log_in_output_dir(tmp_path):
@@ -227,7 +253,6 @@ def test_run_mode_uses_bounded_concurrency_and_preserves_jsonl_order(tmp_path):
             resume=False,
             score_em=lambda pred, gold: 1.0 if pred == gold else 0.0,
             score_f1=lambda pred, gold: 1.0 if pred == gold else 0.0,
-            score_recall_at_k=lambda chunks, facts, k: 1.0,
             get_eval_query_overrides=lambda dataset: {"response_type": "Short Answer"},
             chunk_source_map={},
             query_kwargs={"top_k": 10, "chunk_top_k": 5, "max_total_tokens": 45000},
@@ -282,7 +307,6 @@ def test_run_mode_applies_mode_specific_rerank_and_cache_defaults(tmp_path):
             resume=False,
             score_em=lambda pred, gold: 1.0 if pred == gold else 0.0,
             score_f1=lambda pred, gold: 1.0 if pred == gold else 0.0,
-            score_recall_at_k=lambda chunks, facts, k: 1.0,
             get_eval_query_overrides=lambda dataset: {"response_type": "Short Answer"},
             chunk_source_map={},
             query_kwargs={
