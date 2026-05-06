@@ -1,0 +1,42 @@
+from __future__ import annotations
+import json
+import logging
+from typing import Awaitable, Callable
+
+from .grader import build_shared_prefix
+
+logger = logging.getLogger(__name__)
+
+_CHECKER_SUFFIX = """\
+Answer: {answer}
+
+Question being answered: {query}
+
+For every factual claim in the Answer, verify it is explicitly supported by the Context above.
+Statements such as "I cannot determine X from the context" make no factual claims and are grounded.
+
+Output JSON:
+{{
+  "grounded": true|false,
+  "ungrounded_claims": ["<claim>", ...]
+}}
+"""
+
+
+class HallucinationChecker:
+    def __init__(self, llm_func: Callable[..., Awaitable[str]]) -> None:
+        self._llm = llm_func
+
+    async def verify(self, query: str, answer: str, chunks: list[dict]) -> dict:
+        prefix = build_shared_prefix(chunks)
+        prompt = prefix + _CHECKER_SUFFIX.format(answer=answer, query=query)
+        try:
+            raw = await self._llm(prompt, response_format={"type": "json_object"})
+            result = json.loads(raw)
+            return {
+                "grounded": bool(result.get("grounded", True)),
+                "ungrounded_claims": [str(c) for c in result.get("ungrounded_claims", [])],
+            }
+        except Exception:
+            logger.warning("HallucinationChecker failed, defaulting grounded=True", exc_info=True)
+            return {"grounded": True, "ungrounded_claims": [], "check_status": "error"}
