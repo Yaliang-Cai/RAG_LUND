@@ -61,12 +61,16 @@ DEFAULT_REDUCED_V4_SURGE_SURVEY_CHUNK_TOP_K = 500
 DEFAULT_REDUCED_V4_SURGE_SURVEY_NAIVE_TOP_K = 750
 DEFAULT_REDUCED_V4_SURGE_SURVEY_PPR_TOP_K = 750
 DEFAULT_REDUCED_V4_SURGE_SURVEY_PPR_QA_TOP_K = 500
+DEFAULT_V5_SYNONYM_THRESHOLDS = "0.8,0.9,0.95"
 DEFAULT_DOCBENCH_MULTIMODAL_TOP_K = 3
 DEFAULT_KEYWORD_ENTITY_RRF_K = 10
 DEFAULT_KEYWORD_RELATION_RRF_K = 20
 DEFAULT_PPR_POST_RERANK_FUSION = "none"
 DEFAULT_PPR_POST_RERANK_RRF_K = 60
 INDEX_PROFILE_FILE = ".ablation_index_profile.json"
+MANAGE_WORKSPACE_SYNONYMS_SCRIPT = (
+    PROJECT_ROOT / "scripts" / "manage_workspace_synonyms.py"
+)
 _PROFILE_HINTS: dict[str, dict[str, bool]] = {
     "v0_v1_v2_v3": {
         "enable_entity_disambiguation": True,
@@ -764,6 +768,111 @@ def _reduced_v4_ppr_groups(
     ]
 
 
+def _format_synonym_threshold_token(threshold: float) -> str:
+    return f"{float(threshold):.2f}".replace(".", "p")
+
+
+def _parse_synonym_thresholds(raw: str) -> list[float]:
+    values: list[float] = []
+    for token in _parse_csv(raw):
+        try:
+            value = float(token)
+        except ValueError as exc:
+            raise ValueError(f"Invalid synonym threshold: {token!r}") from exc
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(
+                f"Synonym threshold must be between 0 and 1, got {value!r}"
+            )
+        values.append(value)
+    if not values:
+        raise ValueError("At least one synonym threshold is required")
+    return values
+
+
+def _ppr_v5_synonym_experiment(
+    *,
+    task: str,
+    threshold: float,
+    ppr_top_k: int,
+    ppr_qa_top_k: int,
+) -> dict[str, Any]:
+    experiment = _ppr_v4_experiment(
+        task=task,
+        name=f"ppr_default__syn_{_format_synonym_threshold_token(threshold)}",
+        keyword_fanout_mode="joined",
+        retrieval_mode="dense",
+        enable_rerank=False,
+        ppr_top_k=ppr_top_k,
+        ppr_qa_top_k=ppr_qa_top_k,
+    )
+    experiment["exclude_synonym_edges"] = False
+    experiment["synonymy_threshold"] = float(threshold)
+    return experiment
+
+
+def build_v5_synonym_experiment_matrix(
+    task: str,
+    *,
+    thresholds: list[float] | None = None,
+) -> list[dict[str, Any]]:
+    normalized_task = str(task).strip().lower()
+    threshold_values = list(
+        thresholds
+        if thresholds is not None
+        else _parse_synonym_thresholds(DEFAULT_V5_SYNONYM_THRESHOLDS)
+    )
+
+    if normalized_task in {"docbench", "shared"}:
+        return [
+            _with_v4_windows(
+                _ppr_v5_synonym_experiment(
+                    task="shared",
+                    threshold=threshold,
+                    ppr_top_k=DEFAULT_REDUCED_V4_SHARED_PPR_TOP_K,
+                    ppr_qa_top_k=DEFAULT_REDUCED_V4_SHARED_PPR_QA_TOP_K,
+                ),
+                top_k=DEFAULT_REDUCED_V4_SHARED_TOP_K,
+                chunk_top_k=DEFAULT_REDUCED_V4_SHARED_CHUNK_TOP_K,
+                naive_top_k=DEFAULT_REDUCED_V4_SHARED_NAIVE_TOP_K,
+            )
+            for threshold in threshold_values
+        ]
+
+    if normalized_task in {"surge", "surge_query"}:
+        return [
+            _with_v4_windows(
+                _ppr_v5_synonym_experiment(
+                    task="surge",
+                    threshold=threshold,
+                    ppr_top_k=DEFAULT_REDUCED_V4_SURGE_QUERY_PPR_TOP_K,
+                    ppr_qa_top_k=DEFAULT_REDUCED_V4_SURGE_QUERY_PPR_QA_TOP_K,
+                ),
+                top_k=DEFAULT_REDUCED_V4_SURGE_QUERY_TOP_K,
+                chunk_top_k=DEFAULT_REDUCED_V4_SURGE_QUERY_CHUNK_TOP_K,
+                naive_top_k=DEFAULT_REDUCED_V4_SURGE_QUERY_NAIVE_TOP_K,
+            )
+            for threshold in threshold_values
+        ]
+
+    if normalized_task == "surge_survey":
+        return [
+            _with_v4_windows(
+                _ppr_v5_synonym_experiment(
+                    task="surge",
+                    threshold=threshold,
+                    ppr_top_k=DEFAULT_REDUCED_V4_SURGE_SURVEY_PPR_TOP_K,
+                    ppr_qa_top_k=DEFAULT_REDUCED_V4_SURGE_SURVEY_PPR_QA_TOP_K,
+                ),
+                top_k=DEFAULT_REDUCED_V4_SURGE_SURVEY_TOP_K,
+                chunk_top_k=DEFAULT_REDUCED_V4_SURGE_SURVEY_CHUNK_TOP_K,
+                naive_top_k=DEFAULT_REDUCED_V4_SURGE_SURVEY_NAIVE_TOP_K,
+            )
+            for threshold in threshold_values
+        ]
+
+    raise ValueError(f"Unknown v5_synonym retrieval task: {task!r}")
+
+
 def build_reduced_v4_experiment_matrix(task: str) -> list[dict[str, Any]]:
     normalized_task = str(task).strip().lower()
     if normalized_task in {"docbench", "shared"}:
@@ -1048,7 +1157,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tasks", choices=["both", "shared", "surge"], default="both")
     parser.add_argument(
         "--matrix-mode",
-        choices=["reduced", "reduced_v2", "reduced_v3", "reduced_v4", "full"],
+        choices=["reduced", "reduced_v2", "reduced_v3", "reduced_v4", "v5_synonym", "full"],
         default="reduced",
     )
     parser.add_argument("--query-modes", default="hybrid,ppr")
@@ -1113,6 +1222,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-async-judge", type=int, default=32)
     parser.add_argument("--k-list", default="5,10,20,30,50")
     parser.add_argument("--survey-k-list", default="50,100,200,500")
+    parser.add_argument(
+        "--v5-synonym-thresholds",
+        default=DEFAULT_V5_SYNONYM_THRESHOLDS,
+        help="Comma-separated synonym thresholds used by matrix-mode=v5_synonym.",
+    )
+    parser.add_argument(
+        "--v5-synonym-topk",
+        type=int,
+        default=None,
+        help="Optional synonym top-k forwarded to manage_workspace_synonyms.py.",
+    )
+    parser.add_argument(
+        "--v5-synonym-min-entity-len",
+        type=int,
+        default=None,
+        help="Optional synonym min-entity-len forwarded to manage_workspace_synonyms.py.",
+    )
     parser.add_argument(
         "--bypass-query-cache",
         action=argparse.BooleanOptionalAction,
@@ -1192,7 +1318,7 @@ def _apply_inferred_ablation_flag_defaults(
 
 def _apply_matrix_mode_defaults(args: argparse.Namespace, argv: list[str] | None) -> None:
     raw_argv = list(argv or [])
-    if args.matrix_mode != "reduced_v4":
+    if args.matrix_mode not in {"reduced_v4", "v5_synonym"}:
         return
     if not _argv_mentions_option(raw_argv, "--run-root"):
         args.run_root = DEFAULT_REDUCED_V4_RUN_ROOT
@@ -1446,6 +1572,60 @@ def _run_command(*, command: list[str], cwd: Path, env: dict[str, str], log_file
             check=False,
         )
     return int(proc.returncode)
+
+
+def _apply_workspace_synonyms(
+    *,
+    args: argparse.Namespace,
+    env: dict[str, str],
+    run_root: Path,
+    workspace_path: str,
+    workspace_label: str,
+    threshold: float,
+) -> None:
+    threshold_token = _format_synonym_threshold_token(threshold)
+    log_file = (
+        run_root
+        / "_synonym_ops"
+        / f"{workspace_label}__syn_{threshold_token}.log"
+    )
+    command = [
+        args.python_exe,
+        str(MANAGE_WORKSPACE_SYNONYMS_SCRIPT),
+        "apply",
+        "--workspace-path",
+        str(workspace_path),
+        "--synonymy-threshold",
+        str(threshold),
+    ]
+    if args.v5_synonym_topk is not None:
+        command.extend(["--synonymy-topk", str(args.v5_synonym_topk)])
+    if args.v5_synonym_min_entity_len is not None:
+        command.extend(
+            ["--synonymy-min-entity-len", str(args.v5_synonym_min_entity_len)]
+        )
+    if args.dry_run:
+        _write_json(
+            log_file.with_suffix(".json"),
+            {
+                "command": command,
+                "workspace_path": str(workspace_path),
+                "workspace_label": workspace_label,
+                "synonymy_threshold": float(threshold),
+                "dry_run": True,
+            },
+        )
+        return
+    code = _run_command(
+        command=command,
+        cwd=PROJECT_ROOT,
+        env=env,
+        log_file=log_file,
+    )
+    if code != 0:
+        raise RuntimeError(
+            f"Synonym apply failed for {workspace_label} threshold={threshold}: exit {code}"
+        )
 
 
 def _build_workspace_env(
@@ -1833,6 +2013,44 @@ def _selected_experiment_groups(args: argparse.Namespace) -> dict[str, list[dict
             "surge_survey": surge_survey,
         }
 
+    if args.matrix_mode == "v5_synonym":
+        thresholds = _parse_synonym_thresholds(args.v5_synonym_thresholds)
+        shared = [
+            _finalize_experiment_for_task(
+                task="shared",
+                experiment=item,
+                args=args,
+            )
+            for item in build_v5_synonym_experiment_matrix(
+                "shared", thresholds=thresholds
+            )
+        ]
+        surge_query = [
+            _finalize_experiment_for_task(
+                task="surge",
+                experiment=item,
+                args=args,
+            )
+            for item in build_v5_synonym_experiment_matrix(
+                "surge_query", thresholds=thresholds
+            )
+        ]
+        surge_survey = [
+            _finalize_experiment_for_task(
+                task="surge",
+                experiment=item,
+                args=args,
+            )
+            for item in build_v5_synonym_experiment_matrix(
+                "surge_survey", thresholds=thresholds
+            )
+        ]
+        return {
+            "shared": shared,
+            "surge_query": surge_query,
+            "surge_survey": surge_survey,
+        }
+
     shared = [
         _finalize_experiment_for_task(
             task="shared",
@@ -2017,45 +2235,110 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     results: list[dict[str, Any]] = []
-    if args.tasks in {"both", "shared"}:
-        for experiment in shared_experiments:
-            results.append(
-                _run_one(
+    if args.matrix_mode == "v5_synonym":
+        thresholds = _parse_synonym_thresholds(args.v5_synonym_thresholds)
+        shared_by_threshold = {
+            float(item["synonymy_threshold"]): item for item in shared_experiments
+        }
+        surge_query_by_threshold = {
+            float(item["synonymy_threshold"]): item
+            for item in surge_query_experiments
+        }
+        surge_survey_by_threshold = {
+            float(item["synonymy_threshold"]): item
+            for item in surge_survey_experiments
+        }
+        if args.tasks in {"both", "shared"}:
+            for threshold in thresholds:
+                experiment = shared_by_threshold[threshold]
+                _apply_workspace_synonyms(
                     args=args,
                     env=env,
                     run_root=run_root,
-                    progress_file=progress_file,
-                    task="shared",
-                    experiment=experiment,
+                    workspace_path=shared_layout["workspace_dir"],
+                    workspace_label=args.shared_workspace_id,
+                    threshold=threshold,
                 )
-            )
-    if args.tasks in {"both", "surge"}:
-        for experiment in surge_query_experiments:
-            results.append(
-                _run_one(
+                results.append(
+                    _run_one(
+                        args=args,
+                        env=env,
+                        run_root=run_root,
+                        progress_file=progress_file,
+                        task="shared",
+                        experiment=experiment,
+                    )
+                )
+        if args.tasks in {"both", "surge"}:
+            for threshold in thresholds:
+                _apply_workspace_synonyms(
                     args=args,
                     env=env,
                     run_root=run_root,
-                    progress_file=progress_file,
-                    task=(
-                        "surge_query"
-                        if args.matrix_mode in {"reduced_v3", "reduced_v4"}
-                        else "surge"
-                    ),
-                    experiment=experiment,
+                    workspace_path=surge_layout["workspace_dir"],
+                    workspace_label=args.surge_workspace_id,
+                    threshold=threshold,
                 )
-            )
-        for experiment in surge_survey_experiments:
-            results.append(
-                _run_one(
-                    args=args,
-                    env=env,
-                    run_root=run_root,
-                    progress_file=progress_file,
-                    task="surge_survey",
-                    experiment=experiment,
+                results.append(
+                    _run_one(
+                        args=args,
+                        env=env,
+                        run_root=run_root,
+                        progress_file=progress_file,
+                        task="surge_query",
+                        experiment=surge_query_by_threshold[threshold],
+                    )
                 )
-            )
+                results.append(
+                    _run_one(
+                        args=args,
+                        env=env,
+                        run_root=run_root,
+                        progress_file=progress_file,
+                        task="surge_survey",
+                        experiment=surge_survey_by_threshold[threshold],
+                    )
+                )
+    else:
+        if args.tasks in {"both", "shared"}:
+            for experiment in shared_experiments:
+                results.append(
+                    _run_one(
+                        args=args,
+                        env=env,
+                        run_root=run_root,
+                        progress_file=progress_file,
+                        task="shared",
+                        experiment=experiment,
+                    )
+                )
+        if args.tasks in {"both", "surge"}:
+            for experiment in surge_query_experiments:
+                results.append(
+                    _run_one(
+                        args=args,
+                        env=env,
+                        run_root=run_root,
+                        progress_file=progress_file,
+                        task=(
+                            "surge_query"
+                            if args.matrix_mode in {"reduced_v3", "reduced_v4"}
+                            else "surge"
+                        ),
+                        experiment=experiment,
+                    )
+                )
+            for experiment in surge_survey_experiments:
+                results.append(
+                    _run_one(
+                        args=args,
+                        env=env,
+                        run_root=run_root,
+                        progress_file=progress_file,
+                        task="surge_survey",
+                        experiment=experiment,
+                    )
+                )
 
     _write_json(summary_file, {"generated_at": _now_iso(), "results": results})
     return 0

@@ -46,7 +46,8 @@ INGEST_PROGRESS_FILENAME = "multihopqa_ingest_progress.jsonl"
 INGEST_FAILURES_FILENAME = "multihopqa_ingest_failures.jsonl"
 BUILD_LOG_FILENAME = "multihopqa_build_index.log"
 INDEX_PROFILE_FILENAME = "multihopqa_index_profile.json"
-MULTIHOPQA_INDEX_PROFILE_KEY = "v0_v1_v2"
+MULTIHOPQA_INDEX_PROFILE_KEY = "v0"
+VALID_INDEX_PROFILES = ("v0",)
 
 
 class _TeeStream:
@@ -105,21 +106,34 @@ def resolve_log_file(working_dir: str | Path, log_file: str | None) -> Path:
     return working_dir_path / BUILD_LOG_FILENAME
 
 
-def apply_multihopqa_index_profile(settings: Any) -> dict[str, Any]:
-    """Pin MultiHopQA indexing to the same V0+V1+V2 profile as DocBench/SurGE.
+def apply_multihopqa_index_profile(
+    settings: Any,
+    profile: str = MULTIHOPQA_INDEX_PROFILE_KEY,
+) -> dict[str, Any]:
+    """Apply a MultiHopQA index-materialization profile.
 
-    V3 is query-time only, so it is intentionally disabled at index build time.
+    V3/PPR knobs are query-time only, so multi-hop construction stays disabled.
     """
-    settings.enable_entity_disambiguation = True
-    settings.enable_synonym_linking = True
+    profile_key = str(profile or MULTIHOPQA_INDEX_PROFILE_KEY).strip().lower()
+    if profile_key not in VALID_INDEX_PROFILES:
+        raise ValueError(
+            f"Unsupported MultiHopQA index profile: {profile!r}. "
+            f"Valid: {', '.join(VALID_INDEX_PROFILES)}"
+        )
+
+    enable_disambiguation = False
+    enable_synonyms = False
+
+    settings.enable_entity_disambiguation = enable_disambiguation
+    settings.enable_synonym_linking = enable_synonyms
     settings.enable_multi_hop = False
     settings.enable_entity_surface_normalization = True
     settings.enable_keyword_case_normalization = True
     settings.strict_relation_endpoint_entity_match = True
 
     ablation_flags = {
-        "enable_entity_disambiguation": True,
-        "enable_synonym_linking": True,
+        "enable_entity_disambiguation": enable_disambiguation,
+        "enable_synonym_linking": enable_synonyms,
         "enable_multi_hop": False,
         "multi_hop_depth": int(getattr(settings, "multi_hop_depth", 2)),
         "ppr_damping": float(getattr(settings, "ppr_damping", 0.85)),
@@ -128,22 +142,27 @@ def apply_multihopqa_index_profile(settings: Any) -> dict[str, Any]:
         "passage_node_weight": float(getattr(settings, "passage_node_weight", 0.05)),
     }
     index_profile = {
-        "profile_version": 1,
-        "enable_entity_disambiguation": True,
-        "enable_synonym_linking": True,
+        "profile_version": 2,
+        "profile_key": profile_key,
+        "chunk_token_size": int(getattr(settings, "chunk_token_size", 0) or 0),
+        "enable_entity_disambiguation": enable_disambiguation,
+        "enable_synonym_linking": enable_synonyms,
+        "enable_entity_surface_normalization": True,
+        "enable_keyword_case_normalization": True,
+        "strict_relation_endpoint_entity_match": True,
     }
-    if hasattr(settings, "synonymy_threshold"):
+    if enable_synonyms and hasattr(settings, "synonymy_threshold"):
         index_profile["synonymy_threshold"] = float(getattr(settings, "synonymy_threshold"))
-    if hasattr(settings, "synonymy_topk"):
+    if enable_synonyms and hasattr(settings, "synonymy_topk"):
         index_profile["synonymy_topk"] = int(getattr(settings, "synonymy_topk"))
-    if hasattr(settings, "synonymy_min_entity_len"):
+    if enable_synonyms and hasattr(settings, "synonymy_min_entity_len"):
         index_profile["synonymy_min_entity_len"] = int(
             getattr(settings, "synonymy_min_entity_len")
         )
 
     return {
-        "ablation_profile": MULTIHOPQA_INDEX_PROFILE_KEY,
-        "ablation_group": "DB+V1+V2",
+        "ablation_profile": profile_key,
+        "ablation_group": "DB-only",
         "ablation_flags": ablation_flags,
         "index_profile": index_profile,
     }
@@ -697,7 +716,10 @@ async def main(args: argparse.Namespace) -> None:
     manifest_path = working_dir_path / INGEST_MANIFEST_FILENAME
 
     settings = LocalRagSettings.from_env()
-    index_profile_metadata = apply_multihopqa_index_profile(settings)
+    index_profile_metadata = apply_multihopqa_index_profile(
+        settings,
+        profile=args.index_profile,
+    )
     validate_or_write_index_profile(
         working_dir=working_dir_path,
         workspace=args.workspace,
@@ -761,6 +783,7 @@ async def main(args: argparse.Namespace) -> None:
         print(f"[build_index] Log file:         {args.resolved_log_file}")
         print(f"[build_index] Ingest batch size: {args.ingest_batch_size} paragraphs/virtual-doc")
         print(f"[build_index] LLM max async:     {args.llm_model_max_async}")
+        print(f"[build_index] Chunk token size:  {settings.chunk_token_size}")
         print(
             "[build_index] Index profile:     "
             f"{index_profile_metadata['ablation_profile']} "
@@ -803,6 +826,7 @@ async def main(args: argparse.Namespace) -> None:
             "ingest_batch_size": args.ingest_batch_size,
             "batch_doc_concurrency": args.batch_doc_concurrency,
             "llm_model_max_async": args.llm_model_max_async,
+            "chunk_token_size": settings.chunk_token_size,
             "doc_status_timeout": args.doc_status_timeout,
             "doc_status_poll_interval": args.doc_status_poll_interval,
             "ablation_profile": index_profile_metadata["ablation_profile"],
@@ -841,7 +865,7 @@ async def main(args: argparse.Namespace) -> None:
         print(f"    --n-samples {args.n_samples} \\")
         print(f"    --seed {args.seed} \\")
         print("    --output-dir ./multihop_results \\")
-        print("    --modes naive hybrid ppr auto full")
+        print("    --modes naive hybrid ppr")
     finally:
         await service.cleanup_workspace_instance(args.workspace)
 
@@ -872,6 +896,16 @@ def _parse_args() -> argparse.Namespace:
             "When set, uses the exact HippoRAG2 corpus (9221/6119/11656 paragraphs) "
             "instead of sampling from HuggingFace. Download with "
             "download_hipporag2_datasets.py. Overrides --n-samples and --seed."
+        ),
+    )
+    p.add_argument(
+        "--index-profile",
+        default=MULTIHOPQA_INDEX_PROFILE_KEY,
+        choices=VALID_INDEX_PROFILES,
+        dest="index_profile",
+        help=(
+            "Index materialization profile. v0 disables entity disambiguation "
+            "and synonym linking."
         ),
     )
     p.add_argument(
