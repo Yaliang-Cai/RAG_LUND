@@ -99,23 +99,31 @@ def _download_with_requests(output_dir: Path, force: bool) -> None:
 
     for filename in _FILES:
         dest = output_dir / filename
+        tmp_dest = dest.with_name(f"{dest.name}.tmp")
         if dest.exists() and not force:
             print(f"  [skip] {filename} already exists")
             continue
         print(f"  [download] {filename} ...", end="", flush=True)
         last_error: Exception | None = None
+        downloaded = False
         for repo_id in (_HF_REPO, _HF_LEGACY_REPO):
             for hf_filename in _candidate_hf_paths(filename):
                 url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/{hf_filename}"
                 try:
-                    urllib.request.urlretrieve(url, dest)
+                    if tmp_dest.exists():
+                        tmp_dest.unlink()
+                    urllib.request.urlretrieve(url, tmp_dest)
+                    tmp_dest.replace(dest)
                     last_error = None
+                    downloaded = True
                     break
-                except urllib.error.HTTPError as exc:
+                except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+                    if tmp_dest.exists():
+                        tmp_dest.unlink()
                     last_error = exc
-            if dest.exists() and last_error is None:
+            if downloaded:
                 break
-        if not dest.exists():
+        if not downloaded:
             raise RuntimeError(f"failed to download {filename}") from last_error
         print(f" done ({dest.stat().st_size // 1024} KB)")
 
@@ -177,6 +185,10 @@ def main() -> None:
             _download_with_huggingface_hub(output_dir, args.force)
         except ImportError:
             print("huggingface_hub not installed, falling back to urllib")
+            _download_with_requests(output_dir, args.force)
+        except Exception as exc:
+            print(f"\nhuggingface_hub download failed: {exc}")
+            print("Falling back to urllib direct download")
             _download_with_requests(output_dir, args.force)
 
     print("\nVerifying downloads:")

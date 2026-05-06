@@ -13,6 +13,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RAGANYTHING_ROOT="${REPO_ROOT}/rag-anything"
 DATA_DIR="${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/hipporag2_data"
+HIPPO_RAG2_DOWNLOAD_BACKEND="${HIPPO_RAG2_DOWNLOAD_BACKEND:-requests}"
 
 INDEX_PROFILE="v0"
 CHUNK_SIZE="${CHUNK_SIZE:-4096}"
@@ -162,7 +163,8 @@ PY
 
 log "=== Step 0: Download HippoRAG2 datasets ==="
 python "${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/download_hipporag2_datasets.py" \
-    --output-dir "${DATA_DIR}"
+    --output-dir "${DATA_DIR}" \
+    --backend "${HIPPO_RAG2_DOWNLOAD_BACKEND}"
 
 for DATASET in "${DATASETS[@]}"; do
     WORKSPACE_ID="${DATASET}_hr2_v0"
