@@ -312,7 +312,23 @@ class AdaptiveAgentGraph:
             confidence = "high"
         else:
             confidence = "none"
-            answer = None
+            if not answer:
+                # generator was never called (end_insufficient reached directly);
+                # run it once with whatever chunks are available so the model can
+                # say "I couldn't find relevant information" instead of returning "".
+                chunks = final.get("chunks") or []
+                if chunks:
+                    prefix = build_shared_prefix(chunks)
+                else:
+                    prefix = "You are a RAG quality controller.\n\nContext:\n(No relevant context was retrieved.)\n\n---\n\n"
+                try:
+                    raw = await self._llm(prefix + _GENERATOR_SUFFIX.format(query=query))
+                    answer = raw if isinstance(raw, str) else str(raw)
+                except Exception:
+                    logger.warning("Fallback generator failed", exc_info=True)
+                    answer = "No relevant information was found in the knowledge base to answer this question."
+            else:
+                answer = None
 
         if return_trace:
             return {
