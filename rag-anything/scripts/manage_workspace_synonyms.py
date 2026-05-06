@@ -113,11 +113,18 @@ def _resolve_workspace_context(workspace_path_raw: str) -> WorkspaceContext:
     if not workspace_path.is_dir():
         raise ValueError(f"Workspace path does not exist or is not a directory: {workspace_path}")
 
-    if not any((workspace_path / name).exists() for name in EXPECTED_WORKSPACE_FILES):
-        raise ValueError(
-            "workspace-path must point to the leaf workspace directory, not its parent: "
-            f"{workspace_path}"
-        )
+    def _is_leaf_workspace(path: Path) -> bool:
+        return any((path / name).exists() for name in EXPECTED_WORKSPACE_FILES)
+
+    if not _is_leaf_workspace(workspace_path):
+        nested = workspace_path / workspace_path.name
+        if nested.is_dir() and _is_leaf_workspace(nested):
+            workspace_path = nested
+        else:
+            raise ValueError(
+                "workspace-path must point to the leaf workspace directory or its "
+                f"single-workspace parent: {workspace_path}"
+            )
 
     workspace_id = workspace_path.name
     working_dir_root = workspace_path.parent
