@@ -6,8 +6,9 @@ set -euo pipefail
 #
 # The initial V0 build contains no SYNONYM edges. Later experiments may add
 # SYNONYM edges directly to this same workspace, following the retrieval v5
-# workflow. The runner does not pass exclude_synonym_edges: LightRAG's mode-aware
-# default excludes synonym edges for hybrid and allows them for PPR.
+# workflow. This runner explicitly passes exclude_synonym_edges, so this version
+# evaluates no-synonym retrieval for hybrid and PPR even if SYNONYM edges are
+# later added to the workspace.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RAGANYTHING_ROOT="${REPO_ROOT}/rag-anything"
@@ -20,9 +21,7 @@ export CHUNK_SIZE
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-/data/workspaces/multihopqa_hr2_v0}"
 RESULTS_ROOT="${RESULTS_ROOT:-${RAGANYTHING_ROOT}/results/multihopqa_hr2_v0}"
 
-# PPR is intentionally deferred while PPR ablations are still being selected.
-# Re-enable later with: MODES="naive hybrid ppr"
-MODES="${MODES:-naive hybrid}"
+MODES="${MODES:-naive hybrid ppr}"
 RECALL_K="${RECALL_K:-2 5}"
 
 CONCURRENCY="${CONCURRENCY:-32}"
@@ -233,6 +232,7 @@ for DATASET in "${DATASETS[@]}"; do
         --recognition-top-k "${RECOGNITION_TOP_K}" \
         --no-enable-kg-rerank \
         --no-ppr-enable-rerank \
+        --exclude-synonym-edges \
         --bypass-query-cache \
         "${eval_resume_arg[@]}"
     log "[${DATASET}] Evaluation complete: ${RESULTS_DIR}/${DATASET}_summary.json"
