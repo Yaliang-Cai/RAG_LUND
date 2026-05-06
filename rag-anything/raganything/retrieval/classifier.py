@@ -1,14 +1,15 @@
-# raganything/retrieval/classifier.py
 import json
 import logging
 import time
 from typing import Any, Awaitable, Callable
 
+from raganything.constants import DEFAULT_AGENTIC_ROUTER_FALLBACK_PROFILE
 from .profiles import PROFILE_REGISTRY
 
 logger = logging.getLogger(__name__)
 
 _CONFIDENCE_THRESHOLD = 0.6
+_ROUTER_PROFILES = {"precise", "semantic", "local", "multihop"}  # full excluded
 
 _CLASSIFIER_PROMPT = """\
 You are a retrieval routing classifier. Given a user query, select the most
@@ -20,36 +21,26 @@ Available profiles (ordered from narrow to broad):
   Signals: specific IDs, error codes, version numbers, rare proper nouns, abbreviations.
   Examples: "What is the impact scope of CVE-2026-001?"
             "Status of order ID ORD-20260424-8821"
-            "What does the acronym MTTR stand for in this document?"
 
 - semantic: Default workhorse for everyday knowledge queries. No graph traversal needed.
   Signals: factual questions, process/procedure explanations, concept definitions, summaries.
-           Single topic, no multi-entity reasoning, no rare terminology.
+           Single topic, no multi-entity reasoning.
   Examples: "What is the company leave policy?"
             "How does the attention mechanism work?"
-            "Summarise the key findings of this report."
 
-- local: Query is tightly focused on ONE specific entity and asks about its direct
-  properties, relationships, or current state. Does not require cross-document hops.
-  Signals: "What are the [attributes/dependencies/upstream-downstream] of X?"
+- local: Query is tightly focused on ONE specific entity and its direct properties or relationships.
+  Signals: "What are the [attributes/dependencies] of X?"
   Examples: "What are the upstream systems of the payment service?"
-            "What configuration parameters does the Redis cluster expose?"
 
-- multihop: Query involves MULTIPLE distinct entities and requires chaining logic
-  across documents — comparisons, causal chains, impact analysis.
-  Signals: two or more named entities, causal language ("led to", "caused", "resulted in"),
-           comparative language ("difference between", "how does A affect B").
-  Examples: "How did the network partition in region A eventually cause the order service in region B to fail?"
+- multihop: Query involves MULTIPLE distinct entities requiring cross-document reasoning.
+  Signals: two or more named entities, causal/comparative language.
+  Examples: "How did the network partition in region A cause failures in region B?"
             "Compare the indexing strategies used by LightRAG and HippoRAG2."
-
-- full: Use ONLY when the query is genuinely ambiguous or the intent cannot be
-  determined with confidence. Do not use as a safe default.
 
 Key disambiguation rules:
 - If the query asks about one entity → prefer local over multihop.
-- If the query is a plain question with no entity graph needed → prefer semantic over local.
-- If precise terminology appears alongside reasoning → prefer multihop or local, not precise.
-- Reserve full for true ambiguity, not for difficult classification.
+- If no entity graph is needed → prefer semantic over local.
+- When genuinely unsure → choose semantic (it is the safe default).{avoid_instruction}
 
 First briefly state your reasoning in one sentence, then output JSON.
 Output format: {{"reasoning": "...", "profile": "<name>", "confidence": <0.0-1.0>}}
@@ -57,45 +48,51 @@ Output format: {{"reasoning": "...", "profile": "<name>", "confidence": <0.0-1.0
 Query: {query}
 """
 
+_AVOID_INSTRUCTION = """
+- Do NOT output any of these profiles (already tried and failed): {avoid_list}
+"""
+
 
 class QueryClassifier:
     def __init__(self, llm_func: Callable[..., Awaitable[str]]):
         self._llm = llm_func
 
-    async def classify(self, query: str) -> tuple[str, dict[str, Any]]:
-        """Classify query into a profile name.
-
-        Returns:
-            (profile_name, metadata) where metadata contains confidence,
-            reasoning, and latency (seconds).
-        """
+    async def classify(
+        self, query: str, avoid: list[str] | None = None
+    ) -> tuple[str, dict[str, Any]]:
         t0 = time.monotonic()
-        profile = "full"
+        fallback = DEFAULT_AGENTIC_ROUTER_FALLBACK_PROFILE
+        profile = fallback
         confidence = 0.0
         reasoning = ""
+        avoid = avoid or []
+        avoid_instruction = (
+            _AVOID_INSTRUCTION.format(avoid_list=", ".join(avoid)) if avoid else ""
+        )
         try:
-            prompt = _CLASSIFIER_PROMPT.format(query=query)
-            raw = await self._llm(
-                prompt,
-                response_format={"type": "json_object"},
+            prompt = _CLASSIFIER_PROMPT.format(
+                query=query, avoid_instruction=avoid_instruction
             )
+            raw = await self._llm(prompt, response_format={"type": "json_object"})
             result = json.loads(raw)
-            profile = str(result.get("profile", "full")).strip()
+            candidate = str(result.get("profile", fallback)).strip()
             confidence = float(result.get("confidence", 0.0))
             reasoning = str(result.get("reasoning", ""))
-            if confidence < _CONFIDENCE_THRESHOLD or profile not in PROFILE_REGISTRY:
+
+            valid = (
+                candidate in _ROUTER_PROFILES
+                and candidate not in avoid
+                and confidence >= _CONFIDENCE_THRESHOLD
+            )
+            profile = candidate if valid else fallback
+            if not valid:
                 logger.warning(
-                    "Classifier fallback: profile=%r confidence=%.2f → 'full'",
-                    profile,
-                    confidence,
+                    "Classifier fallback: profile=%r conf=%.2f avoid=%r -> %r",
+                    candidate, confidence, avoid, fallback,
                 )
-                profile = "full"
         except Exception:
-            logger.warning("Classifier output parse failed, fallback to 'full'", exc_info=True)
-            profile = "full"
+            logger.warning("Classifier failed, fallback to %r", fallback, exc_info=True)
+            profile = fallback
+
         latency = time.monotonic() - t0
-        return profile, {
-            "confidence": confidence,
-            "reasoning": reasoning,
-            "latency": round(latency, 4),
-        }
+        return profile, {"confidence": confidence, "reasoning": reasoning, "latency": round(latency, 4)}
