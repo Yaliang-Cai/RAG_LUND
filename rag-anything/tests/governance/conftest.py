@@ -5,6 +5,7 @@ so tests don't trample each other and a single PG instance can run the full suit
 """
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
@@ -52,6 +53,13 @@ async def pg_pool():
     async def _setup(conn):
         # `setup` runs on every acquire (asyncpg resets session state on release).
         await conn.execute(f'SET search_path TO "{schema}"')
+        # Register JSONB codec (idempotent, persists on connection)
+        await conn.set_type_codec(
+            'jsonb',
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema='pg_catalog',
+        )
 
     pool = await asyncpg.create_pool(
         PG_TEST_DSN, min_size=1, max_size=4, setup=_setup

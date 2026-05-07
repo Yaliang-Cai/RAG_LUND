@@ -1,6 +1,7 @@
 """asyncpg pool factory and migration runner."""
 from __future__ import annotations
 
+import json
 import logging
 from importlib import resources
 
@@ -13,11 +14,21 @@ logger = logging.getLogger(__name__)
 
 async def create_pool(settings: GovernanceSettings) -> asyncpg.Pool:
     """Create an asyncpg pool. Caller is responsible for closing."""
+    async def _init(conn):
+        """Register JSONB codec on connection creation."""
+        await conn.set_type_codec(
+            'jsonb',
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema='pg_catalog',
+        )
+
     pool = await asyncpg.create_pool(
         settings.pg_dsn,
         min_size=settings.pg_pool_min,
         max_size=settings.pg_pool_max,
         command_timeout=settings.pg_command_timeout,
+        init=_init,
     )
     if pool is None:
         raise RuntimeError(f"asyncpg.create_pool returned None for dsn={settings.pg_dsn}")

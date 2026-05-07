@@ -9,7 +9,6 @@ Public methods are organized by concern:
 """
 from __future__ import annotations
 
-import json
 import logging
 from typing import Optional
 
@@ -45,14 +44,7 @@ class GovernanceService:
             row = await conn.fetchrow(
                 "SELECT * FROM workspaces WHERE workspace_id = $1", workspace_id
             )
-        if row is None:
-            return None
-        # Convert asyncpg Record to dict, handling JSONB fields
-        row_dict = dict(row)
-        # Ensure metadata is a dict (asyncpg handles JSONB correctly, but be defensive)
-        if isinstance(row_dict.get("metadata"), str):
-            row_dict["metadata"] = json.loads(row_dict["metadata"])
-        return WorkspaceRow.model_validate(row_dict)
+        return WorkspaceRow.model_validate(dict(row)) if row else None
 
     async def set_frozen(self, workspace_id: str, frozen: bool) -> bool:
         """Set the frozen flag. Returns True if the row existed and was updated."""
