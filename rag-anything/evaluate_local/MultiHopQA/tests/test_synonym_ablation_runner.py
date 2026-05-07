@@ -42,7 +42,7 @@ def test_synonym_ablation_runner_pins_multihop_windows_and_ppr_defaults():
     text = _script_text()
 
     for assignment in [
-        'CONCURRENCY="${CONCURRENCY:-32}"',
+        'CONCURRENCY="${CONCURRENCY:-50}"',
         'TOP_K="${TOP_K:-10}"',
         'CHUNK_TOP_K="${CHUNK_TOP_K:-5}"',
         'NAIVE_TOP_K="${NAIVE_TOP_K:-10}"',
