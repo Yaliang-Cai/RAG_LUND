@@ -62,6 +62,7 @@ DEFAULT_REDUCED_V4_SURGE_SURVEY_NAIVE_TOP_K = 750
 DEFAULT_REDUCED_V4_SURGE_SURVEY_PPR_TOP_K = 750
 DEFAULT_REDUCED_V4_SURGE_SURVEY_PPR_QA_TOP_K = 500
 DEFAULT_V5_SYNONYM_THRESHOLDS = "0.8,0.9,0.95"
+DEFAULT_REDUCED_V7_SYNONYM_THRESHOLD = 0.8
 DEFAULT_DOCBENCH_MULTIMODAL_TOP_K = 3
 DEFAULT_KEYWORD_ENTITY_RRF_K = 10
 DEFAULT_KEYWORD_RELATION_RRF_K = 20
@@ -996,6 +997,64 @@ def build_reduced_v6_experiment_matrix(task: str) -> list[dict[str, Any]]:
     ]
 
 
+def build_reduced_v7_experiment_matrix(task: str) -> list[dict[str, Any]]:
+    normalized_task = str(task).strip().lower()
+    if normalized_task not in {"docbench", "shared"}:
+        raise ValueError(f"reduced_v7 is DocBench-only, got task: {task!r}")
+
+    baseline = _with_unified_retrieval(
+        {
+            "task": "shared",
+            "name": "baseline_ppr_all_on",
+            "query_mode": "ppr",
+            "keyword_fanout_mode": "per_keyword_rrf",
+            "retrieval_mode": "hybrid",
+            "exclude_synonym_edges": False,
+            "answer_context_mode": "chunk_only_prompt",
+            "enable_rerank": True,
+            "enable_kg_rerank": False,
+            "ppr_top_k": DEFAULT_REDUCED_V4_SHARED_PPR_TOP_K,
+            "ppr_qa_top_k": DEFAULT_REDUCED_V4_SHARED_PPR_QA_TOP_K,
+            "ppr_post_rerank_fusion": DEFAULT_PPR_POST_RERANK_FUSION,
+            "ppr_post_rerank_rrf_k": DEFAULT_PPR_POST_RERANK_RRF_K,
+        }
+    )
+    groups = [
+        baseline,
+        {
+            **baseline,
+            "name": "ppr_no_rerank",
+            "enable_rerank": False,
+        },
+        {
+            **baseline,
+            "name": "ppr_no_per_keyword",
+            "keyword_fanout_mode": "joined",
+        },
+        _with_unified_retrieval(
+            {
+                **baseline,
+                "name": "ppr_no_retrieval_hybrid",
+                "retrieval_mode": "dense",
+            }
+        ),
+        {
+            **baseline,
+            "name": "ppr_no_synonym_edges",
+            "exclude_synonym_edges": True,
+        },
+    ]
+    return [
+        _with_v4_windows(
+            item,
+            top_k=DEFAULT_REDUCED_V4_SHARED_TOP_K,
+            chunk_top_k=DEFAULT_REDUCED_V4_SHARED_CHUNK_TOP_K,
+            naive_top_k=DEFAULT_REDUCED_V4_SHARED_NAIVE_TOP_K,
+        )
+        for item in groups
+    ]
+
+
 def build_reduced_v3_experiment_matrix(task: str) -> list[dict[str, Any]]:
     normalized_task = str(task).strip().lower()
     if normalized_task in {"docbench", "shared"}:
@@ -1218,6 +1277,7 @@ def build_parser() -> argparse.ArgumentParser:
             "reduced_v3",
             "reduced_v4",
             "reduced_v6",
+            "reduced_v7",
             "v5_synonym",
             "full",
         ],
@@ -1381,7 +1441,7 @@ def _apply_inferred_ablation_flag_defaults(
 
 def _apply_matrix_mode_defaults(args: argparse.Namespace, argv: list[str] | None) -> None:
     raw_argv = list(argv or [])
-    if args.matrix_mode not in {"reduced_v4", "reduced_v6", "v5_synonym"}:
+    if args.matrix_mode not in {"reduced_v4", "reduced_v6", "reduced_v7", "v5_synonym"}:
         return
     if not _argv_mentions_option(raw_argv, "--run-root"):
         args.run_root = DEFAULT_REDUCED_V4_RUN_ROOT
@@ -2105,6 +2165,21 @@ def _selected_experiment_groups(args: argparse.Namespace) -> dict[str, list[dict
             "surge_survey": [],
         }
 
+    if args.matrix_mode == "reduced_v7":
+        shared = [
+            _finalize_experiment_for_task(
+                task="shared",
+                experiment=item,
+                args=args,
+            )
+            for item in build_reduced_v7_experiment_matrix("shared")
+        ]
+        return {
+            "shared": shared,
+            "surge_query": [],
+            "surge_survey": [],
+        }
+
     if args.matrix_mode == "v5_synonym":
         thresholds = _parse_synonym_thresholds(args.v5_synonym_thresholds)
         shared = [
@@ -2237,8 +2312,10 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(raw_argv)
     _apply_matrix_mode_defaults(args, raw_argv)
-    if args.matrix_mode == "reduced_v6" and args.tasks == "surge":
-        raise ValueError("reduced_v6 is DocBench-only; use --tasks shared or --tasks both")
+    if args.matrix_mode in {"reduced_v6", "reduced_v7"} and args.tasks == "surge":
+        raise ValueError(
+            f"{args.matrix_mode} is DocBench-only; use --tasks shared or --tasks both"
+        )
     _apply_inferred_ablation_flag_defaults(args, raw_argv)
     args.ablation_flags = validate_ablation_flags(args, naming_style="hyphen")
     if args.surge_survey_ppr_top_k <= 0:
@@ -2259,15 +2336,19 @@ def main(argv: list[str] | None = None) -> int:
     shared_experiments = experiment_groups["shared"]
     surge_query_experiments = experiment_groups["surge_query"]
     surge_survey_experiments = experiment_groups["surge_survey"]
+    needs_shared_workspace = args.tasks in {"both", "shared"} and bool(shared_experiments)
+    needs_surge_workspace = args.tasks in {"both", "surge"} and bool(
+        surge_query_experiments or surge_survey_experiments
+    )
     shared_layout = resolve_shared_workspace_layout(
         run_root=args.run_root,
         workspace_id=args.shared_workspace_id,
-        require_existing=bool(args.require_existing_workspaces),
+        require_existing=bool(args.require_existing_workspaces and needs_shared_workspace),
     )
     surge_layout = resolve_surge_workspace_layout(
         run_root=args.run_root,
         workspace_id=args.surge_workspace_id,
-        require_existing=bool(args.require_existing_workspaces),
+        require_existing=bool(args.require_existing_workspaces and needs_surge_workspace),
     )
     repaired_profiles: list[dict[str, Any]] = []
     shared_profile_repair = _repair_legacy_index_profile_if_needed(
@@ -2391,6 +2472,27 @@ def main(argv: list[str] | None = None) -> int:
                         progress_file=progress_file,
                         task="surge_survey",
                         experiment=surge_survey_by_threshold[threshold],
+                    )
+                )
+    elif args.matrix_mode == "reduced_v7":
+        if args.tasks in {"both", "shared"}:
+            _apply_workspace_synonyms(
+                args=args,
+                env=env,
+                run_root=run_root,
+                workspace_path=shared_layout["workspace_dir"],
+                workspace_label=args.shared_workspace_id,
+                threshold=DEFAULT_REDUCED_V7_SYNONYM_THRESHOLD,
+            )
+            for experiment in shared_experiments:
+                results.append(
+                    _run_one(
+                        args=args,
+                        env=env,
+                        run_root=run_root,
+                        progress_file=progress_file,
+                        task="shared",
+                        experiment=experiment,
                     )
                 )
     else:
