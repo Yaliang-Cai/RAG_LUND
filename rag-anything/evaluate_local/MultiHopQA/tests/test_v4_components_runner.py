@@ -19,7 +19,9 @@ def test_v4_components_runner_exists_and_does_not_mutate_indexes_or_synonyms():
     assert "--synonymy-threshold" not in text
     assert "baseline_non_ppr" not in text
     assert "naive_dense" not in text
-    assert "ppr_default\"" not in text
+    assert "ppr_default" not in text
+    assert "check_synonym_manifest_ready" not in text
+    assert "synonym_linking_manifest.json" not in text
     assert 'file_prefix="2wikimultihopqa"' in text
 
 
@@ -43,7 +45,7 @@ def test_v4_components_runner_pins_multihop_windows():
         assert assignment in text
 
 
-def test_v4_components_runner_has_expected_ten_experiments():
+def test_v4_components_runner_has_expected_nine_no_synonym_experiments():
     text = _script_text()
 
     for name in [
@@ -56,9 +58,9 @@ def test_v4_components_runner_has_expected_ten_experiments():
         "ppr_hybrid_no_rerank",
         "ppr_rerank",
         "ppr_raw_rerank_rrf",
-        "ppr_default_with_synonym",
     ]:
         assert name in text
+    assert "ppr_default_with_synonym" not in text
 
 
 def test_v4_components_runner_non_ppr_calls_match_docbench_v4_switches():
@@ -80,7 +82,7 @@ def test_v4_components_runner_non_ppr_calls_match_docbench_v4_switches():
     assert "--exclude-synonym-edges" in non_ppr_body
 
 
-def test_v4_components_runner_ppr_calls_match_docbench_v4_plus_synonym_default():
+def test_v4_components_runner_ppr_calls_match_docbench_v4_no_synonym_components():
     text = _script_text()
 
     for call in [
@@ -88,7 +90,6 @@ def test_v4_components_runner_ppr_calls_match_docbench_v4_plus_synonym_default()
         'run_ppr_experiment "ppr_hybrid_no_rerank" "joined" "hybrid" "--no-ppr-enable-rerank" "--exclude-synonym-edges" "none"',
         'run_ppr_experiment "ppr_rerank" "joined" "dense" "--ppr-enable-rerank" "--exclude-synonym-edges" "none"',
         'run_ppr_experiment "ppr_raw_rerank_rrf" "joined" "dense" "--ppr-enable-rerank" "--exclude-synonym-edges" "raw_rrf"',
-        'run_ppr_experiment "ppr_default_with_synonym" "joined" "dense" "--no-ppr-enable-rerank" "--no-exclude-synonym-edges" "none"',
     ]:
         assert call in text
 
@@ -96,12 +97,3 @@ def test_v4_components_runner_ppr_calls_match_docbench_v4_plus_synonym_default()
     assert "--no-enable-kg-rerank" in ppr_body
     assert "--ppr-post-rerank-fusion" in text
     assert "--ppr-post-rerank-rrf-k" in text
-
-
-def test_v4_components_runner_requires_existing_synonym_manifest_for_synonym_control():
-    text = _script_text()
-
-    assert "check_synonym_manifest_ready" in text
-    assert "synonym_linking_manifest.json" in text
-    assert 'SYNONYM_THRESHOLD="${SYNONYM_THRESHOLD:-0.8}"' in text
-    assert "Run run_hipporag2_synonym_ablation.sh first" in text

@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MultiHopQA V4 components runner.
+# MultiHopQA V4 ppr_default_with_synonym runner.
 #
-# This runner reuses existing V0 MultiHopQA workspaces. It does not download
-# data, build indexes, rebuild SYNONYM edges, or rerun the already-completed
-# naive / hybrid / ppr default runs. It only runs the no-synonym V4-style
-# component experiments using MultiHopQA windows. Run the separate V4 PPR
-# synonym runner later after synonym apply has completed.
+# This runner reuses existing V0 MultiHopQA workspaces and existing threshold
+# 0.8 SYNONYM edges. It does not download data, build indexes, rebuild SYNONYM
+# edges, or run the no-synonym V4 component experiments.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RAGANYTHING_ROOT="${REPO_ROOT}/rag-anything"
@@ -15,6 +13,7 @@ DATA_DIR="${DATA_DIR:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/hipporag2_da
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/workspaces/multihopqa_hr2_v0}"
 RESULTS_ROOT="${RESULTS_ROOT:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/results/multihopqa_hr2_v0_v4_components}"
+SYNONYM_THRESHOLD="${SYNONYM_THRESHOLD:-0.8}"
 
 INDEX_PROFILE="v0"
 CHUNK_SIZE="${CHUNK_SIZE:-4096}"
@@ -38,23 +37,12 @@ PPR_POST_RERANK_RRF_K="${PPR_POST_RERANK_RRF_K:-60}"
 PPR_SYNONYM_WEIGHT_MODE="${PPR_SYNONYM_WEIGHT_MODE:-raw}"
 
 EVAL_RESUME="${EVAL_RESUME:-0}"
+EXPERIMENT="ppr_default_with_synonym"
 
 DATASETS=("hotpotqa" "musique" "2wiki")
 if [[ $# -ge 1 ]]; then
     DATASETS=("$1")
 fi
-
-EXPERIMENTS=(
-    "non_ppr_per_keyword"
-    "non_ppr_kg_rerank"
-    "non_ppr_retrieval_hybrid"
-    "non_ppr_untruncated"
-    "non_ppr_chunk_only"
-    "ppr_per_keyword_no_rerank"
-    "ppr_hybrid_no_rerank"
-    "ppr_rerank"
-    "ppr_raw_rerank_rrf"
-)
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -178,23 +166,57 @@ if errors:
 PY
 }
 
-run_eval() {
+check_synonym_manifest_ready() {
+    local working_dir="$1"
+    local workspace_id="$2"
+    local manifest_path="${working_dir}/synonym_linking_manifest.json"
+    [[ -f "${manifest_path}" ]] || die "Missing synonym manifest: ${manifest_path}. Run run_hipporag2_synonym_ablation.sh first."
+
+    python - "$manifest_path" "$workspace_id" "$SYNONYM_THRESHOLD" <<'PY'
+import json
+import math
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+expected_workspace = sys.argv[2]
+expected_threshold = float(sys.argv[3])
+payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+errors = []
+if payload.get("workspace_id") != expected_workspace:
+    errors.append(f"workspace_id={payload.get('workspace_id')!r}")
+if payload.get("status") != "completed":
+    errors.append(f"status={payload.get('status')!r}")
+try:
+    threshold = float(payload.get("synonymy_threshold"))
+except (TypeError, ValueError):
+    threshold = math.nan
+if not math.isclose(threshold, expected_threshold, rel_tol=0.0, abs_tol=1e-9):
+    errors.append(f"synonymy_threshold={payload.get('synonymy_threshold')!r}")
+if int(payload.get("created_edges") or 0) <= 0:
+    errors.append(f"created_edges={payload.get('created_edges')!r}")
+
+if errors:
+    raise SystemExit(
+        "Synonym manifest check failed. Expected completed threshold-0.8 edges: "
+        + "; ".join(errors)
+    )
+PY
+}
+
+run_with_synonym() {
     local dataset="$1"
     local working_dir="$2"
     local workspace_id="$3"
-    local experiment="$4"
-    local mode="$5"
-    local ppr_post_rerank_fusion="$6"
-    shift 6
-
-    local output_dir="${RESULTS_ROOT}/${dataset}/${experiment}"
+    local output_dir="${RESULTS_ROOT}/${dataset}/${EXPERIMENT}"
     local eval_resume_arg=()
     if [[ "${EVAL_RESUME}" == "1" ]]; then
         eval_resume_arg=(--resume)
     fi
 
     mkdir -p "${output_dir}"
-    log "[${dataset}] ${experiment}: mode=${mode}, ppr_post_rerank_fusion=${ppr_post_rerank_fusion}"
+    log "[${dataset}] ${EXPERIMENT}: ppr default with SYNONYM edges"
     RAGANYTHING_MIN_RERANK_SCORE="${MIN_RERANK_SCORE}" \
     MIN_RERANK_SCORE="${MIN_RERANK_SCORE}" \
     python "${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/evaluate_multihop.py" \
@@ -203,7 +225,7 @@ run_eval() {
         --working-dir "${working_dir}" \
         --hipporag2-data-dir "${DATA_DIR}" \
         --output-dir "${output_dir}" \
-        --modes "${mode}" \
+        --modes "ppr" \
         --recall-k ${RECALL_K} \
         --concurrency "${CONCURRENCY}" \
         --top-k "${TOP_K}" \
@@ -216,99 +238,46 @@ run_eval() {
         --passage-node-weight "${PASSAGE_NODE_WEIGHT}" \
         --recognition-top-k "${RECOGNITION_TOP_K}" \
         --linking-top-k "${LINKING_TOP_K}" \
-        --ppr-post-rerank-fusion "${ppr_post_rerank_fusion}" \
+        --ppr-post-rerank-fusion "none" \
         --ppr-post-rerank-rrf-k "${PPR_POST_RERANK_RRF_K}" \
         --ppr-synonym-weight-mode "${PPR_SYNONYM_WEIGHT_MODE}" \
+        --no-enable-kg-rerank \
+        --no-ppr-enable-rerank \
+        --no-exclude-synonym-edges \
+        --keyword-fanout-mode "joined" \
+        --qdrant-retrieval-mode "dense" \
+        --answer-context-mode "chunk_only_prompt" \
         --bypass-query-cache \
-        "$@" \
         "${eval_resume_arg[@]}"
 }
 
-run_non_ppr_experiment() {
-    local experiment="$1"
-    local keyword_fanout_mode="$2"
-    local qdrant_retrieval_mode="$3"
-    local kg_rerank_flag="$4"
-    local answer_context_mode="$5"
-    local kg_chunk_selection_source="$6"
-
-    run_eval \
-        "${DATASET}" \
-        "${WORKING_DIR}" \
-        "${WORKSPACE_ID}" \
-        "${experiment}" \
-        "hybrid" \
-        "none" \
-        --hybrid-enable-rerank \
-        "${kg_rerank_flag}" \
-        --exclude-synonym-edges \
-        --keyword-fanout-mode "${keyword_fanout_mode}" \
-        --qdrant-retrieval-mode "${qdrant_retrieval_mode}" \
-        --kg-chunk-selection-source "${kg_chunk_selection_source}" \
-        --answer-context-mode "${answer_context_mode}"
-}
-
-run_ppr_experiment() {
-    local experiment="$1"
-    local keyword_fanout_mode="$2"
-    local qdrant_retrieval_mode="$3"
-    local ppr_rerank_flag="$4"
-    local synonym_flag="$5"
-    local ppr_post_rerank_fusion="$6"
-
-    run_eval \
-        "${DATASET}" \
-        "${WORKING_DIR}" \
-        "${WORKSPACE_ID}" \
-        "${experiment}" \
-        "ppr" \
-        "${ppr_post_rerank_fusion}" \
-        --no-enable-kg-rerank \
-        "${ppr_rerank_flag}" \
-        "${synonym_flag}" \
-        --keyword-fanout-mode "${keyword_fanout_mode}" \
-        --qdrant-retrieval-mode "${qdrant_retrieval_mode}" \
-        --answer-context-mode "chunk_only_prompt"
-}
-
 print_summary() {
-    python - "$RESULTS_ROOT" "${DATASETS[@]}" <<'PY'
+    python - "$RESULTS_ROOT" "$EXPERIMENT" "${DATASETS[@]}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-datasets = sys.argv[2:]
-experiments = [
-    "non_ppr_per_keyword",
-    "non_ppr_kg_rerank",
-    "non_ppr_retrieval_hybrid",
-    "non_ppr_untruncated",
-    "non_ppr_chunk_only",
-    "ppr_per_keyword_no_rerank",
-    "ppr_hybrid_no_rerank",
-    "ppr_rerank",
-    "ppr_raw_rerank_rrf",
-]
+experiment = sys.argv[2]
+datasets = sys.argv[3:]
 
 print("dataset\texperiment\tmode\tem\tf1\trecall@2\trecall@5")
 for dataset in datasets:
-    for experiment in experiments:
-        path = root / dataset / experiment / f"{dataset}_summary.json"
-        if not path.exists():
-            print(f"{dataset}\t{experiment}\tMISSING\t\t\t\t")
-            continue
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        results = payload.get("results") or {}
-        if not results:
-            print(f"{dataset}\t{experiment}\tNO_MODES\t\t\t\t")
-            continue
-        for mode, metrics in results.items():
-            print(
-                f"{dataset}\t{experiment}\t{mode}\t"
-                f"{metrics.get('em', '')}\t{metrics.get('f1', '')}\t"
-                f"{metrics.get('recall@2', '')}\t{metrics.get('recall@5', '')}"
-            )
+    path = root / dataset / experiment / f"{dataset}_summary.json"
+    if not path.exists():
+        print(f"{dataset}\t{experiment}\tMISSING\t\t\t\t")
+        continue
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    results = payload.get("results") or {}
+    if not results:
+        print(f"{dataset}\t{experiment}\tNO_MODES\t\t\t\t")
+        continue
+    for mode, metrics in results.items():
+        print(
+            f"{dataset}\t{experiment}\t{mode}\t"
+            f"{metrics.get('em', '')}\t{metrics.get('f1', '')}\t"
+            f"{metrics.get('recall@2', '')}\t{metrics.get('recall@5', '')}"
+        )
 PY
 }
 
@@ -316,13 +285,14 @@ check_data_ready
 mkdir -p "${RESULTS_ROOT}"
 
 log "================================================================"
-log "MultiHopQA V4 components"
+log "MultiHopQA V4 PPR with SYNONYM edges"
 log "Workspace root:     ${WORKSPACE_ROOT}"
 log "Results root:       ${RESULTS_ROOT}"
+log "Synonym threshold:  ${SYNONYM_THRESHOLD}"
 log "Profile:            ${INDEX_PROFILE}"
 log "CHUNK_SIZE:         ${CHUNK_SIZE}"
 log "Concurrency:        ${CONCURRENCY}"
-log "Experiments:        ${EXPERIMENTS[*]}"
+log "Experiment:         ${EXPERIMENT}"
 log "================================================================"
 
 for DATASET in "${DATASETS[@]}"; do
@@ -336,17 +306,8 @@ for DATASET in "${DATASETS[@]}"; do
     log "================================================================"
 
     check_workspace_ready "${WORKING_DIR}" "${DATASET}" "${WORKSPACE_ID}"
-
-    run_non_ppr_experiment "non_ppr_per_keyword" "per_keyword_rrf" "dense" "--no-enable-kg-rerank" "kg_prompt" "truncated"
-    run_non_ppr_experiment "non_ppr_kg_rerank" "joined" "dense" "--enable-kg-rerank" "kg_prompt" "truncated"
-    run_non_ppr_experiment "non_ppr_retrieval_hybrid" "joined" "hybrid" "--no-enable-kg-rerank" "kg_prompt" "truncated"
-    run_non_ppr_experiment "non_ppr_untruncated" "joined" "dense" "--no-enable-kg-rerank" "kg_prompt" "untruncated"
-    run_non_ppr_experiment "non_ppr_chunk_only" "joined" "dense" "--no-enable-kg-rerank" "chunk_only_prompt" "truncated"
-
-    run_ppr_experiment "ppr_per_keyword_no_rerank" "per_keyword_rrf" "dense" "--no-ppr-enable-rerank" "--exclude-synonym-edges" "none"
-    run_ppr_experiment "ppr_hybrid_no_rerank" "joined" "hybrid" "--no-ppr-enable-rerank" "--exclude-synonym-edges" "none"
-    run_ppr_experiment "ppr_rerank" "joined" "dense" "--ppr-enable-rerank" "--exclude-synonym-edges" "none"
-    run_ppr_experiment "ppr_raw_rerank_rrf" "joined" "dense" "--ppr-enable-rerank" "--exclude-synonym-edges" "raw_rrf"
+    check_synonym_manifest_ready "${WORKING_DIR}" "${WORKSPACE_ID}"
+    run_with_synonym "${DATASET}" "${WORKING_DIR}" "${WORKSPACE_ID}"
 done
 
 log "================================================================"
