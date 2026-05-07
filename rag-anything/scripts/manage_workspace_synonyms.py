@@ -128,20 +128,40 @@ def _resolve_workspace_context(
     def _is_leaf_workspace(path: Path) -> bool:
         return any((path / name).exists() for name in EXPECTED_WORKSPACE_FILES)
 
+    workspace_id_override = (
+        str(workspace_id_raw).strip() if workspace_id_raw is not None else None
+    )
     if not _is_leaf_workspace(workspace_path):
-        nested = workspace_path / workspace_path.name
-        if nested.is_dir() and _is_leaf_workspace(nested):
-            workspace_path = nested
+        nested_candidates: list[Path] = []
+        if workspace_id_override:
+            nested_candidates.append(workspace_path / workspace_id_override)
+        nested_candidates.append(workspace_path / workspace_path.name)
+        leaf_children = [
+            child
+            for child in workspace_path.iterdir()
+            if child.is_dir() and _is_leaf_workspace(child)
+        ]
+        if len(leaf_children) == 1:
+            nested_candidates.append(leaf_children[0])
+
+        for nested in nested_candidates:
+            if nested.is_dir() and _is_leaf_workspace(nested):
+                workspace_path = nested
+                break
         else:
+            tried = ", ".join(
+                str(path)
+                for path in dict.fromkeys(nested_candidates)
+                if path != workspace_path
+            )
             raise ValueError(
                 "workspace-path must point to the leaf workspace directory or its "
                 f"single-workspace parent: {workspace_path}"
+                + (f"; tried nested candidates: {tried}" if tried else "")
             )
 
     workspace_id = (
-        str(workspace_id_raw).strip()
-        if workspace_id_raw is not None
-        else workspace_path.name
+        workspace_id_override if workspace_id_override is not None else workspace_path.name
     )
     if not workspace_id:
         raise ValueError("workspace-id must not be empty")
@@ -350,7 +370,7 @@ async def _open_service_and_rag(
     )
     rag = await service.get_rag(
         context.workspace_id,
-        working_dir=str(context.workspace_path),
+        working_dir=str(context.working_dir_root),
     )
     await service._ensure_workspace_warmed(context.workspace_id)
     if getattr(rag, "lightrag", None) is None:

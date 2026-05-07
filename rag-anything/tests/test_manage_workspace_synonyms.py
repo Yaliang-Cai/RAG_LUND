@@ -1,5 +1,8 @@
 from pathlib import Path
 import sys
+import asyncio
+import types
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +17,7 @@ if str(LOCAL_LIGHTRAG_ROOT) not in sys.path:
 from scripts.manage_workspace_synonyms import (
     WorkspaceSnapshot,
     _build_safety_issues,
+    _open_service_and_rag,
     _parse_args,
     _resolve_workspace_context,
     _split_edge_signature_sets,
@@ -46,6 +50,85 @@ def test_resolve_workspace_context_accepts_workspace_id_override(tmp_path: Path)
     assert context.workspace_path == workspace_dir
     assert context.working_dir_root == tmp_path
     assert context.manifest_path == workspace_dir / "synonym_linking_manifest.json"
+
+
+def test_resolve_workspace_context_accepts_workspace_id_override_parent_dir(
+    tmp_path: Path,
+):
+    parent_dir = tmp_path / "hotpotqa"
+    workspace_dir = parent_dir / "hotpotqa_hr2_v0"
+    workspace_dir.mkdir(parents=True)
+    (workspace_dir / "kv_store_full_docs.json").write_text("{}", encoding="utf-8")
+
+    context = _resolve_workspace_context(
+        str(parent_dir),
+        workspace_id_raw="hotpotqa_hr2_v0",
+    )
+
+    assert context.workspace_id == "hotpotqa_hr2_v0"
+    assert context.workspace_path == workspace_dir
+    assert context.working_dir_root == parent_dir
+    assert context.manifest_path == workspace_dir / "synonym_linking_manifest.json"
+
+
+def test_resolve_workspace_context_accepts_single_leaf_parent(tmp_path: Path):
+    parent_dir = tmp_path / "rag_workspaces"
+    workspace_dir = parent_dir / "docbench_shared_graphbm25_20260504_v0"
+    workspace_dir.mkdir(parents=True)
+    (workspace_dir / "kv_store_full_docs.json").write_text("{}", encoding="utf-8")
+
+    context = _resolve_workspace_context(str(parent_dir))
+
+    assert context.workspace_id == "docbench_shared_graphbm25_20260504_v0"
+    assert context.workspace_path == workspace_dir
+    assert context.working_dir_root == parent_dir
+
+
+def test_open_service_uses_working_dir_root_not_leaf_workspace(
+    tmp_path: Path,
+    monkeypatch,
+):
+    parent_dir = tmp_path / "hotpotqa"
+    workspace_dir = parent_dir / "hotpotqa_hr2_v0"
+    workspace_dir.mkdir(parents=True)
+    (workspace_dir / "kv_store_full_docs.json").write_text("{}", encoding="utf-8")
+    context = _resolve_workspace_context(
+        str(parent_dir),
+        workspace_id_raw="hotpotqa_hr2_v0",
+    )
+    calls: dict[str, str | None] = {}
+
+    class FakeSettings(SimpleNamespace):
+        @classmethod
+        def from_env(cls):
+            return cls()
+
+    class FakeService:
+        def __init__(self, settings):
+            self.settings = settings
+
+        async def get_rag(self, workspace_id, working_dir=None):
+            calls["workspace_id"] = workspace_id
+            calls["working_dir"] = working_dir
+            return SimpleNamespace(lightrag=object())
+
+        async def _ensure_workspace_warmed(self, workspace_id):
+            calls["warmed_workspace_id"] = workspace_id
+
+    fake_local_rag = types.ModuleType("raganything.services.local_rag")
+    fake_local_rag.LocalRagSettings = FakeSettings
+    fake_local_rag.LocalRagService = FakeService
+    monkeypatch.setitem(
+        sys.modules,
+        "raganything.services.local_rag",
+        fake_local_rag,
+    )
+
+    asyncio.run(_open_service_and_rag(context))
+
+    assert calls["workspace_id"] == "hotpotqa_hr2_v0"
+    assert calls["working_dir"] == str(parent_dir)
+    assert calls["warmed_workspace_id"] == "hotpotqa_hr2_v0"
 
 
 def test_parse_args_keeps_workspace_id_optional_for_apply(monkeypatch):
