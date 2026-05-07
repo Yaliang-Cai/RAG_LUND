@@ -153,3 +153,55 @@ class GovernanceService:
                      ORDER BY ingested_at DESC
                 """, workspace_id)
         return [DocumentRow.model_validate(dict(r)) for r in rows]
+
+    # --- provenance -----------------------------------------------------------
+
+    async def insert_provenance(
+        self, workspace_id: str, doc_id, kind: str, ref_ids: list[str]
+    ) -> None:
+        """Bulk insert provenance rows. ON CONFLICT DO NOTHING (idempotent)."""
+        if not ref_ids:
+            return
+        records = [(workspace_id, doc_id, kind, r) for r in ref_ids]
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.executemany("""
+                    INSERT INTO provenance (workspace_id, doc_id, kind, ref_id)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT DO NOTHING
+                """, records)
+
+    async def get_provenance_for_doc(self, doc_id) -> dict[str, list[str]]:
+        """Return {kind: [ref_id, ...]} for the given doc."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT kind, ref_id FROM provenance WHERE doc_id = $1", doc_id
+            )
+        out: dict[str, list[str]] = {"chunk": [], "entity": [], "relation": []}
+        for r in rows:
+            out.setdefault(r["kind"], []).append(r["ref_id"])
+        return out
+
+    async def find_doc_exclusive_refs(
+        self, workspace_id: str, doc_id, kind: str, ref_ids: list[str]
+    ) -> list[str]:
+        """Return the subset of ref_ids whose ONLY provenance source is this doc.
+
+        Used by per-doc deletion to avoid removing entities/relations shared with other docs.
+        """
+        if not ref_ids:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT ref_id
+                  FROM provenance
+                 WHERE workspace_id = $1 AND kind = $2 AND ref_id = ANY($3::text[])
+                 GROUP BY ref_id
+                HAVING COUNT(DISTINCT doc_id) = 1
+                   AND (array_agg(DISTINCT doc_id))[1] = $4
+            """, workspace_id, kind, ref_ids, doc_id)
+        return [r["ref_id"] for r in rows]
+
+    async def delete_provenance_for_doc(self, doc_id) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute("DELETE FROM provenance WHERE doc_id = $1", doc_id)
