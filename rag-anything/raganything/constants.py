@@ -356,3 +356,17 @@ DEFAULT_AGENTIC_ROUTER_FALLBACK_PROFILE = "semantic"
 DEFAULT_AGENTIC_DECOMPOSE_MAX_SUBQUESTIONS = 4
 DEFAULT_AGENTIC_PARALLEL_RETRIEVE_CONCURRENCY = 3
 DEFAULT_AGENTIC_GRADER_FALLBACK_SUFFICIENT = True
+
+# ---------------------------------------------------------------------------
+# Governance layer (PostgreSQL-backed)
+# ---------------------------------------------------------------------------
+
+DEFAULT_PG_DSN: str = "postgresql://localhost:5432/raganything"
+DEFAULT_PG_POOL_MIN: int = 2
+DEFAULT_PG_POOL_MAX: int = 10
+DEFAULT_PG_COMMAND_TIMEOUT_SECONDS: int = 30
+
+DEFAULT_JOB_MAX_CONCURRENT: int = 1
+DEFAULT_JOB_PROGRESS_INTERVAL_SECONDS: int = 5
+DEFAULT_JOB_PROGRESS_CHUNK_INTERVAL: int = 10
+DEFAULT_JOB_SHUTDOWN_GRACE_SECONDS: int = 30
