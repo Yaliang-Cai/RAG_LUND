@@ -1,7 +1,6 @@
 -- 001_init: initial governance schema
 -- Idempotent: can be re-run safely.
-
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- Requires PostgreSQL >= 13 for gen_random_uuid() (built-in, no extension needed).
 
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
