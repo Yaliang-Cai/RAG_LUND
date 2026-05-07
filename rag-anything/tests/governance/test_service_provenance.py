@@ -49,3 +49,19 @@ async def test_delete_provenance_for_doc(gov):
     await gov.delete_provenance_for_doc(d)
     prov = await gov.get_provenance_for_doc(d)
     assert prov == {"chunk": [], "entity": [], "relation": []}
+
+
+async def test_find_doc_exclusive_refs_cross_workspace_isolation(gov):
+    """workspace_id filter must prevent cross-workspace false matches."""
+    await gov.ensure_workspace("w2")
+    d1, _ = await gov.upsert_document("w1", "a.pdf", "h1", 1)
+    d2, _ = await gov.upsert_document("w2", "b.pdf", "h2", 1)
+    # Same ref_id ("E.Same") appears in different workspaces
+    await gov.insert_provenance("w1", d1, "entity", ["E.Same"])
+    await gov.insert_provenance("w2", d2, "entity", ["E.Same"])
+    # In workspace w1, d1 is the sole source for E.Same
+    exclusive_w1 = await gov.find_doc_exclusive_refs("w1", d1, "entity", ["E.Same"])
+    assert exclusive_w1 == ["E.Same"]
+    # In workspace w2, d2 is the sole source for E.Same
+    exclusive_w2 = await gov.find_doc_exclusive_refs("w2", d2, "entity", ["E.Same"])
+    assert exclusive_w2 == ["E.Same"]
