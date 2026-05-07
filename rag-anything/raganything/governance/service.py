@@ -64,3 +64,87 @@ class GovernanceService:
             )
         if frozen is True:
             raise WorkspaceFrozenError(f"workspace '{workspace_id}' is frozen")
+
+    # --- documents -------------------------------------------------------
+
+    async def upsert_document(
+        self,
+        workspace_id: str,
+        filename: str,
+        file_hash: str,
+        size_bytes: int,
+        *,
+        force: bool = False,
+    ) -> tuple["UUID", bool]:  # type: ignore[name-defined]
+        """Insert a document; return (doc_id, is_duplicate).
+
+        - If (workspace_id, file_hash) already exists and force=False, return existing doc_id with is_duplicate=True.
+        - If force=True, always insert (filename can be reused; no UNIQUE on (workspace_id, filename)).
+        """
+        async with self._pool.acquire() as conn:
+            if force:
+                await conn.execute("""
+                    DELETE FROM documents
+                     WHERE workspace_id = $1 AND file_hash = $2
+                """, workspace_id, file_hash)
+                row = await conn.fetchrow("""
+                    INSERT INTO documents (workspace_id, filename, file_hash, size_bytes, status)
+                    VALUES ($1, $2, $3, $4, 'pending')
+                    RETURNING doc_id
+                """, workspace_id, filename, file_hash, size_bytes)
+                return row["doc_id"], False
+
+            row = await conn.fetchrow("""
+                INSERT INTO documents (workspace_id, filename, file_hash, size_bytes, status)
+                VALUES ($1, $2, $3, $4, 'pending')
+                ON CONFLICT (workspace_id, file_hash) DO NOTHING
+                RETURNING doc_id
+            """, workspace_id, filename, file_hash, size_bytes)
+            if row is not None:
+                return row["doc_id"], False
+
+            existing = await conn.fetchval("""
+                SELECT doc_id FROM documents
+                 WHERE workspace_id = $1 AND file_hash = $2
+            """, workspace_id, file_hash)
+            return existing, True
+
+    async def mark_document_status(
+        self, doc_id, status: str, *, error: Optional[str] = None, finished: bool = False
+    ) -> None:
+        async with self._pool.acquire() as conn:
+            if finished:
+                await conn.execute("""
+                    UPDATE documents
+                       SET status = $2, error = $3, finished_at = NOW()
+                     WHERE doc_id = $1
+                """, doc_id, status, error)
+            else:
+                await conn.execute("""
+                    UPDATE documents
+                       SET status = $2, error = COALESCE($3, error)
+                     WHERE doc_id = $1
+                """, doc_id, status, error)
+
+    async def get_document(self, doc_id):
+        from raganything.governance.models import DocumentRow
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM documents WHERE doc_id = $1", doc_id)
+        return DocumentRow.model_validate(dict(row)) if row else None
+
+    async def list_documents(self, workspace_id: str, *, status: Optional[str] = None):
+        from raganything.governance.models import DocumentRow
+        async with self._pool.acquire() as conn:
+            if status:
+                rows = await conn.fetch("""
+                    SELECT * FROM documents
+                     WHERE workspace_id = $1 AND status = $2
+                     ORDER BY ingested_at DESC
+                """, workspace_id, status)
+            else:
+                rows = await conn.fetch("""
+                    SELECT * FROM documents
+                     WHERE workspace_id = $1
+                     ORDER BY ingested_at DESC
+                """, workspace_id)
+        return [DocumentRow.model_validate(dict(r)) for r in rows]
