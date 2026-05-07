@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "rag-anything"))
 from evaluate_local.MultiHopQA.evaluate_multihop import (
     _build_query_kwargs,
     _load_chunk_source_map,
+    _mode_query_kwargs,
     _parse_args,
     _resolve_log_file,
     _resolve_retrieved_sources,
@@ -120,6 +121,30 @@ def test_build_query_kwargs_pins_eval_retrieval_controls():
     assert kwargs["chunk_top_k"] == 5
     assert kwargs["naive_top_k"] == 10
     assert kwargs["max_total_tokens"] == 45000
+
+
+def test_query_kwargs_preserve_explicit_synonym_filter_values():
+    built = _build_query_kwargs(
+        query_overrides={},
+        wire_profile=None,
+        exclude_synonym_edges=False,
+    )
+
+    assert built["exclude_synonym_edges"] is False
+
+    hybrid_kwargs = _mode_query_kwargs(
+        {"exclude_synonym_edges": True},
+        "hybrid",
+        hybrid_enable_rerank=True,
+    )
+    ppr_kwargs = _mode_query_kwargs(
+        {"exclude_synonym_edges": False},
+        "ppr",
+        ppr_enable_rerank=True,
+    )
+
+    assert hybrid_kwargs["exclude_synonym_edges"] is True
+    assert ppr_kwargs["exclude_synonym_edges"] is False
 
 
 def test_parse_args_defaults_match_shared_retrieval_ablation(monkeypatch):
