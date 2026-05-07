@@ -198,7 +198,7 @@ class GovernanceService:
                  WHERE workspace_id = $1 AND kind = $2 AND ref_id = ANY($3::text[])
                  GROUP BY ref_id
                 HAVING COUNT(DISTINCT doc_id) = 1
-                   AND MAX(doc_id) = $4
+                   AND bool_and(doc_id = $4)
             """, workspace_id, kind, ref_ids, doc_id)
         return [r["ref_id"] for r in rows]
 
