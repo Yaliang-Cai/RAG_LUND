@@ -14,7 +14,7 @@ from typing import Optional
 
 import asyncpg
 
-from raganything.governance.models import WorkspaceRow
+from raganything.governance.models import DocumentRow, DocumentStatus, WorkspaceRow
 
 logger = logging.getLogger(__name__)
 
@@ -78,20 +78,27 @@ class GovernanceService:
     ) -> tuple["UUID", bool]:  # type: ignore[name-defined]
         """Insert a document; return (doc_id, is_duplicate).
 
-        - If (workspace_id, file_hash) already exists and force=False, return existing doc_id with is_duplicate=True.
-        - If force=True, always insert (filename can be reused; no UNIQUE on (workspace_id, filename)).
+        - If (workspace_id, file_hash) already exists and force=False, return existing
+          doc_id with is_duplicate=True.
+        - If force=True, atomically delete any existing document with the same hash and
+          insert a fresh row. Cascade FK on `provenance.doc_id` deletes provenance for
+          the old doc — this is the intended "re-ingest from scratch" semantic.
         """
         async with self._pool.acquire() as conn:
             if force:
-                await conn.execute("""
-                    DELETE FROM documents
-                     WHERE workspace_id = $1 AND file_hash = $2
-                """, workspace_id, file_hash)
-                row = await conn.fetchrow("""
-                    INSERT INTO documents (workspace_id, filename, file_hash, size_bytes, status)
-                    VALUES ($1, $2, $3, $4, 'pending')
-                    RETURNING doc_id
-                """, workspace_id, filename, file_hash, size_bytes)
+                async with conn.transaction():
+                    await conn.execute(
+                        "DELETE FROM documents WHERE workspace_id = $1 AND file_hash = $2",
+                        workspace_id, file_hash,
+                    )
+                    row = await conn.fetchrow(
+                        """
+                        INSERT INTO documents (workspace_id, filename, file_hash, size_bytes, status)
+                        VALUES ($1, $2, $3, $4, 'pending')
+                        RETURNING doc_id
+                        """,
+                        workspace_id, filename, file_hash, size_bytes,
+                    )
                 return row["doc_id"], False
 
             row = await conn.fetchrow("""
@@ -110,7 +117,7 @@ class GovernanceService:
             return existing, True
 
     async def mark_document_status(
-        self, doc_id, status: str, *, error: Optional[str] = None, finished: bool = False
+        self, doc_id, status: DocumentStatus, *, error: Optional[str] = None, finished: bool = False,
     ) -> None:
         async with self._pool.acquire() as conn:
             if finished:
@@ -127,13 +134,11 @@ class GovernanceService:
                 """, doc_id, status, error)
 
     async def get_document(self, doc_id):
-        from raganything.governance.models import DocumentRow
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM documents WHERE doc_id = $1", doc_id)
         return DocumentRow.model_validate(dict(row)) if row else None
 
-    async def list_documents(self, workspace_id: str, *, status: Optional[str] = None):
-        from raganything.governance.models import DocumentRow
+    async def list_documents(self, workspace_id: str, *, status: Optional[DocumentStatus] = None):
         async with self._pool.acquire() as conn:
             if status:
                 rows = await conn.fetch("""
