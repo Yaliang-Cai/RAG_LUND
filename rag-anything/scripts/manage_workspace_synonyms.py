@@ -25,6 +25,7 @@ import json
 import sys
 import traceback
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,14 @@ def _parse_args() -> argparse.Namespace:
             required=True,
             help="Absolute path to the leaf workspace directory.",
         )
+        subparser.add_argument(
+            "--workspace-id",
+            default=None,
+            help=(
+                "Workspace id stored in graph/vector payloads. Defaults to the "
+                "workspace-path directory name for backwards compatibility."
+            ),
+        )
         if command == "apply":
             subparser.add_argument(
                 "--synonymy-threshold",
@@ -108,7 +117,10 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _resolve_workspace_context(workspace_path_raw: str) -> WorkspaceContext:
+def _resolve_workspace_context(
+    workspace_path_raw: str,
+    workspace_id_raw: str | None = None,
+) -> WorkspaceContext:
     workspace_path = Path(workspace_path_raw).expanduser().resolve()
     if not workspace_path.is_dir():
         raise ValueError(f"Workspace path does not exist or is not a directory: {workspace_path}")
@@ -126,7 +138,13 @@ def _resolve_workspace_context(workspace_path_raw: str) -> WorkspaceContext:
                 f"single-workspace parent: {workspace_path}"
             )
 
-    workspace_id = workspace_path.name
+    workspace_id = (
+        str(workspace_id_raw).strip()
+        if workspace_id_raw is not None
+        else workspace_path.name
+    )
+    if not workspace_id:
+        raise ValueError("workspace-id must not be empty")
     working_dir_root = workspace_path.parent
     return WorkspaceContext(
         workspace_path=workspace_path,
@@ -330,7 +348,10 @@ async def _open_service_and_rag(
             synonymy_min_entity_len=synonymy_min_entity_len,
         )
     )
-    rag = await service.get_rag(context.workspace_id)
+    rag = await service.get_rag(
+        context.workspace_id,
+        working_dir=str(context.workspace_path),
+    )
     await service._ensure_workspace_warmed(context.workspace_id)
     if getattr(rag, "lightrag", None) is None:
         raise RuntimeError("LightRAG runtime not initialized after workspace warmup")
@@ -357,6 +378,37 @@ def _status_payload(
     }
 
 
+def _write_synonym_manifest(
+    context: WorkspaceContext,
+    service: Any,
+    *,
+    cleared_edges: int,
+    created_edges: int,
+) -> None:
+    payload = service._current_synonym_manifest(context.workspace_id)
+    payload.update(
+        {
+            "status": "completed",
+            "cleared_edges": int(cleared_edges),
+            "created_edges": int(created_edges),
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+    context.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    context.manifest_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _discard_synonym_manifest(context: WorkspaceContext, service: Any) -> None:
+    ready = getattr(service, "_workspace_synonym_ready", None)
+    if ready is not None:
+        ready.discard(context.workspace_id)
+    if context.manifest_path.exists():
+        context.manifest_path.unlink()
+
+
 async def _run_status(context: WorkspaceContext) -> dict[str, Any]:
     service = None
     try:
@@ -374,7 +426,7 @@ async def _run_clear(context: WorkspaceContext) -> dict[str, Any]:
         service, rag = await _open_service_and_rag(context)
         before = await _collect_workspace_snapshot(rag, context)
         cleared_edges = await clear_synonym_edges(rag.lightrag.chunk_entity_relation_graph)
-        service._invalidate_synonym_manifest(context.workspace_id)
+        _discard_synonym_manifest(context, service)
         after = await _collect_workspace_snapshot(rag, context)
         issues = _build_safety_issues(before, after)
         if issues:
@@ -403,11 +455,11 @@ async def _run_apply(context: WorkspaceContext, args: argparse.Namespace) -> dic
             synonymy_min_entity_len=args.synonymy_min_entity_len,
         )
         before = await _collect_workspace_snapshot(rag, context)
-        result = await service.finalize_workspace_synonyms(
-            context.workspace_id,
-            force=True,
-            reset_existing=True,
-        )
+        result = await rag.lightrag.rebuild_synonym_edges(reset_existing=True)
+        cleared_edges = int(result.get("cleared_edges", 0))
+        created_edges = int(result.get("created_edges", 0))
+        result = dict(result)
+        result["manifest_path"] = str(context.manifest_path)
         after = await _collect_workspace_snapshot(rag, context)
         issues = _build_safety_issues(before, after)
         if issues:
@@ -415,6 +467,15 @@ async def _run_apply(context: WorkspaceContext, args: argparse.Namespace) -> dic
                 "Detected factual graph or storage mutation while rebuilding synonym edges: "
                 + json.dumps(issues, ensure_ascii=False, indent=2)
             )
+        _write_synonym_manifest(
+            context,
+            service,
+            cleared_edges=cleared_edges,
+            created_edges=created_edges,
+        )
+        ready = getattr(service, "_workspace_synonym_ready", None)
+        if ready is not None:
+            ready.add(context.workspace_id)
         return {
             "success": True,
             "command": "apply",
@@ -430,7 +491,10 @@ async def _run_apply(context: WorkspaceContext, args: argparse.Namespace) -> dic
 
 
 async def _amain(args: argparse.Namespace) -> dict[str, Any]:
-    context = _resolve_workspace_context(args.workspace_path)
+    context = _resolve_workspace_context(
+        args.workspace_path,
+        workspace_id_raw=getattr(args, "workspace_id", None),
+    )
     if args.command == "status":
         return await _run_status(context)
     if args.command == "clear":
