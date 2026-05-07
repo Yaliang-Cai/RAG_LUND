@@ -12,6 +12,112 @@
 
 ---
 
+## Pre-flight: local PostgreSQL on no-sudo Ubuntu
+
+The plan assumes a reachable PostgreSQL server. The recommended setup uses conda-forge — no sudo, no system packages, runs entirely under `~/`.
+
+> **Skip this section if:** you already have a PG instance reachable at `RAGANYTHING_PG_DSN` and a separate test DB at `RAGANYTHING_PG_TEST_DSN`. Just verify both are accessible (see step 6 below) and proceed.
+
+### Step 1: Install PostgreSQL via conda-forge
+
+```bash
+# In your existing project conda env
+conda install -c conda-forge "postgresql>=15"
+which initdb pg_ctl psql      # confirm they're on PATH
+```
+
+If you don't already have a conda env, `mamba create -n raganything python=3.12 postgresql -c conda-forge` works equivalently.
+
+### Step 2: Initialize the data directory
+
+```bash
+mkdir -p ~/data/pg
+initdb -D ~/data/pg --auth=trust --username="$USER" --encoding=UTF8 --locale=C
+```
+
+`--auth=trust` is fine for a localhost-only single-user dev box. **Do not** use this on a shared machine.
+
+### Step 3: Pick a non-default port
+
+Default 5432 may collide with another user's PG on shared servers. Edit `~/data/pg/postgresql.conf`:
+
+```bash
+sed -i "s/^#port = 5432/port = 5433/" ~/data/pg/postgresql.conf
+sed -i "s/^#listen_addresses = 'localhost'/listen_addresses = 'localhost'/" ~/data/pg/postgresql.conf
+```
+
+### Step 4: Start PostgreSQL
+
+```bash
+pg_ctl -D ~/data/pg -l ~/data/pg/server.log start
+# verify
+tail -5 ~/data/pg/server.log
+psql -h 127.0.0.1 -p 5433 -U "$USER" -d postgres -c "SELECT version();"
+```
+
+Expected: prints `PostgreSQL 15.x ...` from the SELECT.
+
+To stop later: `pg_ctl -D ~/data/pg stop`.
+
+### Step 5: Create the application + test databases
+
+```bash
+psql -h 127.0.0.1 -p 5433 -U "$USER" -d postgres <<EOF
+CREATE DATABASE raganything;
+CREATE DATABASE raganything_test;
+EOF
+```
+
+### Step 6: Configure the DSN environment variables
+
+Add to your `.env` or shell profile:
+
+```bash
+export RAGANYTHING_PG_DSN="postgresql://$USER@127.0.0.1:5433/raganything"
+export RAGANYTHING_PG_TEST_DSN="postgresql://$USER@127.0.0.1:5433/raganything_test"
+```
+
+Verify:
+
+```bash
+python -c "
+import asyncio, asyncpg, os
+async def main():
+    for var in ('RAGANYTHING_PG_DSN', 'RAGANYTHING_PG_TEST_DSN'):
+        c = await asyncpg.connect(os.environ[var])
+        v = await c.fetchval('SELECT version()')
+        await c.close()
+        print(var, 'ok:', v.split(',')[0])
+asyncio.run(main())
+"
+```
+
+Expected: two `ok:` lines.
+
+### Step 7: Optional — auto-start on shell login
+
+Add to `~/.bashrc` (or zsh equivalent):
+
+```bash
+pg_ctl -D ~/data/pg status >/dev/null 2>&1 || pg_ctl -D ~/data/pg -l ~/data/pg/server.log start
+```
+
+This is opt-in. Many people prefer to start PG explicitly when working on the project to avoid an idle process holding ports.
+
+### Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---|---|
+| `initdb: error: directory "/path" exists but is not empty` | The data dir was previously initialized. Either delete and re-init, or skip step 2. |
+| `could not connect to server: Connection refused` | PG isn't running. Check `~/data/pg/server.log` for startup errors. |
+| `FATAL: role "$USER" does not exist` | `initdb` ran as a different user. Re-run step 2. |
+| Port 5433 also in use | Pick another (5434, 5435 …); update step 3 and the DSN env vars. |
+| `out of shared memory` on heavy ingest | Bump `shared_buffers = 256MB` in `postgresql.conf` and restart. |
+
+Once steps 1–6 pass, the rest of the plan can run normally.
+
+---
+
 ## File structure
 
 ### Created files
