@@ -48,6 +48,8 @@ def test_v4_ppr_synonym_runner_requires_completed_threshold_0p8_manifest():
 
     assert "check_synonym_manifest_ready" in text
     assert "synonym_linking_manifest.json" in text
+    assert 'nested_manifest_path="${working_dir}/${workspace_id}/synonym_linking_manifest.json"' in text
+    assert 'flat_manifest_path="${working_dir}/synonym_linking_manifest.json"' in text
     assert 'SYNONYM_THRESHOLD="${SYNONYM_THRESHOLD:-0.8}"' in text
     assert "Run run_hipporag2_synonym_ablation.sh first" in text
     assert '"created_edges"' in text

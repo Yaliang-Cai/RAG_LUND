@@ -169,8 +169,16 @@ PY
 check_synonym_manifest_ready() {
     local working_dir="$1"
     local workspace_id="$2"
-    local manifest_path="${working_dir}/synonym_linking_manifest.json"
-    [[ -f "${manifest_path}" ]] || die "Missing synonym manifest: ${manifest_path}. Run run_hipporag2_synonym_ablation.sh first."
+    local nested_manifest_path="${working_dir}/${workspace_id}/synonym_linking_manifest.json"
+    local flat_manifest_path="${working_dir}/synonym_linking_manifest.json"
+    local manifest_path=""
+    if [[ -f "${nested_manifest_path}" ]]; then
+        manifest_path="${nested_manifest_path}"
+    elif [[ -f "${flat_manifest_path}" ]]; then
+        manifest_path="${flat_manifest_path}"
+    else
+        die "Missing synonym manifest. Checked ${nested_manifest_path} and ${flat_manifest_path}. Run run_hipporag2_synonym_ablation.sh first."
+    fi
 
     python - "$manifest_path" "$workspace_id" "$SYNONYM_THRESHOLD" <<'PY'
 import json

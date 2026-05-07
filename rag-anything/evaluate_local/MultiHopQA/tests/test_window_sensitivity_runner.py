@@ -29,6 +29,8 @@ def test_window_sensitivity_runner_checks_existing_workspace_and_synonyms():
     assert "check_synonym_manifest_ready" in text
     assert 'SYNONYM_THRESHOLD="${SYNONYM_THRESHOLD:-0.8}"' in text
     assert "synonym_linking_manifest.json" in text
+    assert 'nested_manifest_path="${working_dir}/${workspace_id}/synonym_linking_manifest.json"' in text
+    assert 'flat_manifest_path="${working_dir}/synonym_linking_manifest.json"' in text
     assert 'file_prefix="2wikimultihopqa"' in text
     assert '"created_edges"' in text
 
