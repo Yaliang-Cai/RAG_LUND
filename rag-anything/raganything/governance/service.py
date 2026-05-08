@@ -334,3 +334,92 @@ class GovernanceService:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(sql, *args)
         return [AuditRow.model_validate(dict(r)) for r in rows]
+
+    # --- ingest orchestration -------------------------------------------------
+
+    async def run_ingest(
+        self,
+        job_id,
+        doc_id,
+        workspace_id: str,
+        file_path: str,
+        *,
+        chunking_strategy: Optional[str] = None,
+    ) -> None:
+        """Background coroutine launched by JobRunner.
+
+        Wraps LocalRagService.ingest() with status updates, provenance capture,
+        and audit logging.
+        """
+        from raganything.governance.callbacks import (
+            IngestProvenanceCallback, JobProgressCallback,
+        )
+        from pathlib import Path as _P
+
+        if self._rag is None:
+            raise RuntimeError("GovernanceService.run_ingest requires rag_service injection")
+
+        prov_cb = IngestProvenanceCallback(workspace_id, doc_id)
+        prog_cb = JobProgressCallback(self, job_id)
+        self._rag.register_callback(prov_cb)
+        self._rag.register_callback(prog_cb)
+
+        await self.mark_document_status(doc_id, "parsing")
+        try:
+            workspace_output = str(_P(self._rag.settings.output_dir) / workspace_id)
+            await self._rag.ingest(
+                file_path,
+                workspace_id=workspace_id,
+                output_dir=workspace_output,
+                chunking_strategy=chunking_strategy or None,
+            )
+            # Persist chunk provenance gathered by the callback.
+            await self.insert_provenance(workspace_id, doc_id, "chunk", prov_cb.chunk_ids)
+            # Backfill entity / relation provenance from LightRAG's per-chunk maps.
+            await self._backfill_entity_relation_provenance(
+                workspace_id, doc_id, prov_cb.chunk_ids,
+            )
+            await self.mark_document_status(doc_id, "done", finished=True)
+            await self.record_audit(
+                workspace_id, "ingest",
+                doc_id=doc_id,
+                details={
+                    "chunk_count": len(prov_cb.chunk_ids),
+                    "filename": _P(file_path).name,
+                },
+            )
+            await prog_cb.flush()
+        except Exception as exc:
+            await self.mark_document_status(
+                doc_id, "failed", error=str(exc), finished=True,
+            )
+            await self.record_audit(
+                workspace_id, "ingest_failed",
+                doc_id=doc_id, details={"error": str(exc)},
+            )
+            raise
+        finally:
+            self._rag.unregister_callback(prov_cb)
+            self._rag.unregister_callback(prog_cb)
+
+    async def _backfill_entity_relation_provenance(
+        self, workspace_id: str, doc_id, chunk_ids: list[str]
+    ) -> None:
+        if not chunk_ids:
+            return
+        rag = await self._rag.get_rag(workspace_id)
+        await rag._ensure_lightrag_initialized()
+        lr = rag.lightrag
+        ent_set: set[str] = set()
+        rel_set: set[str] = set()
+        for cid in chunk_ids:
+            try:
+                ents = await lr.entity_chunks.get(cid) or []
+                rels = await lr.relation_chunks.get(cid) or []
+            except Exception:
+                logger.exception("backfill: failed to read provenance for chunk %s", cid)
+                continue
+            ent_set.update(ents if isinstance(ents, list) else [])
+            rel_set.update(rels if isinstance(rels, list) else [])
+        await self.insert_provenance(workspace_id, doc_id, "entity", sorted(ent_set))
+        await self.insert_provenance(workspace_id, doc_id, "relation", sorted(rel_set))
