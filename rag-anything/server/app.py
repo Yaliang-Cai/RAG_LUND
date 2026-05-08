@@ -20,6 +20,7 @@ from raganything.governance import (
     GovernanceService,
     GovernanceSettings,
     JobRunner,
+    WorkspaceFrozenError,
     create_pool,
     mark_orphaned_jobs_crashed,
     run_migrations,
@@ -304,8 +305,11 @@ async def ingest(
     file: UploadFile = File(...),
     workspace_id: Optional[str] = Form(default=None),
     chunking_strategy: Optional[str] = Form(default=None),
+    force: bool = Query(default=False),
     _auth: None = Depends(verify_api_key),
-    service: LocalRagService = Depends(get_service),
+    rag_service: LocalRagService = Depends(get_rag),
+    gov: GovernanceService = Depends(get_gov),
+    jobs: JobRunner = Depends(get_jobs),
 ):
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in SUPPORTED_EXTENSIONS:
@@ -313,29 +317,52 @@ async def ingest(
             status_code=400,
             detail=f"Unsupported file type: '{file_ext}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
         )
-
     if chunking_strategy and chunking_strategy not in VALID_CHUNKING_STRATEGIES:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid chunking_strategy '{chunking_strategy}'. Valid: {', '.join(sorted(VALID_CHUNKING_STRATEGIES))}",
+            detail=f"Invalid chunking_strategy '{chunking_strategy}'.",
         )
 
     file_stem = Path(file.filename).stem
-    final_workspace_id = workspace_id.strip() if workspace_id and workspace_id.strip() else _compute_workspace_id(file_stem)
+    final_workspace_id = (
+        workspace_id.strip() if workspace_id and workspace_id.strip()
+        else _compute_workspace_id(file_stem)
+    )
     _validate_workspace_id(final_workspace_id)
 
     try:
         content = await file.read()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File read failed: {str(e)}")
+    file_hash = hashlib.sha256(content).hexdigest()
 
-    # 保存原始文件到 uploads/{workspace_id}/
-    # basename-only + resolve+relative_to 三重校验，防路径穿越写
-    upload_dir = UPLOADS_DIR / final_workspace_id
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    original_filename = Path(file.filename).name  # strip any directory components
+    # Workspace + frozen check
+    await gov.ensure_workspace(final_workspace_id)
+    try:
+        await gov.ensure_writable(final_workspace_id)
+    except WorkspaceFrozenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    # Idempotency check
+    original_filename = Path(file.filename).name
     if not original_filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
+
+    doc_id, duplicate = await gov.upsert_document(
+        final_workspace_id, original_filename, file_hash, len(content), force=force,
+    )
+    if duplicate:
+        return {
+            "job_id": None,
+            "doc_id": str(doc_id),
+            "workspace_id": final_workspace_id,
+            "status": "duplicate",
+            "duplicate": True,
+        }
+
+    # Save the original to uploads/{ws}/{filename}
+    upload_dir = UPLOADS_DIR / final_workspace_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
     upload_path = upload_dir / original_filename
     try:
         upload_path.resolve().relative_to(upload_dir.resolve())
@@ -343,29 +370,24 @@ async def ingest(
         raise HTTPException(status_code=400, detail="Invalid filename")
     upload_path.write_bytes(content)
 
-    # 写入临时文件供 parser 使用（保留原始文件名以便 MinerU 正确命名输出）
-    tmp_dir = Path(tempfile.mkdtemp())
-    tmp_path = tmp_dir / original_filename
-    tmp_path.write_bytes(content)
+    # Enqueue the job
+    job_id = await gov.create_job(final_workspace_id, [doc_id])
 
-    workspace_output = str(Path(service.settings.output_dir) / final_workspace_id)
-    try:
-        final_id = await service.ingest(
-            str(tmp_path),
-            workspace_id=final_workspace_id,
-            output_dir=workspace_output,
-            chunking_strategy=chunking_strategy or None,
+    async def _run():
+        await gov.run_ingest(
+            job_id, doc_id, final_workspace_id,
+            str(upload_path),
+            chunking_strategy=chunking_strategy,
         )
-        if service.settings.enable_synonym_linking:
-            await service.finalize_workspace_synonyms(
-                final_id,
-                force=False,
-                reset_existing=True,
-            )
-    finally:
-        shutil.rmtree(str(tmp_dir), ignore_errors=True)
 
-    return {"workspace_id": final_id, "filename": original_filename}
+    await jobs.submit(job_id, _run)
+    return {
+        "job_id": str(job_id),
+        "doc_id": str(doc_id),
+        "workspace_id": final_workspace_id,
+        "status": "queued",
+        "duplicate": False,
+    }
 
 
 @app.post("/ingest/batch")
