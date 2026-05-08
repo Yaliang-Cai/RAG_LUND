@@ -205,3 +205,128 @@ class GovernanceService:
     async def delete_provenance_for_doc(self, doc_id) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute("DELETE FROM provenance WHERE doc_id = $1", doc_id)
+
+    # --- jobs -----------------------------------------------------------------
+
+    async def create_job(self, workspace_id: str, doc_ids: list) -> "UUID":  # type: ignore
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO ingest_jobs (workspace_id, doc_ids, status)
+                VALUES ($1, $2, 'queued')
+                RETURNING job_id
+            """, workspace_id, doc_ids)
+        return row["job_id"]
+
+    async def mark_job_running(self, job_id) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE ingest_jobs SET status = 'running' WHERE job_id = $1", job_id
+            )
+
+    async def mark_job_done(self, job_id) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE ingest_jobs
+                   SET status = 'done', finished_at = NOW()
+                 WHERE job_id = $1
+            """, job_id)
+
+    async def mark_job_failed(self, job_id, error: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE ingest_jobs
+                   SET status = 'failed', error = $2, finished_at = NOW()
+                 WHERE job_id = $1
+            """, job_id, error)
+
+    async def update_job_progress(self, job_id, progress: dict) -> None:
+        import json as _json
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE ingest_jobs SET progress = $2 WHERE job_id = $1",
+                job_id, _json.dumps(progress),
+            )
+
+    async def get_job(self, job_id):
+        import json as _json
+        from raganything.governance.models import JobRow
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM ingest_jobs WHERE job_id = $1", job_id)
+        if row:
+            data = dict(row)
+            if isinstance(data.get("progress"), str):
+                data["progress"] = _json.loads(data["progress"])
+            return JobRow.model_validate(data)
+        return None
+
+    async def list_jobs(
+        self, workspace_id: Optional[str] = None, status: Optional[str] = None, limit: int = 50
+    ):
+        import json as _json
+        from raganything.governance.models import JobRow
+        clauses, args = [], []
+        if workspace_id:
+            args.append(workspace_id)
+            clauses.append(f"workspace_id = ${len(args)}")
+        if status:
+            args.append(status)
+            clauses.append(f"status = ${len(args)}")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        args.append(limit)
+        sql = f"SELECT * FROM ingest_jobs {where} ORDER BY started_at DESC LIMIT ${len(args)}"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+        result = []
+        for r in rows:
+            data = dict(r)
+            if isinstance(data.get("progress"), str):
+                data["progress"] = _json.loads(data["progress"])
+            result.append(JobRow.model_validate(data))
+        return result
+
+    # --- audit ----------------------------------------------------------------
+
+    async def record_audit(
+        self,
+        workspace_id: str,
+        action: str,
+        *,
+        doc_id=None,
+        actor: Optional[str] = None,
+        details: Optional[dict] = None,
+    ) -> None:
+        import json as _json
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO ingest_audit (workspace_id, doc_id, action, actor, details)
+                VALUES ($1, $2, $3, $4, $5)
+            """, workspace_id, doc_id, action, actor, _json.dumps(details or {}))
+
+    async def list_audit(
+        self,
+        workspace_id: Optional[str] = None,
+        *,
+        action: Optional[str] = None,
+        limit: int = 100,
+    ):
+        import json as _json
+        from raganything.governance.models import AuditRow
+        clauses, args = [], []
+        if workspace_id:
+            args.append(workspace_id)
+            clauses.append(f"workspace_id = ${len(args)}")
+        if action:
+            args.append(action)
+            clauses.append(f"action = ${len(args)}")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        args.append(limit)
+        sql = f"SELECT * FROM ingest_audit {where} ORDER BY timestamp DESC LIMIT ${len(args)}"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+        result = []
+        for r in rows:
+            data = dict(r)
+            if isinstance(data.get("details"), str):
+                data["details"] = _json.loads(data["details"])
+            result.append(AuditRow.model_validate(data))
+        return result
