@@ -1409,3 +1409,32 @@ async def list_workspaces(
             "workspace": str(working_root),
         },
     }
+
+
+# =========================================================================
+# 审计日志
+# =========================================================================
+
+@app.get("/workspace/{workspace_id}/audit")
+async def workspace_audit(
+    workspace_id: str,
+    action: Optional[str] = None,
+    limit: int = 100,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    _validate_workspace_id(workspace_id)
+    rows = await gov.list_audit(workspace_id=workspace_id, action=action,
+                                limit=max(1, min(limit, 500)))
+    return {"audit": [r.model_dump(mode="json") for r in rows]}
+
+
+@app.get("/admin/audit")
+async def admin_audit(
+    action: Optional[str] = None,
+    limit: int = 100,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    rows = await gov.list_audit(action=action, limit=max(1, min(limit, 500)))
+    return {"audit": [r.model_dump(mode="json") for r in rows]}
