@@ -144,6 +144,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the DocBench single-document V0+synonym retrieval subset."
     )
     parser.add_argument("--run-root", default=str(DEFAULT_RUN_ROOT))
+    parser.add_argument(
+        "--stage",
+        "--phase",
+        choices=["generate", "evaluate", "stats", "all"],
+        default="generate",
+        help=(
+            "Execution stage. Default runs retrieval/generation only. "
+            "Run evaluate after starting the judge model, then run stats."
+        ),
+    )
     parser.add_argument("--start-id", type=int, default=0)
     parser.add_argument("--end-id", type=int, default=49)
     parser.add_argument("--max-async-ingest-docs", type=int, default=2)
@@ -284,9 +294,15 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(experiments, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    modes = (
+        ("generate", "evaluate", "stats")
+        if args.stage == "all"
+        else (str(args.stage),)
+    )
     for experiment in experiments:
         paths.output_dir_for(str(experiment["name"])).mkdir(parents=True, exist_ok=True)
-        for mode in ("generate", "evaluate", "stats"):
+    for mode in modes:
+        for experiment in experiments:
             code = _run_command(
                 _evaluate_py_command(
                     args=args,
