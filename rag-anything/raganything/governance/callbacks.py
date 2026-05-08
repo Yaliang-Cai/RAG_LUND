@@ -12,10 +12,13 @@ logger = logging.getLogger(__name__)
 
 
 class IngestProvenanceCallback(ProcessingCallback):
-    """Capture chunk_ids as they are indexed for a single document.
+    """Manually-callable chunk-id collector.
 
-    The owning code (GovernanceService.run_ingest) reads `chunk_ids` after
-    LocalRagService.ingest() returns and persists provenance rows.
+    NOTE: LightRAG's upstream ProcessingCallback does NOT dispatch a
+    'on_chunk_indexed' event, so this callback is never invoked during
+    real ingest. Provenance capture in production happens via snapshot
+    diff in GovernanceService.run_ingest. This class is retained for
+    unit tests and as an opt-in manual API.
     """
 
     def __init__(self, workspace_id: str, doc_id: UUID):

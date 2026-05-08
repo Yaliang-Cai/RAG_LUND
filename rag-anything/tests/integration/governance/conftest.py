@@ -74,6 +74,10 @@ async def fake_rag():
     inner_rag.lightrag.entity_chunks.get = AsyncMock(return_value=[])
     inner_rag.lightrag.relation_chunks = MagicMock()
     inner_rag.lightrag.relation_chunks.get = AsyncMock(return_value=[])
+    # text_chunks: simulate an empty JsonKVStorage so _snapshot_chunk_ids returns set()
+    inner_rag.lightrag.text_chunks = MagicMock()
+    inner_rag.lightrag.text_chunks._data = {}
+    inner_rag.lightrag.text_chunks.db = None
     rag.get_rag = AsyncMock(return_value=inner_rag)
     return rag
 

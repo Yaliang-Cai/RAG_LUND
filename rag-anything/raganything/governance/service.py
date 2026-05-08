@@ -348,8 +348,9 @@ class GovernanceService:
     ) -> None:
         """Background coroutine launched by JobRunner.
 
-        Wraps LocalRagService.ingest() with status updates, provenance capture,
-        and audit logging.
+        Captures chunk provenance via before/after snapshot of LightRAG's text_chunks
+        KV (callback hooks don't carry chunk IDs in the upstream ProcessingCallback).
+        Safe under JobRunner(max_concurrent=1).
         """
         from raganything.governance.callbacks import (
             IngestProvenanceCallback, JobProgressCallback,
@@ -366,6 +367,13 @@ class GovernanceService:
 
         await self.mark_document_status(doc_id, "parsing")
         try:
+            rag_inner = await self._rag.get_rag(workspace_id)
+            await rag_inner._ensure_lightrag_initialized()
+            lr = rag_inner.lightrag
+
+            # Snapshot text_chunks BEFORE ingest
+            chunks_before = await self._snapshot_chunk_ids(lr)
+
             workspace_output = str(_P(self._rag.settings.output_dir) / workspace_id)
             await self._rag.ingest(
                 file_path,
@@ -373,18 +381,27 @@ class GovernanceService:
                 output_dir=workspace_output,
                 chunking_strategy=chunking_strategy or None,
             )
-            # Persist chunk provenance gathered by the callback.
-            await self.insert_provenance(workspace_id, doc_id, "chunk", prov_cb.chunk_ids)
+
+            # Diff to find this ingest's chunk IDs
+            chunks_after = await self._snapshot_chunk_ids(lr)
+            new_chunk_ids = sorted(chunks_after - chunks_before)
+            logger.info(
+                "run_ingest %s/%s captured %d new chunks",
+                workspace_id, doc_id, len(new_chunk_ids),
+            )
+
+            # Persist chunk provenance.
+            await self.insert_provenance(workspace_id, doc_id, "chunk", new_chunk_ids)
             # Backfill entity / relation provenance from LightRAG's per-chunk maps.
             await self._backfill_entity_relation_provenance(
-                workspace_id, doc_id, prov_cb.chunk_ids,
+                workspace_id, doc_id, new_chunk_ids,
             )
             await self.mark_document_status(doc_id, "done", finished=True)
             await self.record_audit(
                 workspace_id, "ingest",
                 doc_id=doc_id,
                 details={
-                    "chunk_count": len(prov_cb.chunk_ids),
+                    "chunk_count": len(new_chunk_ids),
                     "filename": _P(file_path).name,
                 },
             )
@@ -401,6 +418,54 @@ class GovernanceService:
         finally:
             self._rag.unregister_callback(prov_cb)
             self._rag.unregister_callback(prog_cb)
+
+    async def _snapshot_chunk_ids(self, lr) -> set[str]:
+        """Return the current set of chunk IDs from LightRAG's text_chunks KV.
+
+        Tries storage APIs in order of preference:
+          1. JsonKVStorage: reads ._data dict directly (in-memory shared state).
+          2. PGKVStorage: issues a direct SELECT id FROM LIGHTRAG_DOC_CHUNKS.
+          3. Any KV with a get_all() -> dict[id, value] method (future-proof).
+          4. Any KV with an all_keys() method.
+        Returns an empty set on any failure so ingest still succeeds.
+        Safe under JobRunner(max_concurrent=1) — no other writer is active.
+        """
+        if lr is None:
+            return set()
+        tc = getattr(lr, "text_chunks", None)
+        if tc is None:
+            return set()
+        try:
+            # 1. JsonKVStorage: _data is a shared-memory proxy dict populated after initialize()
+            inner = getattr(tc, "_data", None)
+            if isinstance(inner, dict):
+                return set(inner.keys())
+
+            # 2. PGKVStorage: use the injected db connection pool directly
+            db = getattr(tc, "db", None)
+            if db is not None and callable(getattr(db, "query", None)):
+                workspace = getattr(tc, "workspace", "") or ""
+                rows = await db.query(
+                    "SELECT id FROM LIGHTRAG_DOC_CHUNKS WHERE workspace=$1",
+                    [workspace],
+                    multirows=True,
+                ) or []
+                return {r["id"] for r in rows}
+
+            # 3. Future-proof: get_all() returning dict[id, value]
+            if hasattr(tc, "get_all"):
+                data = await tc.get_all()
+                if isinstance(data, dict):
+                    return set(data.keys())
+
+            # 4. Future-proof: all_keys()
+            if hasattr(tc, "all_keys"):
+                keys = await tc.all_keys()
+                return set(keys) if keys else set()
+
+        except Exception:
+            logger.exception("_snapshot_chunk_ids failed; provenance will be empty")
+        return set()
 
     async def delete_document(self, workspace_id: str, doc_id) -> dict:
         """Five-step orchestrated delete. Returns a cleanup report dict."""
