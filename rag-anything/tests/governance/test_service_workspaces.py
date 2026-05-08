@@ -47,3 +47,13 @@ async def test_ensure_writable_passes_when_unfrozen_or_missing(gov):
     await gov.ensure_writable("never_seen")  # no row → not frozen
     await gov.ensure_workspace("w2")
     await gov.ensure_writable("w2")  # exists, frozen=False
+
+
+async def test_backfill_legacy_workspaces(gov):
+    inserted = await gov.backfill_legacy_workspaces(["w1", "w2"])
+    assert inserted == 2
+    again = await gov.backfill_legacy_workspaces(["w1", "w2", "w3"])
+    assert again == 1  # only w3 was new
+    rows = [await gov.get_workspace(w) for w in ("w1", "w2", "w3")]
+    assert all(r is not None for r in rows)
+    assert rows[0].metadata == {"legacy": True}

@@ -65,6 +65,32 @@ class GovernanceService:
         if frozen is True:
             raise WorkspaceFrozenError(f"workspace '{workspace_id}' is frozen")
 
+    async def backfill_legacy_workspaces(self, workspace_ids: list[str]) -> int:
+        """Insert workspace rows for any workspace_id not already in PG.
+
+        Used at startup to register filesystem-only workspaces created before
+        the governance layer existed. Returns count of new rows inserted.
+        """
+        if not workspace_ids:
+            return 0
+        async with self._pool.acquire() as conn:
+            existing = {
+                r["workspace_id"]
+                for r in await conn.fetch(
+                    "SELECT workspace_id FROM workspaces WHERE workspace_id = ANY($1::text[])",
+                    workspace_ids,
+                )
+            }
+            new = [w for w in workspace_ids if w not in existing]
+            if not new:
+                return 0
+            await conn.executemany("""
+                INSERT INTO workspaces (workspace_id, metadata)
+                VALUES ($1, $2)
+                ON CONFLICT (workspace_id) DO NOTHING
+            """, [(w, {"legacy": True}) for w in new])
+        return len(new)
+
     # --- documents -------------------------------------------------------
 
     async def upsert_document(

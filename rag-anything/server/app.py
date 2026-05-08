@@ -95,6 +95,20 @@ async def lifespan(app: FastAPI):
     job_runner = JobRunner(gov_service, max_concurrent=gov_settings.job_max_concurrent)
     await job_runner.start()
 
+    # Discover existing workspaces on disk and register them.
+    working_root = Path(rag_settings.working_dir_root).resolve()
+    output_root = Path(rag_settings.output_dir).resolve()
+    discovered: set[str] = set()
+    for root in (working_root, output_root):
+        if root.exists():
+            for d in root.iterdir():
+                if d.is_dir():
+                    discovered.add(d.name)
+    if discovered:
+        new_count = await gov_service.backfill_legacy_workspaces(sorted(discovered))
+        if new_count:
+            logger.info("lifespan: backfilled %d legacy workspaces", new_count)
+
     app.state.pg_pool = pg_pool
     app.state.rag = rag_service
     app.state.gov = gov_service
