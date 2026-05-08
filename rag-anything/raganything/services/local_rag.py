@@ -1802,6 +1802,37 @@ class LocalRagService:
         self._workspace_warmup_locks.pop(workspace_id, None)
         self._workspace_synonym_locks.pop(workspace_id, None)
 
+    async def aclose(self) -> None:
+        """Release all long-lived resources held by this service.
+
+        Called from the FastAPI lifespan shutdown hook. Idempotent.
+        """
+        # 1. Finalize each cached LightRAG instance (closes Neo4j sessions, Qdrant clients).
+        workspace_ids = list(self._rag_instances.keys())
+        for wid in workspace_ids:
+            try:
+                await self.cleanup_workspace_instance(wid)
+            except Exception:
+                self.logger.exception("aclose: cleanup_workspace_instance(%s) failed", wid)
+
+        # 2. Close httpx-backed OpenAI clients.
+        for attr in ("text_client", "vision_client"):
+            client = getattr(self, attr, None)
+            if client is None:
+                continue
+            try:
+                await client.close()
+            except Exception:
+                self.logger.exception("aclose: %s.close() failed", attr)
+
+        # 3. Drop GPU-resident model cache so a subsequent process can reload cleanly.
+        try:
+            _MODEL_CACHE.clear()
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            self.logger.exception("aclose: model cache cleanup failed")
+
     def _workspace_state_dir(self, workspace_id: str) -> Path:
         return Path(self.settings.working_dir_root) / workspace_id
 
