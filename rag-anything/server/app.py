@@ -1188,9 +1188,15 @@ async def delete_workspace(
     workspace_id: str,
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
+    gov: GovernanceService = Depends(get_gov),
 ):
     import asyncio as _asyncio
     _validate_workspace_id(workspace_id)
+
+    try:
+        await gov.ensure_writable(workspace_id)
+    except WorkspaceFrozenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
     # Step 1: Drop all storages (Neo4j, Qdrant, KV) before touching the filesystem
     drop_errors = []
@@ -1232,6 +1238,8 @@ async def delete_workspace(
             shutil.rmtree(str(d), ignore_errors=True)
             deleted.append(name)
 
+    await gov.record_audit(workspace_id, "delete_workspace",
+                           details={"deleted": deleted, "drop_errors": drop_errors})
     return {"status": "ok", "deleted": deleted, "drop_errors": drop_errors}
 
 
@@ -1277,6 +1285,39 @@ async def get_workspace_stats(
         "graphml_size": graphml_path.stat().st_size if graphml_path.exists() else 0,
         "upload_size_total": _dir_size(upload_dir),
     }
+
+
+@app.patch("/workspace/{workspace_id}/freeze")
+async def freeze_workspace(
+    workspace_id: str,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    _validate_workspace_id(workspace_id)
+    await gov.ensure_workspace(workspace_id)
+    ws_before = await gov.get_workspace(workspace_id)
+    prev = bool(ws_before.frozen) if ws_before else False
+    ok = await gov.set_frozen(workspace_id, True)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    await gov.record_audit(workspace_id, "freeze", details={"previous_state": prev})
+    return {"workspace_id": workspace_id, "frozen": True}
+
+
+@app.patch("/workspace/{workspace_id}/unfreeze")
+async def unfreeze_workspace(
+    workspace_id: str,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    _validate_workspace_id(workspace_id)
+    ws_before = await gov.get_workspace(workspace_id)
+    if ws_before is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    ok = await gov.set_frozen(workspace_id, False)
+    await gov.record_audit(workspace_id, "unfreeze",
+                           details={"previous_state": ws_before.frozen})
+    return {"workspace_id": workspace_id, "frozen": False}
 
 
 # =========================================================================
