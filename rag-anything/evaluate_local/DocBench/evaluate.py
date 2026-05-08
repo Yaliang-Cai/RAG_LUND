@@ -39,6 +39,7 @@ import logging
 import re
 import sys
 import gc
+import copy
 from pathlib import Path
 from datetime import datetime
 from typing import Any, TextIO
@@ -50,10 +51,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from evaluate_local.ablation_flags import as_bool
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
 from raganything.constants import (
+    DEFAULT_CHUNK_TOP_K,
     DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
+    DEFAULT_NAIVE_TOP_K,
     DEFAULT_PPR_QA_TOP_K,
     DEFAULT_PPR_TOP_K,
     DEFAULT_RECOGNITION_TOP_K,
+    DEFAULT_TOP_K,
 )
 
 # ==========================================
@@ -69,6 +73,7 @@ DATA_ROOT = Path("/data/y50056788/Yaliang/datasets_for_eval/data_for_DocBench")
 # Output root directory (all results are saved here)
 OUTPUT_DIR = SCRIPT_DIR / "docbench_results"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+INDEX_STATE_DIR = OUTPUT_DIR
 PROMPT_DUMP_DIR = OUTPUT_DIR / "prompt_dumps"
 PROMPT_DUMP_DIR.mkdir(parents=True, exist_ok=True)
 FINAL_MESSAGES_DUMP_DIR = OUTPUT_DIR / "final_vlm_messages"
@@ -102,8 +107,9 @@ RAGANYTHING_EVAL_PROMPT_FILENAME = "evaluation_prompt_RAG-Anything.txt"
 # Query parameters (DocBench tuned)
 DOCBENCH_QUERY_PARAMS = {
     "mode": "hybrid",
-    "top_k": 40,
-    "chunk_top_k": 20,
+    "top_k": DEFAULT_TOP_K,
+    "chunk_top_k": DEFAULT_CHUNK_TOP_K,
+    "naive_top_k": DEFAULT_NAIVE_TOP_K,
     "enable_rerank": True,
     "rerank_score_scope": "all",
     "vlm_enhanced": True,
@@ -144,6 +150,9 @@ def _build_docbench_query_params(
     one_sentence: bool = False,
     *,
     query_mode: str | None = None,
+    top_k: int | None = None,
+    chunk_top_k: int | None = None,
+    naive_top_k: int | None = None,
     recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K,
     keyword_fanout_mode: str = "joined",
     keyword_entity_rrf_k: int = 10,
@@ -171,6 +180,12 @@ def _build_docbench_query_params(
             query_params["mode"] = normalized_mode
 
     mode = str(query_params.get("mode", "")).strip()
+    if top_k is not None:
+        query_params["top_k"] = int(top_k)
+    if chunk_top_k is not None:
+        query_params["chunk_top_k"] = int(chunk_top_k)
+    if naive_top_k is not None:
+        query_params["naive_top_k"] = int(naive_top_k)
     query_params["enable_rerank"] = bool(enable_rerank)
     query_params["enable_kg_rerank"] = bool(enable_kg_rerank)
     query_params["keyword_fanout_mode"] = str(keyword_fanout_mode).strip()
@@ -247,6 +262,51 @@ def _load_eval_prompt(eval_prompt_filename: str) -> str:
         return f.read()
 
 
+def _configure_runtime_paths(
+    *,
+    run_output_dir: str | Path | None = None,
+    working_dir_root: str | Path | None = None,
+    index_state_dir: str | Path | None = None,
+) -> None:
+    """Override output/index paths for one run without changing dataset paths."""
+    global OUTPUT_DIR
+    global INDEX_STATE_DIR
+    global PROMPT_DUMP_DIR
+    global FINAL_MESSAGES_DUMP_DIR
+    global GENERATION_CONFIG_FILE
+    global SINGLE_INGEST_MANIFEST_FILE
+    global SINGLE_INGEST_FAILURES_FILE
+    global WORKING_DIR_ROOT
+    global OUTPUT_MD_DIR
+    global _MASTER_LOG_PATH
+
+    if run_output_dir is not None:
+        OUTPUT_DIR = Path(run_output_dir).expanduser().resolve()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    if working_dir_root is not None:
+        WORKING_DIR_ROOT = Path(working_dir_root).expanduser().resolve()
+    else:
+        WORKING_DIR_ROOT = OUTPUT_DIR / "rag_workspaces"
+    WORKING_DIR_ROOT.mkdir(parents=True, exist_ok=True)
+
+    if index_state_dir is not None:
+        INDEX_STATE_DIR = Path(index_state_dir).expanduser().resolve()
+    else:
+        INDEX_STATE_DIR = OUTPUT_DIR
+    INDEX_STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    PROMPT_DUMP_DIR = OUTPUT_DIR / "prompt_dumps"
+    FINAL_MESSAGES_DUMP_DIR = OUTPUT_DIR / "final_vlm_messages"
+    GENERATION_CONFIG_FILE = OUTPUT_DIR / "generation_config.json"
+    SINGLE_INGEST_MANIFEST_FILE = INDEX_STATE_DIR / "single_ingest_manifest.json"
+    SINGLE_INGEST_FAILURES_FILE = INDEX_STATE_DIR / "single_ingest_failures.jsonl"
+    OUTPUT_MD_DIR = INDEX_STATE_DIR / "mineru_outputs"
+    for path in (PROMPT_DUMP_DIR, FINAL_MESSAGES_DUMP_DIR, OUTPUT_MD_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+    _MASTER_LOG_PATH = None
+
+
 def _save_generation_config(
     *,
     one_sentence: bool,
@@ -259,6 +319,8 @@ def _save_generation_config(
     eval_prompt_filename: str,
     effective_query_params: dict[str, Any],
     index_profile: dict[str, Any],
+    apply_synonym_edges: bool,
+    synonymy_threshold: float,
     start_id: int,
     end_id: int,
     resume: bool,
@@ -274,9 +336,16 @@ def _save_generation_config(
         "eval_prompt_filename": eval_prompt_filename,
         "effective_query_params": dict(effective_query_params),
         "index_profile": dict(index_profile),
+        "apply_synonym_edges": bool(apply_synonym_edges),
+        "synonymy_threshold": float(synonymy_threshold),
         "start_id": int(start_id),
         "end_id": int(end_id),
         "resume": bool(resume),
+        "paths": {
+            "run_output_dir": str(OUTPUT_DIR),
+            "working_dir_root": str(WORKING_DIR_ROOT),
+            "index_state_dir": str(INDEX_STATE_DIR),
+        },
     }
     with open(GENERATION_CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -333,14 +402,17 @@ logging.getLogger("raganything.parser").setLevel(logging.INFO)
 _MASTER_LOG_PATH: Path | None = None
 
 
-def _ensure_master_log_handler() -> None:
+def _ensure_master_log_handler(mode: str = "generate") -> None:
     """
     Keep one consolidated evaluate log file even if LocalRagService is recycled.
     """
     global _MASTER_LOG_PATH
     if _MASTER_LOG_PATH is None:
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        _MASTER_LOG_PATH = OUTPUT_DIR / "logs" / f"evaluate_generate_{ts}.log"
+        safe_mode = "".join(
+            ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(mode)
+        )
+        _MASTER_LOG_PATH = OUTPUT_DIR / "logs" / f"evaluate_{safe_mode}_{ts}.log"
         _MASTER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     root_logger = logging.getLogger()
@@ -396,13 +468,21 @@ def _save_json_file(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _build_docbench_index_profile(settings: LocalRagSettings) -> dict[str, Any]:
+def _build_docbench_index_profile(
+    settings: LocalRagSettings,
+    *,
+    apply_synonym_edges: bool = True,
+    synonymy_threshold: float = 0.8,
+) -> dict[str, Any]:
     profile: dict[str, Any] = {
         "schema_version": "docbench_single_index_profile_v1",
         "profile_version": 1,
+        "base_profile": "v0",
         "enable_entity_disambiguation": bool(settings.enable_entity_disambiguation),
         "enable_synonym_linking": bool(settings.enable_synonym_linking),
         "enable_multi_hop": bool(settings.enable_multi_hop),
+        "synonym_edges_postprocess_enabled": bool(apply_synonym_edges),
+        "synonym_edges_threshold": float(synonymy_threshold),
         "enable_entity_surface_normalization": bool(
             settings.enable_entity_surface_normalization
         ),
@@ -419,7 +499,7 @@ def _build_docbench_index_profile(settings: LocalRagSettings) -> dict[str, Any]:
         ),
     }
     if hasattr(settings, "synonymy_threshold"):
-        profile["synonymy_threshold"] = float(settings.synonymy_threshold)
+        profile["synonymy_threshold"] = float(synonymy_threshold)
     if hasattr(settings, "synonymy_topk"):
         profile["synonymy_topk"] = int(settings.synonymy_topk)
     if hasattr(settings, "synonymy_min_entity_len"):
@@ -553,6 +633,7 @@ def _record_single_ingest_success(
     workspace_id: str,
     pdf_file: Path,
     index_profile: dict[str, Any],
+    synonym_edges: dict[str, Any],
 ) -> None:
     docs = manifest.setdefault("docs", {})
     docs[str(doc_name)] = {
@@ -562,6 +643,7 @@ def _record_single_ingest_success(
         "file_name": pdf_file.name,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "index_profile": dict(index_profile),
+        "synonym_edges": dict(synonym_edges),
     }
     _save_single_ingest_manifest(manifest)
 
@@ -597,6 +679,62 @@ def _validate_per_doc_workspace_env_isolation(workspace_ids: list[str]) -> None:
             "NEO4J_WORKSPACE/QDRANT_WORKSPACE or run a single matching doc. "
             f"Details: {'; '.join(conflicts)}"
         )
+
+
+async def _apply_v0_synonym_edges(
+    service: LocalRagService,
+    workspace_id: str,
+    *,
+    synonymy_threshold: float,
+) -> dict[str, Any]:
+    old_service_values = {
+        "enable_synonym_linking": service.settings.enable_synonym_linking,
+        "synonymy_threshold": service.settings.synonymy_threshold,
+    }
+    service.settings.enable_synonym_linking = True
+    service.settings.synonymy_threshold = float(synonymy_threshold)
+
+    rag = await service.get_rag(workspace_id)
+    lightrag_inst = getattr(rag, "lightrag", None)
+    old_lightrag_values: dict[str, Any] = {}
+    if lightrag_inst is not None:
+        for key, value in (
+            ("enable_synonym_linking", True),
+            ("synonymy_threshold", float(synonymy_threshold)),
+            ("synonymy_topk", int(service.settings.synonymy_topk)),
+            ("synonymy_min_entity_len", int(service.settings.synonymy_min_entity_len)),
+            ("enable_entity_disambiguation", False),
+        ):
+            if hasattr(lightrag_inst, key):
+                old_lightrag_values[key] = getattr(lightrag_inst, key)
+                setattr(lightrag_inst, key, value)
+
+    try:
+        if hasattr(service, "finalize_workspace_synonyms"):
+            result = await service.finalize_workspace_synonyms(
+                workspace_id,
+                force=True,
+                reset_existing=True,
+            )
+        elif lightrag_inst is not None and hasattr(lightrag_inst, "rebuild_synonym_edges"):
+            result = await lightrag_inst.rebuild_synonym_edges(reset_existing=True)
+        else:
+            raise RuntimeError(
+                f"Cannot apply synonym edges for workspace '{workspace_id}': rebuild API missing"
+            )
+    finally:
+        service.settings.enable_synonym_linking = old_service_values[
+            "enable_synonym_linking"
+        ]
+        service.settings.synonymy_threshold = old_service_values["synonymy_threshold"]
+        if lightrag_inst is not None:
+            for key, value in old_lightrag_values.items():
+                setattr(lightrag_inst, key, value)
+
+    payload = dict(result or {})
+    payload["applied"] = True
+    payload["threshold"] = float(synonymy_threshold)
+    return payload
 
 
 def _build_generation_result(
@@ -927,9 +1065,10 @@ def _build_docbench_settings() -> LocalRagSettings:
     settings.query_max_tokens = 2048
     settings.ingest_max_tokens = 8192
     settings.vlm_enable_json_schema = True
-    settings.enable_entity_disambiguation = True
-    settings.enable_synonym_linking = True
+    settings.enable_entity_disambiguation = False
+    settings.enable_synonym_linking = False
     settings.enable_multi_hop = False
+    settings.synonymy_threshold = 0.8
     settings.enable_entity_surface_normalization = True
     settings.enable_keyword_case_normalization = True
     settings.strict_relation_endpoint_entity_match = True
@@ -963,6 +1102,7 @@ def _build_raw_prompt_query_kwargs(
         "max_total_tokens",
         "max_entity_tokens",
         "max_relation_tokens",
+        "naive_top_k",
         "entity_qdrant_retrieval_mode",
         "chunk_qdrant_retrieval_mode",
         "exclude_synonym_edges",
@@ -991,11 +1131,11 @@ def _build_raw_prompt_query_kwargs(
 
 async def generate_answers(
     start_id: int = 0,
-    end_id: int = 229,
+    end_id: int = 49,
     resume: bool = True,
     dump_raw_prompt: bool = False,
     dump_final_messages: bool = False,
-    max_async_generate: int = 1,
+    max_async_generate: int = 6,
     max_async_docs: int | None = None,
     max_async_ingest_docs: int | None = None,
     max_async_query_docs: int | None = None,
@@ -1003,7 +1143,13 @@ async def generate_answers(
     one_sentence: bool = False,
     profile_name: str = "docbench_official",
     eval_prompt_filename: str = DOCBENCH_EVAL_PROMPT_FILENAME,
+    run_output_dir: str | Path | None = None,
+    working_dir_root: str | Path | None = None,
+    index_state_dir: str | Path | None = None,
     query_mode: str | None = None,
+    top_k: int | None = None,
+    chunk_top_k: int | None = None,
+    naive_top_k: int | None = None,
     recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K,
     keyword_fanout_mode: str = "joined",
     keyword_entity_rrf_k: int = 10,
@@ -1021,6 +1167,8 @@ async def generate_answers(
     ppr_qa_top_k: int | None = None,
     ppr_post_rerank_fusion: str = "none",
     ppr_post_rerank_rrf_k: int = 60,
+    apply_synonym_edges: bool = True,
+    synonymy_threshold: float = 0.8,
     bypass_query_cache: bool = False,
     bypass_keywords_cache: bool = False,
 ):
@@ -1041,8 +1189,13 @@ async def generate_answers(
         max_async_query_docs: Max concurrent document workspaces in query phase.
         doc_flush_every: Recycle service every N docs; 0 disables recycle.
     """
+    _configure_runtime_paths(
+        run_output_dir=run_output_dir,
+        working_dir_root=working_dir_root,
+        index_state_dir=index_state_dir,
+    )
     output_file = OUTPUT_DIR / "system_answers.jsonl"
-    max_async_generate = _normalize_max_async(max_async_generate, default=1)
+    max_async_generate = _normalize_max_async(max_async_generate, default=6)
     if max_async_docs is not None:
         if max_async_ingest_docs is None:
             max_async_ingest_docs = max_async_docs
@@ -1079,6 +1232,9 @@ async def generate_answers(
     query_params = _build_docbench_query_params(
         one_sentence=one_sentence,
         query_mode=query_mode,
+        top_k=top_k,
+        chunk_top_k=chunk_top_k,
+        naive_top_k=naive_top_k,
         recognition_top_k=recognition_top_k,
         keyword_fanout_mode=keyword_fanout_mode,
         keyword_entity_rrf_k=keyword_entity_rrf_k,
@@ -1101,7 +1257,12 @@ async def generate_answers(
     )
 
     settings = _build_docbench_settings()
-    index_profile = _build_docbench_index_profile(settings)
+    settings.synonymy_threshold = float(synonymy_threshold)
+    index_profile = _build_docbench_index_profile(
+        settings,
+        apply_synonym_edges=apply_synonym_edges,
+        synonymy_threshold=float(synonymy_threshold),
+    )
 
     _save_generation_config(
         one_sentence=one_sentence,
@@ -1114,6 +1275,8 @@ async def generate_answers(
         eval_prompt_filename=eval_prompt_filename,
         effective_query_params=query_params,
         index_profile=index_profile,
+        apply_synonym_edges=apply_synonym_edges,
+        synonymy_threshold=float(synonymy_threshold),
         start_id=start_id,
         end_id=end_id,
         resume=resume,
@@ -1185,7 +1348,7 @@ async def generate_answers(
     ingested_docs_lock = asyncio.Lock()
 
     def _new_service(label: str) -> LocalRagService:
-        service = LocalRagService(settings)
+        service = LocalRagService(copy.deepcopy(settings))
         logger.info("RAG service initialized for %s", label)
         _ensure_master_log_handler()
         _bridge_lightrag_logs_to_run_file()
@@ -1227,12 +1390,18 @@ async def generate_answers(
                 output_dir=doc_output_dir,
                 workspace_id=workspace_id,
             )
-            if settings.enable_synonym_linking:
-                await service.finalize_workspace_synonyms(
+            synonym_edges_record: dict[str, Any] = {
+                "applied": False,
+                "threshold": float(synonymy_threshold),
+                "skipped": not bool(apply_synonym_edges),
+            }
+            if apply_synonym_edges:
+                synonym_result = await _apply_v0_synonym_edges(
+                    service,
                     workspace_id,
-                    force=False,
-                    reset_existing=True,
+                    synonymy_threshold=float(synonymy_threshold),
                 )
+                synonym_edges_record.update(synonym_result)
             logger.info(f"Ingestion complete, workspace_id: {returned_workspace_id}")
             async with manifest_lock:
                 _record_single_ingest_success(
@@ -1241,6 +1410,7 @@ async def generate_answers(
                     workspace_id=workspace_id,
                     pdf_file=pdf_file,
                     index_profile=index_profile,
+                    synonym_edges=synonym_edges_record,
                 )
             return doc_name, True
         except Exception as exc:
@@ -1575,6 +1745,7 @@ async def evaluate_answers(
     Args:
         resume: Skip already-evaluated records.
     """
+    _ensure_master_log_handler("evaluate")
     input_file = OUTPUT_DIR / "system_answers.jsonl"
     output_file = OUTPUT_DIR / "eval_results.jsonl"
     max_async_judge = _normalize_max_async(max_async_judge)
@@ -1798,6 +1969,7 @@ def _map_type_group(qtype: Any) -> str | None:
 
 def calculate_statistics():
     """Calculate evaluation statistics."""
+    _ensure_master_log_handler("stats")
     result_file = OUTPUT_DIR / "eval_results.jsonl"
     
     if not result_file.exists():
@@ -1968,8 +2140,26 @@ Examples:
     parser.add_argument(
         "--end_id",
         type=int,
-        default=229,
+        default=49,
         help="End document ID (exclusive).",
+    )
+    parser.add_argument(
+        "--run_output_dir",
+        type=str,
+        default=None,
+        help="Directory for this query/evaluation group's outputs.",
+    )
+    parser.add_argument(
+        "--working_dir_root",
+        type=str,
+        default=None,
+        help="Shared root directory for per-document RAG workspaces.",
+    )
+    parser.add_argument(
+        "--index_state_dir",
+        type=str,
+        default=None,
+        help="Shared directory for single-doc ingest manifest/failures and MinerU outputs.",
     )
     parser.add_argument(
         "--no_resume",
@@ -2000,7 +2190,7 @@ Examples:
     parser.add_argument(
         "--max_async_generate",
         type=int,
-        default=1,
+        default=6,
         help="Max concurrent question requests per document in generate mode.",
     )
     parser.add_argument(
@@ -2031,6 +2221,19 @@ Examples:
         "--query_mode",
         choices=DOCBENCH_QUERY_MODE_CHOICES,
         default=DOCBENCH_QUERY_PARAMS["mode"],
+    )
+    parser.add_argument("--top_k", type=int, default=DOCBENCH_QUERY_PARAMS["top_k"])
+    parser.add_argument(
+        "--chunk_top_k",
+        type=int,
+        default=DOCBENCH_QUERY_PARAMS["chunk_top_k"],
+    )
+    parser.add_argument(
+        "--naive_top_k",
+        "--naive-top-k",
+        dest="naive_top_k",
+        type=int,
+        default=DOCBENCH_QUERY_PARAMS["naive_top_k"],
     )
     parser.add_argument(
         "--entity_retrieval_mode",
@@ -2072,6 +2275,8 @@ Examples:
         default="none",
     )
     parser.add_argument("--ppr_post_rerank_rrf_k", type=int, default=60)
+    parser.add_argument("--apply_synonym_edges", type=as_bool, default=True)
+    parser.add_argument("--synonymy_threshold", type=float, default=0.8)
     parser.add_argument(
         "--keyword_fanout_mode",
         choices=["joined", "per_keyword_rrf"],
@@ -2105,6 +2310,11 @@ Examples:
     parser.add_argument("--bypass_keywords_cache", action="store_true")
 
     args = parser.parse_args()
+    _configure_runtime_paths(
+        run_output_dir=args.run_output_dir,
+        working_dir_root=args.working_dir_root,
+        index_state_dir=args.index_state_dir,
+    )
     
     profile_name, effective_one_sentence, eval_prompt_filename = _resolve_eval_setup(
         args.raganything_eval_setup
@@ -2126,8 +2336,14 @@ Examples:
     logger.info(f"MaxAsyncDocs: {args.max_async_docs}")
     logger.info(f"MaxAsyncIngestDocs: {args.max_async_ingest_docs}")
     logger.info(f"MaxAsyncQueryDocs: {args.max_async_query_docs}")
+    logger.info(f"RunOutputDir: {OUTPUT_DIR}")
+    logger.info(f"WorkingDirRoot: {WORKING_DIR_ROOT}")
+    logger.info(f"IndexStateDir: {INDEX_STATE_DIR}")
     logger.info(f"DocFlushEvery: {args.doc_flush_every}")
     logger.info(f"QueryMode: {args.query_mode}")
+    logger.info(f"TopK: {args.top_k}")
+    logger.info(f"ChunkTopK: {args.chunk_top_k}")
+    logger.info(f"NaiveTopK: {args.naive_top_k}")
     logger.info(f"EntityRetrievalMode: {args.entity_retrieval_mode}")
     logger.info(f"ChunkRetrievalMode: {args.chunk_retrieval_mode}")
     logger.info(f"ExcludeSynonymEdges: {args.exclude_synonym_edges}")
@@ -2151,7 +2367,13 @@ Examples:
             one_sentence=effective_one_sentence,
             profile_name=profile_name,
             eval_prompt_filename=eval_prompt_filename,
+            run_output_dir=args.run_output_dir,
+            working_dir_root=args.working_dir_root,
+            index_state_dir=args.index_state_dir,
             query_mode=args.query_mode,
+            top_k=args.top_k,
+            chunk_top_k=args.chunk_top_k,
+            naive_top_k=args.naive_top_k,
             recognition_top_k=args.recognition_top_k,
             keyword_fanout_mode=args.keyword_fanout_mode,
             keyword_entity_rrf_k=args.keyword_entity_rrf_k,
@@ -2173,6 +2395,8 @@ Examples:
             ppr_qa_top_k=args.ppr_qa_top_k,
             ppr_post_rerank_fusion=args.ppr_post_rerank_fusion,
             ppr_post_rerank_rrf_k=args.ppr_post_rerank_rrf_k,
+            apply_synonym_edges=args.apply_synonym_edges,
+            synonymy_threshold=args.synonymy_threshold,
             bypass_query_cache=args.bypass_query_cache,
             bypass_keywords_cache=args.bypass_keywords_cache,
         )

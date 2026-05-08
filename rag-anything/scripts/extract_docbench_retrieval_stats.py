@@ -46,13 +46,25 @@ def _find_type_metrics(by_type: dict[str, Any], label: str) -> dict[str, Any] | 
 def _iter_statistics_files(base: Path) -> list[Path]:
     if base.is_file():
         return [base] if base.name == "statistics.json" else []
-    if base.name == "evaluate_shared":
+    if base.name in {"evaluate_shared", "evaluate"}:
         candidate = base / "statistics.json"
         return [candidate] if candidate.exists() else []
+    single_direct = sorted(base.glob("docbench_single__*/evaluate/statistics.json"))
+    if single_direct:
+        return single_direct
     direct = sorted(base.glob("docbench__*/evaluate_shared/statistics.json"))
     if direct:
         return direct
+    single_nested = sorted(base.glob("**/docbench_single__*/evaluate/statistics.json"))
+    if single_nested:
+        return single_nested
     return sorted(base.glob("**/docbench__*/evaluate_shared/statistics.json"))
+
+
+def _experiment_name_for_stats(path: Path) -> str:
+    if path.parent.name == "evaluate":
+        return path.parent.parent.name
+    return path.parent.parent.name
 
 
 def _row_for_stats(path: Path, type_labels: tuple[str, ...]) -> dict[str, Any]:
@@ -63,7 +75,7 @@ def _row_for_stats(path: Path, type_labels: tuple[str, ...]) -> dict[str, Any]:
         by_type = {}
 
     row: dict[str, Any] = {
-        "experiment": path.parent.parent.name,
+        "experiment": _experiment_name_for_stats(path),
         "overall": _metric_value(overall, "accuracy"),
     }
     for label in type_labels:
@@ -76,7 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Extract DocBench retrieval-ablation statistics from "
-            "docbench__*/evaluate_shared/statistics.json files."
+            "docbench__*/evaluate_shared/statistics.json or "
+            "docbench_single__*/evaluate/statistics.json files."
         )
     )
     parser.add_argument(
