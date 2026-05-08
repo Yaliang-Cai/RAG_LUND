@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Literal, Optional, Set
 
@@ -14,6 +15,15 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+
+from raganything.governance import (
+    GovernanceService,
+    GovernanceSettings,
+    JobRunner,
+    create_pool,
+    mark_orphaned_jobs_crashed,
+    run_migrations,
+)
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
 from raganything.chunking import CHUNKING_STRATEGIES
@@ -69,9 +79,40 @@ SUPPORTED_EXTENSIONS: Set[str] = {
 # 三层存储目录
 UPLOADS_DIR = Path(os.getenv("RAGANYTHING_UPLOADS_DIR", DEFAULT_UPLOADS_DIR)).resolve()
 
-app = FastAPI(title="RAGAnything Local Service")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    rag_settings = LocalRagSettings.from_env()
+    gov_settings = GovernanceSettings.from_env()
+
+    pg_pool = await create_pool(gov_settings)
+    await run_migrations(pg_pool)
+    crashed = await mark_orphaned_jobs_crashed(pg_pool)
+    if crashed:
+        logger.warning("lifespan: marked %d orphaned jobs as crashed", crashed)
+
+    rag_service = LocalRagService(rag_settings)
+    gov_service = GovernanceService(pg_pool, rag_service)
+    job_runner = JobRunner(gov_service, max_concurrent=gov_settings.job_max_concurrent)
+    await job_runner.start()
+
+    app.state.pg_pool = pg_pool
+    app.state.rag = rag_service
+    app.state.gov = gov_service
+    app.state.jobs = job_runner
+    app.state.gov_settings = gov_settings
+
+    logger.info("lifespan: startup complete")
+    try:
+        yield
+    finally:
+        await job_runner.stop(grace_period=gov_settings.job_shutdown_grace)
+        await rag_service.aclose()
+        await pg_pool.close()
+        logger.info("lifespan: shutdown complete")
+
+
+app = FastAPI(title="RAGAnything Local Service", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
-_service: Optional[LocalRagService] = None
 
 if _USE_LOCAL_STATIC:
     logger.info("Offline mode: serving JS/CSS from server/static/")
@@ -138,12 +179,21 @@ def _find_md_in_hybrid_auto(workspace_id: str, filename: str, output_dir: str) -
 
 
 # --- 依赖注入 ---
-def get_service() -> LocalRagService:
-    global _service
-    if _service is None:
-        settings = LocalRagSettings.from_env()
-        _service = LocalRagService(settings)
-    return _service
+def get_service(request: Request) -> LocalRagService:
+    """Backward-compat alias for get_rag(). Prefer Depends(get_rag) in new code."""
+    return request.app.state.rag
+
+
+def get_rag(request: Request) -> LocalRagService:
+    return request.app.state.rag
+
+
+def get_gov(request: Request) -> GovernanceService:
+    return request.app.state.gov
+
+
+def get_jobs(request: Request) -> JobRunner:
+    return request.app.state.jobs
 
 def verify_api_key(x_api_key: Optional[str] = Header(default=None)):
     expected = os.getenv(API_KEY_ENV, "").strip()
