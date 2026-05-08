@@ -159,7 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-async-ingest-docs", type=int, default=2)
     parser.add_argument("--max-async-query-docs", type=int, default=1)
     parser.add_argument("--max-async-generate", type=int, default=6)
-    parser.add_argument("--max-async-judge", type=int, default=4)
+    parser.add_argument("--max-async-judge", type=int, default=50)
     parser.add_argument("--doc-flush-every", type=int, default=4)
     parser.add_argument("--synonymy-threshold", type=float, default=0.8)
     parser.add_argument("--python-exe", default=sys.executable)
