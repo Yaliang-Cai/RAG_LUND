@@ -1,0 +1,57 @@
+### Variables (edit before running)
+@baseUrl = http://127.0.0.1:9621
+@apiKey = your-api-key-or-leave-empty
+@workspace = smoke
+@docId = paste-doc-id-from-ingest-response
+@jobId = paste-job-id-from-ingest-response
+
+### Ingest a file (job-based)
+POST {{baseUrl}}/ingest
+X-Api-Key: {{apiKey}}
+Content-Type: multipart/form-data; boundary=----X
+
+------X
+Content-Disposition: form-data; name="file"; filename="demo.md"
+Content-Type: text/markdown
+
+# Hello
+------X
+Content-Disposition: form-data; name="workspace_id"
+
+{{workspace}}
+------X--
+
+### Force re-ingest of a duplicate
+POST {{baseUrl}}/ingest?force=true
+
+### Poll a job
+GET {{baseUrl}}/jobs/{{jobId}}
+X-Api-Key: {{apiKey}}
+
+### List jobs for a workspace
+GET {{baseUrl}}/jobs?workspace_id={{workspace}}&limit=10
+X-Api-Key: {{apiKey}}
+
+### Cancel a running job
+DELETE {{baseUrl}}/jobs/{{jobId}}
+X-Api-Key: {{apiKey}}
+
+### Freeze
+PATCH {{baseUrl}}/workspace/{{workspace}}/freeze
+X-Api-Key: {{apiKey}}
+
+### Unfreeze
+PATCH {{baseUrl}}/workspace/{{workspace}}/unfreeze
+X-Api-Key: {{apiKey}}
+
+### Delete a document
+DELETE {{baseUrl}}/workspace/{{workspace}}/document/{{docId}}
+X-Api-Key: {{apiKey}}
+
+### Audit log for a workspace
+GET {{baseUrl}}/workspace/{{workspace}}/audit?limit=50
+X-Api-Key: {{apiKey}}
+
+### Cross-workspace audit
+GET {{baseUrl}}/admin/audit?limit=50
+X-Api-Key: {{apiKey}}
