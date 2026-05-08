@@ -402,6 +402,111 @@ class GovernanceService:
             self._rag.unregister_callback(prov_cb)
             self._rag.unregister_callback(prog_cb)
 
+    async def delete_document(self, workspace_id: str, doc_id) -> dict:
+        """Five-step orchestrated delete. Returns a cleanup report dict."""
+        report: dict = {"qdrant": "skipped", "neo4j": "skipped",
+                        "kv": "skipped", "fs": "skipped"}
+        prov = await self.get_provenance_for_doc(doc_id)
+        chunk_ids = prov.get("chunk", [])
+        entity_ids = prov.get("entity", [])
+        relation_ids = prov.get("relation", [])
+
+        await self.mark_document_status(doc_id, "deleting")
+
+        rag = await self._rag.get_rag(workspace_id)
+        await rag._ensure_lightrag_initialized()
+        lr = rag.lightrag
+
+        # 3a. Qdrant — delete points by id from the three collections.
+        try:
+            if chunk_ids and lr.chunks_vdb is not None:
+                await lr.chunks_vdb.delete(chunk_ids)
+            if entity_ids and lr.entities_vdb is not None:
+                await lr.entities_vdb.delete(entity_ids)
+            if relation_ids and lr.relationships_vdb is not None:
+                await lr.relationships_vdb.delete(relation_ids)
+            report["qdrant"] = "ok"
+        except Exception as exc:
+            report["qdrant"] = f"failed: {exc}"
+            logger.exception("delete_document: qdrant cleanup failed")
+
+        # 3b. Neo4j — only delete entities/relations whose only provenance is this doc.
+        try:
+            ent_exclusive = await self.find_doc_exclusive_refs(
+                workspace_id, doc_id, "entity", entity_ids,
+            )
+            rel_exclusive = await self.find_doc_exclusive_refs(
+                workspace_id, doc_id, "relation", relation_ids,
+            )
+            graph = lr.chunk_entity_relation_graph
+            if graph is not None:
+                for ent in ent_exclusive:
+                    try:
+                        await graph.delete_node(ent)
+                    except Exception:
+                        logger.warning("neo4j delete_node(%s) failed", ent)
+                for rel_key in rel_exclusive:
+                    if "::" in rel_key:
+                        src, tgt = rel_key.split("::", 1)
+                        try:
+                            await graph.delete_edge(src, tgt)
+                        except Exception:
+                            logger.warning("neo4j delete_edge(%s) failed", rel_key)
+            report["neo4j"] = "ok"
+        except Exception as exc:
+            report["neo4j"] = f"failed: {exc}"
+            logger.exception("delete_document: neo4j cleanup failed")
+
+        # 3c. LightRAG KV — chunks and full_docs.
+        try:
+            if chunk_ids and lr.text_chunks is not None:
+                for cid in chunk_ids:
+                    try:
+                        await lr.text_chunks.delete(cid)
+                    except Exception:
+                        pass
+            if lr.full_docs is not None:
+                try:
+                    await lr.full_docs.delete(str(doc_id))
+                except Exception:
+                    pass
+            report["kv"] = "ok"
+        except Exception as exc:
+            report["kv"] = f"failed: {exc}"
+            logger.exception("delete_document: kv cleanup failed")
+
+        # 3d. Filesystem — only remove uploads/{ws}/{filename} if no other doc shares it.
+        try:
+            doc = await self.get_document(doc_id)
+            if doc is not None:
+                async with self._pool.acquire() as conn:
+                    other = await conn.fetchval("""
+                        SELECT COUNT(*) FROM documents
+                         WHERE workspace_id = $1 AND filename = $2 AND doc_id <> $3
+                    """, workspace_id, doc.filename, doc_id)
+                if not other:
+                    from raganything.constants import DEFAULT_UPLOADS_DIR
+                    import os as _os
+                    uploads = _os.environ.get("RAGANYTHING_UPLOADS_DIR", DEFAULT_UPLOADS_DIR)
+                    from pathlib import Path as _P
+                    target = _P(uploads).resolve() / workspace_id / doc.filename
+                    if target.exists():
+                        target.unlink()
+            report["fs"] = "ok"
+        except Exception as exc:
+            report["fs"] = f"failed: {exc}"
+            logger.exception("delete_document: fs cleanup failed")
+
+        # 4. Provenance + status update.
+        await self.delete_provenance_for_doc(doc_id)
+        await self.mark_document_status(doc_id, "deleted", finished=True)
+
+        # 5. Audit.
+        await self.record_audit(
+            workspace_id, "delete_doc", doc_id=doc_id, details={"cleanup": report},
+        )
+        return report
+
     async def _backfill_entity_relation_provenance(
         self, workspace_id: str, doc_id, chunk_ids: list[str]
     ) -> None:

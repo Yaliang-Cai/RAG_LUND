@@ -1320,6 +1320,30 @@ async def unfreeze_workspace(
     return {"workspace_id": workspace_id, "frozen": False}
 
 
+@app.delete("/workspace/{workspace_id}/document/{doc_id}")
+async def delete_document_endpoint(
+    workspace_id: str,
+    doc_id: str,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    _validate_workspace_id(workspace_id)
+    from uuid import UUID
+    try:
+        did = UUID(doc_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid doc_id")
+    try:
+        await gov.ensure_writable(workspace_id)
+    except WorkspaceFrozenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    doc = await gov.get_document(did)
+    if doc is None or doc.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="Document not found in workspace")
+    report = await gov.delete_document(workspace_id, did)
+    return {"doc_id": doc_id, "workspace_id": workspace_id, "cleanup": report}
+
+
 # =========================================================================
 # 查询默认配置
 # =========================================================================
