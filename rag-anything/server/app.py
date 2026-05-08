@@ -524,6 +524,56 @@ async def retry_ingest(
     return {"job_id": str(job_id), "workspace_id": workspace_id, "status": "queued"}
 
 
+# =========================================================================
+# Jobs
+# =========================================================================
+
+@app.get("/jobs/{job_id}")
+async def get_job_endpoint(
+    job_id: str,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    from uuid import UUID
+    try:
+        jid = UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+    j = await gov.get_job(jid)
+    if j is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return j.model_dump(mode="json")
+
+
+@app.get("/jobs")
+async def list_jobs_endpoint(
+    workspace_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    rows = await gov.list_jobs(
+        workspace_id=workspace_id, status=status, limit=max(1, min(limit, 200)),
+    )
+    return {"jobs": [r.model_dump(mode="json") for r in rows]}
+
+
+@app.delete("/jobs/{job_id}")
+async def cancel_job_endpoint(
+    job_id: str,
+    _auth: None = Depends(verify_api_key),
+    jobs: JobRunner = Depends(get_jobs),
+):
+    from uuid import UUID
+    try:
+        jid = UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+    cancelled = await jobs.cancel(jid)
+    return {"job_id": job_id, "cancelled": cancelled}
+
+
 @app.get("/uploads/{workspace_id}")
 def list_uploads(
     workspace_id: str,
