@@ -10,7 +10,7 @@ from typing import List, Literal, Optional, Set
 
 import json as _json
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -395,117 +395,133 @@ async def ingest_batch(
     files: List[UploadFile] = File(...),
     workspace_id: Optional[str] = Form(default=None),
     chunking_strategy: Optional[str] = Form(default=None),
+    force: bool = Query(default=False),
     _auth: None = Depends(verify_api_key),
-    service: LocalRagService = Depends(get_service),
+    rag_service: LocalRagService = Depends(get_rag),
+    gov: GovernanceService = Depends(get_gov),
+    jobs: JobRunner = Depends(get_jobs),
 ):
-    """Ingest multiple files into the same workspace in one request.
-
-    All files are written to a temporary directory and processed via
-    ``process_folder_complete``, which applies the configured concurrency
-    (``MAX_CONCURRENT_FILES``) internally.
-    """
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
-
     for f in files:
-        ext = Path(f.filename).suffix.lower()
-        if ext not in SUPPORTED_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file type: '{ext}' ({f.filename}). Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
-            )
-
+        if Path(f.filename).suffix.lower() not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(status_code=400,
+                                detail=f"Unsupported file type: {f.filename}")
     if chunking_strategy and chunking_strategy not in VALID_CHUNKING_STRATEGIES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid chunking_strategy '{chunking_strategy}'. Valid: {', '.join(sorted(VALID_CHUNKING_STRATEGIES))}",
-        )
+        raise HTTPException(status_code=400, detail="Invalid chunking_strategy")
 
     first_stem = Path(files[0].filename).stem
-    final_workspace_id = workspace_id.strip() if workspace_id and workspace_id.strip() else _compute_workspace_id(first_stem)
+    final_workspace_id = (
+        workspace_id.strip() if workspace_id and workspace_id.strip()
+        else _compute_workspace_id(first_stem)
+    )
     _validate_workspace_id(final_workspace_id)
+
+    await gov.ensure_workspace(final_workspace_id)
+    try:
+        await gov.ensure_writable(final_workspace_id)
+    except WorkspaceFrozenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
     upload_dir = UPLOADS_DIR / final_workspace_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    tmp_dir = Path(tempfile.mkdtemp())
 
-    filenames: List[str] = []
-    try:
-        for f in files:
-            content = await f.read()
-            name = Path(f.filename).name
-            if not name:
-                raise HTTPException(status_code=400, detail="Invalid filename")
+    new_doc_specs: list[tuple] = []   # (doc_id, upload_path)
+    duplicates: list[str] = []
 
-            upload_path = upload_dir / name
-            try:
-                upload_path.resolve().relative_to(upload_dir.resolve())
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid filename")
-
-            upload_path.write_bytes(content)
-            (tmp_dir / name).write_bytes(content)
-            filenames.append(name)
-
-        workspace_output = str(Path(service.settings.output_dir) / final_workspace_id)
-        # Pass the temp directory — service.ingest() detects a directory and calls
-        # rag.process_folder_complete(), which applies MAX_CONCURRENT_FILES concurrency.
-        final_id = await service.ingest(
-            str(tmp_dir),
-            workspace_id=final_workspace_id,
-            output_dir=workspace_output,
-            chunking_strategy=chunking_strategy or None,
+    for f in files:
+        content = await f.read()
+        file_hash = hashlib.sha256(content).hexdigest()
+        name = Path(f.filename).name
+        if not name:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        upload_path = upload_dir / name
+        try:
+            upload_path.resolve().relative_to(upload_dir.resolve())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        doc_id, duplicate = await gov.upsert_document(
+            final_workspace_id, name, file_hash, len(content), force=force,
         )
-        if service.settings.enable_synonym_linking:
-            await service.finalize_workspace_synonyms(
-                final_id,
-                force=False,
-                reset_existing=True,
-            )
-    finally:
-        shutil.rmtree(str(tmp_dir), ignore_errors=True)
+        if duplicate:
+            duplicates.append(str(doc_id))
+            continue
+        upload_path.write_bytes(content)
+        new_doc_specs.append((doc_id, upload_path))
 
-    return {"workspace_id": final_id, "files": filenames}
+    if not new_doc_specs:
+        return {
+            "job_id": None,
+            "workspace_id": final_workspace_id,
+            "status": "duplicate",
+            "duplicate_doc_ids": duplicates,
+        }
+
+    job_id = await gov.create_job(final_workspace_id, [d for d, _ in new_doc_specs])
+
+    async def _run():
+        for d, p in new_doc_specs:
+            try:
+                await gov.run_ingest(job_id, d, final_workspace_id, str(p),
+                                     chunking_strategy=chunking_strategy)
+            except Exception:
+                logger.exception("batch ingest doc %s failed", d)
+
+    await jobs.submit(job_id, _run)
+    return {
+        "job_id": str(job_id),
+        "workspace_id": final_workspace_id,
+        "status": "queued",
+        "doc_ids": [str(d) for d, _ in new_doc_specs],
+        "duplicate_doc_ids": duplicates,
+    }
 
 
 @app.post("/retry/{workspace_id}")
 async def retry_ingest(
     workspace_id: str,
-    background_tasks: BackgroundTasks,
     _auth: None = Depends(verify_api_key),
-    service: LocalRagService = Depends(get_service),
+    rag_service: LocalRagService = Depends(get_rag),
+    gov: GovernanceService = Depends(get_gov),
+    jobs: JobRunner = Depends(get_jobs),
 ):
-    """Re-trigger ingest for an existing workspace using its already-uploaded files."""
     _validate_workspace_id(workspace_id)
     upload_dir = UPLOADS_DIR / workspace_id
     if not upload_dir.exists():
-        raise HTTPException(status_code=404, detail=f"No uploads found for workspace '{workspace_id}'")
-
+        raise HTTPException(status_code=404,
+                            detail=f"No uploads for workspace '{workspace_id}'")
     files = sorted(p for p in upload_dir.iterdir() if p.is_file())
     if not files:
-        raise HTTPException(status_code=404, detail=f"No files in workspace '{workspace_id}'")
+        raise HTTPException(status_code=404,
+                            detail=f"No files in workspace '{workspace_id}'")
 
-    workspace_output = str(Path(service.settings.output_dir) / workspace_id)
+    await gov.ensure_workspace(workspace_id)
+    try:
+        await gov.ensure_writable(workspace_id)
+    except WorkspaceFrozenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
-    async def _do_retry():
-        for file_path in files:
+    doc_specs: list[tuple] = []
+    for fp in files:
+        content = fp.read_bytes()
+        file_hash = hashlib.sha256(content).hexdigest()
+        # force=True so repeated retries always re-process; the user explicitly asked to retry
+        doc_id, _ = await gov.upsert_document(
+            workspace_id, fp.name, file_hash, len(content), force=True,
+        )
+        doc_specs.append((doc_id, fp))
+
+    job_id = await gov.create_job(workspace_id, [d for d, _ in doc_specs])
+
+    async def _run():
+        for d, fp in doc_specs:
             try:
-                await service.ingest(
-                    str(file_path),
-                    workspace_id=workspace_id,
-                    output_dir=workspace_output,
-                )
-            except Exception as exc:
-                logger.warning("retry_ingest %s/%s failed: %s", workspace_id, file_path.name, exc)
-        if service.settings.enable_synonym_linking:
-            await service.finalize_workspace_synonyms(
-                workspace_id,
-                force=False,
-                reset_existing=True,
-            )
+                await gov.run_ingest(job_id, d, workspace_id, str(fp))
+            except Exception:
+                logger.exception("retry ingest doc %s failed", d)
 
-    background_tasks.add_task(_do_retry)
-    return {"status": "queued", "workspace_id": workspace_id, "files": [f.name for f in files]}
+    await jobs.submit(job_id, _run)
+    return {"job_id": str(job_id), "workspace_id": workspace_id, "status": "queued"}
 
 
 @app.get("/uploads/{workspace_id}")
