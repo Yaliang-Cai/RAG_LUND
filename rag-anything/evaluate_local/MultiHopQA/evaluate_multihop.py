@@ -38,10 +38,58 @@ load_dotenv()
 
 VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto", "full")
 VALID_DATASETS = ("hotpotqa", "musique", "2wiki", "simpleqa")
+VALID_QA_PROMPT_STYLES = ("lightrag", "hipporag2")
+VALID_ANSWER_PARSE_MODES = ("strip_references", "hipporag2_answer")
 SOURCE_MAP_FILENAME = "multihopqa_chunk_source_map.json"
 PPR_MODES = {"ppr", "ppr_local"}
 
 _REFERENCES_RE = re.compile(r"#+\s*references?.*", re.IGNORECASE | re.DOTALL)
+_ANSWER_MARKER_RE = re.compile(r"\banswer\s*:\s*", re.IGNORECASE)
+
+_HIPPORAG2_RAG_QA_SYSTEM = (
+    'As an advanced reading comprehension assistant, your task is to analyze text passages and corresponding questions meticulously. '
+    'Your response start after "Thought: ", where you will methodically break down the reasoning process, illustrating how you arrive at conclusions. '
+    'Conclude with "Answer: " to present a concise, definitive response, devoid of additional elaborations.'
+)
+
+_HIPPORAG2_ONE_SHOT_RAG_QA_DOCS = (
+    "Wikipedia Title: The Last Horse\n"
+    "The Last Horse (Spanish:El último caballo) is a 1950 Spanish comedy film directed by Edgar Neville starring Fernando Fernán Gómez.\n"
+    "Wikipedia Title: Southampton\n"
+    "The University of Southampton, which was founded in 1862 and received its Royal Charter as a university in 1952, has over 22,000 students. "
+    "The university is ranked in the top 100 research universities in the world in the Academic Ranking of World Universities 2010. "
+    "In 2010, the THES - QS World University Rankings positioned the University of Southampton in the top 80 universities in the world. "
+    "The university considers itself one of the top 5 research universities in the UK. "
+    "The university has a global reputation for research into engineering sciences, oceanography, chemistry, cancer sciences, sound and vibration research, "
+    "computer science and electronics, optoelectronics and textile conservation at the Textile Conservation Centre (which is due to close in October 2009.) "
+    "It is also home to the National Oceanography Centre, Southampton (NOCS), the focus of Natural Environment Research Council-funded marine research.\n"
+    "Wikipedia Title: Stanton Township, Champaign County, Illinois\n"
+    "Stanton Township is a township in Champaign County, Illinois, USA. As of the 2010 census, its population was 505 and it contained 202 housing units.\n"
+    "Wikipedia Title: Neville A. Stanton\n"
+    "Neville A. Stanton is a British Professor of Human Factors and Ergonomics at the University of Southampton. "
+    "Prof Stanton is a Chartered Engineer (C.Eng), Chartered Psychologist (C.Psychol) and Chartered Ergonomist (C.ErgHF). "
+    "He has written and edited over a forty books and over three hundered peer-reviewed journal papers on applications of the subject. "
+    "Stanton is a Fellow of the British Psychological Society, a Fellow of The Institute of Ergonomics and Human Factors and a member of the Institution of Engineering and Technology. "
+    'He has been published in academic journals including "Nature". '
+    "He has also helped organisations design new human-machine interfaces, such as the Adaptive Cruise Control system for Jaguar Cars.\n"
+    "Wikipedia Title: Finding Nemo\n"
+    "Finding Nemo Theatrical release poster Directed by Andrew Stanton Produced by Graham Walters Screenplay by Andrew Stanton Bob Peterson David Reynolds "
+    "Story by Andrew Stanton Starring Albert Brooks Ellen DeGeneres Alexander Gould Willem Dafoe Music by Thomas Newman Cinematography Sharon Calahan "
+    "Jeremy Lasky Edited by David Ian Salter Production company Walt Disney Pictures Pixar Animation Studios Distributed by Buena Vista Pictures Distribution "
+    "Release date May 30, 2003 (2003 - 05 - 30) Running time 100 minutes Country United States Language English Budget $$94 million Box office $$940.3 million"
+)
+
+_HIPPORAG2_ONE_SHOT_RAG_QA_INPUT = (
+    f"{_HIPPORAG2_ONE_SHOT_RAG_QA_DOCS}"
+    "\n\nQuestion: "
+    "When was Neville A. Stanton's employer founded?"
+    "\nThought: "
+)
+
+_HIPPORAG2_ONE_SHOT_RAG_QA_OUTPUT = (
+    "The employer of Neville A. Stanton is University of Southampton. The University of Southampton was founded in 1862. "
+    "\nAnswer: 1862."
+)
 
 
 class _TeeStream:
@@ -98,6 +146,18 @@ def _resolve_log_file(output_dir: str | Path, log_file: str | None, dataset: str
 
 def _strip_references(text: str) -> str:
     return _REFERENCES_RE.sub("", text).strip()
+
+
+def _parse_answer_text(text: str, answer_parse_mode: str) -> str:
+    stripped = _strip_references(text)
+    if answer_parse_mode == "strip_references":
+        return stripped
+    if answer_parse_mode == "hipporag2_answer":
+        matches = list(_ANSWER_MARKER_RE.finditer(stripped))
+        if not matches:
+            return stripped
+        return stripped[matches[-1].end():].strip()
+    raise ValueError(f"Unknown answer_parse_mode: {answer_parse_mode!r}")
 
 
 def _load_existing_ids(jsonl_path: Path) -> set[str]:
@@ -269,6 +329,73 @@ def _resolve_retrieved_sources(
     return sources
 
 
+def _hipporag2_chunk_content(
+    chunk: dict[str, Any],
+    chunk_source_map: dict[str, dict[str, Any]],
+) -> str:
+    chunk_id = _trace_chunk_id(chunk)
+    source = chunk_source_map.get(chunk_id) if chunk_id else None
+    if source:
+        content = str(source.get("content") or "").strip()
+        if content:
+            return content
+        title = str(source.get("title") or "").strip()
+        text = str(source.get("text") or "").strip()
+        if title and text:
+            return f"{title}\n{text}"
+        return title or text
+    return str(chunk.get("content") or "").strip()
+
+
+def _build_hipporag2_user_prompt(
+    question: str,
+    chunks: list[dict[str, Any]],
+    chunk_source_map: dict[str, dict[str, Any]],
+    *,
+    qa_top_k: int | None = None,
+) -> str:
+    limit = len(chunks) if qa_top_k is None else max(0, int(qa_top_k))
+    passages = []
+    for chunk in chunks[:limit]:
+        if not isinstance(chunk, dict):
+            continue
+        content = _hipporag2_chunk_content(chunk, chunk_source_map)
+        if content:
+            passages.append(f"Wikipedia Title: {content}")
+    prefix = "".join(f"{passage}\n\n" for passage in passages)
+    return f"{prefix}Question: {question}\nThought: "
+
+
+async def _call_hipporag2_qa(
+    service: Any,
+    *,
+    question: str,
+    chunks: list[dict[str, Any]],
+    chunk_source_map: dict[str, dict[str, Any]],
+    qa_top_k: int | None,
+) -> str:
+    llm_model_func = getattr(service, "llm_model_func", None)
+    if not callable(llm_model_func):
+        raise RuntimeError("HippoRAG2 QA prompt requires service.llm_model_func")
+    prompt = _build_hipporag2_user_prompt(
+        question,
+        chunks,
+        chunk_source_map,
+        qa_top_k=qa_top_k,
+    )
+    answer = await llm_model_func(
+        prompt,
+        system_prompt=_HIPPORAG2_RAG_QA_SYSTEM,
+        history_messages=[
+            {"role": "user", "content": _HIPPORAG2_ONE_SHOT_RAG_QA_INPUT},
+            {"role": "assistant", "content": _HIPPORAG2_ONE_SHOT_RAG_QA_OUTPUT},
+        ],
+        enable_cot=True,
+        stream=False,
+    )
+    return answer if isinstance(answer, str) else str(answer)
+
+
 def _score_recall_by_source_keys(
     retrieved_sources: list[dict[str, Any]],
     gold_source_keys: list[str] | None,
@@ -358,6 +485,8 @@ async def _run_mode(
     concurrency: int = 1,
     hybrid_enable_rerank: bool = True,
     ppr_enable_rerank: bool = False,
+    qa_prompt_style: str = "lightrag",
+    answer_parse_mode: str = "strip_references",
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = output_dir / f"{dataset}_{mode}_results.jsonl"
@@ -384,26 +513,49 @@ async def _run_mode(
     wire_profile = "full" if mode == "full" else None
 
     async def _evaluate_item(item: dict) -> dict[str, Any]:
+        raw_answer = ""
+        chunks: list[dict[str, Any]] = []
         try:
             call_kwargs = _build_query_kwargs(
                 query_overrides=query_overrides,
                 wire_profile=wire_profile,
                 **query_kwargs,
             )
-            result = await service.query_with_trace(
-                workspace_id=workspace_id,
-                query=item["question"],
-                working_dir=working_dir,
-                mode=wire_mode,
-                **call_kwargs,
-            )
-            raw_answer = result.get("answer", "")
-            answer = _strip_references(raw_answer)
-            chunks = result.get("trace", {}).get("data", {}).get("chunks", [])
+            if qa_prompt_style == "hipporag2":
+                retrieval_kwargs = dict(call_kwargs)
+                retrieval_kwargs["only_need_context"] = True
+                result = await service.query_with_trace(
+                    workspace_id=workspace_id,
+                    query=item["question"],
+                    working_dir=working_dir,
+                    mode=wire_mode,
+                    **retrieval_kwargs,
+                )
+                raw_chunks = result.get("trace", {}).get("data", {}).get("chunks", [])
+                chunks = raw_chunks if isinstance(raw_chunks, list) else []
+                qa_top_k = call_kwargs.get("ppr_qa_top_k") or call_kwargs.get("chunk_top_k")
+                raw_answer = await _call_hipporag2_qa(
+                    service,
+                    question=item["question"],
+                    chunks=chunks,
+                    chunk_source_map=chunk_source_map,
+                    qa_top_k=int(qa_top_k) if qa_top_k is not None else None,
+                )
+            else:
+                result = await service.query_with_trace(
+                    workspace_id=workspace_id,
+                    query=item["question"],
+                    working_dir=working_dir,
+                    mode=wire_mode,
+                    **call_kwargs,
+                )
+                raw_answer = result.get("answer", "")
+                raw_chunks = result.get("trace", {}).get("data", {}).get("chunks", [])
+                chunks = raw_chunks if isinstance(raw_chunks, list) else []
+            answer = _parse_answer_text(raw_answer, answer_parse_mode)
         except Exception as e:
             print(f"  [WARN] query failed for id={item['id']}: {e}")
             answer = ""
-            chunks = []
 
         gold = item["answer"]
         em = score_em(answer, gold)
@@ -417,6 +569,8 @@ async def _run_mode(
             "em": em,
             "f1": f1,
         }
+        if qa_prompt_style == "hipporag2":
+            record["raw_pred"] = raw_answer
         if item.get("gold_source_keys"):
             record["gold_source_keys"] = item["gold_source_keys"]
         retrieved_sources = _resolve_retrieved_sources(chunks, chunk_source_map)
@@ -561,7 +715,10 @@ async def main(args: argparse.Namespace) -> None:
         f"qdrant_retrieval_mode={args.qdrant_retrieval_mode}, "
         f"ppr_top_k={args.ppr_top_k}, ppr_qa_top_k={args.ppr_qa_top_k}, "
         f"enable_kg_rerank={args.enable_kg_rerank}, "
-        f"bypass_query_cache={args.bypass_query_cache}, vlm_enhanced={args.vlm_enhanced}"
+        f"bypass_query_cache={args.bypass_query_cache}, "
+        f"bypass_keywords_cache={args.bypass_keywords_cache}, "
+        f"vlm_enhanced={args.vlm_enhanced}, "
+        f"qa_prompt_style={args.qa_prompt_style}, answer_parse_mode={args.answer_parse_mode}"
     )
 
     results: dict[str, dict] = {}
@@ -597,6 +754,8 @@ async def main(args: argparse.Namespace) -> None:
             concurrency=args.concurrency,
             hybrid_enable_rerank=args.hybrid_enable_rerank,
             ppr_enable_rerank=args.ppr_enable_rerank,
+            qa_prompt_style=args.qa_prompt_style,
+            answer_parse_mode=args.answer_parse_mode,
         )
         results[mode] = metrics
         print(f"  [{mode}] EM={metrics.get('em', 0):.4f}  F1={metrics.get('f1', 0):.4f}")
@@ -611,6 +770,8 @@ async def main(args: argparse.Namespace) -> None:
         "seed": effective_seed,
         "recall_k": args.recall_k,
         "concurrency": args.concurrency,
+        "qa_prompt_style": args.qa_prompt_style,
+        "answer_parse_mode": args.answer_parse_mode,
         "base_query_kwargs": {k: v for k, v in base_query_kwargs.items() if v is not None},
         "query_kwargs_by_mode": query_kwargs_by_mode,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -701,7 +862,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--bypass-keywords-cache", "--bypass_keywords_cache", action=argparse.BooleanOptionalAction, default=False, dest="bypass_keywords_cache")
     p.add_argument("--vlm-enhanced", action=argparse.BooleanOptionalAction, default=False, dest="vlm_enhanced")
     p.add_argument("--allow-missing-source-map", action="store_true", dest="allow_missing_source_map")
+    p.add_argument("--qa-prompt-style", default="lightrag", choices=VALID_QA_PROMPT_STYLES, dest="qa_prompt_style")
+    p.add_argument("--answer-parse-mode", default=None, choices=VALID_ANSWER_PARSE_MODES, dest="answer_parse_mode")
     args = p.parse_args()
+    if args.answer_parse_mode is None:
+        args.answer_parse_mode = (
+            "hipporag2_answer" if args.qa_prompt_style == "hipporag2" else "strip_references"
+        )
     if args.concurrency <= 0:
         raise SystemExit("--concurrency must be > 0")
     if args.top_k <= 0:

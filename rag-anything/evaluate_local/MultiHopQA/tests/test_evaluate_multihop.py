@@ -10,15 +10,58 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "rag-anything"))
 
 from evaluate_local.MultiHopQA.evaluate_multihop import (
+    _build_hipporag2_user_prompt,
     _build_query_kwargs,
     _load_chunk_source_map,
     _mode_query_kwargs,
+    _parse_answer_text,
     _parse_args,
     _resolve_log_file,
     _resolve_retrieved_sources,
     _run_mode,
     _score_support_recall,
 )
+
+
+def test_parse_answer_text_extracts_hipporag2_answer_after_references_strip():
+    raw = (
+        "Thought: Neville A. Stanton worked at the University of Southampton.\n"
+        "Answer: 1862.\n\n"
+        "### References\n"
+        "* [1] Southampton"
+    )
+
+    assert _parse_answer_text(raw, "hipporag2_answer") == "1862."
+
+
+def test_parse_answer_text_hipporag2_falls_back_without_answer_marker():
+    raw = "Thought: not formatted.\nThe answer is 1862.\n### References\n* [1] Southampton"
+
+    assert _parse_answer_text(raw, "hipporag2_answer") == "Thought: not formatted.\nThe answer is 1862."
+
+
+def test_build_hipporag2_user_prompt_prefers_source_map_content_and_ends_with_thought():
+    source_map = {
+        "chunk-a": {
+            "content": "Southampton\nThe University of Southampton was founded in 1862.",
+        }
+    }
+    chunks = [
+        {"id": "chunk-a", "content": "stale trace content"},
+        {"id": "chunk-b", "content": "Other title\nOther text"},
+    ]
+
+    prompt = _build_hipporag2_user_prompt(
+        "When was Neville A. Stanton's employer founded?",
+        chunks,
+        source_map,
+        qa_top_k=1,
+    )
+
+    assert "Wikipedia Title: Southampton\nThe University of Southampton was founded in 1862." in prompt
+    assert "stale trace content" not in prompt
+    assert "Other title" not in prompt
+    assert prompt.endswith("Question: When was Neville A. Stanton's employer founded?\nThought: ")
 
 
 def test_resolve_retrieved_sources_uses_chunk_id_map():
@@ -178,6 +221,33 @@ def test_parse_args_defaults_match_shared_retrieval_ablation(monkeypatch):
     assert args.bypass_keywords_cache is False
     assert args.vlm_enhanced is False
     assert args.log_file is None
+    assert args.qa_prompt_style == "lightrag"
+    assert args.answer_parse_mode == "strip_references"
+
+
+def test_parse_args_defaults_answer_parser_for_hipporag2_prompt(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate_multihop.py",
+            "--dataset",
+            "2wiki",
+            "--workspace",
+            "2wiki_500_seed42_0428",
+            "--working-dir",
+            "/tmp/2wiki_500_seed42_0428",
+            "--output-dir",
+            "/tmp/out",
+            "--qa-prompt-style",
+            "hipporag2",
+        ],
+    )
+
+    args = _parse_args()
+
+    assert args.qa_prompt_style == "hipporag2"
+    assert args.answer_parse_mode == "hipporag2_answer"
 
 
 def test_parse_args_accepts_naive_top_k(monkeypatch):
@@ -362,3 +432,89 @@ def test_run_mode_applies_mode_specific_rerank_and_cache_defaults(tmp_path):
     assert ppr_call["bypass_query_cache"] is True
     assert ppr_call["bypass_keywords_cache"] is False
     assert ppr_call["vlm_enhanced"] is False
+
+
+def test_run_mode_hipporag2_prompt_uses_retrieval_only_then_answer_parser(tmp_path):
+    class FakeService:
+        def __init__(self):
+            self.retrieval_calls = []
+            self.qa_calls = []
+
+        async def query_with_trace(self, **kwargs):
+            self.retrieval_calls.append(kwargs)
+            return {
+                "answer": "retrieval context, not final answer",
+                "trace": {
+                    "data": {
+                        "chunks": [
+                            {"id": "chunk-a", "content": "Trace title\nTrace text"},
+                        ]
+                    }
+                },
+            }
+
+        async def llm_model_func(self, prompt, system_prompt=None, history_messages=None, **kwargs):
+            self.qa_calls.append(
+                {
+                    "prompt": prompt,
+                    "system_prompt": system_prompt,
+                    "history_messages": history_messages,
+                    "kwargs": kwargs,
+                }
+            )
+            return "Thought: the retrieved passage gives the year.\nAnswer: 1862.\n### References\n* [1] Southampton"
+
+    service = FakeService()
+    source_map = {
+        "chunk-a": {
+            "source_key": "source-a",
+            "source_paragraph_id": "hotpotqa_000001",
+            "title": "Southampton",
+            "content": "Southampton\nThe University of Southampton was founded in 1862.",
+        }
+    }
+
+    metrics = asyncio.run(
+        _run_mode(
+            service=service,
+            workspace_id="hotpotqa_hr2_v0",
+            working_dir="/tmp/ws",
+            items=[
+                {
+                    "id": "q0",
+                    "question": "When was Neville A. Stanton's employer founded?",
+                    "answer": "1862",
+                    "supporting_facts": ["The University of Southampton was founded in 1862."],
+                    "gold_source_keys": ["source-a"],
+                }
+            ],
+            mode="ppr",
+            dataset="hotpotqa",
+            recall_ks=[1],
+            output_dir=tmp_path,
+            resume=False,
+            score_em=lambda pred, gold: 1.0 if pred.rstrip(".") == gold else 0.0,
+            score_f1=lambda pred, gold: 1.0 if pred.rstrip(".") == gold else 0.0,
+            get_eval_query_overrides=lambda dataset: {"response_type": "Short Answer"},
+            chunk_source_map=source_map,
+            query_kwargs={"top_k": 10, "chunk_top_k": 5, "ppr_qa_top_k": 5},
+            concurrency=1,
+            qa_prompt_style="hipporag2",
+            answer_parse_mode="hipporag2_answer",
+        )
+    )
+
+    assert metrics["em"] == 1.0
+    assert service.retrieval_calls[0]["only_need_context"] is True
+    assert service.retrieval_calls[0]["mode"] == "ppr"
+    assert "Question: When was Neville A. Stanton's employer founded?\nThought: " in service.qa_calls[0]["prompt"]
+    assert service.qa_calls[0]["history_messages"][0]["role"] == "user"
+    assert service.qa_calls[0]["history_messages"][1]["role"] == "assistant"
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "hotpotqa_ppr_results.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["pred"] == "1862."
+    assert rows[0]["raw_pred"].startswith("Thought:")
+    assert rows[0]["recall@1"] == 1.0
