@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MultiHopQA V4 PPR component runner with HippoRAG2-style QA prompt.
+# MultiHopQA V4 PPR component runner with semantic passage CoT QA prompt.
 #
 # This runner reuses existing V0 HippoRAG2 MultiHopQA workspaces. It does not
 # download data, build indexes, or rebuild SYNONYM edges. The synonym component
@@ -12,7 +12,7 @@ RAGANYTHING_ROOT="${REPO_ROOT}/rag-anything"
 DATA_DIR="${DATA_DIR:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/hipporag2_data}"
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/workspaces/multihopqa_hr2_v0}"
-RESULTS_ROOT="${RESULTS_ROOT:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/results/multihopqa_hr2_v0_v4_components_hipporag2_prompt}"
+RESULTS_ROOT="${RESULTS_ROOT:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/results/multihopqa_hr2_v0_v4_components_semantic_prompt}"
 SYNONYM_THRESHOLD="${SYNONYM_THRESHOLD:-0.8}"
 
 INDEX_PROFILE="v0"
@@ -221,8 +221,8 @@ run_ppr_experiment() {
         --keyword-fanout-mode "${keyword_fanout_mode}" \
         --qdrant-retrieval-mode "${qdrant_retrieval_mode}" \
         --answer-context-mode "chunk_only_prompt" \
-        --qa-prompt-style "hipporag2" \
-        --answer-parse-mode "hipporag2_answer" \
+        --qa-prompt-style "semantic_cot" \
+        --answer-parse-mode "answer_marker" \
         --bypass-query-cache \
         --no-bypass-keywords-cache \
         "${eval_resume_arg[@]}"
@@ -268,7 +268,7 @@ check_data_ready
 mkdir -p "${RESULTS_ROOT}"
 
 log "================================================================"
-log "MultiHopQA V4 PPR components with HippoRAG2 QA prompt"
+log "MultiHopQA V4 PPR components with semantic passage CoT QA prompt"
 log "Workspace root:     ${WORKSPACE_ROOT}"
 log "Results root:       ${RESULTS_ROOT}"
 log "Synonym threshold:  ${SYNONYM_THRESHOLD}"

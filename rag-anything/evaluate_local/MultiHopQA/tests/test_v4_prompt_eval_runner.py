@@ -12,13 +12,13 @@ def _script_text() -> str:
 def test_v4_prompt_eval_runner_exists_and_only_uses_existing_assets():
     text = _script_text()
 
-    assert "multihopqa_hr2_v0_v4_components_hipporag2_prompt" in text
+    assert "multihopqa_hr2_v0_v4_components_semantic_prompt" in text
     assert "build_index.py" not in text
     assert "download_hipporag2_datasets.py" not in text
     assert "manage_workspace_synonyms.py" not in text
     assert 'file_prefix="2wikimultihopqa"' in text
-    assert "--qa-prompt-style \"hipporag2\"" in text
-    assert "--answer-parse-mode \"hipporag2_answer\"" in text
+    assert "--qa-prompt-style \"semantic_cot\"" in text
+    assert "--answer-parse-mode \"answer_marker\"" in text
     assert "--no-bypass-keywords-cache" in text
 
 

@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "rag-anything"))
 
 from evaluate_local.MultiHopQA.evaluate_multihop import (
-    _build_hipporag2_user_prompt,
+    _build_semantic_cot_user_prompt,
     _build_query_kwargs,
     _load_chunk_source_map,
     _mode_query_kwargs,
@@ -23,7 +23,7 @@ from evaluate_local.MultiHopQA.evaluate_multihop import (
 )
 
 
-def test_parse_answer_text_extracts_hipporag2_answer_after_references_strip():
+def test_parse_answer_text_extracts_answer_marker_after_references_strip():
     raw = (
         "Thought: Neville A. Stanton worked at the University of Southampton.\n"
         "Answer: 1862.\n\n"
@@ -31,18 +31,20 @@ def test_parse_answer_text_extracts_hipporag2_answer_after_references_strip():
         "* [1] Southampton"
     )
 
-    assert _parse_answer_text(raw, "hipporag2_answer") == "1862."
+    assert _parse_answer_text(raw, "answer_marker") == "1862."
 
 
-def test_parse_answer_text_hipporag2_falls_back_without_answer_marker():
+def test_parse_answer_text_answer_marker_falls_back_without_answer_marker():
     raw = "Thought: not formatted.\nThe answer is 1862.\n### References\n* [1] Southampton"
 
-    assert _parse_answer_text(raw, "hipporag2_answer") == "Thought: not formatted.\nThe answer is 1862."
+    assert _parse_answer_text(raw, "answer_marker") == "Thought: not formatted.\nThe answer is 1862."
 
 
-def test_build_hipporag2_user_prompt_prefers_source_map_content_and_ends_with_thought():
+def test_build_semantic_cot_user_prompt_prefers_source_map_content_and_ends_with_thought():
     source_map = {
         "chunk-a": {
+            "title": "Southampton",
+            "text": "The University of Southampton was founded in 1862.",
             "content": "Southampton\nThe University of Southampton was founded in 1862.",
         }
     }
@@ -51,14 +53,17 @@ def test_build_hipporag2_user_prompt_prefers_source_map_content_and_ends_with_th
         {"id": "chunk-b", "content": "Other title\nOther text"},
     ]
 
-    prompt = _build_hipporag2_user_prompt(
+    prompt = _build_semantic_cot_user_prompt(
         "When was Neville A. Stanton's employer founded?",
         chunks,
         source_map,
         qa_top_k=1,
     )
 
-    assert "Wikipedia Title: Southampton\nThe University of Southampton was founded in 1862." in prompt
+    assert "Passage 1:" in prompt
+    assert "Title: Southampton" in prompt
+    assert "Text: The University of Southampton was founded in 1862." in prompt
+    assert "Wikipedia Title:" not in prompt
     assert "stale trace content" not in prompt
     assert "Other title" not in prompt
     assert prompt.endswith("Question: When was Neville A. Stanton's employer founded?\nThought: ")
@@ -225,7 +230,7 @@ def test_parse_args_defaults_match_shared_retrieval_ablation(monkeypatch):
     assert args.answer_parse_mode == "strip_references"
 
 
-def test_parse_args_defaults_answer_parser_for_hipporag2_prompt(monkeypatch):
+def test_parse_args_defaults_answer_parser_for_semantic_cot_prompt(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
@@ -240,14 +245,14 @@ def test_parse_args_defaults_answer_parser_for_hipporag2_prompt(monkeypatch):
             "--output-dir",
             "/tmp/out",
             "--qa-prompt-style",
-            "hipporag2",
+            "semantic_cot",
         ],
     )
 
     args = _parse_args()
 
-    assert args.qa_prompt_style == "hipporag2"
-    assert args.answer_parse_mode == "hipporag2_answer"
+    assert args.qa_prompt_style == "semantic_cot"
+    assert args.answer_parse_mode == "answer_marker"
 
 
 def test_parse_args_accepts_naive_top_k(monkeypatch):
@@ -434,7 +439,7 @@ def test_run_mode_applies_mode_specific_rerank_and_cache_defaults(tmp_path):
     assert ppr_call["vlm_enhanced"] is False
 
 
-def test_run_mode_hipporag2_prompt_uses_retrieval_only_then_answer_parser(tmp_path):
+def test_run_mode_semantic_cot_prompt_uses_semantic_passages_and_answer_parser(tmp_path):
     class FakeService:
         def __init__(self):
             self.retrieval_calls = []
@@ -499,14 +504,16 @@ def test_run_mode_hipporag2_prompt_uses_retrieval_only_then_answer_parser(tmp_pa
             chunk_source_map=source_map,
             query_kwargs={"top_k": 10, "chunk_top_k": 5, "ppr_qa_top_k": 5},
             concurrency=1,
-            qa_prompt_style="hipporag2",
-            answer_parse_mode="hipporag2_answer",
+            qa_prompt_style="semantic_cot",
+            answer_parse_mode="answer_marker",
         )
     )
 
     assert metrics["em"] == 1.0
     assert service.retrieval_calls[0]["only_need_context"] is True
     assert service.retrieval_calls[0]["mode"] == "ppr"
+    assert "Passage 1:" in service.qa_calls[0]["prompt"]
+    assert "Wikipedia Title:" not in service.qa_calls[0]["prompt"]
     assert "Question: When was Neville A. Stanton's employer founded?\nThought: " in service.qa_calls[0]["prompt"]
     assert service.qa_calls[0]["history_messages"][0]["role"] == "user"
     assert service.qa_calls[0]["history_messages"][1]["role"] == "assistant"
