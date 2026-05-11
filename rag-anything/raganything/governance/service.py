@@ -569,19 +569,37 @@ class GovernanceService:
             )
             graph = lr.chunk_entity_relation_graph
             if graph is not None:
+                # Delete nodes first — Neo4j DETACH-deletes incident edges as
+                # part of node removal, so most edges are already gone before
+                # we get to the edge loop. We still try them in case some
+                # endpoint stays (shared with another doc).
+                deleted_nodes = 0
                 for ent in ent_exclusive:
                     try:
                         await graph.delete_node(ent)
+                        deleted_nodes += 1
                     except Exception:
                         logger.warning("neo4j delete_node(%s) failed", ent)
+                deleted_edges = 0
+                edges_already_gone = 0
                 for rel_key in rel_exclusive:
                     # LightRAG joins relation endpoints with "<SEP>"
-                    if "<SEP>" in rel_key:
-                        src, tgt = rel_key.split("<SEP>", 1)
-                        try:
-                            await graph.delete_edge(src, tgt)
-                        except Exception:
-                            logger.warning("neo4j delete_edge(%s) failed", rel_key)
+                    if "<SEP>" not in rel_key:
+                        continue
+                    src, tgt = rel_key.split("<SEP>", 1)
+                    try:
+                        await graph.delete_edge(src, tgt)
+                        deleted_edges += 1
+                    except Exception:
+                        # Most edges are cascade-removed when the endpoint
+                        # node is deleted above. Log at DEBUG to keep the log
+                        # readable for the common "everything deleted" case.
+                        edges_already_gone += 1
+                        logger.debug("neo4j delete_edge(%s): already gone (cascade)", rel_key)
+                logger.info(
+                    "neo4j cleanup: deleted %d nodes, %d edges (%d already cascaded)",
+                    deleted_nodes, deleted_edges, edges_already_gone,
+                )
             report["neo4j"] = "ok"
         except Exception as exc:
             report["neo4j"] = f"failed: {exc}"
