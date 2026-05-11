@@ -20,6 +20,7 @@ from evaluate_local.MultiHopQA.evaluate_multihop import (
     _resolve_retrieved_sources,
     _run_mode,
     _score_support_recall,
+    _select_hipporag2_eval_items,
 )
 
 
@@ -162,6 +163,7 @@ def test_build_query_kwargs_pins_eval_retrieval_controls():
         chunk_top_k=5,
         naive_top_k=10,
         max_total_tokens=45000,
+        hub_penalty_threshold=50,
     )
 
     assert kwargs["response_type"] == "Short Answer"
@@ -169,6 +171,21 @@ def test_build_query_kwargs_pins_eval_retrieval_controls():
     assert kwargs["chunk_top_k"] == 5
     assert kwargs["naive_top_k"] == 10
     assert kwargs["max_total_tokens"] == 45000
+    assert kwargs["hub_penalty_threshold"] == 50
+
+
+def test_select_hipporag2_eval_items_uses_seeded_fixed_subset():
+    items = [{"id": f"q{i}"} for i in range(10)]
+
+    first = _select_hipporag2_eval_items(items, n_samples=4, seed=42)
+    second = _select_hipporag2_eval_items(items, n_samples=4, seed=42)
+    different_seed = _select_hipporag2_eval_items(items, n_samples=4, seed=7)
+
+    assert len(first) == 4
+    assert [row["id"] for row in first] == [row["id"] for row in second]
+    assert [row["id"] for row in first] != [row["id"] for row in different_seed]
+    assert _select_hipporag2_eval_items(items, n_samples=0, seed=42) == items
+    assert _select_hipporag2_eval_items(items, n_samples=10, seed=42) == items
 
 
 def test_query_kwargs_preserve_explicit_synonym_filter_values():
@@ -219,6 +236,7 @@ def test_parse_args_defaults_match_shared_retrieval_ablation(monkeypatch):
     assert args.chunk_top_k == 5
     assert args.naive_top_k is None
     assert args.ppr_qa_top_k == 5
+    assert args.hub_penalty_threshold == 50
     assert args.enable_kg_rerank is False
     assert args.hybrid_enable_rerank is True
     assert args.ppr_enable_rerank is False
@@ -277,6 +295,30 @@ def test_parse_args_accepts_naive_top_k(monkeypatch):
     args = _parse_args()
 
     assert args.naive_top_k == 10
+
+
+def test_parse_args_accepts_hub_penalty_threshold(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate_multihop.py",
+            "--dataset",
+            "2wiki",
+            "--workspace",
+            "2wiki_500_seed42_0428",
+            "--working-dir",
+            "/tmp/2wiki_500_seed42_0428",
+            "--output-dir",
+            "/tmp/out",
+            "--hub-penalty-threshold",
+            "10",
+        ],
+    )
+
+    args = _parse_args()
+
+    assert args.hub_penalty_threshold == 10
 
 
 def test_resolve_log_file_defaults_to_dataset_log_in_output_dir(tmp_path):

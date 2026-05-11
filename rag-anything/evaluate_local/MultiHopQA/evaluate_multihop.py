@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import random
 import re
 import sys
 from datetime import datetime, timezone
@@ -179,6 +180,14 @@ def _load_existing_ids(jsonl_path: Path) -> set[str]:
                 except (json.JSONDecodeError, KeyError):
                     pass
     return ids
+
+
+def _select_hipporag2_eval_items(items: list[dict], n_samples: int, seed: int) -> list[dict]:
+    """Select a deterministic query subset without changing the indexed corpus identity."""
+    if n_samples <= 0 or n_samples >= len(items):
+        return list(items)
+    rng = random.Random(seed)
+    return rng.sample(items, n_samples)
 
 
 def _append_jsonl(path: Path, record: dict) -> None:
@@ -654,7 +663,13 @@ async def main(args: argparse.Namespace) -> None:
                 "Supported: hotpotqa, musique, 2wiki"
             )
         print(f"[eval] HippoRAG2 mode: loading {args.dataset} from {hipporag2_dir}")
-        items = hr2_loaders[args.dataset]()
+        all_items = hr2_loaders[args.dataset]()
+        items = _select_hipporag2_eval_items(all_items, args.n_samples, args.seed)
+        if len(items) != len(all_items):
+            print(
+                "[eval] HippoRAG2 query subset: "
+                f"n={len(items)} of {len(all_items)}, seed={args.seed}"
+            )
         effective_n_samples = 0
         effective_seed = 0
     else:
@@ -707,6 +722,7 @@ async def main(args: argparse.Namespace) -> None:
         "ppr_damping": args.ppr_damping,
         "ppr_top_k": args.ppr_top_k,
         "ppr_qa_top_k": args.ppr_qa_top_k,
+        "hub_penalty_threshold": args.hub_penalty_threshold,
         "ppr_post_rerank_fusion": args.ppr_post_rerank_fusion,
         "ppr_post_rerank_rrf_k": args.ppr_post_rerank_rrf_k,
         "passage_node_weight": args.passage_node_weight,
@@ -725,6 +741,7 @@ async def main(args: argparse.Namespace) -> None:
         f"max_total_tokens={args.max_total_tokens}, concurrency={args.concurrency}, "
         f"qdrant_retrieval_mode={args.qdrant_retrieval_mode}, "
         f"ppr_top_k={args.ppr_top_k}, ppr_qa_top_k={args.ppr_qa_top_k}, "
+        f"hub_penalty_threshold={args.hub_penalty_threshold}, "
         f"enable_kg_rerank={args.enable_kg_rerank}, "
         f"bypass_query_cache={args.bypass_query_cache}, "
         f"bypass_keywords_cache={args.bypass_keywords_cache}, "
@@ -779,6 +796,8 @@ async def main(args: argparse.Namespace) -> None:
         "n_queries": len(items),
         "n_samples": effective_n_samples,
         "seed": effective_seed,
+        "query_n_samples_arg": args.n_samples,
+        "query_seed_arg": args.seed,
         "recall_k": args.recall_k,
         "concurrency": args.concurrency,
         "qa_prompt_style": args.qa_prompt_style,
@@ -827,7 +846,8 @@ def _parse_args() -> argparse.Namespace:
         dest="hipporag2_data_dir",
         help=(
             "Path to HippoRAG2 dataset directory (from download_hipporag2_datasets.py). "
-            "When set, uses the exact 1 000 HippoRAG2 queries and ignores --n-samples/--seed."
+            "When set, --n-samples/--seed select a fixed query subset only; "
+            "the workspace/source-map identity remains the full HippoRAG2 corpus."
         ),
     )
     p.add_argument("--modes",       nargs="+", default=["naive", "hybrid", "ppr", "auto", "full"],
@@ -862,6 +882,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--ppr-damping", type=float, default=0.5, dest="ppr_damping")
     p.add_argument("--ppr-top-k", type=int, default=50, dest="ppr_top_k")
     p.add_argument("--ppr-qa-top-k", type=int, default=5, dest="ppr_qa_top_k")
+    p.add_argument("--hub-penalty-threshold", type=int, default=50, dest="hub_penalty_threshold")
     p.add_argument("--ppr-post-rerank-fusion", "--ppr_post_rerank_fusion", default="none", choices=["none", "raw_rrf"], dest="ppr_post_rerank_fusion")
     p.add_argument("--ppr-post-rerank-rrf-k", "--ppr_post_rerank_rrf_k", type=int, default=60, dest="ppr_post_rerank_rrf_k")
     p.add_argument("--passage-node-weight", type=float, default=0.05, dest="passage_node_weight")
@@ -882,6 +903,8 @@ def _parse_args() -> argparse.Namespace:
         )
     if args.concurrency <= 0:
         raise SystemExit("--concurrency must be > 0")
+    if args.n_samples < 0:
+        raise SystemExit("--n-samples must be >= 0")
     if args.top_k <= 0:
         raise SystemExit("--top-k must be > 0")
     if args.chunk_top_k <= 0:
@@ -896,6 +919,8 @@ def _parse_args() -> argparse.Namespace:
         raise SystemExit("--ppr-qa-top-k must be > 0")
     if args.ppr_qa_top_k > args.ppr_top_k:
         raise SystemExit("--ppr-qa-top-k must be <= --ppr-top-k")
+    if args.hub_penalty_threshold < 0:
+        raise SystemExit("--hub-penalty-threshold must be >= 0")
     if args.ppr_post_rerank_rrf_k <= 0:
         raise SystemExit("--ppr-post-rerank-rrf-k must be > 0")
     if not (0.0 < args.ppr_damping < 1.0):
