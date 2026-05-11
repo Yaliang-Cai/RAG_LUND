@@ -114,6 +114,14 @@ app.mount("/", StaticFiles(directory=str(APP_ROOT / "static/dist"), html=True), 
 - WorkspaceSwitcher: `DropdownMenu` + `Command` (searchable), calls `GET /workspaces`
 - ThemeToggle: icon button, persisted in Zustand + localStorage
 
+**Global Job Notifications (AppShell responsibility):**
+
+`AppShell` runs `useJobs(workspaceId)` at the shell level (2s polling when any job is running). It tracks the previous jobs snapshot via `useRef` and diffs on each poll result:
+- If a job transitions from `running` → `failed`: fire Sonner error toast with file name and a "View Jobs" link (`navigate('/jobs')`)
+- If a job transitions from `running` → `done`: fire Sonner success toast (optional, can be silenced if noisy)
+
+The Jobs tab in `TopNav` shows a badge count (`RunningJobsCount`) when any jobs are active, so users always have ambient awareness regardless of which page they are on. This badge is derived from the same `useJobs` query result — no extra fetch.
+
 ## 5. Pages
 
 ### Chat (`/chat`)
@@ -125,6 +133,20 @@ app.mount("/", StaticFiles(directory=str(APP_ROOT / "static/dist"), html=True), 
 - Reasoning trace rendered in a `Collapsible` (collapsed by default), `IBM Plex Mono` font
 - Auto-scroll to bottom on new chunks; user scroll-up pauses auto-scroll
 - Query mode: `hybrid` default; `Select` component with options `naive / local / global / hybrid`
+
+**Citation jump (PDF deep-link):**
+
+When the stream completes, the response payload includes a `source_nodes` array. Each node must contain:
+```ts
+{ doc_id: string; filename: string; page_num: number; excerpt: string }
+```
+These are rendered as inline citation chips below the AI answer (e.g., `[paper_01.pdf p.4]`). Clicking a chip:
+1. Sets `selectedFileId` and `pendingPageNum` in Zustand store
+2. Navigates to `/documents`
+3. `DocumentsPage` reads `pendingPageNum` from the store on mount, passes it to `<PdfViewer pageNumber={pendingPageNum} />`
+4. `react-pdf` renders directly to the target page; `PdfViewer` clears `pendingPageNum` after mount
+
+**Backend contract requirement:** `POST /query/stream` SSE events must include a terminal `source_nodes` event (or embed `page_num` in existing source metadata). This requires a backend verification step before the PdfViewer feature can be activated — if `page_num` is absent from the current response, the citation chips degrade gracefully to filename-only (no page jump).
 
 ### Documents (`/documents`)
 
@@ -193,6 +215,8 @@ interface AppStore {
   toggleTheme: () => void
   selectedFileId: string | null
   setSelectedFile: (id: string | null) => void
+  pendingPageNum: number | null           // set by citation chip click
+  setPendingPageNum: (n: number | null) => void
 }
 ```
 
@@ -295,3 +319,5 @@ rag-anything/server/static/dist/
 - `static/dist/` is not committed to git; it is generated at build time.
 - The `app.mount("/", StaticFiles(...), name="spa")` call must be the **last** statement in `app.py` after all API routes are registered, or FastAPI will route API calls to the static handler first.
 - Legacy `/graph/{ws}/html` endpoint (pyvis iframe) remains in `app.py` but is not surfaced in the new frontend. It can be removed in a future cleanup PR.
+- **`page_num` availability:** Before implementing citation jump, verify that `POST /query/stream` (or the underlying LightRAG retrieval) returns `page_num` in `source_nodes`. If the field is absent, the plan must include a backend task to surface it. Citation chips must degrade gracefully (filename-only) if `page_num` is `null`.
+- **Global job diff logic:** `AppShell`'s job-diff ref must handle the case where the component remounts (e.g., HMR in dev) without re-firing stale failure toasts. Store the last-seen job snapshot in Zustand (persisted across remounts) rather than a plain `useRef`.
