@@ -639,21 +639,83 @@ class GovernanceService:
     async def _backfill_entity_relation_provenance(
         self, workspace_id: str, doc_id, chunk_ids: list[str]
     ) -> None:
+        """Map chunk_ids → entities/relations using LightRAG's per-chunk KV stores.
+
+        LightRAG's JsonKVStorage doesn't expose .get(key). Read the underlying
+        `._data` dict directly (or `get_all()` as fallback) and look up by
+        chunk_id. The value shape is either a list of names or a dict whose
+        "data" key holds the list — handle both.
+        """
         if not chunk_ids:
             return
         rag = await self._rag.get_rag(workspace_id)
         await rag._ensure_lightrag_initialized()
         lr = rag.lightrag
+
+        ent_map = await self._read_chunk_kv(getattr(lr, "entity_chunks", None))
+        rel_map = await self._read_chunk_kv(getattr(lr, "relation_chunks", None))
+
+        chunk_set = set(chunk_ids)
         ent_set: set[str] = set()
         rel_set: set[str] = set()
-        for cid in chunk_ids:
-            try:
-                ents = await lr.entity_chunks.get(cid) or []
-                rels = await lr.relation_chunks.get(cid) or []
-            except Exception:
-                logger.exception("backfill: failed to read provenance for chunk %s", cid)
-                continue
-            ent_set.update(ents if isinstance(ents, list) else [])
-            rel_set.update(rels if isinstance(rels, list) else [])
+        for cid in chunk_set:
+            ent_set.update(self._extract_names(ent_map.get(cid)))
+            rel_set.update(self._extract_names(rel_map.get(cid)))
+
+        logger.info(
+            "backfill %s/%s: %d entities, %d relations from %d chunks",
+            workspace_id, doc_id, len(ent_set), len(rel_set), len(chunk_set),
+        )
         await self.insert_provenance(workspace_id, doc_id, "entity", sorted(ent_set))
         await self.insert_provenance(workspace_id, doc_id, "relation", sorted(rel_set))
+
+    async def _read_chunk_kv(self, kv) -> dict:
+        """Return the full chunk_id → value dict from a LightRAG KV store.
+
+        Returns {} on any failure so backfill keeps moving.
+        """
+        if kv is None:
+            return {}
+        try:
+            inner = getattr(kv, "_data", None)
+            if isinstance(inner, dict):
+                return dict(inner)
+            if hasattr(kv, "get_all"):
+                data = await kv.get_all()
+                if isinstance(data, dict):
+                    return data
+            db = getattr(kv, "db", None)
+            if db is not None and callable(getattr(db, "query", None)):
+                workspace = getattr(kv, "workspace", "") or ""
+                ns = getattr(kv, "namespace", "") or ""
+                rows = await db.query(
+                    "SELECT id, value FROM LIGHTRAG_KV WHERE workspace=$1 AND namespace=$2",
+                    [workspace, ns],
+                    multirows=True,
+                ) or []
+                return {r["id"]: r["value"] for r in rows}
+        except Exception:
+            logger.exception("_read_chunk_kv failed")
+        return {}
+
+    @staticmethod
+    def _extract_names(value) -> list[str]:
+        """Coerce a chunk-KV value into a list of entity/relation names.
+
+        Accepts a list of strings, a dict with a 'data'/'entities'/'relations' key,
+        a single string, or None.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [str(v) for v in value if v]
+        if isinstance(value, dict):
+            for key in ("data", "entities", "relations", "names", "ids"):
+                inner = value.get(key)
+                if isinstance(inner, list):
+                    return [str(v) for v in inner if v]
+                if isinstance(inner, str):
+                    return [inner]
+        return []
