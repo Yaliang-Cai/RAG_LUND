@@ -65,6 +65,21 @@ check_data_ready() {
     done
 }
 
+resolve_working_dir() {
+    local dataset="$1"
+    local workspace_id="$2"
+    local nested="${WORKSPACE_ROOT}/${dataset}/${workspace_id}"
+    local flat="${WORKSPACE_ROOT}/${dataset}"
+
+    if [[ -f "${nested}/multihopqa_index_profile.json" ]]; then
+        printf '%s\n' "${nested}"
+    elif [[ -f "${flat}/multihopqa_index_profile.json" ]]; then
+        printf '%s\n' "${flat}"
+    else
+        die "Missing workspace artifacts. Checked ${nested} and ${flat}."
+    fi
+}
+
 check_workspace_ready() {
     local working_dir="$1"
     local dataset="$2"
@@ -91,30 +106,77 @@ expected_workspace = sys.argv[6]
 profile = json.loads(profile_path.read_text(encoding="utf-8"))
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 source_map = json.loads(source_map_path.read_text(encoding="utf-8"))
+index_profile = profile.get("index_profile") or {}
+manifest_index_profile = manifest.get("index_profile") or {}
+ingest_stats = manifest.get("ingest_stats") or {}
+source_payload = source_map.get("map") or {}
 
 errors = []
-if profile.get("workspace") != expected_workspace:
-    errors.append(f"profile.workspace={profile.get('workspace')!r}")
+if profile.get("schema_version") != "multihopqa_index_profile_v1":
+    errors.append(f"profile.schema_version={profile.get('schema_version')!r}")
+if profile.get("workspace_id") != expected_workspace:
+    errors.append(f"profile.workspace_id={profile.get('workspace_id')!r}")
 if profile.get("dataset") != expected_dataset:
     errors.append(f"profile.dataset={profile.get('dataset')!r}")
 if profile.get("ablation_profile") != "v0":
-    errors.append(f"ablation_profile={profile.get('ablation_profile')!r}")
-if profile.get("corpus_source") != "hipporag2":
-    errors.append(f"corpus_source={profile.get('corpus_source')!r}")
+    errors.append(f"profile.ablation_profile={profile.get('ablation_profile')!r}")
+if profile.get("ablation_group") != "DB-only":
+    errors.append(f"profile.ablation_group={profile.get('ablation_group')!r}")
 if int(profile.get("n_samples") or 0) != 0:
-    errors.append(f"n_samples={profile.get('n_samples')!r}")
+    errors.append(f"profile.n_samples={profile.get('n_samples')!r}")
 if int(profile.get("seed") or -1) != 0:
-    errors.append(f"seed={profile.get('seed')!r}")
-if profile.get("enable_synonym_linking") is not False:
-    errors.append(f"enable_synonym_linking={profile.get('enable_synonym_linking')!r}")
-if int(profile.get("chunk_token_size") or 0) != expected_chunk_size:
+    errors.append(f"profile.seed={profile.get('seed')!r}")
+if index_profile.get("profile_key") != "v0":
+    errors.append(f"index_profile.profile_key={index_profile.get('profile_key')!r}")
+if index_profile.get("enable_entity_disambiguation") is not False:
     errors.append(
-        f"chunk_token_size={profile.get('chunk_token_size')!r}, expected={expected_chunk_size}"
+        "index_profile.enable_entity_disambiguation="
+        f"{index_profile.get('enable_entity_disambiguation')!r}"
     )
-if manifest.get("status") != "completed":
-    errors.append(f"manifest.status={manifest.get('status')!r}")
+if index_profile.get("enable_synonym_linking") is not False:
+    errors.append(
+        f"index_profile.enable_synonym_linking={index_profile.get('enable_synonym_linking')!r}"
+    )
+if int(index_profile.get("chunk_token_size") or 0) != expected_chunk_size:
+    errors.append(
+        f"index_profile.chunk_token_size={index_profile.get('chunk_token_size')!r}, "
+        f"expected={expected_chunk_size}"
+    )
+if manifest.get("schema_version") != "multihopqa_ingest_manifest_v1":
+    errors.append(f"manifest.schema_version={manifest.get('schema_version')!r}")
 if manifest.get("workspace_id") != expected_workspace:
     errors.append(f"manifest.workspace_id={manifest.get('workspace_id')!r}")
+if manifest.get("dataset") != expected_dataset:
+    errors.append(f"manifest.dataset={manifest.get('dataset')!r}")
+if manifest.get("corpus_source") != "hipporag2":
+    errors.append(f"manifest.corpus_source={manifest.get('corpus_source')!r}")
+if int(manifest.get("n_samples") or 0) != 0:
+    errors.append(f"manifest.n_samples={manifest.get('n_samples')!r}")
+if int(manifest.get("seed") or -1) != 0:
+    errors.append(f"manifest.seed={manifest.get('seed')!r}")
+if manifest.get("ablation_profile") != "v0":
+    errors.append(f"manifest.ablation_profile={manifest.get('ablation_profile')!r}")
+if manifest.get("ablation_group") != "DB-only":
+    errors.append(f"manifest.ablation_group={manifest.get('ablation_group')!r}")
+if int(manifest.get("chunk_token_size") or 0) != expected_chunk_size:
+    errors.append(
+        f"manifest.chunk_token_size={manifest.get('chunk_token_size')!r}, "
+        f"expected={expected_chunk_size}"
+    )
+if manifest_index_profile != index_profile:
+    errors.append("manifest.index_profile does not match profile.index_profile")
+if int(ingest_stats.get("failed_now_batch_count") or 0) != 0:
+    errors.append(
+        f"ingest_stats.failed_now_batch_count={ingest_stats.get('failed_now_batch_count')!r}"
+    )
+batch_count = int(manifest.get("batch_count") or 0)
+successful_count = int(ingest_stats.get("successful_before_batch_count") or 0) + int(
+    ingest_stats.get("successful_now_batch_count") or 0
+)
+if batch_count > 0 and successful_count != batch_count:
+    errors.append(
+        f"successful_batch_count={successful_count}, batch_count={batch_count}"
+    )
 if source_map.get("workspace_id") != expected_workspace:
     errors.append(f"source_map.workspace_id={source_map.get('workspace_id')!r}")
 if source_map.get("dataset") != expected_dataset:
@@ -123,8 +185,18 @@ if int(source_map.get("n_samples") or 0) != 0:
     errors.append(f"source_map.n_samples={source_map.get('n_samples')!r}")
 if int(source_map.get("seed") or -1) != 0:
     errors.append(f"source_map.seed={source_map.get('seed')!r}")
-if int(source_map.get("map_size") or 0) <= 0:
+source_map_size = int(source_map.get("map_size") or 0)
+if source_map_size <= 0:
     errors.append(f"source_map.map_size={source_map.get('map_size')!r}")
+if source_map_size != len(source_payload):
+    errors.append(
+        f"source_map.map_size={source_map_size}, actual_map_size={len(source_payload)}"
+    )
+expected_chunk_total = int(manifest.get("expected_chunk_total") or 0)
+if expected_chunk_total and expected_chunk_total != source_map_size:
+    errors.append(
+        f"manifest.expected_chunk_total={expected_chunk_total}, source_map.map_size={source_map_size}"
+    )
 
 if errors:
     raise SystemExit("Workspace check failed: " + "; ".join(errors))
@@ -280,7 +352,7 @@ log "================================================================"
 
 for DATASET in "${DATASETS[@]}"; do
     WORKSPACE_ID="${DATASET}_hr2_v0"
-    WORKING_DIR="${WORKSPACE_ROOT}/${DATASET}"
+    WORKING_DIR="$(resolve_working_dir "${DATASET}" "${WORKSPACE_ID}")"
 
     log "================================================================"
     log "Dataset:      ${DATASET}"

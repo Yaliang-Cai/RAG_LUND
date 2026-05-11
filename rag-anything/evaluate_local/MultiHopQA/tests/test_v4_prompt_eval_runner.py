@@ -22,6 +22,28 @@ def test_v4_prompt_eval_runner_exists_and_only_uses_existing_assets():
     assert "--no-bypass-keywords-cache" in text
 
 
+def test_v4_prompt_eval_runner_resolves_nested_or_flat_workspaces():
+    text = _script_text()
+
+    assert "resolve_working_dir()" in text
+    assert 'local nested="${WORKSPACE_ROOT}/${dataset}/${workspace_id}"' in text
+    assert 'local flat="${WORKSPACE_ROOT}/${dataset}"' in text
+    assert 'WORKING_DIR="$(resolve_working_dir "${DATASET}" "${WORKSPACE_ID}")"' in text
+
+
+def test_v4_prompt_eval_runner_checks_build_index_schema():
+    text = _script_text()
+
+    assert 'index_profile = profile.get("index_profile") or {}' in text
+    assert 'manifest_index_profile = manifest.get("index_profile") or {}' in text
+    assert 'profile.get("workspace_id")' in text
+    assert 'manifest.get("corpus_source") != "hipporag2"' in text
+    assert 'ingest_stats.get("failed_now_batch_count")' in text
+    assert 'manifest.get("expected_chunk_total")' in text
+    assert 'profile.get("workspace")' not in text
+    assert 'manifest.get("status")' not in text
+
+
 def test_v4_prompt_eval_runner_pins_expected_defaults():
     text = _script_text()
 
