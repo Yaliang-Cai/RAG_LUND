@@ -39,7 +39,7 @@ load_dotenv()
 
 VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto", "full")
 VALID_DATASETS = ("hotpotqa", "musique", "2wiki", "simpleqa")
-VALID_QA_PROMPT_STYLES = ("lightrag", "semantic_cot")
+VALID_QA_PROMPT_STYLES = ("lightrag", "semantic_cot", "kg_semantic_cot")
 VALID_ANSWER_PARSE_MODES = ("strip_references", "answer_marker")
 SOURCE_MAP_FILENAME = "multihopqa_chunk_source_map.json"
 PPR_MODES = {"ppr", "ppr_local"}
@@ -52,6 +52,14 @@ _SEMANTIC_COT_QA_SYSTEM = (
     'Use only the information in the provided passages. '
     'Your response should start after "Thought: ", where you briefly identify the evidence needed to answer the question. '
     'Conclude with "Answer: " to present a concise, definitive response, devoid of additional elaborations.'
+)
+
+_KG_SEMANTIC_COT_QA_SYSTEM = (
+    "As an advanced multi-hop reading comprehension assistant, analyze the "
+    "provided knowledge graph data and document passages to answer the question. "
+    "Use only the provided context. Start your response after \"Thought: \" by "
+    "briefly identifying the evidence chain, and conclude with \"Answer: \" "
+    "followed by a concise final answer."
 )
 
 _SEMANTIC_COT_ONE_SHOT_QA_DOCS = (
@@ -386,6 +394,67 @@ def _build_semantic_cot_user_prompt(
     return f"{prefix}Question: {question}\nThought: "
 
 
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _jsonl_context_block(rows: list[Any]) -> str:
+    return "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+
+
+def _kg_semantic_reference_list(references: list[Any]) -> str:
+    lines = []
+    for ref in references:
+        if not isinstance(ref, dict):
+            continue
+        reference_id = str(ref.get("reference_id") or "").strip()
+        title = str(ref.get("file_path") or ref.get("title") or "").strip()
+        if reference_id:
+            lines.append(f"[{reference_id}] {title}".rstrip())
+    return "\n".join(lines)
+
+
+def _build_kg_semantic_cot_user_prompt(
+    question: str,
+    raw_data: dict[str, Any],
+    chunk_source_map: dict[str, dict[str, Any]],
+    *,
+    qa_top_k: int | None = None,
+) -> str:
+    data = raw_data.get("data") if isinstance(raw_data.get("data"), dict) else raw_data
+    entities = _as_list(data.get("entities"))
+    relationships = _as_list(data.get("relationships"))
+    chunks = [chunk for chunk in _as_list(data.get("chunks")) if isinstance(chunk, dict)]
+    references = _as_list(data.get("references"))
+
+    limit = len(chunks) if qa_top_k is None else max(0, int(qa_top_k))
+    passages = []
+    for rank, chunk in enumerate(chunks[:limit], start=1):
+        passage = _semantic_cot_passage_text(rank, chunk, chunk_source_map)
+        if passage:
+            passages.append(passage)
+
+    passage_block = "\n\n".join(passages)
+    reference_list = _kg_semantic_reference_list(references)
+    return (
+        "Knowledge Graph Data (Entity):\n\n"
+        "```json\n"
+        f"{_jsonl_context_block(entities)}\n"
+        "```\n\n"
+        "Knowledge Graph Data (Relationship):\n\n"
+        "```json\n"
+        f"{_jsonl_context_block(relationships)}\n"
+        "```\n\n"
+        "Document Chunks (Title/Text passages):\n\n"
+        f"{passage_block}\n\n"
+        "Reference Document List:\n\n"
+        "```\n"
+        f"{reference_list}\n"
+        "```\n\n"
+        f"Question: {question}\nThought: "
+    )
+
+
 async def _call_semantic_cot_qa(
     service: Any,
     *,
@@ -410,6 +479,32 @@ async def _call_semantic_cot_qa(
             {"role": "user", "content": _SEMANTIC_COT_ONE_SHOT_QA_INPUT},
             {"role": "assistant", "content": _SEMANTIC_COT_ONE_SHOT_QA_OUTPUT},
         ],
+        enable_cot=True,
+        stream=False,
+    )
+    return answer if isinstance(answer, str) else str(answer)
+
+
+async def _call_kg_semantic_cot_qa(
+    service: Any,
+    *,
+    question: str,
+    raw_data: dict[str, Any],
+    chunk_source_map: dict[str, dict[str, Any]],
+    qa_top_k: int | None,
+) -> str:
+    llm_model_func = getattr(service, "llm_model_func", None)
+    if not callable(llm_model_func):
+        raise RuntimeError("KG semantic CoT QA prompt requires service.llm_model_func")
+    prompt = _build_kg_semantic_cot_user_prompt(
+        question,
+        raw_data,
+        chunk_source_map,
+        qa_top_k=qa_top_k,
+    )
+    answer = await llm_model_func(
+        prompt,
+        system_prompt=_KG_SEMANTIC_COT_QA_SYSTEM,
         enable_cot=True,
         stream=False,
     )
@@ -541,7 +636,7 @@ async def _run_mode(
                 wire_profile=wire_profile,
                 **query_kwargs,
             )
-            if qa_prompt_style == "semantic_cot":
+            if qa_prompt_style in ("semantic_cot", "kg_semantic_cot"):
                 retrieval_kwargs = dict(call_kwargs)
                 retrieval_kwargs["only_need_context"] = True
                 result = await service.query_with_trace(
@@ -551,16 +646,26 @@ async def _run_mode(
                     mode=wire_mode,
                     **retrieval_kwargs,
                 )
-                raw_chunks = result.get("trace", {}).get("data", {}).get("chunks", [])
+                trace_data = result.get("trace", {}).get("data", {})
+                raw_chunks = trace_data.get("chunks", []) if isinstance(trace_data, dict) else []
                 chunks = raw_chunks if isinstance(raw_chunks, list) else []
                 qa_top_k = call_kwargs.get("ppr_qa_top_k") or call_kwargs.get("chunk_top_k")
-                raw_answer = await _call_semantic_cot_qa(
-                    service,
-                    question=item["question"],
-                    chunks=chunks,
-                    chunk_source_map=chunk_source_map,
-                    qa_top_k=int(qa_top_k) if qa_top_k is not None else None,
-                )
+                if qa_prompt_style == "kg_semantic_cot":
+                    raw_answer = await _call_kg_semantic_cot_qa(
+                        service,
+                        question=item["question"],
+                        raw_data=trace_data if isinstance(trace_data, dict) else {},
+                        chunk_source_map=chunk_source_map,
+                        qa_top_k=int(qa_top_k) if qa_top_k is not None else None,
+                    )
+                else:
+                    raw_answer = await _call_semantic_cot_qa(
+                        service,
+                        question=item["question"],
+                        chunks=chunks,
+                        chunk_source_map=chunk_source_map,
+                        qa_top_k=int(qa_top_k) if qa_top_k is not None else None,
+                    )
             else:
                 result = await service.query_with_trace(
                     workspace_id=workspace_id,
@@ -589,7 +694,7 @@ async def _run_mode(
             "em": em,
             "f1": f1,
         }
-        if qa_prompt_style == "semantic_cot":
+        if qa_prompt_style in ("semantic_cot", "kg_semantic_cot"):
             record["raw_pred"] = raw_answer
         if item.get("gold_source_keys"):
             record["gold_source_keys"] = item["gold_source_keys"]
@@ -899,7 +1004,9 @@ def _parse_args() -> argparse.Namespace:
     args = p.parse_args()
     if args.answer_parse_mode is None:
         args.answer_parse_mode = (
-            "answer_marker" if args.qa_prompt_style == "semantic_cot" else "strip_references"
+            "answer_marker"
+            if args.qa_prompt_style in ("semantic_cot", "kg_semantic_cot")
+            else "strip_references"
         )
     if args.concurrency <= 0:
         raise SystemExit("--concurrency must be > 0")

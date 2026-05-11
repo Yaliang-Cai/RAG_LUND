@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "rag-anything"))
 
 from evaluate_local.MultiHopQA.evaluate_multihop import (
+    _build_kg_semantic_cot_user_prompt,
     _build_semantic_cot_user_prompt,
     _build_query_kwargs,
     _load_chunk_source_map,
@@ -67,6 +68,61 @@ def test_build_semantic_cot_user_prompt_prefers_source_map_content_and_ends_with
     assert "Wikipedia Title:" not in prompt
     assert "stale trace content" not in prompt
     assert "Other title" not in prompt
+    assert prompt.endswith("Question: When was Neville A. Stanton's employer founded?\nThought: ")
+
+
+def test_build_kg_semantic_cot_user_prompt_preserves_kg_and_uses_title_text_chunks():
+    source_map = {
+        "chunk-a": {
+            "title": "Southampton",
+            "text": "The University of Southampton was founded in 1862.",
+            "content": "Southampton\nThe University of Southampton was founded in 1862.",
+        }
+    }
+    chunks = [
+        {
+            "id": "chunk-a",
+            "reference_id": "1",
+            "content": "stale trace content",
+        }
+    ]
+    raw_data = {
+        "entities": [
+            {
+                "entity_name": "Neville A. Stanton",
+                "entity_type": "person",
+                "description": "British professor at the University of Southampton",
+            }
+        ],
+        "relationships": [
+            {
+                "src_id": "Neville A. Stanton",
+                "tgt_id": "University of Southampton",
+                "description": "Stanton works at Southampton",
+            }
+        ],
+        "chunks": chunks,
+        "references": [{"reference_id": "1", "file_path": "Southampton"}],
+    }
+
+    prompt = _build_kg_semantic_cot_user_prompt(
+        "When was Neville A. Stanton's employer founded?",
+        raw_data,
+        source_map,
+        qa_top_k=5,
+    )
+
+    assert "Knowledge Graph Data (Entity):" in prompt
+    assert "Knowledge Graph Data (Relationship):" in prompt
+    assert '"entity_name": "Neville A. Stanton"' in prompt
+    assert '"src_id": "Neville A. Stanton"' in prompt
+    assert "Document Chunks (Title/Text passages" in prompt
+    assert "Passage 1:" in prompt
+    assert "Title: Southampton" in prompt
+    assert "Text: The University of Southampton was founded in 1862." in prompt
+    assert "stale trace content" not in prompt
+    assert "Reference Document List" in prompt
+    assert "[1] Southampton" in prompt
     assert prompt.endswith("Question: When was Neville A. Stanton's employer founded?\nThought: ")
 
 
@@ -270,6 +326,31 @@ def test_parse_args_defaults_answer_parser_for_semantic_cot_prompt(monkeypatch):
     args = _parse_args()
 
     assert args.qa_prompt_style == "semantic_cot"
+    assert args.answer_parse_mode == "answer_marker"
+
+
+def test_parse_args_defaults_answer_parser_for_kg_semantic_cot_prompt(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate_multihop.py",
+            "--dataset",
+            "hotpotqa",
+            "--workspace",
+            "ws",
+            "--working-dir",
+            "/tmp/ws",
+            "--output-dir",
+            "/tmp/out",
+            "--qa-prompt-style",
+            "kg_semantic_cot",
+        ],
+    )
+
+    args = _parse_args()
+
+    assert args.qa_prompt_style == "kg_semantic_cot"
     assert args.answer_parse_mode == "answer_marker"
 
 
@@ -563,6 +644,122 @@ def test_run_mode_semantic_cot_prompt_uses_semantic_passages_and_answer_parser(t
     rows = [
         json.loads(line)
         for line in (tmp_path / "hotpotqa_ppr_results.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["pred"] == "1862."
+    assert rows[0]["raw_pred"].startswith("Thought:")
+    assert rows[0]["recall@1"] == 1.0
+
+
+def test_run_mode_kg_semantic_cot_preserves_hybrid_kg_context_and_recall(tmp_path):
+    class FakeService:
+        def __init__(self):
+            self.retrieval_calls = []
+            self.qa_calls = []
+
+        async def query_with_trace(self, **kwargs):
+            self.retrieval_calls.append(kwargs)
+            return {
+                "answer": "retrieval context, not final answer",
+                "trace": {
+                    "data": {
+                        "entities": [
+                            {
+                                "entity_name": "Neville A. Stanton",
+                                "entity_type": "person",
+                                "description": "British professor at the University of Southampton",
+                            }
+                        ],
+                        "relationships": [
+                            {
+                                "src_id": "Neville A. Stanton",
+                                "tgt_id": "University of Southampton",
+                                "description": "Stanton works at Southampton",
+                            }
+                        ],
+                        "chunks": [
+                            {
+                                "id": "chunk-a",
+                                "reference_id": "1",
+                                "content": "Trace title\nTrace text",
+                            }
+                        ],
+                        "references": [{"reference_id": "1", "file_path": "Southampton"}],
+                    }
+                },
+            }
+
+        async def llm_model_func(self, prompt, system_prompt=None, history_messages=None, **kwargs):
+            self.qa_calls.append(
+                {
+                    "prompt": prompt,
+                    "system_prompt": system_prompt,
+                    "history_messages": history_messages,
+                    "kwargs": kwargs,
+                }
+            )
+            return "Thought: the KG and passage identify the employer.\nAnswer: 1862."
+
+    service = FakeService()
+    source_map = {
+        "chunk-a": {
+            "source_key": "source-a",
+            "source_paragraph_id": "hotpotqa_000001",
+            "title": "Southampton",
+            "text": "The University of Southampton was founded in 1862.",
+            "content": "Southampton\nThe University of Southampton was founded in 1862.",
+        }
+    }
+
+    metrics = asyncio.run(
+        _run_mode(
+            service=service,
+            workspace_id="hotpotqa_hr2_v0",
+            working_dir="/tmp/ws",
+            items=[
+                {
+                    "id": "q0",
+                    "question": "When was Neville A. Stanton's employer founded?",
+                    "answer": "1862",
+                    "supporting_facts": ["The University of Southampton was founded in 1862."],
+                    "gold_source_keys": ["source-a"],
+                }
+            ],
+            mode="hybrid",
+            dataset="hotpotqa",
+            recall_ks=[1],
+            output_dir=tmp_path,
+            resume=False,
+            score_em=lambda pred, gold: 1.0 if pred.rstrip(".") == gold else 0.0,
+            score_f1=lambda pred, gold: 1.0 if pred.rstrip(".") == gold else 0.0,
+            get_eval_query_overrides=lambda dataset: {"response_type": "Short Answer"},
+            chunk_source_map=source_map,
+            query_kwargs={
+                "top_k": 10,
+                "chunk_top_k": 5,
+                "answer_context_mode": "kg_prompt",
+            },
+            concurrency=1,
+            hybrid_enable_rerank=True,
+            qa_prompt_style="kg_semantic_cot",
+            answer_parse_mode="answer_marker",
+        )
+    )
+
+    assert metrics["em"] == 1.0
+    retrieval_call = service.retrieval_calls[0]
+    assert retrieval_call["only_need_context"] is True
+    assert retrieval_call["mode"] == "hybrid"
+    assert retrieval_call["answer_context_mode"] == "kg_prompt"
+    prompt = service.qa_calls[0]["prompt"]
+    assert "Knowledge Graph Data (Entity):" in prompt
+    assert "Knowledge Graph Data (Relationship):" in prompt
+    assert "Passage 1:" in prompt
+    assert "Title: Southampton" in prompt
+    assert "Question: When was Neville A. Stanton's employer founded?\nThought: " in prompt
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "hotpotqa_hybrid_results.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert rows[0]["pred"] == "1862."
     assert rows[0]["raw_pred"].startswith("Thought:")
