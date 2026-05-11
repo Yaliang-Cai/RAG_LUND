@@ -112,6 +112,17 @@ ingest_stats = manifest.get("ingest_stats") or {}
 source_payload = source_map.get("map") or {}
 
 errors = []
+
+def require_int(payload, key, label):
+    if key not in payload or payload.get(key) is None:
+        errors.append(f"{label}.{key}=missing")
+        return None
+    try:
+        return int(payload.get(key))
+    except (TypeError, ValueError):
+        errors.append(f"{label}.{key}={payload.get(key)!r}")
+        return None
+
 if profile.get("schema_version") != "multihopqa_index_profile_v1":
     errors.append(f"profile.schema_version={profile.get('schema_version')!r}")
 if profile.get("workspace_id") != expected_workspace:
@@ -122,9 +133,11 @@ if profile.get("ablation_profile") != "v0":
     errors.append(f"profile.ablation_profile={profile.get('ablation_profile')!r}")
 if profile.get("ablation_group") != "DB-only":
     errors.append(f"profile.ablation_group={profile.get('ablation_group')!r}")
-if int(profile.get("n_samples") or 0) != 0:
+profile_n_samples = require_int(profile, "n_samples", "profile")
+profile_seed = require_int(profile, "seed", "profile")
+if profile_n_samples is not None and profile_n_samples != 0:
     errors.append(f"profile.n_samples={profile.get('n_samples')!r}")
-if int(profile.get("seed") or -1) != 0:
+if profile_seed is not None and profile_seed != 0:
     errors.append(f"profile.seed={profile.get('seed')!r}")
 if index_profile.get("profile_key") != "v0":
     errors.append(f"index_profile.profile_key={index_profile.get('profile_key')!r}")
@@ -150,9 +163,11 @@ if manifest.get("dataset") != expected_dataset:
     errors.append(f"manifest.dataset={manifest.get('dataset')!r}")
 if manifest.get("corpus_source") != "hipporag2":
     errors.append(f"manifest.corpus_source={manifest.get('corpus_source')!r}")
-if int(manifest.get("n_samples") or 0) != 0:
+manifest_n_samples = require_int(manifest, "n_samples", "manifest")
+manifest_seed = require_int(manifest, "seed", "manifest")
+if manifest_n_samples is not None and manifest_n_samples != 0:
     errors.append(f"manifest.n_samples={manifest.get('n_samples')!r}")
-if int(manifest.get("seed") or -1) != 0:
+if manifest_seed is not None and manifest_seed != 0:
     errors.append(f"manifest.seed={manifest.get('seed')!r}")
 if manifest.get("ablation_profile") != "v0":
     errors.append(f"manifest.ablation_profile={manifest.get('ablation_profile')!r}")
@@ -181,9 +196,11 @@ if source_map.get("workspace_id") != expected_workspace:
     errors.append(f"source_map.workspace_id={source_map.get('workspace_id')!r}")
 if source_map.get("dataset") != expected_dataset:
     errors.append(f"source_map.dataset={source_map.get('dataset')!r}")
-if int(source_map.get("n_samples") or 0) != 0:
+source_map_n_samples = require_int(source_map, "n_samples", "source_map")
+source_map_seed = require_int(source_map, "seed", "source_map")
+if source_map_n_samples is not None and source_map_n_samples != 0:
     errors.append(f"source_map.n_samples={source_map.get('n_samples')!r}")
-if int(source_map.get("seed") or -1) != 0:
+if source_map_seed is not None and source_map_seed != 0:
     errors.append(f"source_map.seed={source_map.get('seed')!r}")
 source_map_size = int(source_map.get("map_size") or 0)
 if source_map_size <= 0:

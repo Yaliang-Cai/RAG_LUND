@@ -40,8 +40,14 @@ def test_v4_prompt_eval_runner_checks_build_index_schema():
     assert 'manifest.get("corpus_source") != "hipporag2"' in text
     assert 'ingest_stats.get("failed_now_batch_count")' in text
     assert 'manifest.get("expected_chunk_total")' in text
+    assert "def require_int(payload, key, label):" in text
+    assert 'profile_seed = require_int(profile, "seed", "profile")' in text
+    assert 'manifest_seed = require_int(manifest, "seed", "manifest")' in text
+    assert 'source_map_seed = require_int(source_map, "seed", "source_map")' in text
     assert 'profile.get("workspace")' not in text
     assert 'manifest.get("status")' not in text
+    assert 'get("seed") or -1' not in text
+    assert 'get("n_samples") or 0' not in text
 
 
 def test_v4_prompt_eval_runner_pins_expected_defaults():
