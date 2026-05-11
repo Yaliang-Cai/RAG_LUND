@@ -575,8 +575,9 @@ class GovernanceService:
                     except Exception:
                         logger.warning("neo4j delete_node(%s) failed", ent)
                 for rel_key in rel_exclusive:
-                    if "::" in rel_key:
-                        src, tgt = rel_key.split("::", 1)
+                    # LightRAG joins relation endpoints with "<SEP>"
+                    if "<SEP>" in rel_key:
+                        src, tgt = rel_key.split("<SEP>", 1)
                         try:
                             await graph.delete_edge(src, tgt)
                         except Exception:
@@ -639,12 +640,16 @@ class GovernanceService:
     async def _backfill_entity_relation_provenance(
         self, workspace_id: str, doc_id, chunk_ids: list[str]
     ) -> None:
-        """Map chunk_ids → entities/relations using LightRAG's per-chunk KV stores.
+        """Map chunk_ids → entities/relations via INVERTED LightRAG KV stores.
 
-        LightRAG's JsonKVStorage doesn't expose .get(key). Read the underlying
-        `._data` dict directly (or `get_all()` as fallback) and look up by
-        chunk_id. The value shape is either a list of names or a dict whose
-        "data" key holds the list — handle both.
+        LightRAG's entity_chunks is keyed by entity name and stores a list of
+        the chunks each entity appears in:
+
+            {"World Bank|organization": {"chunk_ids": ["chunk-...", ...], ...}, ...}
+
+        Same shape for relation_chunks (keys joined with "<SEP>"). To find
+        entities for our chunks, scan every entry and pick those whose
+        chunk_ids intersect our set.
         """
         if not chunk_ids:
             return
@@ -652,27 +657,26 @@ class GovernanceService:
         await rag._ensure_lightrag_initialized()
         lr = rag.lightrag
 
-        ent_map = await self._read_chunk_kv(getattr(lr, "entity_chunks", None))
-        rel_map = await self._read_chunk_kv(getattr(lr, "relation_chunks", None))
+        ent_map = await self._read_lightrag_kv(getattr(lr, "entity_chunks", None))
+        rel_map = await self._read_lightrag_kv(getattr(lr, "relation_chunks", None))
 
         chunk_set = set(chunk_ids)
-        ent_set: set[str] = set()
-        rel_set: set[str] = set()
-        for cid in chunk_set:
-            ent_set.update(self._extract_names(ent_map.get(cid)))
-            rel_set.update(self._extract_names(rel_map.get(cid)))
+        ent_set = self._invert_lookup(ent_map, chunk_set)
+        rel_set = self._invert_lookup(rel_map, chunk_set)
 
         logger.info(
-            "backfill %s/%s: %d entities, %d relations from %d chunks",
+            "backfill %s/%s: %d entities, %d relations from %d chunks "
+            "(scanned %d ent / %d rel entries)",
             workspace_id, doc_id, len(ent_set), len(rel_set), len(chunk_set),
+            len(ent_map), len(rel_map),
         )
         await self.insert_provenance(workspace_id, doc_id, "entity", sorted(ent_set))
         await self.insert_provenance(workspace_id, doc_id, "relation", sorted(rel_set))
 
-    async def _read_chunk_kv(self, kv) -> dict:
-        """Return the full chunk_id → value dict from a LightRAG KV store.
+    async def _read_lightrag_kv(self, kv) -> dict:
+        """Return the underlying dict of a LightRAG JsonKVStorage / PGKVStorage.
 
-        Returns {} on any failure so backfill keeps moving.
+        Returns {} on any failure.
         """
         if kv is None:
             return {}
@@ -695,27 +699,23 @@ class GovernanceService:
                 ) or []
                 return {r["id"]: r["value"] for r in rows}
         except Exception:
-            logger.exception("_read_chunk_kv failed")
+            logger.exception("_read_lightrag_kv failed")
         return {}
 
     @staticmethod
-    def _extract_names(value) -> list[str]:
-        """Coerce a chunk-KV value into a list of entity/relation names.
-
-        Accepts a list of strings, a dict with a 'data'/'entities'/'relations' key,
-        a single string, or None.
+    def _invert_lookup(name_to_meta: dict, chunk_set: set[str]) -> set[str]:
+        """Given {name: {chunk_ids: [...]}} and a set of chunk_ids, return
+        the names whose chunk_ids intersect chunk_set.
         """
-        if value is None:
-            return []
-        if isinstance(value, str):
-            return [value]
-        if isinstance(value, list):
-            return [str(v) for v in value if v]
-        if isinstance(value, dict):
-            for key in ("data", "entities", "relations", "names", "ids"):
-                inner = value.get(key)
-                if isinstance(inner, list):
-                    return [str(v) for v in inner if v]
-                if isinstance(inner, str):
-                    return [inner]
-        return []
+        out: set[str] = set()
+        if not name_to_meta or not chunk_set:
+            return out
+        for name, meta in name_to_meta.items():
+            if not isinstance(meta, dict):
+                continue
+            cids = meta.get("chunk_ids") or []
+            if not isinstance(cids, list):
+                continue
+            if any(c in chunk_set for c in cids):
+                out.add(str(name))
+        return out
