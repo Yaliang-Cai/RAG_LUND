@@ -348,9 +348,14 @@ class GovernanceService:
     ) -> None:
         """Background coroutine launched by JobRunner.
 
-        Captures chunk provenance via before/after snapshot of LightRAG's text_chunks
-        KV (callback hooks don't carry chunk IDs in the upstream ProcessingCallback).
-        Safe under JobRunner(max_concurrent=1).
+        Captures chunk provenance by:
+          1. Registering IngestProvenanceCallback to capture LightRAG's
+             internal `doc-<hash>` id via the on_document_complete hook.
+          2. After ingest, querying lr.text_chunks for entries whose
+             `full_doc_id` matches the captured LightRAG id.
+
+        Falls back to a before/after snapshot diff if the callback didn't
+        fire (e.g., on errors or unsupported LightRAG versions).
         """
         from raganything.governance.callbacks import (
             IngestProvenanceCallback, JobProgressCallback,
@@ -371,7 +376,7 @@ class GovernanceService:
             await rag_inner._ensure_lightrag_initialized()
             lr = rag_inner.lightrag
 
-            # Snapshot text_chunks BEFORE ingest
+            # Snapshot BEFORE in case the doc_id callback path doesn't fire.
             chunks_before = await self._snapshot_chunk_ids(lr)
 
             workspace_output = str(_P(self._rag.settings.output_dir) / workspace_id)
@@ -382,17 +387,30 @@ class GovernanceService:
                 chunking_strategy=chunking_strategy or None,
             )
 
-            # Diff to find this ingest's chunk IDs
-            chunks_after = await self._snapshot_chunk_ids(lr)
-            new_chunk_ids = sorted(chunks_after - chunks_before)
-            logger.info(
-                "run_ingest %s/%s captured %d new chunks",
-                workspace_id, doc_id, len(new_chunk_ids),
-            )
+            # Primary path: filter text_chunks by full_doc_id captured from
+            # on_document_complete. This is robust against concurrent ingests
+            # in a way snapshot-diff is not.
+            new_chunk_ids: list[str] = []
+            if prov_cb.lightrag_doc_id:
+                new_chunk_ids = await self._find_chunks_for_lightrag_doc(
+                    lr, prov_cb.lightrag_doc_id,
+                )
+                if new_chunk_ids:
+                    logger.info(
+                        "run_ingest %s/%s captured %d chunks via full_doc_id=%s",
+                        workspace_id, doc_id, len(new_chunk_ids), prov_cb.lightrag_doc_id,
+                    )
 
-            # Persist chunk provenance.
+            # Fallback: snapshot diff
+            if not new_chunk_ids:
+                chunks_after = await self._snapshot_chunk_ids(lr)
+                new_chunk_ids = sorted(chunks_after - chunks_before)
+                logger.info(
+                    "run_ingest %s/%s captured %d new chunks via snapshot diff",
+                    workspace_id, doc_id, len(new_chunk_ids),
+                )
+
             await self.insert_provenance(workspace_id, doc_id, "chunk", new_chunk_ids)
-            # Backfill entity / relation provenance from LightRAG's per-chunk maps.
             await self._backfill_entity_relation_provenance(
                 workspace_id, doc_id, new_chunk_ids,
             )
@@ -403,6 +421,7 @@ class GovernanceService:
                 details={
                     "chunk_count": len(new_chunk_ids),
                     "filename": _P(file_path).name,
+                    "lightrag_doc_id": prov_cb.lightrag_doc_id,
                 },
             )
             await prog_cb.flush()
@@ -418,6 +437,51 @@ class GovernanceService:
         finally:
             self._rag.unregister_callback(prov_cb)
             self._rag.unregister_callback(prog_cb)
+
+    async def _find_chunks_for_lightrag_doc(self, lr, lightrag_doc_id: str) -> list[str]:
+        """Query LightRAG's text_chunks KV and return chunk_ids whose full_doc_id matches.
+
+        Returns [] on failure so callers fall back to snapshot-diff.
+        """
+        if lr is None or not lightrag_doc_id:
+            return []
+        tc = getattr(lr, "text_chunks", None)
+        if tc is None:
+            return []
+        try:
+            # 1. JsonKVStorage in-memory dict (multiprocessing shared)
+            inner = getattr(tc, "_data", None)
+            if isinstance(inner, dict):
+                return sorted(
+                    cid for cid, data in inner.items()
+                    if isinstance(data, dict) and data.get("full_doc_id") == lightrag_doc_id
+                )
+
+            # 2. PGKVStorage direct query
+            db = getattr(tc, "db", None)
+            if db is not None and callable(getattr(db, "query", None)):
+                workspace = getattr(tc, "workspace", "") or ""
+                rows = await db.query(
+                    "SELECT id FROM LIGHTRAG_DOC_CHUNKS WHERE workspace=$1 AND full_doc_id=$2",
+                    [workspace, lightrag_doc_id],
+                    multirows=True,
+                ) or []
+                return sorted(r["id"] for r in rows)
+
+            # 3. Future-proof: get_all() returning dict[id, value]
+            if hasattr(tc, "get_all"):
+                data = await tc.get_all()
+                if isinstance(data, dict):
+                    return sorted(
+                        cid for cid, v in data.items()
+                        if isinstance(v, dict) and v.get("full_doc_id") == lightrag_doc_id
+                    )
+        except Exception:
+            logger.exception(
+                "_find_chunks_for_lightrag_doc failed for %s; will fall back to snapshot diff",
+                lightrag_doc_id,
+            )
+        return []
 
     async def _snapshot_chunk_ids(self, lr) -> set[str]:
         """Return the current set of chunk IDs from LightRAG's text_chunks KV.

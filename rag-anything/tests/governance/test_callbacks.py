@@ -7,37 +7,58 @@ from raganything.governance.callbacks import IngestProvenanceCallback, JobProgre
 pytestmark = pytest.mark.asyncio
 
 
-async def test_provenance_callback_collects_chunk_ids():
+async def test_provenance_callback_captures_lightrag_doc_id():
     cb = IngestProvenanceCallback("w1", uuid4())
-    await cb.on_chunk_indexed("c1")
-    await cb.on_chunk_indexed("c2")
-    assert cb.chunk_ids == ["c1", "c2"]
+    assert cb.lightrag_doc_id is None
+    # on_document_complete is sync per ProcessingCallback contract
+    cb.on_document_complete(
+        file_path="/tmp/demo.md",
+        doc_id="doc-abc123",
+        duration_seconds=1.5,
+    )
+    assert cb.lightrag_doc_id == "doc-abc123"
+    assert cb.file_path == "/tmp/demo.md"
+
+
+async def test_provenance_callback_ignores_empty_doc_id():
+    cb = IngestProvenanceCallback("w1", uuid4())
+    cb.on_document_complete(file_path="/tmp/demo.md", doc_id="")
+    assert cb.lightrag_doc_id is None
 
 
 class FakeGov:
     def __init__(self):
         self.writes: list[dict] = []
+
     async def update_job_progress(self, jid, progress):
         self.writes.append(dict(progress))
 
 
-async def test_progress_callback_debounces_by_chunk_count():
+async def test_progress_callback_writes_on_parse_complete():
     gov = FakeGov()
-    cb = JobProgressCallback(gov, uuid4(), interval_s=999, chunk_interval=3)
-    await cb.on_chunk_indexed("a")
-    await cb.on_chunk_indexed("b")
-    assert gov.writes == []  # not yet
-    await cb.on_chunk_indexed("c")
-    assert len(gov.writes) == 1
-    assert gov.writes[0]["indexed"] == 3
+    cb = JobProgressCallback(gov, uuid4(), interval_s=0)
+    cb.on_parse_complete(file_path="/tmp/x.md", content_blocks=8)
+    await asyncio.sleep(0.05)
+    assert len(gov.writes) >= 1
+    assert gov.writes[-1]["total"] == 8
+    assert gov.writes[-1]["parsed"] == 8
 
 
-async def test_progress_callback_flush_forces_write():
+async def test_progress_callback_writes_on_text_insert_complete():
     gov = FakeGov()
-    cb = JobProgressCallback(gov, uuid4(), interval_s=999, chunk_interval=999)
-    await cb.on_progress(parsed=5, total=10)
-    assert gov.writes == []
+    cb = JobProgressCallback(gov, uuid4(), interval_s=0)
+    cb.on_parse_complete(file_path="/tmp/x.md", content_blocks=8)
+    cb.on_text_insert_complete(file_path="/tmp/x.md")
+    await asyncio.sleep(0.05)
+    assert gov.writes[-1]["indexed"] == 8
+
+
+async def test_progress_callback_final_flush_is_async():
+    gov = FakeGov()
+    cb = JobProgressCallback(gov, uuid4(), interval_s=999)
+    cb.on_parse_complete(file_path="/tmp/x.md", content_blocks=4)
+    await asyncio.sleep(0.05)
+    initial = len(gov.writes)
     await cb.flush()
-    assert len(gov.writes) == 1
-    assert gov.writes[0]["parsed"] == 5
-    assert gov.writes[0]["total"] == 10
+    assert len(gov.writes) == initial + 1
+    assert gov.writes[-1]["total"] == 4
