@@ -1,0 +1,34 @@
+import { describe, it, expect, beforeEach } from 'vitest'
+import { useAppStore } from '@/store'
+import { act } from '@testing-library/react'
+
+describe('AppStore', () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      workspaceId: 'default',
+      theme: 'dark',
+      selectedFileId: null,
+      pendingPageNum: null,
+      lastSeenJobStatuses: {},
+    })
+  })
+
+  it('sets workspaceId', () => {
+    act(() => useAppStore.getState().setWorkspace('ws2'))
+    expect(useAppStore.getState().workspaceId).toBe('ws2')
+  })
+
+  it('toggles theme', () => {
+    act(() => useAppStore.getState().toggleTheme())
+    expect(useAppStore.getState().theme).toBe('light')
+    act(() => useAppStore.getState().toggleTheme())
+    expect(useAppStore.getState().theme).toBe('dark')
+  })
+
+  it('sets pendingPageNum and clears it', () => {
+    act(() => useAppStore.getState().setPendingPageNum(5))
+    expect(useAppStore.getState().pendingPageNum).toBe(5)
+    act(() => useAppStore.getState().setPendingPageNum(null))
+    expect(useAppStore.getState().pendingPageNum).toBeNull()
+  })
+})
