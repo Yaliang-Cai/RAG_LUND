@@ -4,20 +4,24 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Send } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
+const MODES = ['naive', 'local', 'global', 'hybrid', 'ppr', 'auto', 'agentic'] as const
+const PROFILES = ['precise', 'local', 'multihop', 'descriptive', 'full'] as const
+
 interface ChatInputProps {
-  onSend: (query: string, mode: string) => void
+  onSend: (query: string, mode: string, profile: string) => void
   disabled?: boolean
 }
 
 export function ChatInput({ onSend, disabled }: ChatInputProps) {
   const [value, setValue] = useState('')
   const [mode, setMode] = useState('hybrid')
+  const [profile, setProfile] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   function submit() {
     const q = value.trim()
     if (!q || disabled) return
-    onSend(q, mode)
+    onSend(q, mode, profile)
     setValue('')
     textareaRef.current?.focus()
   }
@@ -28,6 +32,8 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
       submit()
     }
   }
+
+  const isAuto = mode === 'auto'
 
   return (
     <div className="border-t border-border p-3 flex flex-col gap-2 shrink-0">
@@ -48,18 +54,35 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           <Send className="h-4 w-4" />
         </Button>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <span className="text-xs text-muted-foreground">Mode:</span>
-        <Select value={mode} onValueChange={(v) => { if (v !== null) setMode(v) }}>
+        <Select value={mode} onValueChange={(v) => { if (v != null) { setMode(v); if (v !== 'auto') setProfile('') } }}>
           <SelectTrigger className="h-7 w-28 text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {['naive', 'local', 'global', 'hybrid'].map((m) => (
+            {MODES.map((m) => (
               <SelectItem key={m} value={m} className="text-xs">{m}</SelectItem>
             ))}
           </SelectContent>
         </Select>
+
+        {isAuto && (
+          <>
+            <span className="text-xs text-muted-foreground">Profile:</span>
+            <Select value={profile} onValueChange={(v) => { if (v != null) setProfile(v) }}>
+              <SelectTrigger className="h-7 w-32 text-xs">
+                <SelectValue placeholder="— auto detect —" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="" className="text-xs text-muted-foreground">— auto detect —</SelectItem>
+                {PROFILES.map((p) => (
+                  <SelectItem key={p} value={p} className="text-xs">{p}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </>
+        )}
       </div>
     </div>
   )
