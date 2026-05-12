@@ -35,15 +35,40 @@ def test_synonym_hpo_shell_runner_only_uses_existing_assets():
     assert "N_TRIALS=\"${N_TRIALS:-40}\"" in text
     assert "build_index.py" not in text
     assert "download_hipporag2_datasets.py" not in text
-    assert "manage_workspace_synonyms.py" not in text
+    assert "scripts/manage_workspace_synonyms.py\" apply" in text
+
+
+def test_synonym_hpo_shell_runner_all_stage_applies_synonyms_then_runs_all_stages():
+    text = SHELL_RUNNER.read_text(encoding="utf-8")
+
+    assert 'HPO_STAGE must be dev, verify, full, or all' in text
+    assert 'if [[ "${HPO_STAGE}" == "all" ]]; then' in text
+    assert "apply_synonym_edges_for_all" in text
+    assert 'run_stage "dev"' in text
+    assert 'run_stage "verify"' in text
+    assert 'run_stage "full"' in text
+    assert text.index("apply_synonym_edges_for_all") < text.index('run_stage "dev"')
+    assert '--synonymy-threshold "${SYNONYM_THRESHOLD}"' in text
+    assert "check_synonym_manifest_ready" in text
+
+
+def test_synonym_hpo_shell_runner_does_not_forward_stage_name_as_extra_arg():
+    text = SHELL_RUNNER.read_text(encoding="utf-8")
+    run_stage_body = text.split("run_stage() {", 1)[1].split(
+        "if [[ \"${HPO_STAGE}\" == \"all\" ]]",
+        1,
+    )[0]
+
+    assert 'local stage="$1"' in run_stage_body
+    assert "shift" in run_stage_body
 
 
 def test_synonym_hpo_shell_runner_full_prefers_verify_top_configs():
     text = SHELL_RUNNER.read_text(encoding="utf-8")
 
     assert 'VERIFY_TOP_CONFIGS="${VERIFY_RESULTS_ROOT}/top_configs.tsv"' in text
-    assert 'if [[ "${HPO_STAGE}" == "full" && -z "${CONFIGS_FILE:-}" && -f "${VERIFY_TOP_CONFIGS}" ]]; then' in text
-    assert 'CONFIGS_FILE="${VERIFY_TOP_CONFIGS}"' in text
+    assert 'if [[ "${stage}" == "full" && -z "${CONFIGS_FILE:-}" && -f "${VERIFY_TOP_CONFIGS}" ]]; then' in text
+    assert 'config_args=(--configs-file "${VERIFY_TOP_CONFIGS}")' in text
 
 
 def test_synonym_hpo_search_space_matches_plan_and_excludes_synonym_weight_mode():
