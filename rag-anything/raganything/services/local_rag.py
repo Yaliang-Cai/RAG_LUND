@@ -2369,6 +2369,7 @@ class LocalRagService:
         ppr_synonym_weight_mode: str | None = None,
         exclude_synonym_edges: bool | None = None,
         qdrant_retrieval_mode: str | None = None,
+        profile: str | None = None,
     ):
         """Async generator — yields structured events via LightRAG aquery_llm().
 

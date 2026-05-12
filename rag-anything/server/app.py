@@ -229,6 +229,7 @@ class QueryRequest(BaseModel):
     recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K
     ppr_synonym_weight_mode: Literal["raw", "plus_one"] = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
     qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] = DEFAULT_QDRANT_RETRIEVAL_MODE
+    profile: Optional[str] = None  # auto mode only; None = LLM classifier decides
 
 # =========================================================================
 # 路由
@@ -709,6 +710,7 @@ async def query_stream_endpoint(
                 recognition_top_k=payload.recognition_top_k,
                 ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
                 qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
+                profile=payload.profile,
             ):
                 if event["type"] == "meta":
                     retrieval_data = event  # keep for graph subquery
