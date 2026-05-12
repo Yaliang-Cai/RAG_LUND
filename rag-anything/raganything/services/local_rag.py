@@ -2378,6 +2378,44 @@ class LocalRagService:
           {"type": "chunk", "text": str}                       # LLM token
           {"type": "error", "text": str}                       # error
         """
+        # ── Non-streaming branch: agentic mode or auto+profile override ──
+        if mode == "agentic" or (mode == "auto" and profile):
+            try:
+                extra: dict = {}
+                if profile:
+                    extra["profile"] = profile
+                result = await self.query_with_trace(
+                    workspace_id, query,
+                    mode=mode,
+                    return_trace=True,
+                    top_k=top_k,
+                    chunk_top_k=chunk_top_k,
+                    enable_rerank=enable_rerank,
+                    **extra,
+                )
+                trace = result.get("trace", {})
+                if mode == "agentic":
+                    meta_payload = {
+                        "agentic_trace": {
+                            "confidence": result.get("confidence"),
+                            "grounded": result.get("grounded"),
+                            "profile": trace.get("profile"),
+                            "router_cache_hit": trace.get("router_cache_hit", False),
+                            "retrieve_cycles_used": trace.get("retrieve_cycles_used", 0),
+                            "check_cycles_used": trace.get("check_cycles_used", 0),
+                            "rewrite_history": trace.get("rewrite_history", []),
+                            "sub_questions": trace.get("sub_questions"),
+                        }
+                    }
+                else:
+                    meta_payload = {"routing_trace": trace.get("routing", trace)}
+                yield {"type": "meta", "data": {}, "metadata": meta_payload}
+                yield {"type": "chunk", "text": result.get("answer", "")}
+            except Exception as exc:
+                self.logger.error("stream_query (agentic branch) error: %s", exc)
+                yield {"type": "error", "text": str(exc)}
+            return
+
         try:
             from lightrag import QueryParam
             rag_instance = await self.get_rag(workspace_id)
