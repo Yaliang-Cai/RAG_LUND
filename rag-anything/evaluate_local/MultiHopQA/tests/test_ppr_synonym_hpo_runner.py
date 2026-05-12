@@ -37,6 +37,14 @@ def test_synonym_hpo_shell_runner_only_uses_existing_assets():
     assert "manage_workspace_synonyms.py" not in text
 
 
+def test_synonym_hpo_shell_runner_full_prefers_verify_top_configs():
+    text = SHELL_RUNNER.read_text(encoding="utf-8")
+
+    assert 'VERIFY_TOP_CONFIGS="${VERIFY_RESULTS_ROOT}/top_configs.tsv"' in text
+    assert 'if [[ "${HPO_STAGE}" == "full" && -z "${CONFIGS_FILE:-}" && -f "${VERIFY_TOP_CONFIGS}" ]]; then' in text
+    assert 'CONFIGS_FILE="${VERIFY_TOP_CONFIGS}"' in text
+
+
 def test_synonym_hpo_search_space_matches_plan_and_excludes_synonym_weight_mode():
     assert SEARCH_SPACE == {
         "top_k": [5, 10, 20, 40],

@@ -34,6 +34,7 @@ PY
 DEV_RESULTS_ROOT="${DEV_RESULTS_ROOT:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/results/multihopqa_hr2_v0_ppr_hpo_semantic_prompt_syn_t${threshold_label}_dev}"
 VERIFY_RESULTS_ROOT="${VERIFY_RESULTS_ROOT:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/results/multihopqa_hr2_v0_ppr_hpo_semantic_prompt_syn_t${threshold_label}_verify}"
 FULL_RESULTS_ROOT="${FULL_RESULTS_ROOT:-${RAGANYTHING_ROOT}/evaluate_local/MultiHopQA/results/multihopqa_hr2_v0_ppr_hpo_semantic_prompt_syn_t${threshold_label}_full}"
+VERIFY_TOP_CONFIGS="${VERIFY_RESULTS_ROOT}/top_configs.tsv"
 STUDY_DB="${STUDY_DB:-${DEV_RESULTS_ROOT}/study.db}"
 
 case "${HPO_STAGE}" in
@@ -75,6 +76,9 @@ echo "Top N:              ${TOP_N}"
 echo "================================================================"
 
 CONFIG_ARGS=()
+if [[ "${HPO_STAGE}" == "full" && -z "${CONFIGS_FILE:-}" && -f "${VERIFY_TOP_CONFIGS}" ]]; then
+    CONFIGS_FILE="${VERIFY_TOP_CONFIGS}"
+fi
 if [[ -n "${CONFIGS_FILE:-}" ]]; then
     CONFIG_ARGS=(--configs-file "${CONFIGS_FILE}")
 fi
