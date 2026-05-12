@@ -106,6 +106,12 @@ async def lifespan(app: FastAPI):
     app.state.jobs = job_runner
     app.state.gov_settings = gov_settings
 
+    phoenix_enabled = os.getenv("ENABLE_PHOENIX", "").lower() in ("1", "true", "yes")
+    if phoenix_enabled:
+        from raganything.observability import setup_phoenix
+        setup_phoenix()
+        logger.info("lifespan: Phoenix tracing enabled at http://localhost:6006")
+
     logger.info("lifespan: startup complete")
     try:
         yield
@@ -231,6 +237,11 @@ class QueryRequest(BaseModel):
     qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] = DEFAULT_QDRANT_RETRIEVAL_MODE
     profile: Optional[str] = None  # auto mode only; None = LLM classifier decides
     conversation_history: list[dict] = []
+
+class EvaluateRequest(BaseModel):
+    workspace_id: str
+    query: str
+    answer: str
 
 # =========================================================================
 # 路由
@@ -738,6 +749,17 @@ async def query_stream_endpoint(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/evaluate")
+async def evaluate_endpoint(
+    payload: EvaluateRequest,
+    _auth: None = Depends(verify_api_key),
+    service: LocalRagService = Depends(get_service),
+):
+    """Run LLM-based answer quality evaluation. Returns {score: float, gap: str}."""
+    _validate_workspace_id(payload.workspace_id)
+    return await service.evaluate_answer(payload.workspace_id, payload.query, payload.answer)
 
 
 async def _get_query_subgraph(rag, retrieval, payload):

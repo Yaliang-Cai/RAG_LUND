@@ -2505,6 +2505,16 @@ class LocalRagService:
             self.logger.error("stream_query error: %s", exc)
             yield {"type": "error", "text": str(exc)}
 
+    async def evaluate_answer(self, workspace_id: str, query: str, answer: str) -> dict:
+        """Run AnswerEvaluator on a query+answer pair.
+
+        Returns: {"score": float (0-1), "gap": str}
+        """
+        from raganything.retrieval.evaluator import AnswerEvaluator
+        rag = await self.get_rag(workspace_id)
+        evaluator = AnswerEvaluator(rag.lightrag.llm_model_func)
+        return await evaluator.evaluate(query, answer)
+
 
 if __name__ == "__main__":
     # 加载 .env 文件中的环境变量
