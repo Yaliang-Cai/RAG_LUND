@@ -89,6 +89,8 @@ export interface QueryParams {
   chunk_top_k?: number
   enable_rerank?: boolean
   return_graph?: boolean
+  conversation_history?: { role: string; content: string }[]
+  vlm_enhanced?: boolean
 }
 
 export interface FileRecord {

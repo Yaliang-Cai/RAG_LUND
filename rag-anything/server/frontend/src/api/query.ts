@@ -13,6 +13,12 @@ export async function openQueryStream(params: QueryParams): Promise<Response> {
   if (params.mode === 'auto' && params.profile) {
     body.profile = params.profile
   }
+  if (params.conversation_history && params.conversation_history.length > 0) {
+    body.conversation_history = params.conversation_history
+  }
+  if (params.vlm_enhanced) {
+    body.vlm_enhanced = true
+  }
 
   const response = await fetch('/query/stream', {
     method: 'POST',
