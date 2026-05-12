@@ -78,10 +78,13 @@ export interface StreamErrorEvent {
 
 export type StreamEvent = StreamMetaEvent | StreamChunkEvent | StreamDoneEvent | StreamErrorEvent
 
+export type TraceType = 'agentic' | 'auto' | 'ppr' | null
+
 export interface QueryParams {
   workspace_id: string
   query: string
-  mode?: 'naive' | 'local' | 'global' | 'hybrid'
+  mode?: 'naive' | 'local' | 'global' | 'hybrid' | 'ppr' | 'auto' | 'agentic'
+  profile?: string
   top_k?: number
   chunk_top_k?: number
   enable_rerank?: boolean
