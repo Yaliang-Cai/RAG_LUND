@@ -1,9 +1,9 @@
 import ReactMarkdown from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
-import { ReasoningTrace } from './ReasoningTrace'
+import { AgenticTrace } from './AgenticTrace'
 import { CitationChip } from './CitationChip'
 import { cn } from '@/lib/utils'
-import type { SourceNode } from '@/types'
+import type { SourceNode, TraceType } from '@/types'
 
 export interface Message {
   id: string
@@ -11,6 +11,8 @@ export interface Message {
   content: string
   reasoning?: string
   sourceNodes?: SourceNode[]
+  traceType?: TraceType
+  traceMetadata?: Record<string, unknown>
 }
 
 export function MessageBubble({ message }: { message: Message }) {
@@ -31,7 +33,12 @@ export function MessageBubble({ message }: { message: Message }) {
           <ReactMarkdown rehypePlugins={[rehypeHighlight]}>{message.content}</ReactMarkdown>
         )}
       </div>
-      {!isUser && message.reasoning && <ReasoningTrace text={message.reasoning} />}
+      {!isUser && message.traceType && (
+        <AgenticTrace
+          traceType={message.traceType}
+          metadata={message.traceMetadata ?? {}}
+        />
+      )}
       {!isUser && message.sourceNodes && message.sourceNodes.length > 0 && (
         <div className="flex flex-wrap gap-1 max-w-[80%]">
           {message.sourceNodes.map((n, i) => <CitationChip key={i} node={n} />)}
