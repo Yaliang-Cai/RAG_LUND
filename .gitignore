@@ -24,3 +24,9 @@ logs/
 .DS_Store
 Thumbs.db
 .worktrees/
+.env.local
+
+# Frontend build artifacts
+rag-anything/server/frontend/node_modules/
+rag-anything/server/static/dist/
+.superpowers/

@@ -11,9 +11,8 @@ from typing import List, Literal, Optional, Set
 import json as _json
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from raganything.governance import (
@@ -58,15 +57,6 @@ logger = logging.getLogger(__name__)
 
 # --- 配置与初始化 ---
 APP_ROOT = Path(__file__).resolve().parent
-TEMPLATES = Jinja2Templates(directory=str(APP_ROOT / "templates"))
-
-# 检测本地静态资源是否已下载（运行 server/download_static.py 后生效）
-_STATIC_DIR = APP_ROOT / "static"
-_USE_LOCAL_STATIC: bool = all([
-    (_STATIC_DIR / "marked.min.js").exists(),
-    (_STATIC_DIR / "katex" / "katex.min.js").exists(),
-    (_STATIC_DIR / "hljs" / "highlight.min.js").exists(),
-])
 
 API_KEY_ENV = "RAGANYTHING_API_KEY"
 MAX_TOP_K = int(os.getenv("RAGANYTHING_MAX_TOP_K", str(DEFAULT_TOP_K)))
@@ -127,12 +117,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RAGAnything Local Service", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
-
-if _USE_LOCAL_STATIC:
-    logger.info("Offline mode: serving JS/CSS from server/static/")
-else:
-    logger.info("Online mode: loading JS/CSS from CDN")
 
 
 def _compute_workspace_id(name: str) -> str:
@@ -249,13 +233,6 @@ class QueryRequest(BaseModel):
 # =========================================================================
 # 路由
 # =========================================================================
-
-@app.get("/", response_class=HTMLResponse)
-def index(request: Request):
-    return TEMPLATES.TemplateResponse(
-        "index.html",
-        {"request": request, "use_local_static": _USE_LOCAL_STATIC},
-    )
 
 # --- 文件列表 (解析产物) ---
 @app.get("/files/{workspace_id}")
@@ -743,12 +720,13 @@ async def query_stream_endpoint(
         except Exception as exc:
             yield f"data: {_json.dumps({'type': 'error', 'text': str(exc)}, ensure_ascii=False)}\n\n"
 
-        # Event final: done + optional graph
+        # Event final: done + optional graph + source_nodes
         graph_data = None
         if payload.return_graph:
             rag = await service.get_rag(payload.workspace_id)
             graph_data = await _get_query_subgraph(rag, retrieval_data, payload)
-        yield f"data: {_json.dumps({'type': 'done', 'graph': graph_data}, ensure_ascii=False)}\n\n"
+        source_nodes = _extract_source_nodes(retrieval_data)
+        yield f"data: {_json.dumps({'type': 'done', 'graph': graph_data, 'source_nodes': source_nodes}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         _generate(),
@@ -799,6 +777,46 @@ async def _get_query_subgraph(rag, retrieval, payload):
         return {"nodes": nodes, "edges": edges}
     except Exception:
         return None
+
+
+def _extract_source_nodes(retrieval_data: dict) -> list[dict]:
+    """Extract source file references from LightRAG retrieval meta event.
+
+    page_num is None if LightRAG doesn't surface it — frontend degrades gracefully.
+    """
+    source_nodes: list[dict] = []
+    seen: set[str] = set()
+    data = retrieval_data.get("data", {})
+
+    for key in ("chunks", "references", "sources", "text_chunks"):
+        chunks = data.get(key, [])
+        if not isinstance(chunks, list):
+            continue
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            filename = chunk.get("file_path") or chunk.get("filename") or chunk.get("source")
+            if not filename:
+                continue
+            filename = str(filename).replace("\\", "/").split("/")[-1]
+            doc_id = str(chunk.get("doc_id") or chunk.get("document_id") or "")
+            excerpt = str(chunk.get("content") or chunk.get("text") or "")[:200]
+            page_num = chunk.get("page_num") or chunk.get("page")
+            if isinstance(page_num, float):
+                page_num = int(page_num)
+            elif page_num is not None and not isinstance(page_num, int):
+                page_num = None
+
+            key_id = f"{filename}:{page_num}"
+            if key_id not in seen:
+                seen.add(key_id)
+                source_nodes.append({
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "page_num": page_num,
+                    "excerpt": excerpt,
+                })
+    return source_nodes[:5]
 
 
 # =========================================================================
@@ -1438,3 +1456,15 @@ async def admin_audit(
 ):
     rows = await gov.list_audit(action=action, limit=max(1, min(limit, 500)))
     return {"audit": [r.model_dump(mode="json") for r in rows]}
+
+
+# --- SPA fallback (must be last — after all API routes) ---
+_DIST_DIR = APP_ROOT / "static" / "dist"
+if _DIST_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(_DIST_DIR), html=True), name="spa")
+else:
+    import warnings
+    warnings.warn(
+        "static/dist not found — run `npm run build` in rag-anything/server/frontend/ first",
+        stacklevel=1,
+    )
