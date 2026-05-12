@@ -5,6 +5,7 @@ import { ThemeToggle } from './ThemeToggle'
 import { useJobs } from '@/hooks/useJobs'
 import { useAppStore } from '@/store'
 import { cn } from '@/lib/utils'
+import { BarChart2 } from 'lucide-react'
 
 const NAV_ITEMS = [
   { to: '/chat', label: 'Chat' },
@@ -45,6 +46,19 @@ export function TopNav() {
         ))}
       </nav>
       <div className="ml-auto flex items-center gap-2">
+        <a
+          href="http://localhost:6006"
+          target="_blank"
+          rel="noopener noreferrer"
+          className={cn(
+            'flex items-center gap-1 h-7 px-2 rounded-md border border-border',
+            'text-xs text-muted-foreground hover:text-foreground transition-colors'
+          )}
+          title="Open Arize Phoenix trace dashboard (requires ENABLE_PHOENIX=true)"
+        >
+          <BarChart2 className="h-3 w-3" />
+          Traces
+        </a>
         <WorkspaceSwitcher />
         <ThemeToggle />
       </div>
