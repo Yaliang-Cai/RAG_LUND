@@ -44,4 +44,25 @@ describe('useStreamQuery', () => {
     expect(result.current.status).toBe('done')
     expect(result.current.sourceNodes).toEqual([])
   })
+
+  it('captures agentic_trace from meta event metadata', async () => {
+    const fakeTrace = { confidence: 0.91, grounded: true, profile: 'precise',
+                        retrieve_cycles_used: 2, check_cycles_used: 1 }
+    vi.mocked(queryApi.openQueryStream).mockResolvedValue(
+      makeStream([
+        `data: {"type":"meta","data":{},"metadata":{"agentic_trace":${JSON.stringify(fakeTrace)}}}`,
+        'data: {"type":"chunk","text":"72.3% accuracy"}',
+        'data: {"type":"done","graph":null,"source_nodes":[]}',
+      ])
+    )
+
+    const { result } = renderHook(() => useStreamQuery())
+    await act(async () => {
+      await result.current.send({ workspace_id: 'ws1', query: 'test', mode: 'agentic' })
+    })
+
+    expect(result.current.answer).toBe('72.3% accuracy')
+    expect(result.current.metadata).toEqual({ agentic_trace: fakeTrace })
+    expect(result.current.status).toBe('done')
+  })
 })
