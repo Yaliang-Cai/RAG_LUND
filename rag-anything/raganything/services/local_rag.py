@@ -2370,6 +2370,7 @@ class LocalRagService:
         exclude_synonym_edges: bool | None = None,
         qdrant_retrieval_mode: str | None = None,
         profile: str | None = None,
+        conversation_history: list[dict] | None = None,
     ):
         """Async generator — yields structured events via LightRAG aquery_llm().
 
@@ -2391,6 +2392,7 @@ class LocalRagService:
                     top_k=top_k,
                     chunk_top_k=chunk_top_k,
                     enable_rerank=enable_rerank,
+                    conversation_history=conversation_history or [],
                     **extra,
                 )
                 trace = result.get("trace", {})
@@ -2455,6 +2457,7 @@ class LocalRagService:
                     if qdrant_retrieval_mode is not None
                     else self.settings.qdrant_retrieval_mode
                 ),
+                conversation_history=conversation_history or [],
             )
             result = await rag_instance.lightrag.aquery_llm(query, param=param)
 

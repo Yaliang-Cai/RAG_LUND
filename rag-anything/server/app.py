@@ -230,6 +230,7 @@ class QueryRequest(BaseModel):
     ppr_synonym_weight_mode: Literal["raw", "plus_one"] = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
     qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] = DEFAULT_QDRANT_RETRIEVAL_MODE
     profile: Optional[str] = None  # auto mode only; None = LLM classifier decides
+    conversation_history: list[dict] = []
 
 # =========================================================================
 # 路由
@@ -711,6 +712,7 @@ async def query_stream_endpoint(
                 ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
                 qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
                 profile=payload.profile,
+                conversation_history=payload.conversation_history,
             ):
                 if event["type"] == "meta":
                     retrieval_data = event  # keep for graph subquery
