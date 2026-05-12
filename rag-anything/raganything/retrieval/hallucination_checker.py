@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 import logging
 from typing import Awaitable, Callable
@@ -13,6 +14,7 @@ Answer: {answer}
 Question being answered: {query}
 
 For every factual claim in the Answer, verify it is explicitly supported by the Context above.
+Only mark grounded=true if each factual claim is directly supported by the supplied chunks.
 Statements such as "I cannot determine X from the context" make no factual claims and are grounded.
 
 Output JSON:
@@ -34,9 +36,16 @@ class HallucinationChecker:
             raw = await self._llm(prompt, response_format={"type": "json_object"})
             result = json.loads(raw)
             return {
-                "grounded": bool(result.get("grounded", True)),
+                "grounded": bool(result.get("grounded", False)),
                 "ungrounded_claims": [str(c) for c in result.get("ungrounded_claims", [])],
             }
         except Exception:
-            logger.warning("HallucinationChecker failed, defaulting grounded=True", exc_info=True)
-            return {"grounded": True, "ungrounded_claims": [], "check_status": "error"}
+            logger.warning(
+                "HallucinationChecker failed, defaulting grounded=False",
+                exc_info=True,
+            )
+            return {
+                "grounded": False,
+                "ungrounded_claims": [],
+                "check_status": "error",
+            }

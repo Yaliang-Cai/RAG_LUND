@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 _PATH_CONFIG: dict[str, tuple[str, str | None]] = {
     "naive":                ("naive",   None),
     "local_kg":             ("local",   None),   # entity-centric local KG BFS, no global/community
-    "hybrid":               ("hybrid",  None),
+    "global_kg":            ("global",  None),   # relation/event-centric KG edge search
+    "hybrid":               ("hybrid",  None),   # experimental/fallback: local_kg + global_kg
     "mix":                  ("mix",     None),
     "ppr":                  ("ppr",     None),
     "qdrant_hybrid":        ("hybrid",  "hybrid"),

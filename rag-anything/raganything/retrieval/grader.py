@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 import logging
 from typing import Awaitable, Callable
@@ -14,16 +15,21 @@ Question: {query}
 
 Task:
 1. Are the chunks above sufficient to accurately answer the question?
-2. If not sufficient, is this because the information genuinely does not exist in these documents \
+2. If not sufficient, is this because the information genuinely does not exist in these documents
 (unanswerable), rather than because retrieval was incomplete?
 
 Output JSON: {{"sufficient": true|false, "unanswerable": true|false, "reason": "<one short sentence>"}}
 
 Rules for "unanswerable":
-- Set true ONLY when the available chunks explicitly state or clearly imply the requested \
-information is not present in the indexed documents.
-- Set false when chunks are empty or off-topic — that may simply mean retrieval needs improvement.
+- Set true ONLY when the available chunks explicitly state or clearly imply the requested
+  information is not present in the indexed documents.
+- Set false when chunks are empty or off-topic; that may simply mean retrieval needs improvement.
 - When in doubt, set false (prefer retrying over giving up early).
+
+Rules for "sufficient":
+- Set true only when the chunks contain all facts needed to answer the exact question.
+- For multi-hop, comparison, or causal questions, every bridge fact must be present.
+- If an entity is present but the required relation or supporting passage is missing, set false.
 """
 
 
@@ -57,5 +63,13 @@ class Grader:
                 "reason": str(result.get("reason", "")).strip(),
             }
         except Exception:
-            logger.warning("Grader failed, fallback sufficient=%s", self._fallback_sufficient, exc_info=True)
-            return {"sufficient": self._fallback_sufficient, "unanswerable": False, "reason": "grader error"}
+            logger.warning(
+                "Grader failed, fallback sufficient=%s",
+                self._fallback_sufficient,
+                exc_info=True,
+            )
+            return {
+                "sufficient": self._fallback_sufficient,
+                "unanswerable": False,
+                "reason": "grader error",
+            }

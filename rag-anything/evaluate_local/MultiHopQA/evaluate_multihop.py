@@ -23,6 +23,7 @@ import json
 import random
 import re
 import sys
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -37,7 +38,7 @@ for p in (_raganything_root, _lightrag_root, _projects_root):
 from dotenv import load_dotenv
 load_dotenv()
 
-VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto", "full")
+VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto", "full", "agentic")
 VALID_DATASETS = ("hotpotqa", "musique", "2wiki", "simpleqa")
 VALID_QA_PROMPT_STYLES = ("lightrag", "semantic_cot", "kg_semantic_cot")
 VALID_ANSWER_PARSE_MODES = ("strip_references", "answer_marker")
@@ -582,6 +583,138 @@ def _aggregate_jsonl(jsonl_path: Path, recall_ks: list[int]) -> dict[str, Any]:
     return metrics
 
 
+def _aggregate_agentic_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    profile_counts: Counter[str] = Counter()
+    retrieval_cycle_counts: Counter[str] = Counter()
+    check_cycle_counts: Counter[str] = Counter()
+    paths_activated_counts: Counter[str] = Counter()
+    first_paths_counts: Counter[str] = Counter()
+    chunks_per_path_sum: defaultdict[str, float] = defaultdict(float)
+    chunks_per_path_count: Counter[str] = Counter()
+
+    semantic_selected_count = 0
+    semantic_fallback_count = 0
+    rewrite_count = 0
+    decompose_count = 0
+    targeted_retrieval_count = 0
+    grounded_count = 0
+    empty_final_chunks_count = 0
+    query_fail_count = 0
+
+    for record in records:
+        record_failed = bool(record.get("agentic_query_failed"))
+        if record_failed:
+            query_fail_count += 1
+        trace = record.get("agentic_trace")
+        if not isinstance(trace, dict) or not trace:
+            if not record_failed:
+                query_fail_count += 1
+            continue
+
+        classifier = trace.get("classifier") if isinstance(trace.get("classifier"), dict) else {}
+        selected_profile = str(
+            classifier.get("selected_profile") or trace.get("profile") or "unknown"
+        )
+        profile_counts[selected_profile] += 1
+        if selected_profile == "semantic":
+            semantic_selected_count += 1
+            if classifier.get("fallback_used") is True:
+                semantic_fallback_count += 1
+
+        retrieval_cycle_counts[str(int(trace.get("retrieve_cycles_used") or 0))] += 1
+        check_cycle_counts[str(int(trace.get("check_cycles_used") or 0))] += 1
+
+        steps = trace.get("retrieval_steps") if isinstance(trace.get("retrieval_steps"), list) else []
+        step_types = {str(step.get("type") or "") for step in steps if isinstance(step, dict)}
+        rewrite_history = trace.get("rewrite_history") if isinstance(trace.get("rewrite_history"), list) else []
+        sub_questions = trace.get("sub_questions") if isinstance(trace.get("sub_questions"), list) else []
+        if len(rewrite_history) > 1 or "rewrite" in step_types:
+            rewrite_count += 1
+        if sub_questions or "decompose" in step_types:
+            decompose_count += 1
+        if "targeted" in step_types:
+            targeted_retrieval_count += 1
+
+        hallucination_events = (
+            trace.get("hallucination_events")
+            if isinstance(trace.get("hallucination_events"), list)
+            else []
+        )
+        if trace.get("grounded") is True or any(
+            isinstance(event, dict) and event.get("grounded") is True
+            for event in hallucination_events
+        ):
+            grounded_count += 1
+
+        final_chunks = trace.get("data", {}).get("chunks", []) if isinstance(trace.get("data"), dict) else []
+        if not final_chunks:
+            empty_final_chunks_count += 1
+
+        first_step_seen = False
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            paths = [
+                str(path)
+                for path in step.get("paths_activated", [])
+                if str(path).strip()
+            ]
+            for path in paths:
+                paths_activated_counts[path] += 1
+                if not first_step_seen:
+                    first_paths_counts[path] += 1
+            first_step_seen = first_step_seen or bool(paths)
+            chunks_per_path = step.get("chunks_per_path", {})
+            if isinstance(chunks_per_path, dict):
+                for path, count in chunks_per_path.items():
+                    try:
+                        chunks_per_path_sum[str(path)] += float(count)
+                        chunks_per_path_count[str(path)] += 1
+                    except (TypeError, ValueError):
+                        continue
+
+    chunks_per_path_avg = {
+        path: round(chunks_per_path_sum[path] / chunks_per_path_count[path], 4)
+        for path in sorted(chunks_per_path_count)
+        if chunks_per_path_count[path]
+    }
+    return {
+        "n": len(records),
+        "profile_counts": dict(sorted(profile_counts.items())),
+        "semantic_selected_count": semantic_selected_count,
+        "semantic_fallback_count": semantic_fallback_count,
+        "retrieval_cycle_counts": dict(sorted(retrieval_cycle_counts.items())),
+        "check_cycle_counts": dict(sorted(check_cycle_counts.items())),
+        "rewrite_count": rewrite_count,
+        "decompose_count": decompose_count,
+        "targeted_retrieval_count": targeted_retrieval_count,
+        "grounded_count": grounded_count,
+        "empty_final_chunks_count": empty_final_chunks_count,
+        "paths_activated_counts": dict(sorted(paths_activated_counts.items())),
+        "first_paths_counts": dict(sorted(first_paths_counts.items())),
+        "chunks_per_path_avg": chunks_per_path_avg,
+        "query_fail_count": query_fail_count,
+    }
+
+
+def _aggregate_agentic_jsonl(jsonl_path: Path) -> dict[str, Any]:
+    if not jsonl_path.exists():
+        return {}
+    records: list[dict[str, Any]] = []
+    with jsonl_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+    return _aggregate_agentic_records(records) if records else {}
+
+
 async def _run_mode(
     service: Any,
     workspace_id: str,
@@ -630,13 +763,40 @@ async def _run_mode(
     async def _evaluate_item(item: dict) -> dict[str, Any]:
         raw_answer = ""
         chunks: list[dict[str, Any]] = []
+        agentic_internal_answer: str | None = None
+        agentic_trace: dict[str, Any] | None = None
+        agentic_query_failed = False
         try:
             call_kwargs = _build_query_kwargs(
                 query_overrides=query_overrides,
                 wire_profile=wire_profile,
                 **query_kwargs,
             )
-            if qa_prompt_style in ("semantic_cot", "kg_semantic_cot"):
+            if mode == "agentic" and qa_prompt_style == "semantic_cot":
+                result = await service.query_with_trace(
+                    workspace_id=workspace_id,
+                    query=item["question"],
+                    working_dir=working_dir,
+                    mode=wire_mode,
+                    **call_kwargs,
+                )
+                agentic_internal_answer = str(result.get("answer") or "")
+                raw_trace = result.get("trace", {})
+                agentic_trace = raw_trace if isinstance(raw_trace, dict) else {}
+                if agentic_trace is not None:
+                    agentic_trace.setdefault("grounded", result.get("grounded"))
+                trace_data = agentic_trace.get("data", {}) if isinstance(agentic_trace, dict) else {}
+                raw_chunks = trace_data.get("chunks", []) if isinstance(trace_data, dict) else []
+                chunks = raw_chunks if isinstance(raw_chunks, list) else []
+                qa_top_k = call_kwargs.get("ppr_qa_top_k") or call_kwargs.get("chunk_top_k")
+                raw_answer = await _call_semantic_cot_qa(
+                    service,
+                    question=item["question"],
+                    chunks=chunks,
+                    chunk_source_map=chunk_source_map,
+                    qa_top_k=int(qa_top_k) if qa_top_k is not None else None,
+                )
+            elif qa_prompt_style in ("semantic_cot", "kg_semantic_cot"):
                 retrieval_kwargs = dict(call_kwargs)
                 retrieval_kwargs["only_need_context"] = True
                 result = await service.query_with_trace(
@@ -681,6 +841,7 @@ async def _run_mode(
         except Exception as e:
             print(f"  [WARN] query failed for id={item['id']}: {e}")
             answer = ""
+            agentic_query_failed = mode == "agentic"
 
         gold = item["answer"]
         em = score_em(answer, gold)
@@ -696,6 +857,10 @@ async def _run_mode(
         }
         if qa_prompt_style in ("semantic_cot", "kg_semantic_cot"):
             record["raw_pred"] = raw_answer
+        if mode == "agentic":
+            record["agentic_internal_answer"] = agentic_internal_answer or ""
+            record["agentic_trace"] = agentic_trace or {}
+            record["agentic_query_failed"] = agentic_query_failed
         if item.get("gold_source_keys"):
             record["gold_source_keys"] = item["gold_source_keys"]
         retrieved_sources = _resolve_retrieved_sources(chunks, chunk_source_map)
@@ -738,7 +903,10 @@ async def _run_mode(
             print(f"  [{mode}] {done}/{total}")
             last_reported = done
 
-    return _aggregate_jsonl(jsonl_path, recall_ks)
+    metrics = _aggregate_jsonl(jsonl_path, recall_ks)
+    if mode == "agentic":
+        metrics["agentic_stats"] = _aggregate_agentic_jsonl(jsonl_path)
+    return metrics
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -856,6 +1024,7 @@ async def main(args: argparse.Namespace) -> None:
 
     results: dict[str, dict] = {}
     query_kwargs_by_mode: dict[str, dict[str, Any]] = {}
+    agentic_stats_by_mode: dict[str, dict[str, Any]] = {}
     for mode in args.modes:
         print(f"\n[eval] Running mode: {mode}")
         mode_query_kwargs = _mode_query_kwargs(
@@ -890,6 +1059,9 @@ async def main(args: argparse.Namespace) -> None:
             qa_prompt_style=args.qa_prompt_style,
             answer_parse_mode=args.answer_parse_mode,
         )
+        agentic_stats = metrics.pop("agentic_stats", None)
+        if agentic_stats:
+            agentic_stats_by_mode[mode] = agentic_stats
         results[mode] = metrics
         print(f"  [{mode}] EM={metrics.get('em', 0):.4f}  F1={metrics.get('f1', 0):.4f}")
 
@@ -909,6 +1081,7 @@ async def main(args: argparse.Namespace) -> None:
         "answer_parse_mode": args.answer_parse_mode,
         "base_query_kwargs": {k: v for k, v in base_query_kwargs.items() if v is not None},
         "query_kwargs_by_mode": query_kwargs_by_mode,
+        "agentic_stats_by_mode": agentic_stats_by_mode,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "results": results,
     }

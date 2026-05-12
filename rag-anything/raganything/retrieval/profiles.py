@@ -1,8 +1,20 @@
 from dataclasses import dataclass, field
+from typing import Any
 
 
 KNOWN_PATHS: frozenset[str] = frozenset(
-    ["naive", "hybrid", "mix", "ppr", "local_kg", "qdrant_hybrid", "qdrant_sparse", "qdrant_chunks_hybrid", "gfm"]
+    [
+        "naive",
+        "hybrid",
+        "mix",
+        "ppr",
+        "local_kg",
+        "global_kg",
+        "qdrant_hybrid",
+        "qdrant_sparse",
+        "qdrant_chunks_hybrid",
+        "gfm",
+    ]
 )
 
 
@@ -15,10 +27,10 @@ class RetrievalProfile:
     rrf_k: int = 60
     enable_rerank: bool = True
     min_rerank_score: float = 0.3
-    rerank_candidate_cap: int = 30      # was 60
-    min_rrf_score: float = 0.01         # NEW
+    rerank_candidate_cap: int = 30
+    min_rrf_score: float = 0.01
     max_concurrent_paths: int | None = None
-    path_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
+    path_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         missing_weights = [p for p in self.paths if p not in self.rrf_weights]
@@ -43,52 +55,115 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
     for p in [
         RetrievalProfile(
             name="precise",
-            description="Queries with hard constraints: specific IDs, error codes, rare proper nouns, abbreviations",
+            description="Exact lexical constraints: IDs, codes, versions, exact titles, rare strings",
             paths=["qdrant_sparse"],
             rrf_weights={"qdrant_sparse": 1.0},
+            path_overrides={"qdrant_sparse": {"exclude_synonym_edges": True}},
         ),
         RetrievalProfile(
             name="semantic",
-            description="Default workhorse: factual Q&A, process explanations, concept definitions, summaries — no complex reasoning required",
+            description="Default dense+sparse chunk retrieval for ordinary semantic RAG questions",
             paths=["qdrant_chunks_hybrid"],
             rrf_weights={"qdrant_chunks_hybrid": 1.0},
+            path_overrides={
+                "qdrant_chunks_hybrid": {
+                    "qdrant_retrieval_mode": "hybrid",
+                    "exclude_synonym_edges": True,
+                }
+            },
         ),
         RetrievalProfile(
             name="local",
-            description="Single focal entity: attributes, direct relationships, or status of one specific entity",
-            paths=["local_kg", "qdrant_chunks_hybrid"],
-            rrf_weights={"local_kg": 1.0, "qdrant_chunks_hybrid": 0.8},
+            description="Single focal entity: direct attributes, local neighbours, direct relationships",
+            paths=["local_kg"],
+            rrf_weights={"local_kg": 1.0},
+            path_overrides={
+                "local_kg": {
+                    "qdrant_retrieval_mode": "hybrid",
+                    "exclude_synonym_edges": True,
+                }
+            },
+        ),
+        RetrievalProfile(
+            name="global",
+            description="Relation, event, or theme driven KG edge retrieval",
+            paths=["global_kg"],
+            rrf_weights={"global_kg": 1.0},
+            path_overrides={
+                "global_kg": {
+                    "qdrant_retrieval_mode": "hybrid",
+                    "exclude_synonym_edges": True,
+                }
+            },
         ),
         RetrievalProfile(
             name="multihop",
-            description="Multiple entities requiring cross-document logical reasoning, comparison, or causal analysis",
-            paths=["ppr", "hybrid"],
-            rrf_weights={"ppr": 1.0, "hybrid": 0.8},
+            description="Bridge, comparison, causal, or compositional multi-document reasoning via PPR",
+            paths=["ppr"],
+            rrf_weights={"ppr": 1.0},
+            enable_rerank=False,
+            min_rrf_score=0.0,
+            path_overrides={
+                "ppr": {
+                    "qdrant_retrieval_mode": "hybrid",
+                    "exclude_synonym_edges": False,
+                }
+            },
         ),
         RetrievalProfile(
             name="full",
-            description="Fallback for highly ambiguous queries or semantically diffuse multi-turn conversations",
-            paths=["ppr", "hybrid", "naive", "qdrant_sparse"],
+            description="Failure recovery profile combining PPR, semantic chunk retrieval, and lexical sparse retrieval",
+            paths=["ppr", "qdrant_chunks_hybrid", "qdrant_sparse"],
             rrf_weights={
-                "ppr":           1.2,
-                "hybrid":        1.0,
-                "naive":         0.7,
-                "qdrant_sparse": 0.9,
+                "ppr": 1.3,
+                "qdrant_chunks_hybrid": 0.8,
+                "qdrant_sparse": 0.5,
             },
+            enable_rerank=False,
+            min_rrf_score=0.0,
             max_concurrent_paths=None,
+            path_overrides={
+                "ppr": {
+                    "qdrant_retrieval_mode": "hybrid",
+                    "exclude_synonym_edges": False,
+                },
+                "qdrant_chunks_hybrid": {
+                    "qdrant_retrieval_mode": "hybrid",
+                    "exclude_synonym_edges": True,
+                },
+                "qdrant_sparse": {"exclude_synonym_edges": True},
+            },
+        ),
+        RetrievalProfile(
+            name="hybrid_experimental",
+            description="Ablation/debug profile for LightRAG hybrid KG retrieval; not a classifier output",
+            paths=["hybrid"],
+            rrf_weights={"hybrid": 1.0},
+            path_overrides={
+                "hybrid": {
+                    "qdrant_retrieval_mode": "hybrid",
+                    "exclude_synonym_edges": True,
+                }
+            },
         ),
         RetrievalProfile(
             name="gfm_multihop",
-            description="Multi-hop reasoning via GFM graph + PPR walk (toggle either path below)",
+            description="Multi-hop reasoning via optional GFM graph retrieval plus protected PPR",
             paths=[
-                # "gfm",    # uncomment to enable GFM graph retrieval
+                # "gfm",  # uncomment to enable GFM graph retrieval
                 "ppr",
-                "hybrid",
             ],
             rrf_weights={
-                # "gfm": 1.0,   # uncomment together with path above
-                "ppr":    0.8,
-                "hybrid": 0.6,
+                # "gfm": 1.0,  # uncomment together with path above
+                "ppr": 1.0,
+            },
+            enable_rerank=False,
+            min_rrf_score=0.0,
+            path_overrides={
+                "ppr": {
+                    "qdrant_retrieval_mode": "hybrid",
+                    "exclude_synonym_edges": False,
+                }
             },
         ),
     ]
