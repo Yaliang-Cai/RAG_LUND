@@ -10,7 +10,7 @@ import type { SourceNode, TraceType, QueryParams } from '@/types'
 
 let msgId = 0
 
-const MAX_HISTORY_TURNS = 5  // send at most 5 complete turns (10 messages)
+const MAX_HISTORY_TURNS = 5
 
 function modeToTraceType(mode: string): TraceType {
   if (mode === 'agentic') return 'agentic'
@@ -31,8 +31,6 @@ export default function ChatPage() {
   const { send, answer, reasoning, status, sourceNodes, metadata } = useStreamQuery()
   const [messages, setMessages] = useState<Message[]>([])
 
-  // Ref so handleSend always reads current messages without needing
-  // messages in its dependency array
   const messagesRef = useRef<Message[]>([])
   messagesRef.current = messages
 
@@ -77,6 +75,7 @@ export default function ChatPage() {
         sourceNodes: sn,
         traceType,
         traceMetadata: m,
+        query,           // store original query for EvalBadge
       },
     ])
   }, [workspaceId, send])
@@ -96,6 +95,7 @@ export default function ChatPage() {
         streamingAnswer={answer}
         streamingReasoning={reasoning}
         isStreaming={isStreaming}
+        workspaceId={workspaceId}
       />
       <ChatInput onSend={handleSend} disabled={isStreaming} />
     </div>

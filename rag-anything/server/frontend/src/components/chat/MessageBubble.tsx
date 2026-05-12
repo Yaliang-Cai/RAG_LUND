@@ -1,6 +1,7 @@
 import ReactMarkdown from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
 import { AgenticTrace } from './AgenticTrace'
+import { EvalBadge } from './EvalBadge'
 import { CitationChip } from './CitationChip'
 import { cn } from '@/lib/utils'
 import type { SourceNode, TraceType } from '@/types'
@@ -13,9 +14,15 @@ export interface Message {
   sourceNodes?: SourceNode[]
   traceType?: TraceType
   traceMetadata?: Record<string, unknown>
+  query?: string   // original user question (set on assistant messages for EvalBadge)
 }
 
-export function MessageBubble({ message }: { message: Message }) {
+interface MessageBubbleProps {
+  message: Message
+  workspaceId?: string
+}
+
+export function MessageBubble({ message, workspaceId }: MessageBubbleProps) {
   const isUser = message.role === 'user'
   return (
     <div className={cn('flex flex-col gap-1', isUser ? 'items-end' : 'items-start')}>
@@ -37,6 +44,13 @@ export function MessageBubble({ message }: { message: Message }) {
         <AgenticTrace
           traceType={message.traceType}
           metadata={message.traceMetadata ?? {}}
+        />
+      )}
+      {!isUser && message.query && message.content && workspaceId && (
+        <EvalBadge
+          workspaceId={workspaceId}
+          query={message.query}
+          answer={message.content}
         />
       )}
       {!isUser && message.sourceNodes && message.sourceNodes.length > 0 && (

@@ -7,9 +7,16 @@ interface MessageListProps {
   streamingAnswer: string
   streamingReasoning: string
   isStreaming: boolean
+  workspaceId?: string
 }
 
-export function MessageList({ messages, streamingAnswer, streamingReasoning, isStreaming }: MessageListProps) {
+export function MessageList({
+  messages,
+  streamingAnswer,
+  streamingReasoning,
+  isStreaming,
+  workspaceId,
+}: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
@@ -31,7 +38,9 @@ export function MessageList({ messages, streamingAnswer, streamingReasoning, isS
       className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4"
       onScroll={handleScroll}
     >
-      {messages.map((m) => <MessageBubble key={m.id} message={m} />)}
+      {messages.map((m) => (
+        <MessageBubble key={m.id} message={m} workspaceId={workspaceId} />
+      ))}
       {isStreaming && streamingAnswer && (
         <MessageBubble
           message={{
