@@ -10,6 +10,8 @@ import type { SourceNode, TraceType, QueryParams } from '@/types'
 
 let msgId = 0
 
+const MAX_HISTORY_TURNS = 5  // send at most 5 complete turns (10 messages)
+
 function modeToTraceType(mode: string): TraceType {
   if (mode === 'agentic') return 'agentic'
   if (mode === 'ppr') return 'ppr'
@@ -17,10 +19,23 @@ function modeToTraceType(mode: string): TraceType {
   return null
 }
 
+function buildHistory(messages: Message[]): { role: string; content: string }[] {
+  return messages
+    .slice(-MAX_HISTORY_TURNS * 2)
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .map((m) => ({ role: m.role, content: m.content }))
+}
+
 export default function ChatPage() {
   const workspaceId = useAppStore((s) => s.workspaceId)
   const { send, answer, reasoning, status, sourceNodes, metadata } = useStreamQuery()
   const [messages, setMessages] = useState<Message[]>([])
+
+  // Ref so handleSend always reads current messages without needing
+  // messages in its dependency array
+  const messagesRef = useRef<Message[]>([])
+  messagesRef.current = messages
+
   const latestRef = useRef<{
     answer: string
     reasoning: string
@@ -30,15 +45,24 @@ export default function ChatPage() {
 
   latestRef.current = { answer, reasoning, sourceNodes, metadata }
 
-  const handleSend = useCallback(async (query: string, mode: string, profile: string) => {
+  const handleSend = useCallback(async (
+    query: string,
+    mode: string,
+    profile: string,
+    vlmEnabled: boolean,
+  ) => {
     const userMsg: Message = { id: String(++msgId), role: 'user', content: query }
     setMessages((prev) => [...prev, userMsg])
+
+    const history = buildHistory(messagesRef.current)
 
     await send({
       workspace_id: workspaceId,
       query,
       mode: mode as QueryParams['mode'],
       profile: mode === 'auto' && profile ? profile : undefined,
+      vlm_enhanced: vlmEnabled || undefined,
+      conversation_history: history.length > 0 ? history : undefined,
     })
 
     const { answer: a, reasoning: r, sourceNodes: sn, metadata: m } = latestRef.current
