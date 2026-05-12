@@ -713,6 +713,7 @@ async def query_stream_endpoint(
                 qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
                 profile=payload.profile,
                 conversation_history=payload.conversation_history,
+                vlm_enhanced=payload.vlm_enhanced,
             ):
                 if event["type"] == "meta":
                     retrieval_data = event  # keep for graph subquery

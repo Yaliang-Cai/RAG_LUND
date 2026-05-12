@@ -2371,6 +2371,7 @@ class LocalRagService:
         qdrant_retrieval_mode: str | None = None,
         profile: str | None = None,
         conversation_history: list[dict] | None = None,
+        vlm_enhanced: bool = False,
     ):
         """Async generator — yields structured events via LightRAG aquery_llm().
 
@@ -2415,6 +2416,27 @@ class LocalRagService:
                 yield {"type": "chunk", "text": result.get("answer", "")}
             except Exception as exc:
                 self.logger.error("stream_query (agentic branch) error: %s", exc)
+                yield {"type": "error", "text": str(exc)}
+            return
+
+        # ── Non-streaming branch: VLM enhanced query ──
+        if vlm_enhanced and mode not in ("agentic",):
+            try:
+                result = await self.query_with_trace(
+                    workspace_id, query,
+                    mode=mode,
+                    vlm_enhanced=True,
+                    top_k=top_k,
+                    chunk_top_k=chunk_top_k,
+                    enable_rerank=enable_rerank,
+                    conversation_history=conversation_history or [],
+                    return_trace=False,
+                )
+                answer = result.get("answer", result) if isinstance(result, dict) else str(result)
+                yield {"type": "meta", "data": {}, "metadata": {}}
+                yield {"type": "chunk", "text": answer}
+            except Exception as exc:
+                self.logger.error("stream_query (vlm branch) error: %s", exc)
                 yield {"type": "error", "text": str(exc)}
             return
 
