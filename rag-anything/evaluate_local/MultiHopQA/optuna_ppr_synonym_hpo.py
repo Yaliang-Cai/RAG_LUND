@@ -591,6 +591,21 @@ def _write_config_file(path: Path, configs: Sequence[tuple[str, HPOConfig]]) -> 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _top_configs_for_full_confirmation(
+    ranked: Sequence[tuple[str, Mapping[str, Any]]],
+    *,
+    top_n: int = 3,
+) -> list[tuple[str, HPOConfig]]:
+    selected: list[tuple[str, HPOConfig]] = [("ppr_hybrid_syn_anchor", ANCHOR_CONFIG)]
+    for name, payload in ranked:
+        if name == "ppr_hybrid_syn_anchor":
+            continue
+        selected.append((name, HPOConfig.from_params(payload["config"])))
+        if len(selected) >= top_n + 1:
+            break
+    return selected
+
+
 def _run_static_stage(args: argparse.Namespace) -> None:
     workspaces = _prepare_workspace_map(args)
     args.results_root.mkdir(parents=True, exist_ok=True)
@@ -615,7 +630,7 @@ def _run_static_stage(args: argparse.Namespace) -> None:
     ranked = sorted(summaries.items(), key=lambda item: item[1]["macro_f1"], reverse=True)
     _write_json(args.results_root / f"{args.stage}_summary.json", {"ranked": ranked})
     if args.stage == "verify":
-        top_configs = [(name, HPOConfig.from_params(payload["config"])) for name, payload in ranked[:3]]
+        top_configs = _top_configs_for_full_confirmation(ranked, top_n=3)
         _write_config_file(args.results_root / "top_configs.tsv", top_configs)
 
 

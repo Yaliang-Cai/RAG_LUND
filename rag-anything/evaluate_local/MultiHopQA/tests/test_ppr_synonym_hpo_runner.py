@@ -6,6 +6,7 @@ from evaluate_local.MultiHopQA.optuna_ppr_synonym_hpo import (
     SEARCH_SPACE,
     _build_eval_command,
     _macro_metrics,
+    _top_configs_for_full_confirmation,
     _threshold_label,
 )
 
@@ -121,6 +122,25 @@ def test_macro_metrics_uses_macro_average_and_records_auxiliary_metrics():
         "macro_recall@2": 0.6,
         "macro_recall@5": 0.7,
     }
+
+
+def test_verify_top_configs_keeps_anchor_plus_top_three_non_anchor():
+    configs = [
+        ("trial_best", {"config": {"top_k": 20, "ppr_qa_top_k": 8, "ppr_top_k": 100, "passage_node_weight": 0.1, "ppr_damping": 0.65, "hub_penalty_threshold": 25}}),
+        ("ppr_hybrid_syn_anchor", {"config": ANCHOR_CONFIG.to_params()}),
+        ("trial_second", {"config": {"top_k": 40, "ppr_qa_top_k": 5, "ppr_top_k": 50, "passage_node_weight": 0.05, "ppr_damping": 0.5, "hub_penalty_threshold": 50}}),
+        ("trial_third", {"config": {"top_k": 10, "ppr_qa_top_k": 3, "ppr_top_k": 25, "passage_node_weight": 0.02, "ppr_damping": 0.35, "hub_penalty_threshold": 10}}),
+        ("trial_fourth", {"config": {"top_k": 5, "ppr_qa_top_k": 10, "ppr_top_k": 50, "passage_node_weight": 0.2, "ppr_damping": 0.8, "hub_penalty_threshold": 100}}),
+    ]
+
+    selected = _top_configs_for_full_confirmation(configs, top_n=3)
+
+    assert [name for name, _ in selected] == [
+        "ppr_hybrid_syn_anchor",
+        "trial_best",
+        "trial_second",
+        "trial_third",
+    ]
 
 
 def test_threshold_label_is_path_safe():
