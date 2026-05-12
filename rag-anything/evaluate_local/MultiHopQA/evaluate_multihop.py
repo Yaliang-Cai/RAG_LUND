@@ -715,6 +715,63 @@ def _aggregate_agentic_jsonl(jsonl_path: Path) -> dict[str, Any]:
     return _aggregate_agentic_records(records) if records else {}
 
 
+def _format_mapping_for_summary(mapping: Any) -> str:
+    if not isinstance(mapping, dict) or not mapping:
+        return "{}"
+    return ", ".join(
+        f"{key}={value}" for key, value in sorted(mapping.items(), key=lambda item: str(item[0]))
+    )
+
+
+def _format_agentic_stats_lines(agentic_stats_by_mode: dict[str, dict[str, Any]]) -> list[str]:
+    if not agentic_stats_by_mode:
+        return []
+
+    lines = ["", "Agentic trace summary:"]
+    for mode, stats in sorted(agentic_stats_by_mode.items()):
+        if not isinstance(stats, dict) or not stats:
+            continue
+        lines.append(
+            f"  [{mode}] n={stats.get('n', 0)} "
+            f"semantic_selected={stats.get('semantic_selected_count', 0)} "
+            f"semantic_fallback={stats.get('semantic_fallback_count', 0)} "
+            f"query_fail={stats.get('query_fail_count', 0)} "
+            f"empty_final_chunks={stats.get('empty_final_chunks_count', 0)}"
+        )
+        lines.append(
+            f"  [{mode}] rewrite={stats.get('rewrite_count', 0)} "
+            f"decompose={stats.get('decompose_count', 0)} "
+            f"targeted={stats.get('targeted_retrieval_count', 0)} "
+            f"grounded={stats.get('grounded_count', 0)}"
+        )
+        lines.append(
+            f"  [{mode}] profiles: "
+            f"{_format_mapping_for_summary(stats.get('profile_counts'))}"
+        )
+        lines.append(
+            f"  [{mode}] retrieval_cycles: "
+            f"{_format_mapping_for_summary(stats.get('retrieval_cycle_counts'))}"
+        )
+        lines.append(
+            f"  [{mode}] check_cycles: "
+            f"{_format_mapping_for_summary(stats.get('check_cycle_counts'))}"
+        )
+        lines.append(
+            f"  [{mode}] paths_activated: "
+            f"{_format_mapping_for_summary(stats.get('paths_activated_counts'))}"
+        )
+        lines.append(
+            f"  [{mode}] first_paths: "
+            f"{_format_mapping_for_summary(stats.get('first_paths_counts'))}"
+        )
+        lines.append(
+            f"  [{mode}] chunks_per_path_avg: "
+            f"{_format_mapping_for_summary(stats.get('chunks_per_path_avg'))}"
+        )
+
+    return lines if len(lines) > 2 else []
+
+
 async def _run_mode(
     service: Any,
     workspace_id: str,
@@ -1101,6 +1158,8 @@ async def main(args: argparse.Namespace) -> None:
             val = m.get(f"recall@{k}")
             print(f"   {val:.4f}" if val is not None else "      N/A", end="")
         print()
+    for line in _format_agentic_stats_lines(agentic_stats_by_mode):
+        print(line)
     print(f"\nSummary saved to: {summary_path}")
 
 
