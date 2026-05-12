@@ -71,15 +71,16 @@ resolve_working_dir() {
     local workspace_id="$2"
     local nested="${WORKSPACE_ROOT}/${dataset}/${workspace_id}"
     local flat="${WORKSPACE_ROOT}/${dataset}"
-    if [[ -d "${nested}" ]]; then
+
+    if [[ -f "${nested}/multihopqa_index_profile.json" ]]; then
         printf '%s\n' "${nested}"
         return 0
     fi
-    if [[ -d "${flat}" ]]; then
+    if [[ -f "${flat}/multihopqa_index_profile.json" ]]; then
         printf '%s\n' "${flat}"
         return 0
     fi
-    die "Missing workspace directory for ${dataset}: checked ${nested} and ${flat}"
+    die "Missing workspace artifacts for ${dataset}: checked ${nested} and ${flat}"
 }
 
 check_workspace_ready() {
@@ -93,6 +94,8 @@ check_workspace_ready() {
     [[ -f "${manifest_path}" ]] || die "Missing ingest manifest: ${manifest_path}"
     [[ -f "${source_map_path}" ]] || die "Missing chunk source map: ${source_map_path}"
 
+    # This validates the original v0 build profile. Later SYNONYM apply status
+    # is validated separately through synonym_linking_manifest.json.
     python - "$profile_path" "$manifest_path" "$source_map_path" "$CHUNK_SIZE" "$dataset" "$workspace_id" <<'PY'
 import json
 import sys
@@ -155,11 +158,26 @@ if errors:
 PY
 }
 
+synonym_manifest_path() {
+    local working_dir="$1"
+    local workspace_id="$2"
+    local nested="${working_dir}/${workspace_id}/synonym_linking_manifest.json"
+    local flat="${working_dir}/synonym_linking_manifest.json"
+
+    if [[ -f "${nested}" ]]; then
+        printf '%s\n' "${nested}"
+    elif [[ -f "${flat}" ]]; then
+        printf '%s\n' "${flat}"
+    else
+        die "Missing synonym manifest. Checked ${nested} and ${flat}. Apply threshold ${SYNONYM_THRESHOLD} first."
+    fi
+}
+
 check_synonym_manifest_ready() {
     local working_dir="$1"
     local workspace_id="$2"
-    local manifest_path="${working_dir}/synonym_linking_manifest.json"
-    [[ -f "${manifest_path}" ]] || die "Missing synonym manifest: ${manifest_path}. Apply threshold ${SYNONYM_THRESHOLD} first."
+    local manifest_path
+    manifest_path="$(synonym_manifest_path "${working_dir}" "${workspace_id}")"
 
     python - "$manifest_path" "$workspace_id" "$SYNONYM_THRESHOLD" <<'PY'
 import json
