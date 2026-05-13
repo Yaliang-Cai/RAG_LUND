@@ -41,7 +41,12 @@ export function useStreamQuery() {
           try {
             const event = JSON.parse(line.slice(6))
             if (event.type === 'meta') {
-              setMetadata((event.metadata as Record<string, unknown>) ?? {})
+              // Merge data into metadata so trace panels (e.g. PPR) can read
+              // metadata.data.{chunks,entities,relations} from the meta event.
+              setMetadata({
+                ...((event.metadata as Record<string, unknown>) ?? {}),
+                data: (event.data as Record<string, unknown>) ?? {},
+              })
             } else if (event.type === 'chunk') {
               setAnswer((a) => a + (event.text as string))
             } else if (event.type === 'reasoning') {

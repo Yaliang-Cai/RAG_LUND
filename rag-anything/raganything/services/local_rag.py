@@ -2348,8 +2348,10 @@ class LocalRagService:
                     "grounded": result.get("grounded"),
                     "ungrounded_claims": result.get("ungrounded_claims", []),
                     "trace": result.get("trace", {}),
+                    "data": result.get("data", {}),
+                    "metadata": result.get("metadata", {}),
                 }
-            return {"answer": str(result), "trace": {}}
+            return {"answer": str(result), "trace": {}, "data": {}, "metadata": {}}
 
         return await self._safe_query_call(_run_query_with_trace)
 
@@ -2412,7 +2414,11 @@ class LocalRagService:
                     }
                 else:
                     meta_payload = {"routing_trace": trace.get("routing", trace)}
-                yield {"type": "meta", "data": {}, "metadata": meta_payload}
+                yield {
+                    "type": "meta",
+                    "data": result.get("data", {}),
+                    "metadata": meta_payload,
+                }
                 yield {"type": "chunk", "text": result.get("answer", "")}
             except Exception as exc:
                 self.logger.error("stream_query (agentic branch) error: %s", exc)
@@ -2433,7 +2439,11 @@ class LocalRagService:
                     return_trace=False,
                 )
                 answer = result.get("answer", result) if isinstance(result, dict) else str(result)
-                yield {"type": "meta", "data": {}, "metadata": {}}
+                yield {
+                    "type": "meta",
+                    "data": result.get("data", {}) if isinstance(result, dict) else {},
+                    "metadata": result.get("metadata", {}) if isinstance(result, dict) else {},
+                }
                 yield {"type": "chunk", "text": answer}
             except Exception as exc:
                 self.logger.error("stream_query (vlm branch) error: %s", exc)
