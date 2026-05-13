@@ -1,14 +1,26 @@
 import client from './client'
 import type { FileRecord } from '@/types'
 
+interface UploadEntry {
+  name: string
+  size: number
+  modified: number
+}
+
 export async function getFiles(workspaceId: string): Promise<FileRecord[]> {
-  const { data } = await client.get<{ files: string[] }>(`/files/${workspaceId}`)
-  return data.files.map((filename) => ({ filename }))
+  // List original uploaded files (PDF/DOCX/…) rather than parsed .md outputs
+  const { data } = await client.get<{ files: UploadEntry[] }>(`/uploads/${workspaceId}`)
+  return data.files.map((f) => ({ filename: f.name }))
 }
 
 export async function getFileContent(workspaceId: string, filename: string): Promise<string> {
+  // Backend /content endpoint requires the .md filename. Map any original
+  // extension (e.g. paper.pdf) → paper.md to locate the parsed markdown.
+  const dot = filename.lastIndexOf('.')
+  const stem = dot > 0 ? filename.slice(0, dot) : filename
+  const mdName = `${stem}.md`
   const { data } = await client.get<{ content: string }>(`/content/${workspaceId}`, {
-    params: { filename },
+    params: { filename: mdName },
   })
   return data.content
 }
