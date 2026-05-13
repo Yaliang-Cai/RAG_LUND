@@ -48,6 +48,7 @@ def test_server_env_enables_internal_build_defaults():
     assert env["RAGANYTHING_STRICT_RELATION_ENDPOINT_ENTITY_MATCH"] == "true"
     assert env["ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE"] == "true"
     assert env["CONTEXT_ZERO_WINDOW_CONTENT_TYPES"]
+    assert env["RAGANYTHING_SERIALIZE_MINERU"] == "true"
     assert env["MAX_CONCURRENT_FILES"] == "4"
 
 

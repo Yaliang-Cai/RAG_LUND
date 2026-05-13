@@ -124,6 +124,7 @@ def build_server_env(
             "RAGANYTHING_STRICT_RELATION_ENDPOINT_ENTITY_MATCH": "true",
             "ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE": "true",
             "CONTEXT_ZERO_WINDOW_CONTENT_TYPES": DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
+            "RAGANYTHING_SERIALIZE_MINERU": "true",
             "MAX_CONCURRENT_FILES": str(max_concurrent_files),
         }
     )
@@ -452,6 +453,7 @@ def run_build(args: argparse.Namespace) -> int:
             "lightrag_max_parallel_insert": DEFAULT_MAX_PARALLEL_INSERT,
             "embedding_batch_num": DEFAULT_EMBEDDING_BATCH_NUM,
             "embedding_func_max_async": DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
+            "serialize_mineru": env["RAGANYTHING_SERIALIZE_MINERU"],
             "vllm_max_num_seqs": "external_model_server_setting",
         },
         "retries": [],

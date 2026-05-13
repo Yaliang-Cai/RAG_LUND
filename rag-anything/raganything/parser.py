@@ -15,9 +15,11 @@ from __future__ import annotations
 import json
 import argparse
 import base64
+import os
 import subprocess
 import tempfile
 import logging
+import threading
 from pathlib import Path
 from typing import (
     Dict,
@@ -30,6 +32,19 @@ from typing import (
 )
 
 T = TypeVar("T")
+
+_TRUE_SET = {"1", "true", "yes", "y", "on"}
+_MINERU_COMMAND_LOCK = threading.Lock()
+_MINERU_LOCK_STATE = threading.local()
+
+
+def _serialize_mineru_commands_enabled() -> bool:
+    return (
+        str(os.environ.get("RAGANYTHING_SERIALIZE_MINERU", "true"))
+        .strip()
+        .lower()
+        in _TRUE_SET
+    )
 
 
 class MineruExecutionError(Exception):
@@ -621,6 +636,32 @@ class MineruParser(Parser):
             source: Model source
             vlm_url: When the backend is `vlm-http-client`, you need to specify the server_url
         """
+        if (
+            _serialize_mineru_commands_enabled()
+            and not getattr(_MINERU_LOCK_STATE, "held", False)
+        ):
+            cls.logger.info("Waiting for serialized MinerU command lock")
+            with _MINERU_COMMAND_LOCK:
+                cls.logger.info("Acquired serialized MinerU command lock")
+                _MINERU_LOCK_STATE.held = True
+                try:
+                    return cls._run_mineru_command(
+                        input_path=input_path,
+                        output_dir=output_dir,
+                        method=method,
+                        lang=lang,
+                        backend=backend,
+                        start_page=start_page,
+                        end_page=end_page,
+                        formula=formula,
+                        table=table,
+                        device=device,
+                        source=source,
+                        vlm_url=vlm_url,
+                    )
+                finally:
+                    _MINERU_LOCK_STATE.held = False
+
         cmd = [
             "mineru",
             "-p",

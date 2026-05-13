@@ -945,14 +945,36 @@ async def get_graph_stats(
 ):
     _validate_workspace_id(workspace_id)
     gpath = _graphml_path(service, workspace_id)
+    try:
+        rag = await service.get_rag(workspace_id)
+        await rag._ensure_lightrag_initialized()
+        graph = getattr(rag.lightrag, "chunk_entity_relation_graph", None)
+        if graph is not None:
+            labels = await graph.get_all_labels()
+            edges = await graph.get_all_edges()
+            return {
+                "entity_count": len(labels) if isinstance(labels, list) else 0,
+                "relation_count": len(edges) if isinstance(edges, list) else 0,
+                "graphml_size": gpath.stat().st_size if gpath.exists() else 0,
+                "source": "graph_storage",
+            }
+    except Exception as e:
+        logger.warning("get_graph_stats LightRAG fallback: %s", e)
+
     G = _read_graphml_safe(gpath)
     if G is not None:
         return {
             "entity_count": G.number_of_nodes(),
             "relation_count": G.number_of_edges(),
             "graphml_size": gpath.stat().st_size,
+            "source": "graphml",
         }
-    return {"entity_count": 0, "relation_count": 0, "graphml_size": gpath.stat().st_size if gpath.exists() else 0}
+    return {
+        "entity_count": 0,
+        "relation_count": 0,
+        "graphml_size": gpath.stat().st_size if gpath.exists() else 0,
+        "source": "none",
+    }
 
 
 @app.get("/graph/{workspace_id}/search")

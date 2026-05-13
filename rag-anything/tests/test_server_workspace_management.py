@@ -77,6 +77,15 @@ class _FakeGraph:
     async def get_nodes_batch(self, node_ids):
         return {node_id: self.nodes[node_id] for node_id in node_ids if node_id in self.nodes}
 
+    async def get_all_edges(self):
+        return [
+            {
+                "source": "ALPHA|ORG",
+                "target": "BETA|ORG",
+                "description": "related",
+            }
+        ]
+
 
 class _FakeRagWrapper:
     def __init__(self, lightrag):
@@ -84,6 +93,29 @@ class _FakeRagWrapper:
 
     async def _ensure_lightrag_initialized(self):
         return {"success": True}
+
+
+class _FakeStorage:
+    def __init__(self, name, dropped):
+        self.name = name
+        self.dropped = dropped
+
+    async def drop(self):
+        self.dropped.append(self.name)
+
+
+class _FakeDeleteWorkspaceService:
+    def __init__(self, tmp_path: Path, lightrag):
+        self.settings = SimpleNamespace(
+            output_dir=str(tmp_path / "output"),
+            working_dir_root=str(tmp_path / "rag_workspace"),
+        )
+        self._rag_instances = {"ws": object()}
+        self._warmed_workspaces = {"ws"}
+        self.lightrag = lightrag
+
+    async def get_rag(self, workspace_id):
+        return _FakeRagWrapper(self.lightrag)
 
 
 class _FakeService:
@@ -231,3 +263,60 @@ def test_graph_entities_exports_audit_metadata(monkeypatch, tmp_path):
     assert entity["source_id"] == "chunk-1"
     assert entity["file_path"] == "doc1.pdf"
     assert entity["description"] == "Alpha description"
+
+
+def test_graph_stats_prefers_lightrag_graph_storage(monkeypatch, tmp_path):
+    client, _, _ = _client_with_fake_service(monkeypatch, tmp_path)
+
+    response = client.get("/graph/ws/stats")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["entity_count"] == 1
+    assert payload["relation_count"] == 1
+    assert payload["source"] == "graph_storage"
+
+
+def test_delete_workspace_drops_graph_vector_and_kv_storages(monkeypatch, tmp_path):
+    dropped = []
+    storage_names = [
+        "text_chunks",
+        "full_docs",
+        "full_entities",
+        "full_relations",
+        "entity_chunks",
+        "relation_chunks",
+        "entities_vdb",
+        "relationships_vdb",
+        "chunks_vdb",
+        "chunk_entity_relation_graph",
+        "doc_status",
+    ]
+    lightrag = SimpleNamespace(
+        **{name: _FakeStorage(name, dropped) for name in storage_names}
+    )
+    fake_service = _FakeDeleteWorkspaceService(tmp_path, lightrag)
+
+    uploads = tmp_path / "uploads"
+    for path in (
+        uploads / "ws",
+        Path(fake_service.settings.output_dir) / "ws",
+        Path(fake_service.settings.working_dir_root) / "ws",
+    ):
+        path.mkdir(parents=True)
+        (path / "marker.txt").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(server_app, "UPLOADS_DIR", uploads)
+    server_app.app.dependency_overrides[server_app.get_service] = lambda: fake_service
+    client = TestClient(server_app.app)
+
+    response = client.delete("/workspace/ws")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["drop_errors"] == []
+    assert set(dropped) == set(storage_names)
+    assert not (uploads / "ws").exists()
+    assert not (Path(fake_service.settings.output_dir) / "ws").exists()
+    assert not (Path(fake_service.settings.working_dir_root) / "ws").exists()
