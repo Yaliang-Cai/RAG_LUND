@@ -265,60 +265,6 @@ Your response must contain only missed or corrected entries, not a full rewrite.
 9.  Output {completion_delimiter} as the final line.
 10. Output language: {language}. Retain proper nouns in their original language.
 
----Continuation Example: Actual Chat Shape---
-The continuation call is sent as chat messages in this shape:
-
-role=system:
-[entity extraction system prompt — the system message already present in this conversation]
-
-role=user:
----Task---
-Extract entities and relationships from the input text below.
-
----Instructions---
-1.  Follow all type definitions, protocols, and format rules in the system prompt exactly.
-2.  Use ONLY the entity types listed in <Entity_types> below, in lowercase.
-    No other type values are permitted.
-3.  Output ONLY the extracted entities and relationships — no preamble, no explanation.
-4.  Output {completion_delimiter} as the final line.
-5.  Output language: {language}. Retain proper nouns in their original language.
-
----Data to be Processed---
-<Entity_types>
-[person,organization,location,event,artifact,work,naturalentity,concept,process]
-
-<Input Text>
-```
-Corrective Retrieval-Augmented Generation uses a Retrieval Evaluator module to
-score retrieval quality. When retrieval quality is poor, Corrective
-Retrieval-Augmented Generation uses a Query Rewriter module.
-```
-
-<Output>
-
-role=assistant:
-entity{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}process{tuple_delimiter}Framework described in the text as using retrieval evaluation.
-entity{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}process{tuple_delimiter}Module described in the text as evaluating retrieval quality.
-relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Retrieval Evaluator{tuple_delimiter}component, retrieval assessment{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation uses a Retrieval Evaluator.
-{completion_delimiter}
-
-role=user:
----Task---
-Review the previous extraction and add any missed or incorrectly formatted
-entities and relationships from the same input text.
-[... — the full text of this continuation message ...]
-
-<Output>
-
-Correct role=assistant output:
-entity{tuple_delimiter}Query Rewriter{tuple_delimiter}process{tuple_delimiter}Module described in the text as rewriting queries when retrieval quality is poor.
-relation{tuple_delimiter}Corrective Retrieval-Augmented Generation{tuple_delimiter}Query Rewriter{tuple_delimiter}component, query rewriting{tuple_delimiter}The text states Corrective Retrieval-Augmented Generation uses a Query Rewriter.
-{completion_delimiter}
-
-For casing or separator corrections, output the corrected normalized form for the same
-lexical content. Do not use continuation to claim that a different lexical referent
-supersedes an earlier entity; this prompt is additive/corrective, not a delete operation.
-
 <Output>
 """
 
