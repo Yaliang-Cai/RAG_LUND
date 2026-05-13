@@ -51,6 +51,23 @@ def test_server_env_enables_internal_build_defaults():
     assert env["MAX_CONCURRENT_FILES"] == "4"
 
 
+def test_server_env_allows_file_batch_size_override():
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=Path("/tmp/raw"),
+        storage_root=Path("/tmp/internal"),
+        workspace_id="demo_ws",
+    )
+
+    env = build_internal.build_server_env(
+        profile,
+        base_env={},
+        max_concurrent_files=1,
+    )
+
+    assert env["MAX_CONCURRENT_FILES"] == "1"
+
+
 def test_supported_files_are_top_level_only(tmp_path):
     (tmp_path / "a.pdf").write_text("pdf", encoding="utf-8")
     (tmp_path / "b.txt").write_text("txt", encoding="utf-8")
@@ -93,6 +110,8 @@ def test_dry_run_writes_constants_backed_summary(tmp_path):
             str(storage_root),
             "--workspace-id",
             "internal_smoke",
+            "--file-batch-size",
+            "1",
             "--dry-run",
         ]
     )
@@ -104,8 +123,8 @@ def test_dry_run_writes_constants_backed_summary(tmp_path):
     assert payload["workspace_id"] == "internal_smoke"
     assert payload["file_count"] == 1
     assert payload["server_port"] > 0
-    assert payload["concurrency"]["file_batch_size"] == build_internal.DEFAULT_BATCH_SIZE
-    assert payload["concurrency"]["MAX_CONCURRENT_FILES"] == "4"
+    assert payload["concurrency"]["file_batch_size"] == 1
+    assert payload["concurrency"]["MAX_CONCURRENT_FILES"] == "1"
     assert (
         payload["concurrency"]["lightrag_llm_model_max_async"]
         == build_internal.DEFAULT_LLM_MODEL_MAX_ASYNC

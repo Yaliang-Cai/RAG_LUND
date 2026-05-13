@@ -107,8 +107,10 @@ def build_server_env(
     *,
     base_env: dict[str, str] | None = None,
     api_key: str | None = None,
+    max_concurrent_files: int = DEFAULT_BATCH_SIZE,
 ) -> dict[str, str]:
     env = dict(os.environ if base_env is None else base_env)
+    max_concurrent_files = max(1, int(max_concurrent_files))
     env.update(
         {
             "RAGANYTHING_WORKDIR_ROOT": _path_env(profile.working_dir_root),
@@ -122,7 +124,7 @@ def build_server_env(
             "RAGANYTHING_STRICT_RELATION_ENDPOINT_ENTITY_MATCH": "true",
             "ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE": "true",
             "CONTEXT_ZERO_WINDOW_CONTENT_TYPES": DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
-            "MAX_CONCURRENT_FILES": str(DEFAULT_BATCH_SIZE),
+            "MAX_CONCURRENT_FILES": str(max_concurrent_files),
         }
     )
     if api_key:
@@ -410,6 +412,13 @@ def run_build(args: argparse.Namespace) -> int:
     files = collect_supported_files(profile.raw_dir)
     if not files:
         raise RuntimeError(f"No supported files found in {profile.raw_dir}")
+    file_batch_size = (
+        int(args.file_batch_size)
+        if args.file_batch_size is not None
+        else DEFAULT_BATCH_SIZE
+    )
+    if file_batch_size < 1:
+        raise ValueError("--file-batch-size must be >= 1")
 
     for directory in (
         profile.uploads_dir,
@@ -421,7 +430,11 @@ def run_build(args: argparse.Namespace) -> int:
         directory.mkdir(parents=True, exist_ok=True)
 
     port = int(args.port) if int(args.port) > 0 else find_free_port()
-    env = build_server_env(profile, api_key=args.api_key)
+    env = build_server_env(
+        profile,
+        api_key=args.api_key,
+        max_concurrent_files=file_batch_size,
+    )
     summary: dict[str, Any] = {
         "profile": profile.name,
         "workspace_id": profile.workspace_id,
@@ -433,7 +446,7 @@ def run_build(args: argparse.Namespace) -> int:
         "server_host": SERVER_HOST,
         "server_port": port,
         "concurrency": {
-            "file_batch_size": DEFAULT_BATCH_SIZE,
+            "file_batch_size": file_batch_size,
             "MAX_CONCURRENT_FILES": env["MAX_CONCURRENT_FILES"],
             "lightrag_llm_model_max_async": DEFAULT_LLM_MODEL_MAX_ASYNC,
             "lightrag_max_parallel_insert": DEFAULT_MAX_PARALLEL_INSERT,
@@ -458,7 +471,10 @@ def run_build(args: argparse.Namespace) -> int:
         summary["server_roots"] = roots_payload.get("roots", {})
 
         batch_results = []
-        for batch_index, batch in enumerate(_iter_batches(files, DEFAULT_BATCH_SIZE), start=1):
+        for batch_index, batch in enumerate(
+            _iter_batches(files, file_batch_size),
+            start=1,
+        ):
             attempts = 0
             while True:
                 attempts += 1
@@ -582,6 +598,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace-id", default=None)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--api-key", default=None)
+    parser.add_argument(
+        "--file-batch-size",
+        type=int,
+        default=None,
+        help=(
+            "Files submitted per ingest batch and MAX_CONCURRENT_FILES for the "
+            "managed server. Defaults to the constants value."
+        ),
+    )
     parser.add_argument(
         "--ingest-timeout-seconds",
         type=float,
