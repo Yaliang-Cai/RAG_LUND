@@ -2439,11 +2439,18 @@ class LocalRagService:
                     return_trace=False,
                 )
                 answer = result.get("answer", result) if isinstance(result, dict) else str(result)
-                yield {
-                    "type": "meta",
-                    "data": result.get("data", {}) if isinstance(result, dict) else {},
-                    "metadata": result.get("metadata", {}) if isinstance(result, dict) else {},
-                }
+                data = result.get("data", {}) if isinstance(result, dict) else {}
+                metadata = result.get("metadata", {}) if isinstance(result, dict) else {}
+                self.logger.info(
+                    "stream_query VLM branch: answer_len=%d data_keys=%s data.chunks=%d data.entities=%d data.relationships=%d metadata_keys=%s",
+                    len(answer or ""),
+                    list(data.keys()) if isinstance(data, dict) else "non-dict",
+                    len(data.get("chunks", [])) if isinstance(data, dict) else 0,
+                    len(data.get("entities", [])) if isinstance(data, dict) else 0,
+                    len(data.get("relationships", []) or data.get("relations", []) or []) if isinstance(data, dict) else 0,
+                    list(metadata.keys()) if isinstance(metadata, dict) else "non-dict",
+                )
+                yield {"type": "meta", "data": data, "metadata": metadata}
                 yield {"type": "chunk", "text": answer}
             except Exception as exc:
                 self.logger.error("stream_query (vlm branch) error: %s", exc)
