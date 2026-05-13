@@ -992,35 +992,71 @@ async def get_graph_overview(
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
 ):
-    """返回知识图谱概览子图（最高度数节点及其邻域），不依赖 LightRAG async API。"""
+    """返回知识图谱概览子图（最高度数节点及其邻域）。
+
+    优先用 LightRAG `get_knowledge_graph(node_label="*")`（Neo4j/Memgraph/Mongo
+    后端均原生支持），失败时回退到 GraphML 文件。
+    """
     _validate_workspace_id(workspace_id)
+
+    # Try LightRAG API first (works with Neo4j/Memgraph/Mongo backends)
+    try:
+        rag = await service.get_rag(workspace_id)
+        await rag._ensure_lightrag_initialized()
+        kg = await rag.lightrag.get_knowledge_graph(
+            node_label="*", max_depth=1, max_nodes=max_nodes
+        )
+        if kg.nodes:
+            return {
+                "nodes": [
+                    {
+                        "id": n.id,
+                        "label": n.id,
+                        "type": n.properties.get("entity_type", ""),
+                        "description": n.properties.get("description", ""),
+                    }
+                    for n in kg.nodes
+                ],
+                "edges": [
+                    {
+                        "source": e.source,
+                        "target": e.target,
+                        "label": e.properties.get("description", ""),
+                        "weight": float(e.properties.get("weight", 1.0)),
+                    }
+                    for e in kg.edges
+                ],
+            }
+    except Exception as e:
+        logger.warning("get_graph_overview LightRAG fallback: %s", e)
+
+    # Fallback: NetworkX over GraphML file (only present with NetworkX backend)
     G = _read_graphml_safe(_graphml_path(service, workspace_id))
     if G is None or G.number_of_nodes() == 0:
         return {"nodes": [], "edges": []}
 
-    # 选取度数最高的 max_nodes 个节点
     top_nodes = sorted(G.nodes(), key=lambda n: G.degree(n), reverse=True)[:max_nodes]
     sub = G.subgraph(top_nodes)
-
-    nodes = [
-        {
-            "id": n,
-            "label": n,
-            "type": G.nodes[n].get("entity_type", ""),
-            "description": G.nodes[n].get("description", ""),
-        }
-        for n in sub.nodes()
-    ]
-    edges = [
-        {
-            "source": u,
-            "target": v,
-            "label": d.get("description", ""),
-            "weight": float(d.get("weight", 1.0)),
-        }
-        for u, v, d in sub.edges(data=True)
-    ]
-    return {"nodes": nodes, "edges": edges}
+    return {
+        "nodes": [
+            {
+                "id": n,
+                "label": n,
+                "type": G.nodes[n].get("entity_type", ""),
+                "description": G.nodes[n].get("description", ""),
+            }
+            for n in sub.nodes()
+        ],
+        "edges": [
+            {
+                "source": u,
+                "target": v,
+                "label": d.get("description", ""),
+                "weight": float(d.get("weight", 1.0)),
+            }
+            for u, v, d in sub.edges(data=True)
+        ],
+    }
 
 
 _ENTITY_COLORS = {
