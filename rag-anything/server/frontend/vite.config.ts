@@ -1,10 +1,11 @@
 /// <reference types="vitest" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   resolve: {
     alias: { '@': path.resolve(__dirname, './src') },
   },
@@ -27,6 +28,7 @@ export default defineConfig({
       '/output':     { target: 'http://localhost:9621', changeOrigin: true },
       '/config':     { target: 'http://localhost:9621', changeOrigin: true },
       '/retry':      { target: 'http://localhost:9621', changeOrigin: true },
+      '/evaluate':   { target: 'http://localhost:9621', changeOrigin: true },
     },
   },
   test: {
