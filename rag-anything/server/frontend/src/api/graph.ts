@@ -25,7 +25,7 @@ export async function searchGraph(
   query: string
 ): Promise<{ nodes: Array<{ id: string; label: string; type: string }> }> {
   const { data } = await client.get(`/graph/${workspaceId}/search`, {
-    params: { query, limit: 20 },
+    params: { q: query, limit: 20 },
   })
   return data
 }

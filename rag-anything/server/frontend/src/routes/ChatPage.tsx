@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useCallback, useRef } from 'react'
 import { useStreamQuery } from '@/hooks/useStreamQuery'
 import { useAppStore } from '@/store'
 import { MessageList } from '@/components/chat/MessageList'
@@ -28,8 +28,11 @@ function buildHistory(messages: Message[]): { role: string; content: string }[] 
 
 export default function ChatPage() {
   const workspaceId = useAppStore((s) => s.workspaceId)
+  const messages = useAppStore((s) => s.chatMessages)
+  const setMessages = useAppStore((s) => s.setChatMessages)
+  const clearMessages = useAppStore((s) => s.clearChatMessages)
+
   const { send, answer, reasoning, status, sourceNodes, metadata } = useStreamQuery()
-  const [messages, setMessages] = useState<Message[]>([])
 
   const messagesRef = useRef<Message[]>([])
   messagesRef.current = messages
@@ -75,10 +78,10 @@ export default function ChatPage() {
         sourceNodes: sn,
         traceType,
         traceMetadata: m,
-        query,           // store original query for EvalBadge
+        query,
       },
     ])
-  }, [workspaceId, send])
+  }, [workspaceId, send, setMessages])
 
   const isStreaming = status === 'streaming'
 
@@ -86,7 +89,7 @@ export default function ChatPage() {
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
         <span className="text-xs text-muted-foreground">workspace: {workspaceId}</span>
-        <Button variant="ghost" size="icon" onClick={() => setMessages([])} title="New conversation">
+        <Button variant="ghost" size="icon" onClick={clearMessages} title="New conversation">
           <SquarePen className="h-4 w-4" />
         </Button>
       </div>

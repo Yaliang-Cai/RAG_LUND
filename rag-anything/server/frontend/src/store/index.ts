@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { Message } from '@/components/chat/MessageBubble'
 
 interface AppStore {
   workspaceId: string
@@ -12,6 +13,10 @@ interface AppStore {
   setPendingPageNum: (n: number | null) => void
   lastSeenJobStatuses: Record<string, string>
   setLastSeenJobStatuses: (statuses: Record<string, string>) => void
+  // Chat history — persists across navigation (not persisted to localStorage)
+  chatMessages: Message[]
+  setChatMessages: (msgs: Message[] | ((prev: Message[]) => Message[])) => void
+  clearChatMessages: () => void
 }
 
 export const useAppStore = create<AppStore>()(
@@ -19,7 +24,7 @@ export const useAppStore = create<AppStore>()(
     (set) => ({
       workspaceId: 'default',
       setWorkspace: (id) => set({ workspaceId: id }),
-      theme: 'dark',
+      theme: 'light',
       toggleTheme: () => set((s) => ({ theme: s.theme === 'dark' ? 'light' : 'dark' })),
       selectedFileId: null,
       setSelectedFile: (id) => set({ selectedFileId: id }),
@@ -27,6 +32,12 @@ export const useAppStore = create<AppStore>()(
       setPendingPageNum: (n) => set({ pendingPageNum: n }),
       lastSeenJobStatuses: {},
       setLastSeenJobStatuses: (statuses) => set({ lastSeenJobStatuses: statuses }),
+      chatMessages: [],
+      setChatMessages: (msgs) =>
+        set((s) => ({
+          chatMessages: typeof msgs === 'function' ? msgs(s.chatMessages) : msgs,
+        })),
+      clearChatMessages: () => set({ chatMessages: [] }),
     }),
     {
       name: 'raganything-store',
@@ -34,6 +45,7 @@ export const useAppStore = create<AppStore>()(
         workspaceId: s.workspaceId,
         theme: s.theme,
         lastSeenJobStatuses: s.lastSeenJobStatuses,
+        // chatMessages intentionally NOT persisted (cleared on page reload)
       }),
     }
   )
