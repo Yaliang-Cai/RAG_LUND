@@ -4,8 +4,10 @@ import logging
 import os
 import shutil
 import tempfile
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 from pathlib import Path
-from typing import List, Literal, Optional, Set
+from typing import Any, List, Literal, Optional, Set
 
 import json as _json
 
@@ -160,6 +162,145 @@ def verify_api_key_or_query(
     if not expected: return
     if x_api_key == expected or key == expected: return
     raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return _json_safe(asdict(value))
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+def _doc_status_to_dict(doc_status: Any) -> dict[str, Any]:
+    if doc_status is None:
+        return {}
+    if isinstance(doc_status, dict):
+        return dict(doc_status)
+    if is_dataclass(doc_status) and not isinstance(doc_status, type):
+        return asdict(doc_status)
+    if hasattr(doc_status, "__dict__"):
+        return {
+            key: value
+            for key, value in vars(doc_status).items()
+            if not key.startswith("_")
+        }
+    return {}
+
+
+def _document_row(doc_id: str, doc_status: Any) -> dict[str, Any]:
+    data = _doc_status_to_dict(doc_status)
+    return _json_safe(
+        {
+            "doc_id": doc_id,
+            "status": data.get("status", ""),
+            "file_path": data.get("file_path", ""),
+            "chunks_count": data.get("chunks_count", 0),
+            "chunks_list": data.get("chunks_list", []),
+            "multimodal_processed": data.get("multimodal_processed", False),
+            "multimodal_stage": data.get("multimodal_stage", ""),
+            "multimodal_failed_items": data.get("multimodal_failed_items", []),
+            "multimodal_chunk_ids": data.get("multimodal_chunk_ids", []),
+            "created_at": data.get("created_at", ""),
+            "updated_at": data.get("updated_at", ""),
+        }
+    )
+
+
+async def _workspace_documents(
+    service: LocalRagService,
+    workspace_id: str,
+) -> list[dict[str, Any]]:
+    rag = await service.get_rag(workspace_id)
+    await rag._ensure_lightrag_initialized()
+    doc_status = getattr(getattr(rag, "lightrag", None), "doc_status", None)
+    if doc_status is None:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    page = 1
+    page_size = 200
+    while True:
+        docs_page, total = await doc_status.get_docs_paginated(
+            page=page,
+            page_size=page_size,
+            sort_field="file_path",
+            sort_direction="asc",
+        )
+        for doc_id, status in docs_page:
+            rows.append(_document_row(str(doc_id), status))
+        if len(rows) >= int(total) or not docs_page:
+            break
+        page += 1
+    return rows
+
+
+def _safe_workspace_child(root: Path, workspace_id: str, *parts: str) -> Path | None:
+    workspace_root = (root / workspace_id).resolve()
+    candidate = workspace_root.joinpath(*parts).resolve()
+    try:
+        candidate.relative_to(workspace_root)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _delete_document_artifacts(
+    service: LocalRagService,
+    workspace_id: str,
+    file_path: str,
+) -> list[str]:
+    deleted: list[str] = []
+    safe_name = Path(str(file_path or "")).name
+    if not safe_name:
+        return deleted
+    stem = Path(safe_name).stem
+
+    upload_path = _safe_workspace_child(UPLOADS_DIR, workspace_id, safe_name)
+    if upload_path and upload_path.exists() and upload_path.is_file():
+        upload_path.unlink()
+        deleted.append(str(upload_path))
+
+    output_root = Path(service.settings.output_dir).resolve()
+    workspace_output = _safe_workspace_child(output_root, workspace_id)
+    if not workspace_output or not workspace_output.exists():
+        return deleted
+
+    output_doc_dir = _safe_workspace_child(output_root, workspace_id, stem)
+    if (
+        output_doc_dir
+        and output_doc_dir.exists()
+        and output_doc_dir.is_dir()
+        and output_doc_dir != workspace_output
+    ):
+        shutil.rmtree(output_doc_dir)
+        deleted.append(str(output_doc_dir))
+
+    candidates: set[Path] = set()
+    for pattern in (
+        f"**/{safe_name}",
+        f"**/{stem}.md",
+        f"**/{stem}_content_list.json",
+        f"**/{stem}_middle.json",
+    ):
+        for path in workspace_output.glob(pattern):
+            if path.is_file():
+                try:
+                    path.resolve().relative_to(workspace_output)
+                except ValueError:
+                    continue
+                candidates.add(path)
+
+    for path in sorted(candidates):
+        path.unlink()
+        deleted.append(str(path))
+    return deleted
 
 # --- 数据模型 ---
 class QueryRequest(BaseModel):
@@ -696,6 +837,67 @@ async def get_graph_labels(
     return {"labels": []}
 
 
+@app.get("/graph/{workspace_id}/entities")
+async def get_graph_entities(
+    workspace_id: str,
+    _auth: None = Depends(verify_api_key),
+    service: LocalRagService = Depends(get_service),
+):
+    _validate_workspace_id(workspace_id)
+    entities: list[dict[str, Any]] = []
+
+    try:
+        rag = await service.get_rag(workspace_id)
+        await rag._ensure_lightrag_initialized()
+        graph = getattr(rag.lightrag, "chunk_entity_relation_graph", None)
+        if graph is not None:
+            labels = await graph.get_all_labels()
+            node_rows = await graph.get_nodes_batch(labels)
+            for label in labels:
+                data = node_rows.get(label) if isinstance(node_rows, dict) else None
+                if not isinstance(data, dict):
+                    data = {}
+                entities.append(
+                    _json_safe(
+                        {
+                            "label": label,
+                            "entity_id": data.get("entity_id", label),
+                            "entity_name": data.get("entity_name", label),
+                            "entity_type": data.get("entity_type", ""),
+                            "description": data.get("description", ""),
+                            "source_id": data.get("source_id", ""),
+                            "file_path": data.get("file_path", ""),
+                        }
+                    )
+                )
+            return {
+                "workspace_id": workspace_id,
+                "count": len(entities),
+                "entities": entities,
+            }
+    except Exception as e:
+        logger.warning("get_graph_entities LightRAG fallback: %s", e)
+
+    G = _read_graphml_safe(_graphml_path(service, workspace_id))
+    if G is not None:
+        for label, data in G.nodes(data=True):
+            data = data if isinstance(data, dict) else {}
+            entities.append(
+                _json_safe(
+                    {
+                        "label": label,
+                        "entity_id": data.get("entity_id", label),
+                        "entity_name": data.get("entity_name", label),
+                        "entity_type": data.get("entity_type", ""),
+                        "description": data.get("description", ""),
+                        "source_id": data.get("source_id", ""),
+                        "file_path": data.get("file_path", ""),
+                    }
+                )
+            )
+    return {"workspace_id": workspace_id, "count": len(entities), "entities": entities}
+
+
 @app.get("/graph/{workspace_id}/subgraph")
 async def get_subgraph(
     workspace_id: str,
@@ -1030,6 +1232,86 @@ def get_graph_html(
 # =========================================================================
 # 工作空间管理
 # =========================================================================
+
+@app.get("/workspace/{workspace_id}/documents")
+async def list_workspace_documents(
+    workspace_id: str,
+    _auth: None = Depends(verify_api_key),
+    service: LocalRagService = Depends(get_service),
+):
+    _validate_workspace_id(workspace_id)
+    documents = await _workspace_documents(service, workspace_id)
+    return {
+        "workspace_id": workspace_id,
+        "count": len(documents),
+        "documents": documents,
+    }
+
+
+@app.delete("/workspace/{workspace_id}/documents/{doc_id}")
+async def delete_workspace_document(
+    workspace_id: str,
+    doc_id: str,
+    delete_artifacts: bool = True,
+    delete_llm_cache: bool = False,
+    _auth: None = Depends(verify_api_key),
+    service: LocalRagService = Depends(get_service),
+):
+    _validate_workspace_id(workspace_id)
+    doc_id = str(doc_id or "").strip()
+    if not doc_id:
+        raise HTTPException(status_code=400, detail="Invalid doc_id")
+
+    rag = await service.get_rag(workspace_id)
+    await rag._ensure_lightrag_initialized()
+    doc_status = getattr(getattr(rag, "lightrag", None), "doc_status", None)
+    before_status = (
+        await doc_status.get_by_id(doc_id) if doc_status is not None else None
+    )
+    before_data = _doc_status_to_dict(before_status)
+    file_path = str(before_data.get("file_path", "") or "")
+
+    delete_result = await service.lightrag_adelete_by_doc_id(
+        workspace_id,
+        doc_id,
+        delete_llm_cache=delete_llm_cache,
+    )
+    delete_payload = _json_safe(delete_result)
+    if not isinstance(delete_payload, dict) and hasattr(delete_result, "__dict__"):
+        delete_payload = _json_safe(vars(delete_result))
+    if not isinstance(delete_payload, dict):
+        delete_payload = {"result": delete_payload}
+
+    status = str(delete_payload.get("status", "")).lower()
+    if status not in {"success", "not_found"}:
+        raise HTTPException(
+            status_code=int(delete_payload.get("status_code", 500) or 500),
+            detail=delete_payload,
+        )
+
+    if not file_path:
+        file_path = str(delete_payload.get("file_path", "") or "")
+
+    artifacts_deleted: list[str] = []
+    if status == "success" and delete_artifacts:
+        artifacts_deleted = _delete_document_artifacts(service, workspace_id, file_path)
+
+    synonym_rebuild: dict[str, Any] | None = None
+    if status == "success" and service.settings.enable_synonym_linking:
+        synonym_rebuild = await service.finalize_workspace_synonyms(
+            workspace_id,
+            force=True,
+            reset_existing=True,
+        )
+
+    return {
+        "workspace_id": workspace_id,
+        "doc_id": doc_id,
+        "delete_result": delete_payload,
+        "artifacts_deleted": artifacts_deleted,
+        "synonym_rebuild": _json_safe(synonym_rebuild),
+    }
+
 
 @app.delete("/workspace/{workspace_id}")
 async def delete_workspace(
