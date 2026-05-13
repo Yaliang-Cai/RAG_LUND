@@ -32,10 +32,10 @@ from raganything.constants import (
     DEFAULT_SUPPORTED_FILE_EXTENSIONS,
 )
 
-TEST_RAW_DIR = Path("/data/y20056788/Yaliang/datasets_raw_test")
+TEST_RAW_DIR = Path("/data/y50056788/Yaliang/datasets_raw_test")
 TEST_STORAGE_ROOT = Path("/data/y50056788/Yaliang/internal_test")
-PROD_RAW_DIR = Path("/data/y20056788/Yaliang/datasets_raw")
-PROD_STORAGE_ROOT = Path("/data/y20056788/Yaliang/internal")
+PROD_RAW_DIR = Path("/data/y50056788/Yaliang/datasets_raw")
+PROD_STORAGE_ROOT = Path("/data/y50056788/Yaliang/internal")
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_PORT = 0

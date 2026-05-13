@@ -9,7 +9,7 @@ from scripts import build_internal_workspace as build_internal
 def test_test_profile_resolves_internal_test_paths():
     profile = build_internal.resolve_profile("test")
 
-    assert profile.raw_dir == Path("/data/y20056788/Yaliang/datasets_raw_test")
+    assert profile.raw_dir == Path("/data/y50056788/Yaliang/datasets_raw_test")
     assert profile.storage_root == Path("/data/y50056788/Yaliang/internal_test")
     assert profile.workspace_id == "internal_test"
     assert profile.uploads_dir == profile.storage_root / "uploads"
@@ -21,8 +21,8 @@ def test_test_profile_resolves_internal_test_paths():
 def test_prod_profile_resolves_internal_paths():
     profile = build_internal.resolve_profile("prod")
 
-    assert profile.raw_dir == Path("/data/y20056788/Yaliang/datasets_raw")
-    assert profile.storage_root == Path("/data/y20056788/Yaliang/internal")
+    assert profile.raw_dir == Path("/data/y50056788/Yaliang/datasets_raw")
+    assert profile.storage_root == Path("/data/y50056788/Yaliang/internal")
     assert profile.workspace_id == "internal"
 
 
