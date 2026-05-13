@@ -4,7 +4,7 @@ import logging
 from typing import Awaitable, Callable
 
 from raganything.constants import DEFAULT_AGENTIC_GRADER_FALLBACK_SUFFICIENT
-from .json_utils import load_json_object
+from .json_utils import call_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,8 @@ Task:
 2. If not sufficient, is this because the information genuinely does not exist in these documents
 (unanswerable), rather than because retrieval was incomplete?
 
-Output JSON: {{"sufficient": true|false, "unanswerable": true|false, "reason": "<one short sentence>"}}
+Output one compact JSON object only:
+{{"sufficient": true|false, "unanswerable": true|false, "reason": "<one short sentence>"}}
 
 Rules for "unanswerable":
 - Set true ONLY when the available chunks explicitly state or clearly imply the requested
@@ -55,8 +56,7 @@ class Grader:
         prefix = build_shared_prefix(chunks)
         prompt = prefix + _GRADER_SUFFIX.format(query=query)
         try:
-            raw = await self._llm(prompt, response_format={"type": "json_object"})
-            result = load_json_object(raw)
+            result = await call_json_object(self._llm, prompt, max_tokens=384)
             return {
                 "sufficient": bool(result.get("sufficient", self._fallback_sufficient)),
                 "unanswerable": bool(result.get("unanswerable", False)),

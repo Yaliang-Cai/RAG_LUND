@@ -4,7 +4,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from raganything.constants import DEFAULT_AGENTIC_ROUTER_FALLBACK_PROFILE
-from .json_utils import load_json_object
+from .json_utils import call_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -105,8 +105,7 @@ class QueryClassifier:
             prompt = _CLASSIFIER_PROMPT.format(
                 query=query, avoid_instruction=avoid_instruction
             )
-            raw = await self._llm(prompt, response_format={"type": "json_object"})
-            result = load_json_object(raw)
+            result = await call_json_object(self._llm, prompt, max_tokens=256)
             candidate = str(result.get("profile", fallback)).strip()
             confidence = float(result.get("confidence", 0.0))
             reasoning = str(result.get("reasoning", ""))

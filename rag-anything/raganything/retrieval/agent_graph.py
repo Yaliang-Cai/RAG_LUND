@@ -17,7 +17,7 @@ from raganything.constants import (
 )
 from .classifier import QueryClassifier
 from .grader import Grader, build_shared_prefix
-from .json_utils import load_json_object
+from .json_utils import call_json_object
 from .rewriter import Rewriter
 from .hallucination_checker import HallucinationChecker
 from .router import RetrievalRouter
@@ -210,14 +210,15 @@ class AdaptiveAgentGraph:
 
     async def _node_decomposer(self, state: AgentState) -> dict:
         try:
-            raw = await self._llm(
+            parsed = await call_json_object(
+                self._llm,
                 _DECOMPOSE_PROMPT.format(
                     query=state["query"],
                     max_sub=DEFAULT_AGENTIC_DECOMPOSE_MAX_SUBQUESTIONS,
                 ),
-                response_format={"type": "json_object"},
+                max_tokens=512,
             )
-            sub_qs = load_json_object(raw).get("sub_questions", [])
+            sub_qs = parsed.get("sub_questions", [])
             if not sub_qs:
                 sub_qs = [state["query"]]
         except Exception:

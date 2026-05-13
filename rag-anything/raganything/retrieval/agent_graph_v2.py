@@ -17,7 +17,7 @@ from .classifier import QueryClassifier
 from .grader import build_shared_prefix
 from .grader_v2 import GraderV2
 from .hallucination_checker import HallucinationChecker
-from .json_utils import load_json_object
+from .json_utils import call_json_object
 from .recovery_policy import RecoveryAction, RecoveryPolicy
 from .rewriter import Rewriter
 from .router import RetrievalRouter
@@ -342,14 +342,14 @@ class AdaptiveAgentGraphV2:
 
     async def _decompose(self, query: str) -> list[str]:
         try:
-            raw = await self._llm(
+            parsed = await call_json_object(
+                self._llm,
                 _DECOMPOSE_PROMPT.format(
                     query=query,
                     max_sub=DEFAULT_AGENTIC_DECOMPOSE_MAX_SUBQUESTIONS,
                 ),
-                response_format={"type": "json_object"},
+                max_tokens=512,
             )
-            parsed = load_json_object(raw)
             questions = parsed.get("sub_questions", [])
             if not questions:
                 questions = [query]

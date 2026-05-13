@@ -4,7 +4,7 @@ import logging
 from typing import Awaitable, Callable
 
 from .grader import build_shared_prefix
-from .json_utils import load_json_object
+from .json_utils import call_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ Question: {query}
 Task:
 Evaluate whether the chunks above contain enough evidence to answer the exact question.
 
-Output JSON:
+Output one compact JSON object only:
 {{
   "sufficient": true|false,
   "unanswerable": true|false,
@@ -58,8 +58,7 @@ class GraderV2:
     async def grade(self, query: str, chunks: list[dict]) -> dict:
         prompt = build_shared_prefix(chunks) + _GRADER_V2_SUFFIX.format(query=query)
         try:
-            raw = await self._llm(prompt, response_format={"type": "json_object"})
-            result = load_json_object(raw)
+            result = await call_json_object(self._llm, prompt, max_tokens=512)
             return _normalize_result(result, has_chunks=bool(chunks))
         except Exception:
             logger.warning("GraderV2 failed, defaulting insufficient", exc_info=True)

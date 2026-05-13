@@ -4,7 +4,7 @@ import logging
 from typing import Awaitable, Callable
 
 from .grader import build_shared_prefix
-from .json_utils import load_json_object
+from .json_utils import call_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,7 @@ class HallucinationChecker:
         prefix = build_shared_prefix(chunks)
         prompt = prefix + _CHECKER_SUFFIX.format(answer=answer, query=query)
         try:
-            raw = await self._llm(prompt, response_format={"type": "json_object"})
-            result = load_json_object(raw)
+            result = await call_json_object(self._llm, prompt, max_tokens=384)
             claims = result.get("ungrounded_claims", [])
             if not isinstance(claims, list):
                 claims = [claims] if claims else []

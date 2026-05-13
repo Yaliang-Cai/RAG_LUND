@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
@@ -24,6 +24,22 @@ def load_json_object(raw: Any) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise TypeError("expected JSON object")
     return parsed
+
+
+async def call_json_object(
+    llm_func: Callable[..., Awaitable[str]],
+    prompt: str,
+    *,
+    max_tokens: int = 512,
+) -> dict[str, Any]:
+    """Request compact JSON as plain text and parse it locally.
+
+    Avoid passing ``response_format`` to local OpenAI-compatible servers because
+    the SDK parse path raises before returning content when generation hits the
+    token limit with incomplete JSON.
+    """
+    raw = await llm_func(prompt, max_tokens=max_tokens)
+    return load_json_object(raw)
 
 
 def _loads_wrapped_object(text: str) -> Any:
