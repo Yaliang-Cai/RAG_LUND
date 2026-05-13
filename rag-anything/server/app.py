@@ -1488,7 +1488,18 @@ async def admin_audit(
 # --- SPA fallback (must be last — after all API routes) ---
 _DIST_DIR = APP_ROOT / "static" / "dist"
 if _DIST_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(_DIST_DIR), html=True), name="spa")
+    # Serve hashed assets directory directly (no HTML fallback needed for assets)
+    _ASSETS_DIR = _DIST_DIR / "assets"
+    if _ASSETS_DIR.exists():
+        app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        """Serve index.html for all unknown paths (SPA client-side routing)."""
+        candidate = _DIST_DIR / full_path
+        if candidate.exists() and candidate.is_file():
+            return FileResponse(str(candidate))
+        return FileResponse(str(_DIST_DIR / "index.html"))
 else:
     import warnings
     warnings.warn(
