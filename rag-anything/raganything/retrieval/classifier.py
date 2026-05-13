@@ -1,10 +1,10 @@
-import json
 import logging
 import re
 import time
 from typing import Any, Awaitable, Callable
 
 from raganything.constants import DEFAULT_AGENTIC_ROUTER_FALLBACK_PROFILE
+from .json_utils import load_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class QueryClassifier:
                 query=query, avoid_instruction=avoid_instruction
             )
             raw = await self._llm(prompt, response_format={"type": "json_object"})
-            result = json.loads(raw)
+            result = load_json_object(raw)
             candidate = str(result.get("profile", fallback)).strip()
             confidence = float(result.get("confidence", 0.0))
             reasoning = str(result.get("reasoning", ""))

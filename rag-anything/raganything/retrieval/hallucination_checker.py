@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 import logging
 from typing import Awaitable, Callable
 
 from .grader import build_shared_prefix
+from .json_utils import load_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ For every factual claim in the Answer, verify it is explicitly supported by the 
 Only mark grounded=true if each factual claim is directly supported by the supplied chunks.
 Statements such as "I cannot determine X from the context" make no factual claims and are grounded.
 
-Output JSON:
+Output JSON only:
 {{
   "grounded": true|false,
   "ungrounded_claims": ["<claim>", ...]
@@ -34,10 +34,13 @@ class HallucinationChecker:
         prompt = prefix + _CHECKER_SUFFIX.format(answer=answer, query=query)
         try:
             raw = await self._llm(prompt, response_format={"type": "json_object"})
-            result = json.loads(raw)
+            result = load_json_object(raw)
+            claims = result.get("ungrounded_claims", [])
+            if not isinstance(claims, list):
+                claims = [claims] if claims else []
             return {
                 "grounded": bool(result.get("grounded", False)),
-                "ungrounded_claims": [str(c) for c in result.get("ungrounded_claims", [])],
+                "ungrounded_claims": [str(c) for c in claims if str(c).strip()],
             }
         except Exception:
             logger.warning(

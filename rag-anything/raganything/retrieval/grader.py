@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 import logging
 from typing import Awaitable, Callable
 
 from raganything.constants import DEFAULT_AGENTIC_GRADER_FALLBACK_SUFFICIENT
+from .json_utils import load_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ class Grader:
         prompt = prefix + _GRADER_SUFFIX.format(query=query)
         try:
             raw = await self._llm(prompt, response_format={"type": "json_object"})
-            result = json.loads(raw)
+            result = load_json_object(raw)
             return {
                 "sufficient": bool(result.get("sufficient", self._fallback_sufficient)),
                 "unanswerable": bool(result.get("unanswerable", False)),

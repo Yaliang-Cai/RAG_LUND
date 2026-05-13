@@ -135,6 +135,30 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
             },
         ),
         RetrievalProfile(
+            name="full_v2",
+            description="Agentic v2 failure recovery profile with stronger PPR weighting",
+            paths=["ppr", "qdrant_chunks_hybrid", "qdrant_sparse"],
+            rrf_weights={
+                "ppr": 2.0,
+                "qdrant_chunks_hybrid": 0.7,
+                "qdrant_sparse": 0.4,
+            },
+            enable_rerank=False,
+            min_rrf_score=0.0,
+            max_concurrent_paths=None,
+            path_overrides={
+                "ppr": {
+                    "qdrant_retrieval_mode": "hybrid",
+                    "exclude_synonym_edges": False,
+                },
+                "qdrant_chunks_hybrid": {
+                    "qdrant_retrieval_mode": "hybrid",
+                    "exclude_synonym_edges": True,
+                },
+                "qdrant_sparse": {"exclude_synonym_edges": True},
+            },
+        ),
+        RetrievalProfile(
             name="hybrid_experimental",
             description="Ablation/debug profile for LightRAG hybrid KG retrieval; not a classifier output",
             paths=["hybrid"],

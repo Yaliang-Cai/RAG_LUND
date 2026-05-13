@@ -301,6 +301,12 @@ class QueryMixin:
             return_trace_agentic = bool(kwargs.pop("return_trace", False))
             graph = AdaptiveAgentGraph(self.lightrag)
             return await graph.run(query, return_trace=return_trace_agentic, **kwargs)
+
+        if mode == "agentic_v2":
+            from raganything.retrieval.agent_graph_v2 import AdaptiveAgentGraphV2
+            return_trace_agentic = bool(kwargs.pop("return_trace", False))
+            graph = AdaptiveAgentGraphV2(self.lightrag)
+            return await graph.run(query, return_trace=return_trace_agentic, **kwargs)
         # ── end mode="agentic" ────────────────────────────────────────────
 
         # ── mode="gfm": GFM graph neural retrieval ────────────────────────

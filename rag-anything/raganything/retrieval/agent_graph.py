@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 import logging
 from typing import Any
 
@@ -18,6 +17,7 @@ from raganything.constants import (
 )
 from .classifier import QueryClassifier
 from .grader import Grader, build_shared_prefix
+from .json_utils import load_json_object
 from .rewriter import Rewriter
 from .hallucination_checker import HallucinationChecker
 from .router import RetrievalRouter
@@ -217,7 +217,7 @@ class AdaptiveAgentGraph:
                 ),
                 response_format={"type": "json_object"},
             )
-            sub_qs = json.loads(raw).get("sub_questions", [])
+            sub_qs = load_json_object(raw).get("sub_questions", [])
             if not sub_qs:
                 sub_qs = [state["query"]]
         except Exception:

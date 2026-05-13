@@ -38,7 +38,7 @@ for p in (_raganything_root, _lightrag_root, _projects_root):
 from dotenv import load_dotenv
 load_dotenv()
 
-VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto", "full", "agentic")
+VALID_MODES = ("ppr", "ppr_local", "global", "local", "hybrid", "mix", "naive", "rrf", "bypass", "auto", "full", "agentic", "agentic_v2")
 VALID_DATASETS = ("hotpotqa", "musique", "2wiki", "simpleqa")
 VALID_QA_PROMPT_STYLES = ("lightrag", "semantic_cot", "kg_semantic_cot")
 VALID_ANSWER_PARSE_MODES = ("strip_references", "answer_marker")
@@ -829,7 +829,7 @@ async def _run_mode(
                 wire_profile=wire_profile,
                 **query_kwargs,
             )
-            if mode == "agentic" and qa_prompt_style == "semantic_cot":
+            if mode in {"agentic", "agentic_v2"} and qa_prompt_style == "semantic_cot":
                 result = await service.query_with_trace(
                     workspace_id=workspace_id,
                     query=item["question"],
@@ -892,13 +892,19 @@ async def _run_mode(
                     **call_kwargs,
                 )
                 raw_answer = result.get("answer", "")
+                if mode in {"agentic", "agentic_v2"}:
+                    agentic_internal_answer = str(result.get("answer") or "")
+                    raw_trace = result.get("trace", {})
+                    agentic_trace = raw_trace if isinstance(raw_trace, dict) else {}
+                    if agentic_trace is not None:
+                        agentic_trace.setdefault("grounded", result.get("grounded"))
                 raw_chunks = result.get("trace", {}).get("data", {}).get("chunks", [])
                 chunks = raw_chunks if isinstance(raw_chunks, list) else []
             answer = _parse_answer_text(raw_answer, answer_parse_mode)
         except Exception as e:
             print(f"  [WARN] query failed for id={item['id']}: {e}")
             answer = ""
-            agentic_query_failed = mode == "agentic"
+            agentic_query_failed = mode in {"agentic", "agentic_v2"}
 
         gold = item["answer"]
         em = score_em(answer, gold)
@@ -914,7 +920,7 @@ async def _run_mode(
         }
         if qa_prompt_style in ("semantic_cot", "kg_semantic_cot"):
             record["raw_pred"] = raw_answer
-        if mode == "agentic":
+        if mode in {"agentic", "agentic_v2"}:
             record["agentic_internal_answer"] = agentic_internal_answer or ""
             record["agentic_trace"] = agentic_trace or {}
             record["agentic_query_failed"] = agentic_query_failed
@@ -961,7 +967,7 @@ async def _run_mode(
             last_reported = done
 
     metrics = _aggregate_jsonl(jsonl_path, recall_ks)
-    if mode == "agentic":
+    if mode in {"agentic", "agentic_v2"}:
         metrics["agentic_stats"] = _aggregate_agentic_jsonl(jsonl_path)
     return metrics
 
