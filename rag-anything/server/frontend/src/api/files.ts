@@ -21,6 +21,22 @@ export async function uploadFile(workspaceId: string, file: File): Promise<{ job
   return data
 }
 
+export interface BatchUploadResult {
+  job_id: string | null
+  workspace_id: string
+  status: 'queued' | 'duplicate'
+  doc_ids?: string[]
+  duplicate_doc_ids?: string[]
+}
+
+export async function uploadFiles(workspaceId: string, files: File[]): Promise<BatchUploadResult> {
+  const form = new FormData()
+  for (const f of files) form.append('files', f)
+  form.append('workspace_id', workspaceId)
+  const { data } = await client.post<BatchUploadResult>('/ingest/batch', form)
+  return data
+}
+
 export async function deleteDocument(workspaceId: string, docId: string): Promise<void> {
   await client.delete(`/workspace/${workspaceId}/document/${docId}`)
 }

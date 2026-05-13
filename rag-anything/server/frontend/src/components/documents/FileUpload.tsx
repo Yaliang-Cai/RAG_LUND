@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { uploadFile } from '@/api/files'
+import { uploadFile, uploadFiles } from '@/api/files'
 import { useAppStore } from '@/store'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
@@ -10,28 +10,53 @@ const SUPPORTED = new Set([
   'txt', 'md', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'webp',
 ])
 
+// HTMLInputElement extension for folder selection
+type DirInputAttrs = { webkitdirectory?: string; directory?: string }
+
 export function FileUpload({ disabled }: { disabled?: boolean }) {
   const workspaceId = useAppStore((s) => s.workspaceId)
   const navigate = useNavigate()
-  const inputRef = useRef<HTMLInputElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const dirInputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
 
-  function validate(file: File): boolean {
-    const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-    if (!SUPPORTED.has(ext)) {
-      toast.error(`Unsupported file type: .${ext}`)
-      return false
+  function filterSupported(list: File[]): File[] {
+    const ok: File[] = []
+    const rejected: string[] = []
+    for (const f of list) {
+      const ext = f.name.split('.').pop()?.toLowerCase() ?? ''
+      if (SUPPORTED.has(ext)) ok.push(f)
+      else rejected.push(f.name)
     }
-    return true
+    if (rejected.length) {
+      toast.error(`Skipped ${rejected.length} unsupported file(s)`)
+    }
+    return ok
   }
 
-  async function upload(file: File) {
-    if (!validate(file)) return
+  async function uploadMany(rawFiles: File[]) {
+    const files = filterSupported(rawFiles)
+    if (files.length === 0) return
     setUploading(true)
     try {
-      await uploadFile(workspaceId, file)
-      toast.success('Ingest job created')
+      if (files.length === 1) {
+        await uploadFile(workspaceId, files[0])
+        toast.success('Ingest job created')
+      } else {
+        const res = await uploadFiles(workspaceId, files)
+        if (res.status === 'duplicate') {
+          toast.info(`All ${files.length} files already ingested`)
+        } else {
+          const dup = res.duplicate_doc_ids?.length ?? 0
+          const queued = res.doc_ids?.length ?? files.length
+          toast.success(
+            dup > 0
+              ? `Queued ${queued} file(s) (${dup} duplicate skipped)`
+              : `Queued ${queued} file(s)`
+          )
+        }
+      }
       navigate('/jobs')
     } catch (err) {
       toast.error((err as Error).message)
@@ -41,12 +66,27 @@ export function FileUpload({ disabled }: { disabled?: boolean }) {
   }
 
   return (
-    <div className="p-3 border-t border-border shrink-0">
+    <div className="p-3 border-t border-border shrink-0 space-y-2">
       <input
-        ref={inputRef}
+        ref={fileInputRef}
         type="file"
+        multiple
         className="hidden"
-        onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])}
+        onChange={(e) => {
+          if (e.target.files) uploadMany(Array.from(e.target.files))
+          e.target.value = ''
+        }}
+      />
+      <input
+        ref={dirInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        {...({ webkitdirectory: '', directory: '' } as DirInputAttrs)}
+        onChange={(e) => {
+          if (e.target.files) uploadMany(Array.from(e.target.files))
+          e.target.value = ''
+        }}
       />
       <div
         className={cn(
@@ -55,18 +95,30 @@ export function FileUpload({ disabled }: { disabled?: boolean }) {
           dragging && 'border-primary bg-primary/5',
           (disabled || uploading) && 'opacity-50 pointer-events-none'
         )}
-        onClick={() => inputRef.current?.click()}
+        onClick={() => fileInputRef.current?.click()}
         onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
         onDragLeave={() => setDragging(false)}
         onDrop={(e) => {
           e.preventDefault()
           setDragging(false)
-          const file = e.dataTransfer.files[0]
-          if (file) upload(file)
+          const list = Array.from(e.dataTransfer.files)
+          if (list.length) uploadMany(list)
         }}
       >
-        {uploading ? 'Uploading...' : '+ Upload file'}
+        {uploading ? 'Uploading...' : '+ Upload file(s)'}
       </div>
+      <button
+        type="button"
+        disabled={disabled || uploading}
+        onClick={() => dirInputRef.current?.click()}
+        className={cn(
+          'w-full text-xs py-1.5 rounded-md border border-border text-muted-foreground',
+          'hover:bg-muted hover:text-foreground transition-colors',
+          (disabled || uploading) && 'opacity-50 pointer-events-none'
+        )}
+      >
+        + Upload folder
+      </button>
     </div>
   )
 }
