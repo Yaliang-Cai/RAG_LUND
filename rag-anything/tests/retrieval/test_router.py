@@ -2,7 +2,12 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from lightrag import QueryParam
-from raganything.retrieval.router import RetrievalRouter, RetrievalError, _weighted_rrf_merge
+from raganything.retrieval.router import (
+    RetrievalRouter,
+    RetrievalError,
+    _select_with_path_floors,
+    _weighted_rrf_merge,
+)
 from raganything.retrieval.profiles import PROFILE_REGISTRY
 
 
@@ -39,6 +44,51 @@ def test_weighted_rrf_attaches_rrf_score():
     assert result[0]["rrf_score"] > 0.0
 
 
+def test_weighted_rrf_attaches_source_paths():
+    chunks = [{"chunk_id": "shared", "content": "hello"}]
+    result = _weighted_rrf_merge(
+        {"ppr": chunks, "qdrant_chunks_hybrid": chunks},
+        {"ppr": 2.0, "qdrant_chunks_hybrid": 0.7},
+        k=60,
+    )
+    assert result[0]["rrf_source_paths"] == ["ppr", "qdrant_chunks_hybrid"]
+    assert result[0]["rrf_sources"]["ppr"]["rank"] == 1
+
+
+def test_path_floor_reserves_low_rank_ppr_candidates():
+    chunks = [
+        {"chunk_id": f"h{i}", "rrf_source_paths": ["qdrant_chunks_hybrid"]}
+        for i in range(5)
+    ] + [
+        {"chunk_id": f"p{i}", "rrf_source_paths": ["ppr"]}
+        for i in range(3)
+    ]
+    final, trace = _select_with_path_floors(
+        chunks,
+        chunk_top_k=5,
+        path_floors={"ppr": 3},
+    )
+    ids = {chunk["chunk_id"] for chunk in final}
+    assert {"p0", "p1", "p2"}.issubset(ids)
+    assert len(final) == 5
+    assert trace["ppr"] == {"requested": 3, "available": 3, "selected": 3}
+
+
+def test_path_floor_uses_available_ppr_without_duplicates():
+    chunks = [
+        {"chunk_id": "h0", "rrf_source_paths": ["qdrant_chunks_hybrid"]},
+        {"chunk_id": "p0", "rrf_source_paths": ["ppr"]},
+        {"chunk_id": "p0", "rrf_source_paths": ["ppr"]},
+    ]
+    final, trace = _select_with_path_floors(
+        chunks,
+        chunk_top_k=5,
+        path_floors={"ppr": 3},
+    )
+    assert [chunk["chunk_id"] for chunk in final] == ["h0", "p0"]
+    assert trace["ppr"] == {"requested": 3, "available": 1, "selected": 1}
+
+
 # ── RetrievalRouter integration tests ───────────────────────────────────────
 
 def _make_router_lightrag(profile_chunks: dict[str, list[dict]]):
@@ -50,8 +100,10 @@ def _make_router_lightrag(profile_chunks: dict[str, list[dict]]):
         name_map = {
             ("naive",  "dense"):  "naive",
             ("naive",  "bm25"):   "qdrant_sparse",
+            ("naive",  "hybrid"): "qdrant_chunks_hybrid",
             ("hybrid", "dense"):  "hybrid",
             ("hybrid", "hybrid"): "qdrant_hybrid",
+            ("global", "dense"):  "global_kg",
             ("mix",    "dense"):  "mix",
             ("ppr",    "dense"):  "ppr",
         }

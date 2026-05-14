@@ -48,6 +48,9 @@ Rules:
 - unanswerable is only a candidate signal here, not a stopping decision. Do not use it for merely weak retrieval.
 - Empty, off-topic, or weak retrieval means retrieval needs improvement; do not mark that as truly unanswerable.
 - When in doubt, set unanswerable=false and choose the closest retrieval failure type.
+- found_facts and missing_facts have no item-count limit, but every item must be short, atomic, and necessary for judging answer coverage.
+- Do not copy chunk text or write long explanations in facts. Record only the facts needed or missing for answering the question.
+- Return valid JSON only. Do not include Markdown, comments, or prose outside the JSON object.
 """
 
 
@@ -58,7 +61,7 @@ class GraderV2:
     async def grade(self, query: str, chunks: list[dict]) -> dict:
         prompt = build_shared_prefix(chunks) + _GRADER_V2_SUFFIX.format(query=query)
         try:
-            result = await call_json_object(self._llm, prompt, max_tokens=512)
+            result = await call_json_object(self._llm, prompt, max_tokens=1536)
             return _normalize_result(result, has_chunks=bool(chunks))
         except Exception:
             logger.warning("GraderV2 failed, defaulting insufficient", exc_info=True)
@@ -105,6 +108,7 @@ def _fallback_result(*, has_chunks: bool) -> dict:
         "found_facts": [],
         "missing_facts": [],
         "reason": "grader error",
+        "grader_error": True,
     }
 
 

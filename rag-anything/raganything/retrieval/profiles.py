@@ -31,6 +31,7 @@ class RetrievalProfile:
     min_rrf_score: float = 0.01
     max_concurrent_paths: int | None = None
     path_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    path_floors: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         missing_weights = [p for p in self.paths if p not in self.rrf_weights]
@@ -48,6 +49,25 @@ class RetrievalProfile:
             raise ValueError(
                 f"Profile '{self.name}': unknown path names: {unknown_paths}"
             )
+        floor_extra = [p for p in self.path_floors if p not in self.paths]
+        if floor_extra:
+            raise ValueError(
+                f"Profile '{self.name}': path_floors keys not in paths: {floor_extra}"
+            )
+        normalized_floors: dict[str, int] = {}
+        for path, floor in self.path_floors.items():
+            try:
+                parsed = int(floor)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Profile '{self.name}': path_floors must be integers"
+                ) from exc
+            if parsed < 0:
+                raise ValueError(
+                    f"Profile '{self.name}': path_floors must be non-negative: {[path]}"
+                )
+            normalized_floors[path] = parsed
+        self.path_floors = normalized_floors
 
 
 PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
@@ -146,6 +166,7 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
             enable_rerank=False,
             min_rrf_score=0.0,
             max_concurrent_paths=None,
+            path_floors={"ppr": 3},
             path_overrides={
                 "ppr": {
                     "qdrant_retrieval_mode": "hybrid",

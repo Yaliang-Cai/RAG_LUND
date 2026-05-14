@@ -125,9 +125,13 @@ class RetrievalRouter:
         else:
             filtered = reranked
 
-        # 7. Final top-k
+        # 7. Final top-k, with optional path floors for protected paths.
         chunk_top_k = getattr(param, "chunk_top_k", 10)
-        final_chunks = filtered[:chunk_top_k]
+        final_chunks, path_floor_applied = _select_with_path_floors(
+            filtered,
+            chunk_top_k=chunk_top_k,
+            path_floors=profile.path_floors,
+        )
 
         routing_trace = {
             "profile": profile_name,
@@ -139,6 +143,8 @@ class RetrievalRouter:
             "chunks_after_rrf": chunks_after_rrf,
             "chunks_after_rerank": chunks_after_rerank,
             "chunks_after_threshold": len(final_chunks),
+            "path_floor_applied": path_floor_applied,
+            "ppr_floor_count": path_floor_applied.get("ppr", {}).get("selected", 0),
             "latency_per_path": {
                 "classifier": round(classifier_meta["latency"], 3),
                 **latency_by_path,
@@ -161,6 +167,7 @@ def _weighted_rrf_merge(
     """
     scores: dict[str, float] = {}
     meta: dict[str, dict] = {}
+    sources: dict[str, dict[str, dict[str, float | int]]] = {}
 
     for path_name, ranked in chunks_by_path.items():
         w = weights.get(path_name, 1.0)
@@ -168,7 +175,13 @@ def _weighted_rrf_merge(
             chunk_id = chunk.get("chunk_id") or chunk.get("id")
             if not chunk_id:
                 continue
-            scores[chunk_id] = scores.get(chunk_id, 0.0) + w / (k + rank + 1)
+            contribution = w / (k + rank + 1)
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + contribution
+            sources.setdefault(chunk_id, {})[path_name] = {
+                "rank": rank + 1,
+                "weight": w,
+                "score": round(contribution, 6),
+            }
             if chunk_id not in meta:
                 meta[chunk_id] = chunk
 
@@ -177,5 +190,75 @@ def _weighted_rrf_merge(
     for cid in sorted_ids:
         chunk = dict(meta[cid])
         chunk["rrf_score"] = round(scores[cid], 6)
+        chunk["rrf_sources"] = sources.get(cid, {})
+        chunk["rrf_source_paths"] = sorted(sources.get(cid, {}).keys())
         result.append(chunk)
     return result
+
+
+def _select_with_path_floors(
+    chunks: list[dict],
+    *,
+    chunk_top_k: int,
+    path_floors: dict[str, int],
+) -> tuple[list[dict], dict[str, dict[str, int]]]:
+    try:
+        limit = max(1, int(chunk_top_k or 10))
+    except (TypeError, ValueError):
+        limit = 10
+    if not path_floors:
+        return chunks[:limit], {}
+
+    selected_ids: set[str] = set()
+    floor_trace: dict[str, dict[str, int]] = {}
+    for path, raw_floor in path_floors.items():
+        floor = max(0, int(raw_floor))
+        requested = min(floor, limit)
+        available = [c for c in chunks if _chunk_has_source_path(c, path)]
+        count = 0
+        for chunk in available:
+            if len(selected_ids) >= limit or count >= requested:
+                break
+            chunk_id = _chunk_identity(chunk)
+            if not chunk_id or chunk_id in selected_ids:
+                continue
+            selected_ids.add(chunk_id)
+            count += 1
+        floor_trace[path] = {
+            "requested": requested,
+            "available": len({_chunk_identity(c) for c in available if _chunk_identity(c)}),
+            "selected": count,
+        }
+
+    for chunk in chunks:
+        if len(selected_ids) >= limit:
+            break
+        chunk_id = _chunk_identity(chunk)
+        if chunk_id and chunk_id not in selected_ids:
+            selected_ids.add(chunk_id)
+
+    final_chunks: list[dict] = []
+    emitted_ids: set[str] = set()
+    for chunk in chunks:
+        chunk_id = _chunk_identity(chunk)
+        if not chunk_id or chunk_id not in selected_ids or chunk_id in emitted_ids:
+            continue
+        final_chunks.append(chunk)
+        emitted_ids.add(chunk_id)
+        if len(final_chunks) >= limit:
+            break
+    return final_chunks, floor_trace
+
+
+def _chunk_has_source_path(chunk: dict, path: str) -> bool:
+    sources = chunk.get("rrf_sources")
+    if isinstance(sources, dict) and path in sources:
+        return True
+    source_paths = chunk.get("rrf_source_paths")
+    if isinstance(source_paths, list) and path in source_paths:
+        return True
+    return str(chunk.get("retrieval_path") or chunk.get("path") or "") == path
+
+
+def _chunk_identity(chunk: dict) -> str:
+    return str(chunk.get("chunk_id") or chunk.get("id") or "")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import math
 from collections import Counter
 from typing import Any
 
@@ -20,7 +21,7 @@ from .hallucination_checker import HallucinationChecker
 from .json_utils import call_json_object
 from .recovery_policy import RecoveryAction, RecoveryPolicy
 from .rewriter import Rewriter
-from .router import RetrievalRouter
+from .router import RetrievalRouter, _select_with_path_floors
 from .router_cache import RouterCache
 
 logger = logging.getLogger(__name__)
@@ -311,9 +312,12 @@ class AdaptiveAgentGraphV2:
             return_exceptions=True,
         )
         all_chunks: list[dict] = []
+        sub_results: list[tuple[str, list[dict]]] = []
         paths_activated: list[str] = []
         paths_failed: list[str] = []
         chunks_per_path: dict[str, int] = {}
+        ppr_floor_count = 0
+        path_floor_applied: dict[str, dict[str, int]] = {}
         sub_traces = []
         for result in results:
             if isinstance(result, BaseException):
@@ -321,6 +325,7 @@ class AdaptiveAgentGraphV2:
                 continue
             sub_query, chunks, trace = result
             all_chunks.extend(chunks)
+            sub_results.append((sub_query, chunks))
             sub_traces.append({"query": sub_query, **trace})
             for path in trace.get("paths_activated", []):
                 if path not in paths_activated:
@@ -328,7 +333,21 @@ class AdaptiveAgentGraphV2:
             paths_failed.extend(trace.get("paths_failed", []))
             for path, count in trace.get("chunks_per_path", {}).items():
                 chunks_per_path[path] = chunks_per_path.get(path, 0) + int(count)
-        return _dedup_chunks(all_chunks)[:_chunk_limit(param)], {
+            ppr_floor_count += int(trace.get("ppr_floor_count", 0) or 0)
+            for path, floor_data in trace.get("path_floor_applied", {}).items():
+                aggregate = path_floor_applied.setdefault(
+                    path,
+                    {"requested": 0, "available": 0, "selected": 0},
+                )
+                aggregate["requested"] += int(floor_data.get("requested", 0) or 0)
+                aggregate["available"] += int(floor_data.get("available", 0) or 0)
+                aggregate["selected"] += int(floor_data.get("selected", 0) or 0)
+        merged_chunks, merge_trace = _merge_decomposed_chunks(
+            sub_results,
+            chunk_top_k=_chunk_limit(param),
+            path_floors={"ppr": 3},
+        )
+        return merged_chunks, {
             "profile": "full_v2",
             "sub_questions": sub_questions,
             "paths_activated": paths_activated,
@@ -336,8 +355,11 @@ class AdaptiveAgentGraphV2:
             "chunks_per_path": chunks_per_path,
             "chunks_after_rrf": len(all_chunks),
             "chunks_after_rerank": len(all_chunks),
-            "chunks_after_threshold": min(len(_dedup_chunks(all_chunks)), _chunk_limit(param)),
+            "chunks_after_threshold": len(merged_chunks),
             "sub_traces": sub_traces,
+            "path_floor_applied": path_floor_applied,
+            "ppr_floor_count": ppr_floor_count,
+            **merge_trace,
         }
 
     async def _decompose(self, query: str) -> list[str]:
@@ -508,6 +530,15 @@ def _retrieval_step(
     }
     if trace.get("sub_questions"):
         step["sub_questions"] = trace["sub_questions"]
+    for key in (
+        "path_floor_applied",
+        "ppr_floor_count",
+        "decompose_merge_policy",
+        "per_subquestion_cap",
+        "sub_question_chunk_counts",
+    ):
+        if key in trace:
+            step[key] = trace[key]
     return step
 
 
@@ -544,6 +575,75 @@ def _dedup_chunks(chunks: list[dict]) -> list[dict]:
         if cid not in seen or chunk.get("rrf_score", 0.0) > seen[cid].get("rrf_score", 0.0):
             seen[cid] = chunk
     return list(seen.values())
+
+
+def _merge_decomposed_chunks(
+    sub_results: list[tuple[str, list[dict]]],
+    *,
+    chunk_top_k: int,
+    path_floors: dict[str, int] | None = None,
+) -> tuple[list[dict], dict[str, Any]]:
+    limit = max(1, int(chunk_top_k or 10))
+    if not sub_results:
+        return [], {
+            "decompose_merge_policy": "balanced_subquestion_then_global_score",
+            "per_subquestion_cap": 0,
+            "sub_question_chunk_counts": {},
+        }
+
+    per_subquestion_cap = min(4, max(2, math.ceil(limit / len(sub_results))))
+    selected: list[dict] = []
+    selected_ids: set[str] = set()
+
+    def add_chunk(chunk: dict) -> bool:
+        chunk_id = (
+            chunk.get("chunk_id")
+            or chunk.get("id")
+            or _synthetic_chunk_key(chunk, len(selected))
+        )
+        if not chunk_id or chunk_id in selected_ids:
+            return False
+        selected.append(chunk)
+        selected_ids.add(str(chunk_id))
+        return True
+
+    for _, chunks in sub_results:
+        taken = 0
+        for chunk in chunks:
+            if len(selected) >= limit or taken >= per_subquestion_cap:
+                break
+            if add_chunk(chunk):
+                taken += 1
+
+    all_unique = _dedup_chunks([chunk for _, chunks in sub_results for chunk in chunks])
+    all_unique.sort(key=_chunk_score, reverse=True)
+    for chunk in all_unique:
+        add_chunk(chunk)
+
+    final_chunks, floor_trace = _select_with_path_floors(
+        selected,
+        chunk_top_k=limit,
+        path_floors=path_floors or {},
+    )
+    return final_chunks, {
+        "decompose_merge_policy": "balanced_subquestion_then_global_score",
+        "per_subquestion_cap": per_subquestion_cap,
+        "sub_question_chunk_counts": {
+            sub_query: len(chunks)
+            for sub_query, chunks in sub_results
+        },
+        "path_floor_applied": floor_trace,
+        "ppr_floor_count": floor_trace.get("ppr", {}).get("selected", 0),
+    }
+
+
+def _chunk_score(chunk: dict) -> float:
+    for key in ("rerank_score", "rrf_score", "score"):
+        try:
+            return float(chunk.get(key))
+        except (TypeError, ValueError):
+            continue
+    return 0.0
 
 
 def _synthetic_chunk_key(chunk: dict, index: int) -> str:
