@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import csv
 import dataclasses
+import gc
 import hashlib
 import inspect
 import json
@@ -210,6 +211,45 @@ def create_local_rag_service(settings):
     from raganything.services.local_rag import LocalRagService
 
     return LocalRagService(settings)
+
+
+def _clear_cuda_cache() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        return
+
+
+def _clear_local_model_cache() -> None:
+    try:
+        import raganything.services.local_rag as local_rag_module
+
+        model_cache = getattr(local_rag_module, "_MODEL_CACHE", None)
+        if isinstance(model_cache, dict):
+            model_cache.clear()
+    except Exception:
+        return
+
+
+async def recycle_local_rag_service(
+    service: Any,
+    settings: Any,
+    workspace_id: str,
+    *,
+    clear_model_cache: bool = False,
+) -> Any:
+    cleanup = getattr(service, "cleanup_workspace_instance", None)
+    if callable(cleanup):
+        await _maybe_await(cleanup(workspace_id))
+    if clear_model_cache:
+        _clear_local_model_cache()
+    del service
+    gc.collect()
+    _clear_cuda_cache()
+    return create_local_rag_service(settings)
 
 
 def collect_supported_files(raw_dir: Path) -> list[Path]:
@@ -599,6 +639,7 @@ def _summary_base(
     report_dir: Path,
     env: dict[str, str],
     max_async_ingest: int,
+    recycle_service_every: int,
     files: list[Path] | None = None,
     settings: Any | None = None,
 ) -> dict[str, Any]:
@@ -628,6 +669,7 @@ def _summary_base(
             "lightrag_max_parallel_insert": DEFAULT_MAX_PARALLEL_INSERT,
             "embedding_batch_num": DEFAULT_EMBEDDING_BATCH_NUM,
             "embedding_func_max_async": DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
+            "recycle_service_every": recycle_service_every,
         },
         "retries": [],
     }
@@ -771,6 +813,7 @@ async def _run_build_async(
     env: dict[str, str],
     files: list[Path],
     max_async_ingest: int,
+    recycle_service_every: int,
 ) -> int:
     settings = build_local_settings(profile)
     index_profile = build_index_profile(_internal_index_flags(), settings=settings)
@@ -787,12 +830,14 @@ async def _run_build_async(
         report_dir=report_dir,
         env=env,
         max_async_ingest=max_async_ingest,
+        recycle_service_every=recycle_service_every,
         files=files,
         settings=settings,
     )
     summary["index_profile"] = _json_safe(ensured_profile)
     try:
         batch_results: list[dict[str, Any]] = []
+        attempted_since_recycle = 0
         for batch_index, batch in enumerate(
             _iter_batches(files, max_async_ingest),
             start=1,
@@ -825,6 +870,18 @@ async def _run_build_async(
                             **attempt,
                         }
                         summary["retries"].append(retry_record)
+            attempted_since_recycle += len(batch)
+            if (
+                recycle_service_every > 0
+                and attempted_since_recycle >= recycle_service_every
+            ):
+                service = await recycle_local_rag_service(
+                    service,
+                    settings,
+                    profile.workspace_id,
+                    clear_model_cache=False,
+                )
+                attempted_since_recycle = 0
 
         synonym_result = None
         if getattr(settings, "enable_synonym_linking", False):
@@ -897,6 +954,7 @@ async def _run_report_async(
     report_dir: Path,
     env: dict[str, str],
     max_async_ingest: int,
+    recycle_service_every: int,
 ) -> int:
     settings = build_local_settings(profile)
     service = create_local_rag_service(settings)
@@ -913,6 +971,7 @@ async def _run_report_async(
             report_dir=report_dir,
             env=env,
             max_async_ingest=max_async_ingest,
+            recycle_service_every=recycle_service_every,
             files=[],
             settings=settings,
         )
@@ -942,6 +1001,7 @@ async def _run_delete_async(
     report_dir: Path,
     env: dict[str, str],
     max_async_ingest: int,
+    recycle_service_every: int,
 ) -> int:
     settings = build_local_settings(profile)
     service = create_local_rag_service(settings)
@@ -965,6 +1025,7 @@ async def _run_delete_async(
             report_dir=report_dir,
             env=env,
             max_async_ingest=max_async_ingest,
+            recycle_service_every=recycle_service_every,
             files=[],
             settings=settings,
         )
@@ -988,7 +1049,9 @@ async def _run_delete_async(
             await _maybe_await(cleanup(profile.workspace_id))
 
 
-def _prepare_profile_and_dirs(args: argparse.Namespace) -> tuple[BuildProfile, Path, int, dict[str, str]]:
+def _prepare_profile_and_dirs(
+    args: argparse.Namespace,
+) -> tuple[BuildProfile, Path, int, int, dict[str, str]]:
     profile = resolve_profile(
         args.profile,
         raw_dir=Path(args.raw_dir).expanduser() if args.raw_dir else None,
@@ -1004,6 +1067,13 @@ def _prepare_profile_and_dirs(args: argparse.Namespace) -> tuple[BuildProfile, P
     )
     if max_async_ingest < 1:
         raise ValueError("--max-async-ingest must be >= 1")
+    recycle_service_every = (
+        int(args.recycle_service_every)
+        if args.recycle_service_every is not None
+        else max_async_ingest
+    )
+    if recycle_service_every < 0:
+        raise ValueError("--recycle-service-every must be >= 0")
     env = build_local_env(profile, max_async_ingest=max_async_ingest)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_dir = profile.reports_dir / run_id
@@ -1014,11 +1084,13 @@ def _prepare_profile_and_dirs(args: argparse.Namespace) -> tuple[BuildProfile, P
         report_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)
-    return profile, report_dir, max_async_ingest, env
+    return profile, report_dir, max_async_ingest, recycle_service_every, env
 
 
 def run_build(args: argparse.Namespace) -> int:
-    profile, report_dir, max_async_ingest, env = _prepare_profile_and_dirs(args)
+    profile, report_dir, max_async_ingest, recycle_service_every, env = (
+        _prepare_profile_and_dirs(args)
+    )
     files = collect_supported_files(profile.raw_dir)
     if not files:
         raise RuntimeError(f"No supported files found in {profile.raw_dir}")
@@ -1028,6 +1100,7 @@ def run_build(args: argparse.Namespace) -> int:
             report_dir=report_dir,
             env=env,
             max_async_ingest=max_async_ingest,
+            recycle_service_every=recycle_service_every,
             files=files,
         )
         summary["dry_run"] = True
@@ -1043,12 +1116,15 @@ def run_build(args: argparse.Namespace) -> int:
                 env=env,
                 files=files,
                 max_async_ingest=max_async_ingest,
+                recycle_service_every=recycle_service_every,
             )
         )
 
 
 def run_report(args: argparse.Namespace) -> int:
-    profile, report_dir, max_async_ingest, env = _prepare_profile_and_dirs(args)
+    profile, report_dir, max_async_ingest, recycle_service_every, env = (
+        _prepare_profile_and_dirs(args)
+    )
     with _temporary_env(env):
         return asyncio.run(
             _run_report_async(
@@ -1057,6 +1133,7 @@ def run_report(args: argparse.Namespace) -> int:
                 report_dir=report_dir,
                 env=env,
                 max_async_ingest=max_async_ingest,
+                recycle_service_every=recycle_service_every,
             )
         )
 
@@ -1064,7 +1141,9 @@ def run_report(args: argparse.Namespace) -> int:
 def run_delete_doc(args: argparse.Namespace) -> int:
     if not args.doc_id:
         raise ValueError("delete-doc requires --doc-id")
-    profile, report_dir, max_async_ingest, env = _prepare_profile_and_dirs(args)
+    profile, report_dir, max_async_ingest, recycle_service_every, env = (
+        _prepare_profile_and_dirs(args)
+    )
     with _temporary_env(env):
         return asyncio.run(
             _run_delete_async(
@@ -1073,6 +1152,7 @@ def run_delete_doc(args: argparse.Namespace) -> int:
                 report_dir=report_dir,
                 env=env,
                 max_async_ingest=max_async_ingest,
+                recycle_service_every=recycle_service_every,
             )
         )
 
@@ -1103,6 +1183,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--ingest-timeout-seconds",
         type=float,
         default=DEFAULT_INGEST_TIMEOUT_SECONDS,
+    )
+    parser.add_argument(
+        "--recycle-service-every",
+        type=int,
+        default=None,
+        help=(
+            "Attempted files between LocalRagService cleanup/recreation. "
+            "Defaults to --max-async-ingest; use 0 to disable."
+        ),
     )
     parser.add_argument(
         "--max-file-attempts",
