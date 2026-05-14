@@ -3,10 +3,15 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 
 from scripts import build_internal_workspace as build_internal
+
+
+class _FakeEnum(Enum):
+    VALUE = "value"
 
 
 class _FakeDocStatus:
@@ -23,6 +28,10 @@ class _FakeDocStatus:
                 "multimodal_chunk_ids": ["chunk-mm-1"],
                 "created_at": "2026-05-14T00:00:00+00:00",
                 "updated_at": "2026-05-14T00:01:00+00:00",
+                "metadata": {
+                    "enum_value": _FakeEnum.VALUE,
+                    "enum_class": _FakeEnum,
+                },
             },
             "doc-2": {
                 "status": "processed",

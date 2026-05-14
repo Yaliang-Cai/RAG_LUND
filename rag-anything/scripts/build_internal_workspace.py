@@ -16,6 +16,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -400,6 +401,12 @@ def _iter_batches(items: list[Path], batch_size: int) -> Iterable[list[Path]]:
 
 
 def _json_safe(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return _json_safe(value.value)
+    if isinstance(value, type):
+        module = getattr(value, "__module__", "")
+        qualname = getattr(value, "__qualname__", getattr(value, "__name__", str(value)))
+        return f"{module}.{qualname}" if module else str(qualname)
     if dataclasses.is_dataclass(value):
         return _json_safe(dataclasses.asdict(value))
     if isinstance(value, Path):
@@ -412,6 +419,10 @@ def _json_safe(value: Any) -> Any:
         return _json_safe(value.model_dump())
     if hasattr(value, "__dict__") and not isinstance(value, type):
         return _json_safe(vars(value))
+    try:
+        json.dumps(value)
+    except TypeError:
+        return str(value)
     return value
 
 
