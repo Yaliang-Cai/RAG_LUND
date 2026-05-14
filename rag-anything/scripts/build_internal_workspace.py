@@ -9,6 +9,7 @@ import gc
 import hashlib
 import inspect
 import json
+import logging
 import os
 import sys
 import time
@@ -48,6 +49,8 @@ PROD_STORAGE_ROOT = Path("/data/y50056788/Yaliang/internal")
 DEFAULT_INGEST_TIMEOUT_SECONDS = 7200.0
 DEFAULT_MAX_FILE_ATTEMPTS = 2
 
+LOGGER = logging.getLogger("internal_build")
+
 
 @dataclass(frozen=True)
 class BuildProfile:
@@ -77,8 +80,99 @@ class BuildProfile:
         return self.storage_root / "reports"
 
 
+class _CountingFileHandler(logging.FileHandler):
+    def __init__(self, filename: Path) -> None:
+        super().__init__(filename, mode="w", encoding="utf-8")
+        self.warning_count = 0
+        self.error_count = 0
+        self._internal_build_handler = True
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno >= logging.ERROR:
+            self.error_count += 1
+        elif record.levelno >= logging.WARNING:
+            self.warning_count += 1
+        super().emit(record)
+
+
+@dataclass
+class BuildLogContext:
+    log_file: Path
+    handler: _CountingFileHandler
+    root_logger: logging.Logger
+    old_root_level: int
+    old_logger_levels: dict[str, int]
+
+    @property
+    def warning_count(self) -> int:
+        return int(self.handler.warning_count)
+
+    @property
+    def error_count(self) -> int:
+        return int(self.handler.error_count)
+
+
 def _path_env(path: Path) -> str:
     return path.as_posix()
+
+
+def setup_build_logging(report_dir: Path) -> BuildLogContext:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    log_file = report_dir / "internal_build.log"
+    root_logger = logging.getLogger()
+
+    for handler in list(root_logger.handlers):
+        if getattr(handler, "_internal_build_handler", False):
+            root_logger.removeHandler(handler)
+            handler.close()
+
+    old_root_level = root_logger.level
+    logger_names = ("internal_build", "raganything", "lightrag")
+    old_logger_levels = {
+        logger_name: logging.getLogger(logger_name).level
+        for logger_name in logger_names
+    }
+    handler = _CountingFileHandler(log_file)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+    )
+    root_logger.addHandler(handler)
+    if root_logger.level > logging.INFO or root_logger.level == logging.NOTSET:
+        root_logger.setLevel(logging.INFO)
+
+    for logger_name in logger_names:
+        logging.getLogger(logger_name).setLevel(logging.INFO)
+
+    LOGGER.info("Internal workspace log initialized: %s", log_file)
+    return BuildLogContext(
+        log_file=log_file,
+        handler=handler,
+        root_logger=root_logger,
+        old_root_level=old_root_level,
+        old_logger_levels=old_logger_levels,
+    )
+
+
+def close_build_logging(context: BuildLogContext) -> None:
+    context.handler.flush()
+    context.root_logger.removeHandler(context.handler)
+    context.handler.close()
+    context.root_logger.setLevel(context.old_root_level)
+    for logger_name, level in context.old_logger_levels.items():
+        logging.getLogger(logger_name).setLevel(level)
+
+
+def _attach_log_summary(
+    summary: dict[str, Any],
+    log_context: BuildLogContext,
+) -> None:
+    log_context.handler.flush()
+    summary["log_file"] = _path_env(log_context.log_file)
+    summary["warning_count"] = log_context.warning_count
+    summary["error_count"] = log_context.error_count
 
 
 def resolve_profile(
@@ -241,6 +335,11 @@ async def recycle_local_rag_service(
     *,
     clear_model_cache: bool = False,
 ) -> Any:
+    LOGGER.info(
+        "Recycling LocalRagService for workspace=%s clear_model_cache=%s",
+        workspace_id,
+        clear_model_cache,
+    )
     cleanup = getattr(service, "cleanup_workspace_instance", None)
     if callable(cleanup):
         await _maybe_await(cleanup(workspace_id))
@@ -249,7 +348,9 @@ async def recycle_local_rag_service(
     del service
     gc.collect()
     _clear_cuda_cache()
-    return create_local_rag_service(settings)
+    new_service = create_local_rag_service(settings)
+    LOGGER.info("LocalRagService recycled for workspace=%s", workspace_id)
+    return new_service
 
 
 def collect_supported_files(raw_dir: Path) -> list[Path]:
@@ -688,6 +789,13 @@ async def _ingest_one(
     attempts: list[dict[str, Any]] = []
     for attempt in range(1, max(1, int(max_attempts)) + 1):
         start = time.time()
+        LOGGER.info(
+            "Ingest start file=%s attempt=%d workspace=%s output_dir=%s",
+            file_path.name,
+            attempt,
+            profile.workspace_id,
+            output_dir,
+        )
         try:
             result = await asyncio.wait_for(
                 service.ingest(
@@ -705,6 +813,12 @@ async def _ingest_one(
                     "status": "success",
                 }
             )
+            LOGGER.info(
+                "Ingest success file=%s attempt=%d elapsed=%.3fs",
+                file_path.name,
+                attempt,
+                time.time() - start,
+            )
             return {
                 "file": file_path.name,
                 "path": _path_env(file_path),
@@ -720,6 +834,12 @@ async def _ingest_one(
                     "status": "failed",
                     "error": str(exc),
                 }
+            )
+            LOGGER.exception(
+                "Ingest failed file=%s attempt=%d elapsed=%.3fs",
+                file_path.name,
+                attempt,
+                time.time() - start,
             )
             if attempt >= max(1, int(max_attempts)):
                 return {
@@ -737,6 +857,7 @@ async def _collect_and_write_reports(
     profile: BuildProfile,
     report_dir: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    LOGGER.info("Collecting audit reports for workspace=%s", profile.workspace_id)
     documents_payload = await collect_documents(service, profile.workspace_id)
     entities_payload = await collect_entities(service, profile.workspace_id)
     relations_payload = await collect_relations(service, profile.workspace_id)
@@ -750,6 +871,12 @@ async def _collect_and_write_reports(
         relations_payload=relations_payload,
         graph_stats_payload=graph_stats_payload,
     )
+    LOGGER.info(
+        "Audit reports written documents=%s entities=%s relations=%s",
+        documents_payload.get("count", 0),
+        entities_payload.get("count", 0),
+        relations_payload.get("count", 0),
+    )
     return documents_payload, entities_payload, relations_payload, graph_stats_payload
 
 
@@ -761,6 +888,7 @@ async def delete_document(
     doc_id: str,
     delete_llm_cache: bool = False,
 ) -> dict[str, Any]:
+    LOGGER.info("Delete-doc start workspace=%s doc_id=%s", profile.workspace_id, doc_id)
     before_presence = await collect_doc_storage_presence(
         service, profile.workspace_id, doc_id
     )
@@ -776,6 +904,7 @@ async def delete_document(
     status = str(_get_value(delete_result, "status", "")).lower()
     synonym_rebuild = None
     if status == "success" and getattr(service.settings, "enable_synonym_linking", False):
+        LOGGER.info("Delete-doc succeeded; rebuilding synonym edges doc_id=%s", doc_id)
         synonym_rebuild = await _maybe_await(
             service.finalize_workspace_synonyms(
                 profile.workspace_id,
@@ -802,6 +931,7 @@ async def delete_document(
         },
     }
     _write_json(report_dir / "delete_check.json", delete_check)
+    LOGGER.info("Delete-doc complete doc_id=%s status=%s", doc_id, status)
     return delete_check
 
 
@@ -814,6 +944,7 @@ async def _run_build_async(
     files: list[Path],
     max_async_ingest: int,
     recycle_service_every: int,
+    log_context: BuildLogContext,
 ) -> int:
     settings = build_local_settings(profile)
     index_profile = build_index_profile(_internal_index_flags(), settings=settings)
@@ -836,12 +967,31 @@ async def _run_build_async(
     )
     summary["index_profile"] = _json_safe(ensured_profile)
     try:
+        LOGGER.info(
+            (
+                "Internal build start profile=%s workspace=%s raw_dir=%s "
+                "storage_root=%s files=%d max_async_ingest=%d "
+                "recycle_service_every=%d"
+            ),
+            profile.name,
+            profile.workspace_id,
+            profile.raw_dir,
+            profile.storage_root,
+            len(files),
+            max_async_ingest,
+            recycle_service_every,
+        )
         batch_results: list[dict[str, Any]] = []
         attempted_since_recycle = 0
         for batch_index, batch in enumerate(
             _iter_batches(files, max_async_ingest),
             start=1,
         ):
+            LOGGER.info(
+                "Build batch start batch_index=%d files=%s",
+                batch_index,
+                ", ".join(path.name for path in batch),
+            )
             results = await asyncio.gather(
                 *[
                     _ingest_one(
@@ -860,6 +1010,15 @@ async def _run_build_async(
                     "files": [path.name for path in batch],
                     "results": results,
                 }
+            )
+            failed_in_batch = [
+                result for result in results if result.get("status") != "success"
+            ]
+            LOGGER.info(
+                "Build batch complete batch_index=%d succeeded=%d failed=%d",
+                batch_index,
+                len(results) - len(failed_in_batch),
+                len(failed_in_batch),
             )
             for result in results:
                 for attempt in result.get("attempts", []):
@@ -885,6 +1044,10 @@ async def _run_build_async(
 
         synonym_result = None
         if getattr(settings, "enable_synonym_linking", False):
+            LOGGER.info(
+                "Finalizing workspace synonyms workspace=%s",
+                profile.workspace_id,
+            )
             synonym_result = await _maybe_await(
                 service.finalize_workspace_synonyms(
                     profile.workspace_id,
@@ -938,7 +1101,15 @@ async def _run_build_async(
                 "delete_check": delete_check,
             }
         )
+        _attach_log_summary(summary, log_context)
         _write_json(report_dir / "summary.json", summary)
+        LOGGER.info(
+            "Internal build complete workspace=%s succeeded=%d failed=%d reports=%s",
+            profile.workspace_id,
+            summary["succeeded_count"],
+            summary["failed_count"],
+            report_dir,
+        )
         print(f"Reports written to {report_dir}")
         return 1 if failed_results else 0
     finally:
@@ -955,11 +1126,17 @@ async def _run_report_async(
     env: dict[str, str],
     max_async_ingest: int,
     recycle_service_every: int,
+    log_context: BuildLogContext,
 ) -> int:
     settings = build_local_settings(profile)
     service = create_local_rag_service(settings)
     start_time = time.time()
     try:
+        LOGGER.info(
+            "Report command start profile=%s workspace=%s",
+            profile.name,
+            profile.workspace_id,
+        )
         (
             documents_payload,
             entities_payload,
@@ -985,7 +1162,13 @@ async def _run_report_async(
                 "graph_stats": graph_stats_payload,
             }
         )
+        _attach_log_summary(summary, log_context)
         _write_json(report_dir / "summary.json", summary)
+        LOGGER.info(
+            "Report command complete workspace=%s reports=%s",
+            profile.workspace_id,
+            report_dir,
+        )
         print(f"Reports written to {report_dir}")
         return 0
     finally:
@@ -1002,11 +1185,18 @@ async def _run_delete_async(
     env: dict[str, str],
     max_async_ingest: int,
     recycle_service_every: int,
+    log_context: BuildLogContext,
 ) -> int:
     settings = build_local_settings(profile)
     service = create_local_rag_service(settings)
     start_time = time.time()
     try:
+        LOGGER.info(
+            "Delete-doc command start profile=%s workspace=%s doc_id=%s",
+            profile.name,
+            profile.workspace_id,
+            args.doc_id,
+        )
         delete_check = await delete_document(
             service,
             profile=profile,
@@ -1040,7 +1230,14 @@ async def _run_delete_async(
                 "delete_check": delete_check,
             }
         )
+        _attach_log_summary(summary, log_context)
         _write_json(report_dir / "summary.json", summary)
+        LOGGER.info(
+            "Delete-doc command complete workspace=%s doc_id=%s reports=%s",
+            profile.workspace_id,
+            args.doc_id,
+            report_dir,
+        )
         print(f"Reports written to {report_dir}")
         return 0
     finally:
@@ -1091,51 +1288,75 @@ def run_build(args: argparse.Namespace) -> int:
     profile, report_dir, max_async_ingest, recycle_service_every, env = (
         _prepare_profile_and_dirs(args)
     )
-    files = collect_supported_files(profile.raw_dir)
-    if not files:
-        raise RuntimeError(f"No supported files found in {profile.raw_dir}")
-    if args.dry_run:
-        summary = _summary_base(
-            profile=profile,
-            report_dir=report_dir,
-            env=env,
-            max_async_ingest=max_async_ingest,
-            recycle_service_every=recycle_service_every,
-            files=files,
-        )
-        summary["dry_run"] = True
-        _write_json(report_dir / "summary.json", summary)
-        print(f"Dry run wrote summary to {report_dir / 'summary.json'}")
-        return 0
-    with _temporary_env(env):
-        return asyncio.run(
-            _run_build_async(
-                args=args,
+    log_context = setup_build_logging(report_dir)
+    try:
+        files = collect_supported_files(profile.raw_dir)
+        if not files:
+            raise RuntimeError(f"No supported files found in {profile.raw_dir}")
+        if args.dry_run:
+            LOGGER.info(
+                "Dry-run build start profile=%s workspace=%s files=%d",
+                profile.name,
+                profile.workspace_id,
+                len(files),
+            )
+            summary = _summary_base(
                 profile=profile,
                 report_dir=report_dir,
                 env=env,
-                files=files,
                 max_async_ingest=max_async_ingest,
                 recycle_service_every=recycle_service_every,
+                files=files,
             )
-        )
+            summary["dry_run"] = True
+            _attach_log_summary(summary, log_context)
+            _write_json(report_dir / "summary.json", summary)
+            LOGGER.info("Dry-run build complete reports=%s", report_dir)
+            print(f"Dry run wrote summary to {report_dir / 'summary.json'}")
+            return 0
+        with _temporary_env(env):
+            return asyncio.run(
+                _run_build_async(
+                    args=args,
+                    profile=profile,
+                    report_dir=report_dir,
+                    env=env,
+                    files=files,
+                    max_async_ingest=max_async_ingest,
+                    recycle_service_every=recycle_service_every,
+                    log_context=log_context,
+                )
+            )
+    except Exception:
+        LOGGER.exception("Internal build command failed")
+        raise
+    finally:
+        close_build_logging(log_context)
 
 
 def run_report(args: argparse.Namespace) -> int:
     profile, report_dir, max_async_ingest, recycle_service_every, env = (
         _prepare_profile_and_dirs(args)
     )
-    with _temporary_env(env):
-        return asyncio.run(
-            _run_report_async(
-                args=args,
-                profile=profile,
-                report_dir=report_dir,
-                env=env,
-                max_async_ingest=max_async_ingest,
-                recycle_service_every=recycle_service_every,
+    log_context = setup_build_logging(report_dir)
+    try:
+        with _temporary_env(env):
+            return asyncio.run(
+                _run_report_async(
+                    args=args,
+                    profile=profile,
+                    report_dir=report_dir,
+                    env=env,
+                    max_async_ingest=max_async_ingest,
+                    recycle_service_every=recycle_service_every,
+                    log_context=log_context,
+                )
             )
-        )
+    except Exception:
+        LOGGER.exception("Internal report command failed")
+        raise
+    finally:
+        close_build_logging(log_context)
 
 
 def run_delete_doc(args: argparse.Namespace) -> int:
@@ -1144,17 +1365,25 @@ def run_delete_doc(args: argparse.Namespace) -> int:
     profile, report_dir, max_async_ingest, recycle_service_every, env = (
         _prepare_profile_and_dirs(args)
     )
-    with _temporary_env(env):
-        return asyncio.run(
-            _run_delete_async(
-                args=args,
-                profile=profile,
-                report_dir=report_dir,
-                env=env,
-                max_async_ingest=max_async_ingest,
-                recycle_service_every=recycle_service_every,
+    log_context = setup_build_logging(report_dir)
+    try:
+        with _temporary_env(env):
+            return asyncio.run(
+                _run_delete_async(
+                    args=args,
+                    profile=profile,
+                    report_dir=report_dir,
+                    env=env,
+                    max_async_ingest=max_async_ingest,
+                    recycle_service_every=recycle_service_every,
+                    log_context=log_context,
+                )
             )
-        )
+    except Exception:
+        LOGGER.exception("Internal delete-doc command failed")
+        raise
+    finally:
+        close_build_logging(log_context)
 
 
 def build_parser() -> argparse.ArgumentParser:

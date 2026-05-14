@@ -116,14 +116,16 @@ class _FakeRagWrapper:
 
 
 class _FakeService:
-    def __init__(self, settings=None) -> None:
+    def __init__(self, settings=None, fail_names=None) -> None:
         self.settings = settings or SimpleNamespace(enable_synonym_linking=True)
+        self.fail_names = set(fail_names or [])
         self.ingest_calls = []
         self.synonym_calls = []
         self.delete_calls = []
         self.rag = _FakeRagWrapper()
 
     async def ingest(self, *, file_path, output_dir, workspace_id, serialize_by_workspace_id):
+        file_name = Path(file_path).name
         self.ingest_calls.append(
             {
                 "file_path": file_path,
@@ -132,6 +134,8 @@ class _FakeService:
                 "serialize_by_workspace_id": serialize_by_workspace_id,
             }
         )
+        if file_name in self.fail_names:
+            raise RuntimeError(f"forced ingest failure: {file_name}")
         return file_path
 
     async def finalize_workspace_synonyms(self, workspace_id, *, force=False, reset_existing=True):
@@ -155,8 +159,8 @@ class _FakeService:
         return None
 
 
-def _patch_fake_service(monkeypatch):
-    fake = _FakeService()
+def _patch_fake_service(monkeypatch, *, fail_names=None):
+    fake = _FakeService(fail_names=fail_names)
     monkeypatch.setattr(
         build_internal,
         "build_local_settings",
@@ -304,6 +308,12 @@ def test_dry_run_writes_local_summary_without_server_fields(tmp_path):
     assert payload["concurrency"]["max_async_ingest"] == 1
     assert payload["settings"]["enable_entity_disambiguation"] is False
     assert payload["settings"]["enable_synonym_linking"] is True
+    assert Path(payload["log_file"]).exists()
+    assert payload["warning_count"] == 0
+    assert payload["error_count"] == 0
+    assert "Dry-run build start" in Path(payload["log_file"]).read_text(
+        encoding="utf-8"
+    )
     assert not (storage_root / "uploads").exists()
 
 
@@ -346,9 +356,50 @@ def test_build_uses_local_service_batches_and_exports_reports(monkeypatch, tmp_p
         ["c.pdf"],
     ]
     assert summary["failed_count"] == 0
+    assert Path(summary["log_file"]).exists()
+    log_text = Path(summary["log_file"]).read_text(encoding="utf-8")
+    assert "Internal build start" in log_text
+    assert "Build batch complete" in log_text
+    assert summary["error_count"] == 0
     assert json.loads((report_dir / "documents.json").read_text(encoding="utf-8"))["count"] == 2
     assert json.loads((report_dir / "entities.json").read_text(encoding="utf-8"))["count"] == 1
     assert json.loads((report_dir / "relations.json").read_text(encoding="utf-8"))["count"] == 1
+
+
+def test_build_failure_is_written_to_internal_log(monkeypatch, tmp_path):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    (raw_dir / "bad.pdf").write_text("bad", encoding="utf-8")
+    _patch_fake_service(monkeypatch, fail_names={"bad.pdf"})
+
+    result = build_internal.main(
+        [
+            "--profile",
+            "test",
+            "--raw-dir",
+            str(raw_dir),
+            "--storage-root",
+            str(storage_root),
+            "--workspace-id",
+            "ws",
+            "--max-async-ingest",
+            "1",
+            "--max-file-attempts",
+            "1",
+        ]
+    )
+
+    assert result == 1
+    report_dir = sorted((storage_root / "reports").iterdir())[0]
+    summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+    log_file = Path(summary["log_file"])
+    log_text = log_file.read_text(encoding="utf-8")
+    assert summary["failed_count"] == 1
+    assert summary["error_count"] >= 1
+    assert "ERROR" in log_text
+    assert "Ingest failed file=bad.pdf" in log_text
+    assert "forced ingest failure: bad.pdf" in log_text
 
 
 def test_report_command_collects_storage_without_ingest(monkeypatch, tmp_path):
@@ -370,6 +421,9 @@ def test_report_command_collects_storage_without_ingest(monkeypatch, tmp_path):
     assert result == 0
     assert fake.ingest_calls == []
     report_dir = sorted((storage_root / "reports").iterdir())[0]
+    summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+    assert Path(summary["log_file"]).exists()
+    assert summary["error_count"] == 0
     assert (report_dir / "documents.csv").exists()
     assert (report_dir / "entities.csv").exists()
     assert (report_dir / "relations.csv").exists()
@@ -397,6 +451,9 @@ def test_delete_doc_deletes_storage_then_rebuilds_synonyms(monkeypatch, tmp_path
     assert fake.delete_calls == [("ws", "doc-1", False)]
     assert fake.synonym_calls == [("ws", True, True)]
     report_dir = sorted((storage_root / "reports").iterdir())[0]
+    summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+    assert Path(summary["log_file"]).exists()
+    assert summary["error_count"] == 0
     delete_check = json.loads((report_dir / "delete_check.json").read_text(encoding="utf-8"))
     assert delete_check["target_doc_id"] == "doc-1"
     assert delete_check["delete_result"]["status"] == "success"
