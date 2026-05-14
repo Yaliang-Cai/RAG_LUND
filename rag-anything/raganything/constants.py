@@ -203,7 +203,7 @@ DEFAULT_QDRANT_RETRIEVAL_MODE = "dense"
 # =============================================================================
 # V1: Entity disambiguation
 # =============================================================================
-DEFAULT_ENABLE_ENTITY_DISAMBIGUATION = True
+DEFAULT_ENABLE_ENTITY_DISAMBIGUATION = False
 
 # =============================================================================
 # Entity surface normalization (ingest-time, optional)

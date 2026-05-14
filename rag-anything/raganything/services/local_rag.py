@@ -440,7 +440,11 @@ class LocalRagSettings:
                 str(DEFAULT_ENABLE_CALLBACK_EVENT_LOG),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
-            enable_entity_disambiguation=DEFAULT_ENABLE_ENTITY_DISAMBIGUATION,
+            enable_entity_disambiguation=os.getenv(
+                "RAGANYTHING_ENABLE_ENTITY_DISAMBIGUATION",
+                str(DEFAULT_ENABLE_ENTITY_DISAMBIGUATION),
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
             enable_synonym_linking=os.getenv(
                 "RAGANYTHING_ENABLE_SYNONYM_LINKING",
                 str(DEFAULT_ENABLE_SYNONYM_LINKING),

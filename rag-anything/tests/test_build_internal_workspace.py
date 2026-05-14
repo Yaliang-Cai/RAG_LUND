@@ -1,9 +1,185 @@
-from pathlib import Path
+from __future__ import annotations
+
 import json
 import subprocess
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 from scripts import build_internal_workspace as build_internal
+
+
+class _FakeDocStatus:
+    def __init__(self) -> None:
+        self.docs = {
+            "doc-1": {
+                "status": "processed",
+                "file_path": "/raw/a.pdf",
+                "chunks_count": 2,
+                "chunks_list": ["chunk-1", "chunk-mm-1"],
+                "multimodal_processed": False,
+                "multimodal_stage": "chunks_stored",
+                "multimodal_failed_items": [{"index": 0, "error": "timeout"}],
+                "multimodal_chunk_ids": ["chunk-mm-1"],
+                "created_at": "2026-05-14T00:00:00+00:00",
+                "updated_at": "2026-05-14T00:01:00+00:00",
+            },
+            "doc-2": {
+                "status": "processed",
+                "file_path": "/raw/b.pdf",
+                "chunks_count": 1,
+                "chunks_list": ["chunk-2"],
+                "multimodal_processed": True,
+                "multimodal_stage": "completed",
+                "multimodal_failed_items": [],
+                "multimodal_chunk_ids": [],
+            },
+        }
+
+    async def get_docs_paginated(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        sort_field: str = "updated_at",
+        sort_direction: str = "desc",
+        status_filter=None,
+    ):
+        rows = [(doc_id, payload) for doc_id, payload in sorted(self.docs.items())]
+        start = (page - 1) * page_size
+        return rows[start : start + page_size], len(rows)
+
+    async def get_by_id(self, doc_id: str):
+        return self.docs.get(doc_id)
+
+
+class _FakeKV:
+    def __init__(self, data=None) -> None:
+        self.data = data or {}
+
+    async def get_by_id(self, key):
+        return self.data.get(key)
+
+    async def get_by_ids(self, keys):
+        return [self.data.get(key) for key in keys]
+
+
+class _FakeVector:
+    async def get_by_ids(self, keys):
+        return [{"id": key} for key in keys if key]
+
+
+class _FakeGraph:
+    async def get_all_labels(self):
+        return ["EntityA"]
+
+    async def get_nodes_batch(self, labels):
+        return {
+            "EntityA": {
+                "entity_id": "EntityA",
+                "entity_name": "EntityA",
+                "entity_type": "TECH",
+                "description": "desc",
+                "source_id": "chunk-1",
+                "file_path": "/raw/a.pdf",
+            }
+        }
+
+    async def get_all_edges(self):
+        return [
+            {
+                "source": "EntityA",
+                "target": "EntityB",
+                "description": "related",
+                "keywords": "k",
+                "weight": 1.0,
+                "source_id": "chunk-1",
+                "file_path": "/raw/a.pdf",
+            }
+        ]
+
+
+class _FakeRagWrapper:
+    def __init__(self) -> None:
+        self.lightrag = SimpleNamespace(
+            doc_status=_FakeDocStatus(),
+            full_docs=_FakeKV({"doc-1": {"content": "a"}}),
+            full_entities=_FakeKV({"doc-1": {"entity_names": ["EntityA"]}}),
+            full_relations=_FakeKV({"doc-1": {"relation_pairs": [["EntityA", "EntityB"]]}}),
+            text_chunks=_FakeKV({"chunk-1": {"content": "text"}, "chunk-mm-1": {"content": "image"}}),
+            chunks_vdb=_FakeVector(),
+            chunk_entity_relation_graph=_FakeGraph(),
+        )
+
+    async def _ensure_lightrag_initialized(self):
+        return None
+
+
+class _FakeService:
+    def __init__(self, settings=None) -> None:
+        self.settings = settings or SimpleNamespace(enable_synonym_linking=True)
+        self.ingest_calls = []
+        self.synonym_calls = []
+        self.delete_calls = []
+        self.rag = _FakeRagWrapper()
+
+    async def ingest(self, *, file_path, output_dir, workspace_id, serialize_by_workspace_id):
+        self.ingest_calls.append(
+            {
+                "file_path": file_path,
+                "output_dir": output_dir,
+                "workspace_id": workspace_id,
+                "serialize_by_workspace_id": serialize_by_workspace_id,
+            }
+        )
+        return file_path
+
+    async def finalize_workspace_synonyms(self, workspace_id, *, force=False, reset_existing=True):
+        self.synonym_calls.append((workspace_id, force, reset_existing))
+        return {"success": True, "cleared_edges": 1, "created_edges": 2}
+
+    async def get_rag(self, workspace_id):
+        return self.rag
+
+    async def lightrag_adelete_by_doc_id(self, workspace_id, doc_id, *, delete_llm_cache=False):
+        self.delete_calls.append((workspace_id, doc_id, delete_llm_cache))
+        return SimpleNamespace(
+            status="success",
+            doc_id=doc_id,
+            message="deleted",
+            status_code=200,
+            file_path="/raw/a.pdf",
+        )
+
+    async def cleanup_workspace_instance(self, workspace_id):
+        return None
+
+
+def _patch_fake_service(monkeypatch):
+    fake = _FakeService()
+    monkeypatch.setattr(
+        build_internal,
+        "build_local_settings",
+        lambda profile: SimpleNamespace(
+            working_dir_root=str(profile.working_dir_root),
+            output_dir=str(profile.output_dir),
+            log_dir=str(profile.log_dir),
+            uploads_dir=str(profile.uploads_dir),
+            enable_entity_disambiguation=False,
+            enable_synonym_linking=True,
+            enable_resilience=True,
+            enable_entity_surface_normalization=True,
+            enable_keyword_case_normalization=True,
+            strict_relation_endpoint_entity_match=True,
+        ),
+    )
+    monkeypatch.setattr(build_internal, "create_local_rag_service", lambda settings: fake)
+    monkeypatch.setattr(
+        build_internal,
+        "ensure_workspace_index_profile",
+        lambda **kwargs: dict(kwargs["index_profile"]),
+    )
+    return fake
 
 
 def test_test_profile_resolves_internal_test_paths():
@@ -12,7 +188,6 @@ def test_test_profile_resolves_internal_test_paths():
     assert profile.raw_dir == Path("/data/y50056788/Yaliang/datasets_raw_test")
     assert profile.storage_root == Path("/data/y50056788/Yaliang/internal_test")
     assert profile.workspace_id == "internal_test"
-    assert profile.uploads_dir == profile.storage_root / "uploads"
     assert profile.output_dir == profile.storage_root / "output"
     assert profile.working_dir_root == profile.storage_root / "rag_workspace"
     assert profile.log_dir == profile.storage_root / "logs"
@@ -26,7 +201,7 @@ def test_prod_profile_resolves_internal_paths():
     assert profile.workspace_id == "internal"
 
 
-def test_server_env_enables_internal_build_defaults():
+def test_local_env_enables_internal_build_defaults():
     profile = build_internal.resolve_profile(
         "test",
         raw_dir=Path("/tmp/raw"),
@@ -34,13 +209,13 @@ def test_server_env_enables_internal_build_defaults():
         workspace_id="demo_ws",
     )
 
-    env = build_internal.build_server_env(profile, base_env={"EXISTING": "1"})
+    env = build_internal.build_local_env(profile, base_env={"EXISTING": "1"})
 
     assert env["EXISTING"] == "1"
     assert env["RAGANYTHING_WORKDIR_ROOT"] == "/tmp/internal/rag_workspace"
     assert env["RAGANYTHING_OUTPUT_DIR"] == "/tmp/internal/output"
-    assert env["RAGANYTHING_UPLOADS_DIR"] == "/tmp/internal/uploads"
     assert env["RAGANYTHING_LOG_DIR"] == "/tmp/internal/logs"
+    assert env["RAGANYTHING_ENABLE_ENTITY_DISAMBIGUATION"] == "false"
     assert env["RAGANYTHING_ENABLE_SYNONYM_LINKING"] == "true"
     assert env["RAGANYTHING_ENABLE_RESILIENCE"] == "true"
     assert env["RAGANYTHING_ENABLE_ENTITY_SURFACE_NORMALIZATION"] == "true"
@@ -52,7 +227,7 @@ def test_server_env_enables_internal_build_defaults():
     assert env["MAX_CONCURRENT_FILES"] == "4"
 
 
-def test_server_env_allows_file_batch_size_override():
+def test_local_env_allows_max_async_ingest_override():
     profile = build_internal.resolve_profile(
         "test",
         raw_dir=Path("/tmp/raw"),
@@ -60,10 +235,10 @@ def test_server_env_allows_file_batch_size_override():
         workspace_id="demo_ws",
     )
 
-    env = build_internal.build_server_env(
+    env = build_internal.build_local_env(
         profile,
         base_env={},
-        max_concurrent_files=1,
+        max_async_ingest=1,
     )
 
     assert env["MAX_CONCURRENT_FILES"] == "1"
@@ -93,9 +268,10 @@ def test_script_file_help_runs_from_repo_root():
 
     assert result.returncode == 0, result.stderr
     assert "--profile" in result.stdout
+    assert "--max-async-ingest" in result.stdout
 
 
-def test_dry_run_writes_constants_backed_summary(tmp_path):
+def test_dry_run_writes_local_summary_without_server_fields(tmp_path):
     raw_dir = tmp_path / "raw"
     storage_root = tmp_path / "internal"
     raw_dir.mkdir()
@@ -111,7 +287,7 @@ def test_dry_run_writes_constants_backed_summary(tmp_path):
             str(storage_root),
             "--workspace-id",
             "internal_smoke",
-            "--file-batch-size",
+            "--max-async-ingest",
             "1",
             "--dry-run",
         ]
@@ -122,11 +298,106 @@ def test_dry_run_writes_constants_backed_summary(tmp_path):
     assert len(summaries) == 1
     payload = json.loads(summaries[0].read_text(encoding="utf-8"))
     assert payload["workspace_id"] == "internal_smoke"
+    assert payload["execution_mode"] == "local_service"
     assert payload["file_count"] == 1
-    assert payload["server_port"] > 0
-    assert payload["concurrency"]["file_batch_size"] == 1
-    assert payload["concurrency"]["MAX_CONCURRENT_FILES"] == "1"
-    assert (
-        payload["concurrency"]["lightrag_llm_model_max_async"]
-        == build_internal.DEFAULT_LLM_MODEL_MAX_ASYNC
+    assert "server_port" not in payload
+    assert payload["concurrency"]["max_async_ingest"] == 1
+    assert payload["settings"]["enable_entity_disambiguation"] is False
+    assert payload["settings"]["enable_synonym_linking"] is True
+    assert not (storage_root / "uploads").exists()
+
+
+def test_build_uses_local_service_batches_and_exports_reports(monkeypatch, tmp_path):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    for name in ("b.pdf", "a.pdf", "c.pdf"):
+        (raw_dir / name).write_text(name, encoding="utf-8")
+    fake = _patch_fake_service(monkeypatch)
+
+    result = build_internal.main(
+        [
+            "--profile",
+            "test",
+            "--raw-dir",
+            str(raw_dir),
+            "--storage-root",
+            str(storage_root),
+            "--workspace-id",
+            "ws",
+            "--max-async-ingest",
+            "2",
+        ]
     )
+
+    assert result == 0
+    assert [Path(call["file_path"]).name for call in fake.ingest_calls] == [
+        "a.pdf",
+        "b.pdf",
+        "c.pdf",
+    ]
+    assert all(call["workspace_id"] == "ws" for call in fake.ingest_calls)
+    assert all(call["serialize_by_workspace_id"] is False for call in fake.ingest_calls)
+    assert fake.synonym_calls == [("ws", False, True)]
+    report_dir = sorted((storage_root / "reports").iterdir())[0]
+    summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+    assert [batch["files"] for batch in summary["batch_results"]] == [
+        ["a.pdf", "b.pdf"],
+        ["c.pdf"],
+    ]
+    assert summary["failed_count"] == 0
+    assert json.loads((report_dir / "documents.json").read_text(encoding="utf-8"))["count"] == 2
+    assert json.loads((report_dir / "entities.json").read_text(encoding="utf-8"))["count"] == 1
+    assert json.loads((report_dir / "relations.json").read_text(encoding="utf-8"))["count"] == 1
+
+
+def test_report_command_collects_storage_without_ingest(monkeypatch, tmp_path):
+    storage_root = tmp_path / "internal"
+    fake = _patch_fake_service(monkeypatch)
+
+    result = build_internal.main(
+        [
+            "report",
+            "--profile",
+            "test",
+            "--storage-root",
+            str(storage_root),
+            "--workspace-id",
+            "ws",
+        ]
+    )
+
+    assert result == 0
+    assert fake.ingest_calls == []
+    report_dir = sorted((storage_root / "reports").iterdir())[0]
+    assert (report_dir / "documents.csv").exists()
+    assert (report_dir / "entities.csv").exists()
+    assert (report_dir / "relations.csv").exists()
+
+
+def test_delete_doc_deletes_storage_then_rebuilds_synonyms(monkeypatch, tmp_path):
+    storage_root = tmp_path / "internal"
+    fake = _patch_fake_service(monkeypatch)
+
+    result = build_internal.main(
+        [
+            "delete-doc",
+            "--profile",
+            "test",
+            "--storage-root",
+            str(storage_root),
+            "--workspace-id",
+            "ws",
+            "--doc-id",
+            "doc-1",
+        ]
+    )
+
+    assert result == 0
+    assert fake.delete_calls == [("ws", "doc-1", False)]
+    assert fake.synonym_calls == [("ws", True, True)]
+    report_dir = sorted((storage_root / "reports").iterdir())[0]
+    delete_check = json.loads((report_dir / "delete_check.json").read_text(encoding="utf-8"))
+    assert delete_check["target_doc_id"] == "doc-1"
+    assert delete_check["delete_result"]["status"] == "success"
+    assert delete_check["synonym_rebuild"]["created_edges"] == 2
