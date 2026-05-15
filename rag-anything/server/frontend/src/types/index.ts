@@ -54,6 +54,22 @@ export interface SourceNode {
   excerpt: string
 }
 
+/**
+ * Single chunk surfaced in the SSE meta event (data.chunks[]).
+ * Backend field names vary slightly across modes; the loose typing here
+ * matches what LightRAG actually emits.
+ */
+export interface ChunkRef {
+  reference_id?: string | number
+  file_path?: string
+  filename?: string
+  page_idx?: number | null
+  page_num?: number | null
+  content?: string
+  text?: string
+  excerpt?: string
+}
+
 export interface StreamMetaEvent {
   type: 'meta'
   data: Record<string, unknown>
@@ -78,7 +94,7 @@ export interface StreamErrorEvent {
 
 export type StreamEvent = StreamMetaEvent | StreamChunkEvent | StreamDoneEvent | StreamErrorEvent
 
-export type TraceType = 'agentic' | 'auto' | 'ppr' | null
+export type TraceType = 'agentic' | null
 
 export interface QueryParams {
   workspace_id: string

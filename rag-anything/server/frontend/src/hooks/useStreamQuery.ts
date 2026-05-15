@@ -53,6 +53,13 @@ export function useStreamQuery() {
               setReasoning((r) => r + (event.text as string))
             } else if (event.type === 'done') {
               setSourceNodes((event.source_nodes as SourceNode[]) ?? [])
+              // Fallback: if the stream ended without any answer text, show
+              // a user-facing placeholder instead of a silent empty bubble.
+              setAnswer((prev) =>
+                prev.trim() === ''
+                  ? 'No relevant information was found in the knowledge base for this query.'
+                  : prev
+              )
               setStatus('done')
             } else if (event.type === 'error') {
               setStatus('error')

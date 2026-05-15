@@ -7,17 +7,21 @@ import { Button } from '@/components/ui/button'
 import { SquarePen } from 'lucide-react'
 import { postMultimodalQuery } from '@/api/query'
 import type { Message } from '@/components/chat/MessageBubble'
-import type { SourceNode, TraceType, QueryParams } from '@/types'
+import type { SourceNode, TraceType, QueryParams, ChunkRef } from '@/types'
 
 let msgId = 0
 
 const MAX_HISTORY_TURNS = 5
 
 function modeToTraceType(mode: string): TraceType {
-  if (mode === 'agentic') return 'agentic'
-  if (mode === 'ppr') return 'ppr'
-  if (mode === 'auto') return 'auto'
-  return null
+  // Trace panels are only meaningful for agentic mode; other modes hide it.
+  return mode === 'agentic' ? 'agentic' : null
+}
+
+function extractChunks(metadata: Record<string, unknown>): ChunkRef[] {
+  const data = (metadata?.data ?? {}) as Record<string, unknown>
+  const raw = data?.chunks
+  return Array.isArray(raw) ? (raw as ChunkRef[]) : []
 }
 
 function buildHistory(messages: Message[]): { role: string; content: string }[] {
@@ -127,6 +131,7 @@ export default function ChatPage() {
         sourceNodes: sn,
         traceType,
         traceMetadata: m,
+        chunks: extractChunks(m),
         query,
       },
     ])

@@ -31,6 +31,21 @@ function TraceGrid({ items }: { items: KV[] }) {
   )
 }
 
+function Pill({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <span className={cn(
+      'rounded-full border px-2 py-0.5 text-[10px] text-muted-foreground border-border',
+      className
+    )}>
+      {children}
+    </span>
+  )
+}
+
+function PillRow({ children }: { children: ReactNode }) {
+  return <div className="flex items-center gap-1.5 px-3 pt-2 pb-1 flex-wrap">{children}</div>
+}
+
 function AgenticPanel({ metadata }: { metadata: Record<string, unknown> }) {
   const t = (metadata.agentic_trace ?? {}) as Record<string, unknown>
   if (!('confidence' in t) && !('profile' in t)) return null
@@ -56,79 +71,10 @@ function AgenticPanel({ metadata }: { metadata: Record<string, unknown> }) {
   )
 }
 
-function AutoPanel({ metadata }: { metadata: Record<string, unknown> }) {
-  const rt = (metadata.routing_trace ?? {}) as Record<string, unknown>
-  if (!('profile' in rt) && !('paths_activated' in rt)) return null
-  const paths = Array.isArray(rt.paths_activated)
-    ? rt.paths_activated.join(', ')
-    : String(rt.paths_activated ?? '—')
-  return (
-    <>
-      <PillRow>
-        <Pill>{String(rt.profile ?? '?')}</Pill>
-        <Pill>conf {String(rt.confidence ?? '?')}</Pill>
-        <Pill>paths: {paths}</Pill>
-      </PillRow>
-      <TraceGrid items={[
-        { label: 'profile', value: rt.profile },
-        { label: 'paths', value: paths },
-        { label: 'after rrf', value: rt.chunks_after_rrf },
-        { label: 'after rerank', value: rt.chunks_after_rerank },
-        { label: 'final chunks', value: rt.chunks_after_threshold },
-      ]} />
-    </>
-  )
-}
-
-function PprPanel({ metadata }: { metadata: Record<string, unknown> }) {
-  const d = (metadata.data ?? metadata) as Record<string, unknown>
-  const chunks = Array.isArray(d.chunks) ? d.chunks.length : 0
-  const entities = Array.isArray(d.entities) ? d.entities.length : 0
-  const relations = Array.isArray(d.relations) ? d.relations.length : 0
-  if (chunks === 0 && entities === 0) return null
-  return (
-    <>
-      <PillRow>
-        <Pill>chunks {chunks}</Pill>
-        <Pill>entities {entities}</Pill>
-        <Pill>relations {relations}</Pill>
-      </PillRow>
-      <TraceGrid items={[
-        { label: 'chunks', value: chunks },
-        { label: 'entities', value: entities },
-        { label: 'relations', value: relations },
-      ]} />
-    </>
-  )
-}
-
-function Pill({ children, className }: { children: ReactNode; className?: string }) {
-  return (
-    <span className={cn(
-      'rounded-full border px-2 py-0.5 text-[10px] text-muted-foreground border-border',
-      className
-    )}>
-      {children}
-    </span>
-  )
-}
-
-function PillRow({ children }: { children: ReactNode }) {
-  return <div className="flex items-center gap-1.5 px-3 pt-2 pb-1 flex-wrap">{children}</div>
-}
-
-const LABELS: Record<NonNullable<TraceType>, string> = {
-  agentic: 'Agentic trace',
-  auto: 'Routing trace',
-  ppr: 'PPR trace',
-}
-
 export function AgenticTrace({ traceType, metadata }: AgenticTraceProps) {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
 
-  if (!traceType) return null
-
-  const label = LABELS[traceType]
+  if (traceType !== 'agentic') return null
 
   return (
     <div className="mt-1 rounded-lg border border-border bg-secondary/50 text-xs overflow-hidden max-w-[80%]">
@@ -137,15 +83,9 @@ export function AgenticTrace({ traceType, metadata }: AgenticTraceProps) {
         onClick={() => setOpen((o) => !o)}
       >
         {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
-        <span>{label}</span>
+        <span>Agentic trace</span>
       </button>
-      {open && (
-        <>
-          {traceType === 'agentic' && <AgenticPanel metadata={metadata} />}
-          {traceType === 'auto' && <AutoPanel metadata={metadata} />}
-          {traceType === 'ppr' && <PprPanel metadata={metadata} />}
-        </>
-      )}
+      {open && <AgenticPanel metadata={metadata} />}
     </div>
   )
 }
