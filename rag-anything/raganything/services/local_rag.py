@@ -2239,53 +2239,61 @@ class LocalRagService:
 
         return await self._safe_query_call(_run_query_data)
 
-    async def query(self, workspace_id: str, query: str, **kwargs) -> str:
-        rag = await self.get_rag(workspace_id)
-        normalized_kwargs = dict(kwargs)
-        normalized_kwargs.pop("enable_multi_hop", None)
-        normalized_kwargs.setdefault(
-            "image_token_estimate_method",
-            self.settings.image_token_estimate_method,
+    def _apply_query_defaults(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Fill query kwargs with LocalRagSettings defaults and normalize string fields.
+
+        Shared by query(), query_with_trace(), stream_query() and query_with_multimodal()
+        so all entry points produce a consistent QueryParam downstream.
+        """
+        normalized = dict(kwargs)
+        normalized.pop("enable_multi_hop", None)
+        normalized.setdefault(
+            "image_token_estimate_method", self.settings.image_token_estimate_method
         )
-        normalized_kwargs.setdefault(
+        normalized.setdefault(
             "image_token_model_name_or_path",
             self.settings.image_token_model_name_or_path,
         )
-        normalized_kwargs.setdefault(
+        normalized.setdefault(
             "image_wrapper_tokens_per_image",
             self.settings.image_wrapper_tokens_per_image,
         )
-        normalized_kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
-            str(normalized_kwargs.get("image_token_estimate_method", ""))
+        normalized["image_token_estimate_method"] = _normalize_qwen_image_token_method(
+            str(normalized.get("image_token_estimate_method", ""))
         )
-        normalized_kwargs.setdefault("multi_hop_depth", self.settings.multi_hop_depth)
-        normalized_kwargs.setdefault("ppr_damping", self.settings.ppr_damping)
-        normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
-        normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
-        normalized_kwargs.setdefault("recognition_top_k", self.settings.recognition_top_k)
-        normalized_kwargs.setdefault("linking_top_k", self.settings.linking_top_k)
-        normalized_kwargs.setdefault("ppr_qa_top_k", self.settings.ppr_qa_top_k)
-        normalized_kwargs.setdefault("ppr_post_rerank_fusion", "none")
-        normalized_kwargs.setdefault("ppr_post_rerank_rrf_k", 60)
-        normalized_kwargs.setdefault(
+        normalized.setdefault("multi_hop_depth", self.settings.multi_hop_depth)
+        normalized.setdefault("ppr_damping", self.settings.ppr_damping)
+        normalized.setdefault("ppr_top_k", self.settings.ppr_top_k)
+        normalized.setdefault("passage_node_weight", self.settings.passage_node_weight)
+        normalized.setdefault("recognition_top_k", self.settings.recognition_top_k)
+        normalized.setdefault("linking_top_k", self.settings.linking_top_k)
+        normalized.setdefault("ppr_qa_top_k", self.settings.ppr_qa_top_k)
+        normalized.setdefault("ppr_post_rerank_fusion", "none")
+        normalized.setdefault("ppr_post_rerank_rrf_k", 60)
+        normalized.setdefault(
             "exclude_synonym_edges", self.settings.exclude_synonym_edges
         )
-        normalized_kwargs.setdefault(
+        normalized.setdefault(
             "ppr_synonym_weight_mode", self.settings.ppr_synonym_weight_mode
         )
-        normalized_kwargs["ppr_synonym_weight_mode"] = _normalize_ppr_synonym_weight_mode(
-            str(normalized_kwargs.get("ppr_synonym_weight_mode", ""))
+        normalized["ppr_synonym_weight_mode"] = _normalize_ppr_synonym_weight_mode(
+            str(normalized.get("ppr_synonym_weight_mode", ""))
         )
-        normalized_kwargs.setdefault(
+        normalized.setdefault(
             "qdrant_retrieval_mode", self.settings.qdrant_retrieval_mode
         )
-        normalized_kwargs["qdrant_retrieval_mode"] = _normalize_qdrant_retrieval_mode(
-            str(normalized_kwargs.get("qdrant_retrieval_mode", ""))
+        normalized["qdrant_retrieval_mode"] = _normalize_qdrant_retrieval_mode(
+            str(normalized.get("qdrant_retrieval_mode", ""))
         )
-        normalized_kwargs.setdefault(
+        normalized.setdefault(
             "user_prompt",
             _INLINE_CITATION_INSTRUCTION if _INLINE_CITATIONS_ENABLED else "",
         )
+        return normalized
+
+    async def query(self, workspace_id: str, query: str, **kwargs) -> str:
+        rag = await self.get_rag(workspace_id)
+        normalized_kwargs = self._apply_query_defaults(kwargs)
 
         async def _run_query() -> str:
             return await rag.aquery(query, **normalized_kwargs)
@@ -2296,47 +2304,7 @@ class LocalRagService:
         self, workspace_id: str, query: str, working_dir: str | None = None, **kwargs
     ) -> dict[str, Any]:
         rag = await self.get_rag(workspace_id, working_dir=working_dir)
-        normalized_kwargs = dict(kwargs)
-        normalized_kwargs.pop("enable_multi_hop", None)
-        normalized_kwargs.setdefault(
-            "image_token_estimate_method",
-            self.settings.image_token_estimate_method,
-        )
-        normalized_kwargs.setdefault(
-            "image_token_model_name_or_path",
-            self.settings.image_token_model_name_or_path,
-        )
-        normalized_kwargs.setdefault(
-            "image_wrapper_tokens_per_image",
-            self.settings.image_wrapper_tokens_per_image,
-        )
-        normalized_kwargs["image_token_estimate_method"] = _normalize_qwen_image_token_method(
-            str(normalized_kwargs.get("image_token_estimate_method", ""))
-        )
-        normalized_kwargs.setdefault("multi_hop_depth", self.settings.multi_hop_depth)
-        normalized_kwargs.setdefault("ppr_damping", self.settings.ppr_damping)
-        normalized_kwargs.setdefault("ppr_top_k", self.settings.ppr_top_k)
-        normalized_kwargs.setdefault("passage_node_weight", self.settings.passage_node_weight)
-        normalized_kwargs.setdefault("recognition_top_k", self.settings.recognition_top_k)
-        normalized_kwargs.setdefault("linking_top_k", self.settings.linking_top_k)
-        normalized_kwargs.setdefault("ppr_qa_top_k", self.settings.ppr_qa_top_k)
-        normalized_kwargs.setdefault("ppr_post_rerank_fusion", "none")
-        normalized_kwargs.setdefault("ppr_post_rerank_rrf_k", 60)
-        normalized_kwargs.setdefault(
-            "exclude_synonym_edges", self.settings.exclude_synonym_edges
-        )
-        normalized_kwargs.setdefault(
-            "ppr_synonym_weight_mode", self.settings.ppr_synonym_weight_mode
-        )
-        normalized_kwargs["ppr_synonym_weight_mode"] = _normalize_ppr_synonym_weight_mode(
-            str(normalized_kwargs.get("ppr_synonym_weight_mode", ""))
-        )
-        normalized_kwargs.setdefault(
-            "qdrant_retrieval_mode", self.settings.qdrant_retrieval_mode
-        )
-        normalized_kwargs["qdrant_retrieval_mode"] = _normalize_qdrant_retrieval_mode(
-            str(normalized_kwargs.get("qdrant_retrieval_mode", ""))
-        )
+        normalized_kwargs = self._apply_query_defaults(kwargs)
         normalized_kwargs["return_trace"] = True
 
         async def _run_query_with_trace() -> dict[str, Any]:
@@ -2459,45 +2427,38 @@ class LocalRagService:
 
         try:
             from lightrag import QueryParam
+            from raganything.query import _QUERY_PARAM_FIELDS
             rag_instance = await self.get_rag(workspace_id)
             await rag_instance._ensure_lightrag_initialized()
-            param = QueryParam(
-                mode=mode,
-                top_k=top_k,
-                chunk_top_k=chunk_top_k,
-                enable_rerank=enable_rerank,
-                rerank_score_scope="all",
-                stream=True,
-                include_references=True,
-                user_prompt=_INLINE_CITATION_INSTRUCTION if _INLINE_CITATIONS_ENABLED else "",
-                multi_hop_depth=multi_hop_depth if multi_hop_depth is not None else self.settings.multi_hop_depth,
-                ppr_damping=ppr_damping if ppr_damping is not None else self.settings.ppr_damping,
-                ppr_top_k=ppr_top_k if ppr_top_k is not None else self.settings.ppr_top_k,
-                passage_node_weight=passage_node_weight
-                if passage_node_weight is not None
-                else self.settings.passage_node_weight,
-                recognition_top_k=(
-                    recognition_top_k
-                    if recognition_top_k is not None
-                    else self.settings.recognition_top_k
-                ),
-                exclude_synonym_edges=(
-                    exclude_synonym_edges
-                    if exclude_synonym_edges is not None
-                    else self.settings.exclude_synonym_edges
-                ),
-                ppr_synonym_weight_mode=_normalize_ppr_synonym_weight_mode(
-                    ppr_synonym_weight_mode
-                    if ppr_synonym_weight_mode is not None
-                    else self.settings.ppr_synonym_weight_mode
-                ),
-                qdrant_retrieval_mode=_normalize_qdrant_retrieval_mode(
-                    qdrant_retrieval_mode
-                    if qdrant_retrieval_mode is not None
-                    else self.settings.qdrant_retrieval_mode
-                ),
-                conversation_history=conversation_history or [],
-            )
+
+            # Funnel raw stream_query args through the same defaults pipeline
+            # that query()/query_with_trace() use, so QueryParam is identical
+            # regardless of which entry point the caller hit.
+            raw_kwargs: dict[str, Any] = {
+                "mode": mode,
+                "top_k": top_k,
+                "chunk_top_k": chunk_top_k,
+                "enable_rerank": enable_rerank,
+                "rerank_score_scope": "all",
+                "stream": True,
+                "include_references": True,
+                "conversation_history": conversation_history or [],
+            }
+            for k, v in {
+                "multi_hop_depth": multi_hop_depth,
+                "ppr_damping": ppr_damping,
+                "ppr_top_k": ppr_top_k,
+                "passage_node_weight": passage_node_weight,
+                "recognition_top_k": recognition_top_k,
+                "exclude_synonym_edges": exclude_synonym_edges,
+                "ppr_synonym_weight_mode": ppr_synonym_weight_mode,
+                "qdrant_retrieval_mode": qdrant_retrieval_mode,
+            }.items():
+                if v is not None:
+                    raw_kwargs[k] = v
+            normalized = self._apply_query_defaults(raw_kwargs)
+            qp_kwargs = {k: v for k, v in normalized.items() if k in _QUERY_PARAM_FIELDS}
+            param = QueryParam(**qp_kwargs)
             result = await rag_instance.lightrag.aquery_llm(query, param=param)
 
             # Yield meta first (citations, entities, chunks, relationships)
@@ -2521,6 +2482,31 @@ class LocalRagService:
         except Exception as exc:
             self.logger.error("stream_query error: %s", exc)
             yield {"type": "error", "text": str(exc)}
+
+    async def query_with_multimodal(
+        self,
+        workspace_id: str,
+        query: str,
+        multimodal_content: list[dict[str, Any]],
+        **kwargs,
+    ) -> str:
+        """Multimodal query (e.g. image + text). Non-streaming.
+
+        Delegates to RAGAnything.aquery_with_multimodal which encodes the
+        multimodal content into an enhanced query and then routes through
+        the normal aquery() path.
+        """
+        rag = await self.get_rag(workspace_id)
+        normalized_kwargs = self._apply_query_defaults(kwargs)
+
+        async def _run() -> str:
+            return await rag.aquery_with_multimodal(
+                query,
+                multimodal_content=multimodal_content,
+                **normalized_kwargs,
+            )
+
+        return await self._safe_query_call(_run)
 
     async def evaluate_answer(self, workspace_id: str, query: str, answer: str) -> dict:
         """Run AnswerEvaluator on a query+answer pair.

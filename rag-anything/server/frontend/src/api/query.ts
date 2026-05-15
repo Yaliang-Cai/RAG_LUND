@@ -1,5 +1,37 @@
 import type { QueryParams } from '@/types'
 
+export interface MultimodalQueryResult {
+  answer: string
+  workspace_id: string
+  image_count: number
+}
+
+export async function postMultimodalQuery(args: {
+  workspace_id: string
+  query: string
+  images: File[]
+  mode?: string
+  top_k?: number
+  chunk_top_k?: number
+  enable_rerank?: boolean
+}): Promise<MultimodalQueryResult> {
+  const form = new FormData()
+  form.append('workspace_id', args.workspace_id)
+  form.append('query', args.query)
+  if (args.mode) form.append('mode', args.mode)
+  if (args.top_k != null) form.append('top_k', String(args.top_k))
+  if (args.chunk_top_k != null) form.append('chunk_top_k', String(args.chunk_top_k))
+  if (args.enable_rerank != null) form.append('enable_rerank', String(args.enable_rerank))
+  for (const img of args.images) form.append('images', img, img.name)
+
+  const response = await fetch('/query/multimodal', { method: 'POST', body: form })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: response.statusText }))
+    throw new Error((err as { detail?: string }).detail ?? 'Multimodal query failed')
+  }
+  return (await response.json()) as MultimodalQueryResult
+}
+
 export async function openQueryStream(params: QueryParams): Promise<Response> {
   const body: Record<string, unknown> = {
     workspace_id: params.workspace_id,

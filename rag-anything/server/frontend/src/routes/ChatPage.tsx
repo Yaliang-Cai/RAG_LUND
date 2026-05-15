@@ -1,10 +1,11 @@
-import { useCallback, useRef } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { useStreamQuery } from '@/hooks/useStreamQuery'
 import { useAppStore } from '@/store'
 import { MessageList } from '@/components/chat/MessageList'
 import { ChatInput } from '@/components/chat/ChatInput'
 import { Button } from '@/components/ui/button'
 import { SquarePen } from 'lucide-react'
+import { postMultimodalQuery } from '@/api/query'
 import type { Message } from '@/components/chat/MessageBubble'
 import type { SourceNode, TraceType, QueryParams } from '@/types'
 
@@ -34,6 +35,9 @@ export default function ChatPage() {
 
   const { send, answer, reasoning, status, sourceNodes, metadata } = useStreamQuery()
 
+  // Non-streaming (multimodal) busy flag — separate from streaming status.
+  const [multimodalBusy, setMultimodalBusy] = useState(false)
+
   const messagesRef = useRef<Message[]>([])
   messagesRef.current = messages
 
@@ -51,10 +55,55 @@ export default function ChatPage() {
     mode: string,
     profile: string,
     vlmEnabled: boolean,
+    images: File[],
   ) => {
     const userMsg: Message = { id: String(++msgId), role: 'user', content: query }
     setMessages((prev) => [...prev, userMsg])
 
+    // ── Branch A: multimodal (images attached) → non-streaming ──
+    if (images.length > 0) {
+      setMultimodalBusy(true)
+      try {
+        const result = await postMultimodalQuery({
+          workspace_id: workspaceId,
+          query,
+          images,
+          mode,
+        })
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: String(++msgId),
+            role: 'assistant',
+            content: result.answer,
+            reasoning: '',
+            sourceNodes: [],
+            traceType: null,
+            traceMetadata: { image_count: result.image_count },
+            query,
+          },
+        ])
+      } catch (err) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: String(++msgId),
+            role: 'assistant',
+            content: `Multimodal query failed: ${(err as Error).message}`,
+            reasoning: '',
+            sourceNodes: [],
+            traceType: null,
+            traceMetadata: {},
+            query,
+          },
+        ])
+      } finally {
+        setMultimodalBusy(false)
+      }
+      return
+    }
+
+    // ── Branch B: text-only → streaming ──
     const history = buildHistory(messagesRef.current)
 
     await send({
@@ -84,6 +133,7 @@ export default function ChatPage() {
   }, [workspaceId, send, setMessages])
 
   const isStreaming = status === 'streaming'
+  const isBusy = isStreaming || multimodalBusy
 
   return (
     <div className="flex flex-col h-full">
@@ -100,7 +150,7 @@ export default function ChatPage() {
         isStreaming={isStreaming}
         workspaceId={workspaceId}
       />
-      <ChatInput onSend={handleSend} disabled={isStreaming} />
+      <ChatInput onSend={handleSend} disabled={isBusy} />
     </div>
   )
 }

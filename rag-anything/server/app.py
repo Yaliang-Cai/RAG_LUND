@@ -49,7 +49,14 @@ from raganything.constants import (
     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
     DEFAULT_RECOGNITION_TOP_K,
     DEFAULT_QDRANT_RETRIEVAL_MODE,
+    SUPPORTED_IMAGE_EXTENSIONS,
+    DEFAULT_MAX_IMAGE_SIZE_MB,
 )
+from uuid import uuid4
+
+SUPPORTED_IMAGE_EXTS: Set[str] = {e.lower() for e in SUPPORTED_IMAGE_EXTENSIONS}
+MAX_IMAGE_BYTES = DEFAULT_MAX_IMAGE_SIZE_MB * 1024 * 1024
+MAX_IMAGES_PER_QUERY = 4
 
 VALID_CHUNKING_STRATEGIES: Set[str] = set(CHUNKING_STRATEGIES.keys())
 
@@ -640,33 +647,7 @@ async def query_endpoint(
     top_k = max(1, min(payload.top_k, MAX_TOP_K))
     chunk_top_k = max(1, min(payload.chunk_top_k, MAX_CHUNK_TOP_K))
 
-    rag = await service.get_rag(payload.workspace_id)
-    await rag._ensure_lightrag_initialized()
-
-    # Step 1: 获取结构化检索数据 (不调用 LLM)
-    from lightrag import QueryParam
-    data_param = QueryParam(
-        mode=payload.mode,
-        top_k=top_k,
-        chunk_top_k=chunk_top_k,
-        enable_rerank=payload.enable_rerank,
-        rerank_score_scope="all",
-        multi_hop_depth=payload.multi_hop_depth,
-        ppr_damping=payload.ppr_damping,
-        ppr_top_k=payload.ppr_top_k,
-        passage_node_weight=payload.passage_node_weight,
-        recognition_top_k=payload.recognition_top_k,
-        ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
-        qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
-    )
-    retrieval = {}
-    try:
-        retrieval = await rag.lightrag.aquery_data(payload.query, param=data_param)
-    except Exception:
-        pass  # 检索数据是增强功能，失败不阻断
-
-    # Step 2: 获取 LLM 答案 (走完整 VLM 增强链路)
-    answer = await service.query(
+    result = await service.query_with_trace(
         payload.workspace_id,
         payload.query,
         mode=payload.mode,
@@ -683,15 +664,21 @@ async def query_endpoint(
         qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
     )
 
-    # Step 3: 可选获取子图数据
+    answer = result.get("answer", "")
+    data = result.get("data", {}) or {}
+    metadata = result.get("metadata", {}) or {}
+
     graph_data = None
     if payload.return_graph:
-        graph_data = await _get_query_subgraph(rag, retrieval, payload)
+        rag = await service.get_rag(payload.workspace_id)
+        graph_data = await _get_query_subgraph(
+            rag, {"data": data, "metadata": metadata}, payload
+        )
 
     return {
         "answer": answer,
-        "data": retrieval.get("data", {}),
-        "metadata": retrieval.get("metadata", {}),
+        "data": data,
+        "metadata": metadata,
         "graph": graph_data,
     }
 
@@ -749,6 +736,81 @@ async def query_stream_endpoint(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/query/multimodal")
+async def query_multimodal_endpoint(
+    workspace_id: str = Form(...),
+    query: str = Form(...),
+    mode: str = Form(DEFAULT_QUERY_MODE),
+    top_k: int = Form(DEFAULT_TOP_K),
+    chunk_top_k: int = Form(DEFAULT_CHUNK_TOP_K),
+    enable_rerank: bool = Form(DEFAULT_ENABLE_RERANK),
+    images: List[UploadFile] = File(default=[]),
+    _auth: None = Depends(verify_api_key),
+    service: LocalRagService = Depends(get_service),
+):
+    """Multimodal query (image + text), non-streaming.
+
+    Saves uploaded images under uploads/{ws}/_inline/<uuid>.<ext> and
+    forwards them as 'image' multimodal_content items to
+    LocalRagService.query_with_multimodal, which delegates to
+    RAGAnything.aquery_with_multimodal -> VLM describe -> normal aquery().
+    """
+    _validate_workspace_id(workspace_id)
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="query must not be empty")
+    if not images:
+        raise HTTPException(
+            status_code=400,
+            detail="No images attached. Use POST /query for text-only queries.",
+        )
+    if len(images) > MAX_IMAGES_PER_QUERY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many images (max {MAX_IMAGES_PER_QUERY})",
+        )
+    top_k = max(1, min(top_k, MAX_TOP_K))
+    chunk_top_k = max(1, min(chunk_top_k, MAX_CHUNK_TOP_K))
+
+    inline_dir = UPLOADS_DIR / workspace_id / "_inline"
+    inline_dir.mkdir(parents=True, exist_ok=True)
+
+    multimodal_content: list[dict] = []
+    for img in images:
+        ext = Path(img.filename or "").suffix.lower()
+        if ext not in SUPPORTED_IMAGE_EXTS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported image type '{ext}'. Allowed: {sorted(SUPPORTED_IMAGE_EXTS)}",
+            )
+        content = await img.read()
+        if len(content) > MAX_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Image '{img.filename}' exceeds {DEFAULT_MAX_IMAGE_SIZE_MB} MB",
+            )
+        saved_path = inline_dir / f"{uuid4().hex}{ext}"
+        saved_path.write_bytes(content)
+        multimodal_content.append({
+            "type": "image",
+            "img_path": str(saved_path.resolve()),
+        })
+
+    answer = await service.query_with_multimodal(
+        workspace_id,
+        query,
+        multimodal_content,
+        mode=mode,
+        top_k=top_k,
+        chunk_top_k=chunk_top_k,
+        enable_rerank=enable_rerank,
+    )
+    return {
+        "answer": answer,
+        "workspace_id": workspace_id,
+        "image_count": len(multimodal_content),
+    }
 
 
 @app.post("/evaluate")
