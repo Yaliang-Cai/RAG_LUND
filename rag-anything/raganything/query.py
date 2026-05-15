@@ -671,7 +671,12 @@ class QueryMixin:
                     history_summary=query_param.history_summary,
                 )
                 if return_trace:
-                    return {"answer": fallback_answer, "trace": prompt_result}
+                    return {
+                        "answer": fallback_answer,
+                        "data": prompt_result.get("data", {}),
+                        "metadata": prompt_result.get("metadata", {}),
+                        "trace": prompt_result,
+                    }
                 return fallback_answer
             except Exception as exc:
                 self.logger.warning(
@@ -688,7 +693,12 @@ class QueryMixin:
                     fallback_answer = (
                         fallback_result.get("llm_response", {}) or {}
                     ).get("content") or ""
-                    return {"answer": fallback_answer, "trace": fallback_result}
+                    return {
+                        "answer": fallback_answer,
+                        "data": fallback_result.get("data", {}),
+                        "metadata": fallback_result.get("metadata", {}),
+                        "trace": fallback_result,
+                    }
                 return await self.lightrag.aquery(
                     query, param=fallback_param, system_prompt=system_prompt
                 )
@@ -710,7 +720,12 @@ class QueryMixin:
 
         self.logger.info("VLM enhanced query completed")
         if return_trace:
-            return {"answer": result, "trace": prompt_result}
+            return {
+                "answer": result,
+                "data": prompt_result.get("data", {}),
+                "metadata": prompt_result.get("metadata", {}),
+                "trace": prompt_result,
+            }
         return result
 
     async def _generate_answer_from_chunks(

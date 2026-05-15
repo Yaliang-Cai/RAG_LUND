@@ -60,6 +60,7 @@ export interface SourceNode {
  * matches what LightRAG actually emits.
  */
 export interface ChunkRef {
+  id?: string                  // e.g. "DC1", "DC2" — what the LLM cites
   reference_id?: string | number
   file_path?: string
   filename?: string

@@ -28,20 +28,28 @@ const EMPTY_PLACEHOLDER =
   'No relevant information was found in the knowledge base for this query.'
 
 /**
- * Build a map: reference_id -> ChunkRef so inline [N] tokens in the
- * markdown answer can be matched to their source chunk.
+ * Build a map for both citation key variants the LLM may emit:
+ *   - by chunk.id        (the new format, e.g. "DC1" — see
+ *     _INLINE_CITATION_INSTRUCTION in services/local_rag.py)
+ *   - by reference_id    (numeric fallback)
+ *   - by 1-based index   (very old answers)
  */
 function buildChunkMap(chunks?: ChunkRef[]): Map<string, ChunkRef> {
   const map = new Map<string, ChunkRef>()
   if (!chunks) return map
   chunks.forEach((c, idx) => {
-    const rid = c.reference_id != null ? String(c.reference_id) : String(idx + 1)
-    if (!map.has(rid)) map.set(rid, c)
+    const keys: string[] = []
+    if (c.id != null) keys.push(String(c.id))
+    if (c.reference_id != null) keys.push(String(c.reference_id))
+    keys.push(String(idx + 1))
+    for (const k of keys) if (!map.has(k)) map.set(k, c)
   })
   return map
 }
 
-const CITATION_RE = /\[(\d+)\]/g
+// Citation tokens: pure digits ([1], [12]) or upper-case prefix + digits ([DC1], [E12]).
+// Avoids false matches on free-text brackets like [note] or [TODO].
+const CITATION_RE = /\[([A-Z]{0,4}\d{1,4})\]/g
 
 /** Replace [N] tokens in a string with InlineCitation components. */
 function injectCitations(text: string, chunkMap: Map<string, ChunkRef>): ReactNode[] {
