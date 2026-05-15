@@ -4,6 +4,17 @@ import type { QueryParams, SourceNode } from '@/types'
 
 export type StreamStatus = 'idle' | 'streaming' | 'done' | 'error'
 
+const EMPTY_FALLBACK =
+  'No relevant information was found in the knowledge base for this query.'
+
+export interface StreamFinalSnapshot {
+  answer: string
+  reasoning: string
+  metadata: Record<string, unknown>
+  sourceNodes: SourceNode[]
+  status: StreamStatus
+}
+
 export function useStreamQuery() {
   const [answer, setAnswer] = useState('')
   const [reasoning, setReasoning] = useState('')
@@ -12,7 +23,13 @@ export function useStreamQuery() {
   const [metadata, setMetadata] = useState<Record<string, unknown>>({})
   const abortRef = useRef<AbortController | null>(null)
 
-  const send = useCallback(async (params: QueryParams) => {
+  /**
+   * Run a streaming query and return the final snapshot when the SSE stream
+   * closes. The snapshot is accumulated synchronously inside this callback,
+   * so callers don't depend on React having flushed all setState calls
+   * before `await send(...)` resolves (which it usually hasn't).
+   */
+  const send = useCallback(async (params: QueryParams): Promise<StreamFinalSnapshot> => {
     abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
@@ -22,6 +39,13 @@ export function useStreamQuery() {
     setReasoning('')
     setSourceNodes([])
     setMetadata({})
+
+    // Local accumulators — single source of truth for the returned snapshot.
+    let finalAnswer = ''
+    let finalReasoning = ''
+    let finalMetadata: Record<string, unknown> = {}
+    let finalSourceNodes: SourceNode[] = []
+    let finalStatus: StreamStatus = 'streaming'
 
     try {
       const response = await openQueryStream(params)
@@ -41,27 +65,30 @@ export function useStreamQuery() {
           try {
             const event = JSON.parse(line.slice(6))
             if (event.type === 'meta') {
-              // Merge data into metadata so trace panels (e.g. PPR) can read
-              // metadata.data.{chunks,entities,relations} from the meta event.
-              setMetadata({
+              finalMetadata = {
                 ...((event.metadata as Record<string, unknown>) ?? {}),
                 data: (event.data as Record<string, unknown>) ?? {},
-              })
+              }
+              setMetadata(finalMetadata)
             } else if (event.type === 'chunk') {
-              setAnswer((a) => a + (event.text as string))
+              const text = event.text as string
+              finalAnswer += text
+              setAnswer((a) => a + text)
             } else if (event.type === 'reasoning') {
-              setReasoning((r) => r + (event.text as string))
+              const text = event.text as string
+              finalReasoning += text
+              setReasoning((r) => r + text)
             } else if (event.type === 'done') {
-              setSourceNodes((event.source_nodes as SourceNode[]) ?? [])
-              // Fallback: if the stream ended without any answer text, show
-              // a user-facing placeholder instead of a silent empty bubble.
-              setAnswer((prev) =>
-                prev.trim() === ''
-                  ? 'No relevant information was found in the knowledge base for this query.'
-                  : prev
-              )
+              finalSourceNodes = (event.source_nodes as SourceNode[]) ?? []
+              setSourceNodes(finalSourceNodes)
+              if (finalAnswer.trim() === '') {
+                finalAnswer = EMPTY_FALLBACK
+                setAnswer(EMPTY_FALLBACK)
+              }
+              finalStatus = 'done'
               setStatus('done')
             } else if (event.type === 'error') {
+              finalStatus = 'error'
               setStatus('error')
             }
           } catch {
@@ -70,7 +97,18 @@ export function useStreamQuery() {
         }
       }
     } catch (err) {
-      if ((err as Error).name !== 'AbortError') setStatus('error')
+      if ((err as Error).name !== 'AbortError') {
+        finalStatus = 'error'
+        setStatus('error')
+      }
+    }
+
+    return {
+      answer: finalAnswer,
+      reasoning: finalReasoning,
+      metadata: finalMetadata,
+      sourceNodes: finalSourceNodes,
+      status: finalStatus,
     }
   }, [])
 

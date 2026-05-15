@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { SquarePen } from 'lucide-react'
 import { postMultimodalQuery } from '@/api/query'
 import type { Message } from '@/components/chat/MessageBubble'
-import type { SourceNode, TraceType, QueryParams, ChunkRef } from '@/types'
+import type { TraceType, QueryParams, ChunkRef } from '@/types'
 
 let msgId = 0
 
@@ -37,22 +37,13 @@ export default function ChatPage() {
   const setMessages = useAppStore((s) => s.setChatMessages)
   const clearMessages = useAppStore((s) => s.clearChatMessages)
 
-  const { send, answer, reasoning, status, sourceNodes, metadata } = useStreamQuery()
+  const { send, answer, reasoning, status } = useStreamQuery()
 
   // Non-streaming (multimodal) busy flag — separate from streaming status.
   const [multimodalBusy, setMultimodalBusy] = useState(false)
 
   const messagesRef = useRef<Message[]>([])
   messagesRef.current = messages
-
-  const latestRef = useRef<{
-    answer: string
-    reasoning: string
-    sourceNodes: SourceNode[]
-    metadata: Record<string, unknown>
-  }>({ answer: '', reasoning: '', sourceNodes: [], metadata: {} })
-
-  latestRef.current = { answer, reasoning, sourceNodes, metadata }
 
   const handleSend = useCallback(async (
     query: string,
@@ -112,7 +103,9 @@ export default function ChatPage() {
     // vlm_enhanced is intentionally NOT sent from the frontend:
     // backend default (DEFAULT_VLM_ENHANCED=True) lets RAGAnything auto-route,
     // and aquery_vlm_enhanced already falls back to text when chunks have no images.
-    await send({
+    // send() returns a final snapshot accumulated inside the SSE loop, so we
+    // don't depend on React having flushed setState calls before this awaits.
+    const snap = await send({
       workspace_id: workspaceId,
       query,
       mode: mode as QueryParams['mode'],
@@ -120,19 +113,18 @@ export default function ChatPage() {
       conversation_history: history.length > 0 ? history : undefined,
     })
 
-    const { answer: a, reasoning: r, sourceNodes: sn, metadata: m } = latestRef.current
     const traceType = modeToTraceType(mode)
     setMessages((prev) => [
       ...prev,
       {
         id: String(++msgId),
         role: 'assistant',
-        content: a,
-        reasoning: r,
-        sourceNodes: sn,
+        content: snap.answer,
+        reasoning: snap.reasoning,
+        sourceNodes: snap.sourceNodes,
         traceType,
-        traceMetadata: m,
-        chunks: extractChunks(m),
+        traceMetadata: snap.metadata,
+        chunks: extractChunks(snap.metadata),
         query,
       },
     ])
