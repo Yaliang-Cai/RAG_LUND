@@ -4,6 +4,7 @@ import rehypeHighlight from 'rehype-highlight'
 import { AgenticTrace } from './AgenticTrace'
 import { CitationChip } from './CitationChip'
 import { InlineCitation } from './InlineCitation'
+import { ReasoningTrace } from './ReasoningTrace'
 import { cn } from '@/lib/utils'
 import type { SourceNode, TraceType, ChunkRef } from '@/types'
 
@@ -16,6 +17,7 @@ export interface Message {
   traceType?: TraceType
   traceMetadata?: Record<string, unknown>
   chunks?: ChunkRef[]
+  images?: string[]   // blob URLs for user-attached images (multimodal queries)
   query?: string   // original user question (kept for future eval/review use)
 }
 
@@ -116,6 +118,18 @@ export function MessageBubble({ message, workspaceId: _workspaceId }: MessageBub
 
   return (
     <div className={cn('flex flex-col gap-1', isUser ? 'items-end' : 'items-start')}>
+      {isUser && message.images && message.images.length > 0 && (
+        <div className="flex flex-wrap gap-2 max-w-[80%] justify-end">
+          {message.images.map((src, i) => (
+            <img
+              key={i}
+              src={src}
+              alt={`attached ${i + 1}`}
+              className="h-24 max-w-[160px] rounded-lg border border-border object-cover"
+            />
+          ))}
+        </div>
+      )}
       <div
         className={cn(
           'max-w-[80%] rounded-2xl px-4 py-2.5 text-sm',
@@ -135,6 +149,7 @@ export function MessageBubble({ message, workspaceId: _workspaceId }: MessageBub
           </ReactMarkdown>
         )}
       </div>
+      {!isUser && message.reasoning && <ReasoningTrace text={message.reasoning} />}
       {!isUser && message.traceType === 'agentic' && (
         <AgenticTrace
           traceType={message.traceType}

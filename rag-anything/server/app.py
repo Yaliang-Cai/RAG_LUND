@@ -724,6 +724,8 @@ async def query_stream_endpoint(
                     yield f"data: {_json.dumps({'type': 'meta', 'data': event['data'], 'metadata': event['metadata']}, ensure_ascii=False)}\n\n"
                 elif event["type"] == "chunk":
                     yield f"data: {_json.dumps({'type': 'chunk', 'text': event['text']}, ensure_ascii=False)}\n\n"
+                elif event["type"] == "reasoning":
+                    yield f"data: {_json.dumps({'type': 'reasoning', 'text': event['text']}, ensure_ascii=False)}\n\n"
                 elif event["type"] == "error":
                     yield f"data: {_json.dumps({'type': 'error', 'text': event['text']}, ensure_ascii=False)}\n\n"
         except Exception as exc:

@@ -289,6 +289,88 @@ class AdaptiveAgentGraph:
 
     # ── Public API ─────────────────────────────────────────────────────────
 
+    _NODE_LABELS: dict[str, str] = {
+        "router": "Choosing retrieval profile",
+        "retriever": "Retrieving chunks",
+        "grader": "Checking if chunks are sufficient",
+        "rewriter": "Rewriting the query",
+        "decomposer": "Splitting into sub-questions",
+        "parallel_retriever": "Retrieving sub-questions in parallel",
+        "generator": "Generating answer",
+        "hallucination_check": "Verifying answer against sources",
+        "targeted_retriever": "Re-retrieving for ungrounded claims",
+        "end_grounded": "Done — answer is grounded",
+        "end_insufficient": "Done — insufficient evidence",
+    }
+
+    async def astream_run(self, query: str):
+        """Run the graph and yield ('step', label) for each node, then ('final', result_dict).
+
+        Used by stream_query's agentic branch to surface chain-of-thought
+        progress to the frontend (as SSE 'reasoning' events) while the
+        graph executes.
+        """
+        initial: AgentState = {
+            "query": query,
+            "current_query": query,
+            "profile": "semantic",
+            "chunks": [],
+            "grader_sufficient": False,
+            "grader_unanswerable": False,
+            "grader_reason": "",
+            "answer": "",
+            "grounded": False,
+            "ungrounded_claims": [],
+            "retrieve_cycle": 0,
+            "check_cycle": 0,
+            "routing_trace": {},
+        }
+        final: dict | None = None
+        async for update in self._graph.astream(initial, stream_mode="updates"):
+            # update is {node_name: {state-diff fields}}; usually a single key
+            for node_name, state_diff in update.items():
+                label = self._NODE_LABELS.get(node_name, node_name)
+                yield "step", label
+                # Track final state by merging accumulating diffs
+                if final is None:
+                    final = dict(state_diff or {})
+                elif isinstance(state_diff, dict):
+                    final.update(state_diff)
+        final = final or {}
+        answer, confidence, grounded = await self._finalize_answer(query, final)
+        yield "final", {
+            "answer": answer,
+            "confidence": confidence,
+            "grounded": grounded,
+            "ungrounded_claims": final.get("ungrounded_claims", []),
+            "trace": {
+                **final.get("routing_trace", {}),
+                "retrieve_cycles_used": final.get("retrieve_cycle", 0),
+                "check_cycles_used": final.get("check_cycle", 0),
+            },
+        }
+
+    async def _finalize_answer(self, query: str, final: dict) -> tuple[str | None, str, bool]:
+        """Shared answer/confidence resolution used by both run() and astream_run()."""
+        answer: str | None = final.get("answer") or None
+        grounded = bool(final.get("grounded", False))
+        if grounded:
+            return answer, "high", True
+        confidence = "low" if answer else "none"
+        if not answer:
+            chunks = final.get("chunks") or []
+            if chunks:
+                prefix = build_shared_prefix(chunks)
+            else:
+                prefix = "You are a RAG quality controller.\n\nContext:\n(No relevant context was retrieved.)\n\n---\n\n"
+            try:
+                raw = await self._llm(prefix + _GENERATOR_SUFFIX.format(query=query))
+                answer = raw if isinstance(raw, str) else str(raw)
+            except Exception:
+                logger.warning("Fallback generator failed", exc_info=True)
+                answer = "No relevant information was found in the knowledge base to answer this question."
+        return answer, confidence, False
+
     async def run(self, query: str, return_trace: bool = False, **kwargs: Any) -> str | dict:
         initial: AgentState = {
             "query": query,
@@ -311,7 +393,7 @@ class AdaptiveAgentGraph:
         if grounded:
             confidence = "high"
         else:
-            confidence = "none"
+            confidence = "low" if answer else "none"
             if not answer:
                 # generator was never called (end_insufficient reached directly);
                 # run it once with whatever chunks are available so the model can
@@ -327,8 +409,10 @@ class AdaptiveAgentGraph:
                 except Exception:
                     logger.warning("Fallback generator failed", exc_info=True)
                     answer = "No relevant information was found in the knowledge base to answer this question."
-            else:
-                answer = None
+            # else: keep the generator's output even though hallucination_check
+            # flagged it as ungrounded — the answer often still contains useful
+            # information, and the frontend AgenticTrace badge clearly shows
+            # '✗ not grounded' so the user is warned.
 
         if return_trace:
             return {

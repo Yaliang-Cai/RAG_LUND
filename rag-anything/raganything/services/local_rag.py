@@ -2350,12 +2350,43 @@ class LocalRagService:
           {"type": "chunk", "text": str}                       # LLM token
           {"type": "error", "text": str}                       # error
         """
-        # ── Non-streaming branch: agentic mode or auto+profile override ──
-        if mode == "agentic" or (mode == "auto" and profile):
+        # ── Streaming branch: agentic mode (per-node progress via astream) ──
+        if mode == "agentic":
             try:
-                extra: dict = {}
-                if profile:
-                    extra["profile"] = profile
+                from raganything.retrieval.agent_graph import AdaptiveAgentGraph
+                rag_instance = await self.get_rag(workspace_id)
+                await rag_instance._ensure_lightrag_initialized()
+                graph = AdaptiveAgentGraph(rag_instance.lightrag)
+                final: dict[str, Any] = {}
+                async for kind, payload in graph.astream_run(query):
+                    if kind == "step":
+                        # surface chain-of-thought progress to FE
+                        yield {"type": "reasoning", "text": f"→ {payload}\n"}
+                    elif kind == "final":
+                        final = payload
+                trace = final.get("trace", {})
+                meta_payload = {
+                    "agentic_trace": {
+                        "confidence": final.get("confidence"),
+                        "grounded": final.get("grounded"),
+                        "profile": trace.get("profile"),
+                        "router_cache_hit": trace.get("router_cache_hit", False),
+                        "retrieve_cycles_used": trace.get("retrieve_cycles_used", 0),
+                        "check_cycles_used": trace.get("check_cycles_used", 0),
+                        "rewrite_history": trace.get("rewrite_history", []),
+                        "sub_questions": trace.get("sub_questions"),
+                    }
+                }
+                yield {"type": "meta", "data": {}, "metadata": meta_payload}
+                yield {"type": "chunk", "text": str(final.get("answer") or "")}
+            except Exception as exc:
+                self.logger.error("stream_query (agentic branch) error: %s", exc)
+                yield {"type": "error", "text": str(exc)}
+            return
+
+        # ── Non-streaming branch: auto+profile override ──
+        if mode == "auto" and profile:
+            try:
                 result = await self.query_with_trace(
                     workspace_id, query,
                     mode=mode,
@@ -2364,32 +2395,17 @@ class LocalRagService:
                     chunk_top_k=chunk_top_k,
                     enable_rerank=enable_rerank,
                     conversation_history=conversation_history or [],
-                    **extra,
+                    profile=profile,
                 )
                 trace = result.get("trace", {})
-                if mode == "agentic":
-                    meta_payload = {
-                        "agentic_trace": {
-                            "confidence": result.get("confidence"),
-                            "grounded": result.get("grounded"),
-                            "profile": trace.get("profile"),
-                            "router_cache_hit": trace.get("router_cache_hit", False),
-                            "retrieve_cycles_used": trace.get("retrieve_cycles_used", 0),
-                            "check_cycles_used": trace.get("check_cycles_used", 0),
-                            "rewrite_history": trace.get("rewrite_history", []),
-                            "sub_questions": trace.get("sub_questions"),
-                        }
-                    }
-                else:
-                    meta_payload = {"routing_trace": trace.get("routing", trace)}
                 yield {
                     "type": "meta",
                     "data": result.get("data", {}),
-                    "metadata": meta_payload,
+                    "metadata": {"routing_trace": trace.get("routing", trace)},
                 }
                 yield {"type": "chunk", "text": result.get("answer", "")}
             except Exception as exc:
-                self.logger.error("stream_query (agentic branch) error: %s", exc)
+                self.logger.error("stream_query (auto branch) error: %s", exc)
                 yield {"type": "error", "text": str(exc)}
             return
 

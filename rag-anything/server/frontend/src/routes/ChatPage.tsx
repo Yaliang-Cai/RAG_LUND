@@ -51,7 +51,13 @@ export default function ChatPage() {
     profile: string,
     images: File[],
   ) => {
-    const userMsg: Message = { id: String(++msgId), role: 'user', content: query }
+    const imagePreviews = images.length > 0 ? images.map((f) => URL.createObjectURL(f)) : undefined
+    const userMsg: Message = {
+      id: String(++msgId),
+      role: 'user',
+      content: query,
+      ...(imagePreviews ? { images: imagePreviews } : {}),
+    }
     setMessages((prev) => [...prev, userMsg])
 
     // ── Branch A: multimodal (images attached) → non-streaming ──
