@@ -17,7 +17,7 @@ python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cach
 
 # agentic 模式 + Phoenix 监控（浏览器打开 http://localhost:6006）
 python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode agentic --trace --phoenix
-
+python scripts/query_ppr.py -w docbench_shared_graphbm25_20260421_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/raganything/evaluate_local/ablation_runs/graphbm25_20260421/_workspace_cache/docbench_shared/v0_v1_v2/rag_workspaces/docbench_shared_graphbm25_20260421_v0_v1_v2  -q "How does the introduction of repetition control affect the question-asking rate at the highest control level (z=10)?" --mode agentic --phoenix
 # ppr 模式对比基线
 python scripts/query_ppr.py -w docbench_shared_ablation_20260417_v0_v1_v2 --cache-dir /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/ablation_20260417/v0_v1_v2/evaluate_shared/rag_workspaces/docbench_shared_ablation_20260417_v0_v1_v2 -q "What is the top-1 accuracy of the Oracle KGLM on birthdate prediction?" --mode ppr --trace
 

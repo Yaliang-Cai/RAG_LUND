@@ -30,3 +30,7 @@ Thumbs.db
 rag-anything/server/frontend/node_modules/
 rag-anything/server/static/dist/
 .superpowers/
+
+# Local runtime / debug junk
+*.stackdump
+/data/
