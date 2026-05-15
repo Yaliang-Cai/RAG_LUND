@@ -58,7 +58,6 @@ export default function ChatPage() {
     query: string,
     mode: string,
     profile: string,
-    vlmEnabled: boolean,
     images: File[],
   ) => {
     const userMsg: Message = { id: String(++msgId), role: 'user', content: query }
@@ -110,12 +109,14 @@ export default function ChatPage() {
     // ── Branch B: text-only → streaming ──
     const history = buildHistory(messagesRef.current)
 
+    // vlm_enhanced is intentionally NOT sent from the frontend:
+    // backend default (DEFAULT_VLM_ENHANCED=True) lets RAGAnything auto-route,
+    // and aquery_vlm_enhanced already falls back to text when chunks have no images.
     await send({
       workspace_id: workspaceId,
       query,
       mode: mode as QueryParams['mode'],
       profile: mode === 'auto' && profile ? profile : undefined,
-      vlm_enhanced: vlmEnabled || undefined,
       conversation_history: history.length > 0 ? history : undefined,
     })
 

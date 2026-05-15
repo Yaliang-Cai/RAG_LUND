@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Send, Eye, Image as ImageIcon, X } from 'lucide-react'
+import { Send, Image as ImageIcon, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const MODES = ['naive', 'local', 'global', 'hybrid', 'ppr', 'auto', 'agentic'] as const
@@ -15,7 +15,6 @@ interface ChatInputProps {
     query: string,
     mode: string,
     profile: string,
-    vlmEnabled: boolean,
     images: File[],
   ) => void
   disabled?: boolean
@@ -25,7 +24,6 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   const [value, setValue] = useState('')
   const [mode, setMode] = useState('hybrid')
   const [profile, setProfile] = useState('')
-  const [vlmEnabled, setVlmEnabled] = useState(false)
   const [images, setImages] = useState<File[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -33,7 +31,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   function submit() {
     const q = value.trim()
     if (!q || disabled) return
-    onSend(q, mode, profile, vlmEnabled, images)
+    onSend(q, mode, profile, images)
     setValue('')
     setImages([])
     textareaRef.current?.focus()
@@ -160,21 +158,6 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
             </Select>
           </>
         )}
-
-        <button
-          type="button"
-          onClick={() => setVlmEnabled((v) => !v)}
-          className={cn(
-            'inline-flex items-center gap-1 h-7 px-2 rounded-md border text-xs transition-colors',
-            vlmEnabled
-              ? 'bg-primary/10 border-primary text-primary'
-              : 'border-border text-muted-foreground hover:text-foreground'
-          )}
-          title="VLM enhanced: use vision model to reason over images in retrieved documents"
-        >
-          <Eye className="h-3 w-3" />
-          VLM
-        </button>
       </div>
     </div>
   )
