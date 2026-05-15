@@ -82,6 +82,18 @@ async def lifespan(app: FastAPI):
     rag_settings = LocalRagSettings.from_env()
     gov_settings = GovernanceSettings.from_env()
 
+    # Phoenix MUST be initialised before any AsyncOpenAI / langgraph object
+    # is constructed: phoenix.otel.register(auto_instrument=True) patches
+    # those modules at call time, but some OpenAI SDK versions bind the
+    # instrumentor in AsyncOpenAI.__init__ — clients created earlier are
+    # missed. The CLI script (scripts/query_ppr.py) already follows this
+    # order; we mirror it here so web UI traces show up too.
+    phoenix_enabled = os.getenv("ENABLE_PHOENIX", "").lower() in ("1", "true", "yes")
+    if phoenix_enabled:
+        from raganything.observability import setup_phoenix
+        setup_phoenix()
+        logger.info("lifespan: Phoenix tracing enabled at http://localhost:6006")
+
     pg_pool = await create_pool(gov_settings)
     await run_migrations(pg_pool)
     crashed = await mark_orphaned_jobs_crashed(pg_pool)
@@ -112,12 +124,6 @@ async def lifespan(app: FastAPI):
     app.state.gov = gov_service
     app.state.jobs = job_runner
     app.state.gov_settings = gov_settings
-
-    phoenix_enabled = os.getenv("ENABLE_PHOENIX", "").lower() in ("1", "true", "yes")
-    if phoenix_enabled:
-        from raganything.observability import setup_phoenix
-        setup_phoenix()
-        logger.info("lifespan: Phoenix tracing enabled at http://localhost:6006")
 
     logger.info("lifespan: startup complete")
     try:
