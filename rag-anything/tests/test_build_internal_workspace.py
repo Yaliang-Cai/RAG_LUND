@@ -411,6 +411,22 @@ def test_build_failure_is_written_to_internal_log(monkeypatch, tmp_path):
     assert "forced ingest failure: bad.pdf" in log_text
 
 
+def test_internal_log_captures_stdout_and_stderr(tmp_path):
+    context = build_internal.setup_build_logging(tmp_path)
+    try:
+        print("stdout detail line")
+        sys.stderr.write("stderr ERROR detail line\n")
+        summary = {}
+        build_internal._attach_log_summary(summary, context)
+    finally:
+        build_internal.close_build_logging(context)
+
+    log_text = Path(summary["log_file"]).read_text(encoding="utf-8")
+    assert "stdout detail line" in log_text
+    assert "stderr ERROR detail line" in log_text
+    assert summary["error_count"] >= 1
+
+
 def test_report_command_collects_storage_without_ingest(monkeypatch, tmp_path):
     storage_root = tmp_path / "internal"
     fake = _patch_fake_service(monkeypatch)

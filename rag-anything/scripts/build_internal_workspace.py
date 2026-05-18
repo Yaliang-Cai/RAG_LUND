@@ -8,6 +8,7 @@ import dataclasses
 import gc
 import hashlib
 import inspect
+import io
 import json
 import logging
 import os
@@ -96,6 +97,32 @@ class _CountingFileHandler(logging.FileHandler):
         super().emit(record)
 
 
+class _TeeTextStream(io.TextIOBase):
+    def __init__(self, original: Any, mirror: Any) -> None:
+        self._original = original
+        self._mirror = mirror
+        self._internal_build_stream = True
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._original, "encoding", None) or "utf-8"
+
+    def writable(self) -> bool:
+        return True
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._original, "isatty", lambda: False)())
+
+    def write(self, text: str) -> int:
+        written = self._original.write(text)
+        self._mirror.write(text)
+        return written
+
+    def flush(self) -> None:
+        self._original.flush()
+        self._mirror.flush()
+
+
 @dataclass
 class BuildLogContext:
     log_file: Path
@@ -103,6 +130,9 @@ class BuildLogContext:
     root_logger: logging.Logger
     old_root_level: int
     old_logger_levels: dict[str, int]
+    old_stdout: Any
+    old_stderr: Any
+    stream_mirror: Any
 
     @property
     def warning_count(self) -> int:
@@ -148,32 +178,66 @@ def setup_build_logging(report_dir: Path) -> BuildLogContext:
         logging.getLogger(logger_name).setLevel(logging.INFO)
 
     LOGGER.info("Internal workspace log initialized: %s", log_file)
+    stream_mirror = log_file.open("a", encoding="utf-8", buffering=1)
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    sys.stdout = _TeeTextStream(old_stdout, stream_mirror)
+    sys.stderr = _TeeTextStream(old_stderr, stream_mirror)
     return BuildLogContext(
         log_file=log_file,
         handler=handler,
         root_logger=root_logger,
         old_root_level=old_root_level,
         old_logger_levels=old_logger_levels,
+        old_stdout=old_stdout,
+        old_stderr=old_stderr,
+        stream_mirror=stream_mirror,
     )
 
 
 def close_build_logging(context: BuildLogContext) -> None:
+    sys.stdout.flush()
+    sys.stderr.flush()
+    sys.stdout = context.old_stdout
+    sys.stderr = context.old_stderr
     context.handler.flush()
     context.root_logger.removeHandler(context.handler)
     context.handler.close()
+    context.stream_mirror.flush()
+    context.stream_mirror.close()
     context.root_logger.setLevel(context.old_root_level)
     for logger_name, level in context.old_logger_levels.items():
         logging.getLogger(logger_name).setLevel(level)
+
+
+def _count_log_markers(log_file: Path) -> tuple[int, int]:
+    try:
+        text = log_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return 0, 0
+    warning_count = 0
+    error_count = 0
+    for line in text.splitlines():
+        upper = line.upper()
+        if "ERROR" in upper or "TRACEBACK" in upper:
+            error_count += 1
+        elif "WARNING" in upper:
+            warning_count += 1
+    return warning_count, error_count
 
 
 def _attach_log_summary(
     summary: dict[str, Any],
     log_context: BuildLogContext,
 ) -> None:
+    sys.stdout.flush()
+    sys.stderr.flush()
     log_context.handler.flush()
+    log_context.stream_mirror.flush()
+    marker_warnings, marker_errors = _count_log_markers(log_context.log_file)
     summary["log_file"] = _path_env(log_context.log_file)
-    summary["warning_count"] = log_context.warning_count
-    summary["error_count"] = log_context.error_count
+    summary["warning_count"] = max(log_context.warning_count, marker_warnings)
+    summary["error_count"] = max(log_context.error_count, marker_errors)
 
 
 def resolve_profile(
