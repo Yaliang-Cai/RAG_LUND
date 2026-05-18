@@ -1,6 +1,7 @@
 import asyncio
 import configparser
 import hashlib
+import json
 import math
 import os
 import uuid
@@ -31,6 +32,7 @@ config.read("config.ini", "utf-8")
 
 DEFAULT_ENABLE_SPARSE_BM25 = True
 DEFAULT_SPARSE_BM25_MODEL = "Qdrant/bm25"
+DEFAULT_QDRANT_UPSERT_MAX_PAYLOAD_BYTES = 24 * 1024 * 1024
 
 
 def compute_mdhash_id_for_qdrant(
@@ -68,6 +70,115 @@ def workspace_filter_condition(workspace: str) -> models.FieldCondition:
     return models.FieldCondition(
         key=WORKSPACE_ID_FIELD, match=models.MatchValue(value=workspace)
     )
+
+
+def _normalize_positive_int_env(
+    env_name: str, default: int, *, minimum: int = 1
+) -> int:
+    raw_value = os.environ.get(env_name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid %s=%r; falling back to %d", env_name, raw_value, default
+        )
+        return default
+    if value < minimum:
+        logger.warning(
+            "Invalid %s=%r below minimum %d; falling back to %d",
+            env_name,
+            raw_value,
+            minimum,
+            default,
+        )
+        return default
+    return value
+
+
+def _qdrant_jsonable(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _qdrant_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_qdrant_jsonable(v) for v in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _qdrant_jsonable(model_dump(mode="json"))
+        except TypeError:
+            return _qdrant_jsonable(model_dump())
+    as_dict = getattr(value, "dict", None)
+    if callable(as_dict):
+        return _qdrant_jsonable(as_dict())
+    return value
+
+
+def _estimate_qdrant_point_json_bytes(point: models.PointStruct) -> int:
+    """Conservatively estimate one point's JSON size in Qdrant's upsert body."""
+    point_payload = {
+        "id": _qdrant_jsonable(point.id),
+        "vector": _qdrant_jsonable(point.vector),
+        "payload": _qdrant_jsonable(point.payload),
+    }
+    try:
+        return len(
+            json.dumps(
+                point_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        )
+    except Exception:
+        # Fall back to a conservative estimate when qdrant-client changes
+        # internal model shapes in a way our converter does not recognize.
+        dense_vector = point.vector
+        if isinstance(dense_vector, dict):
+            dense_vector = dense_vector.get("", [])
+        vector_len = len(dense_vector) if hasattr(dense_vector, "__len__") else 0
+        payload_size = len(str(point.payload).encode("utf-8", errors="ignore"))
+        return payload_size + vector_len * 24 + 1024
+
+
+def _iter_qdrant_point_batches_by_payload(
+    points: list[models.PointStruct], max_payload_bytes: int
+) -> list[list[models.PointStruct]]:
+    if not points:
+        return []
+
+    batches: list[list[models.PointStruct]] = []
+    current_batch: list[models.PointStruct] = []
+    # Account for the request JSON wrapper and commas around points.
+    current_size = 1024
+
+    for point in points:
+        point_size = _estimate_qdrant_point_json_bytes(point) + 4
+        if current_batch and current_size + point_size > max_payload_bytes:
+            batches.append(current_batch)
+            current_batch = []
+            current_size = 1024
+
+        current_batch.append(point)
+        current_size += point_size
+
+        if len(current_batch) == 1 and point_size > max_payload_bytes:
+            logger.warning(
+                "Single Qdrant point payload is estimated at %.2f MiB, above configured %.2f MiB limit",
+                point_size / (1024 * 1024),
+                max_payload_bytes / (1024 * 1024),
+            )
+            batches.append(current_batch)
+            current_batch = []
+            current_size = 1024
+
+    if current_batch:
+        batches.append(current_batch)
+    return batches
 
 
 def _coerce_qdrant_dense_vector(vector_data: Any) -> list[float] | None:
@@ -604,6 +715,11 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         # Initialize client as None - will be created in initialize() method
         self._client = None
         self._max_batch_size = self.global_config["embedding_batch_num"]
+        self._max_upsert_payload_bytes = _normalize_positive_int_env(
+            "QDRANT_UPSERT_MAX_PAYLOAD_BYTES",
+            DEFAULT_QDRANT_UPSERT_MAX_PAYLOAD_BYTES,
+            minimum=1024 * 1024,
+        )
         self._initialized = False
         self._client_timeout = _normalize_timeout_seconds(
             os.environ.get(
@@ -836,12 +952,26 @@ class QdrantVectorDBStorage(BaseVectorStorage):
                 )
             )
 
-        results = await self._run_client_call_with_timeout(
-            self._client.upsert,
-            collection_name=self.final_namespace,
-            points=list_points,
-            wait=True,
+        point_batches = _iter_qdrant_point_batches_by_payload(
+            list_points, self._max_upsert_payload_bytes
         )
+        if len(point_batches) > 1:
+            logger.info(
+                "[%s] Splitting Qdrant upsert for %s into %d requests below %.2f MiB",
+                self.workspace,
+                self.namespace,
+                len(point_batches),
+                self._max_upsert_payload_bytes / (1024 * 1024),
+            )
+
+        results = None
+        for point_batch in point_batches:
+            results = await self._run_client_call_with_timeout(
+                self._client.upsert,
+                collection_name=self.final_namespace,
+                points=point_batch,
+                wait=True,
+            )
         return results
 
     async def query(
