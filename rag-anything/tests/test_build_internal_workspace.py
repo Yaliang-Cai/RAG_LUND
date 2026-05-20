@@ -455,6 +455,31 @@ def test_processor_reuses_legacy_safe_stem_mineru_output(tmp_path):
     assert content == [{"type": "image", "img_path": str(image_path.resolve())}]
 
 
+def test_processor_reuses_older_mineru_output(tmp_path):
+    raw_dir = tmp_path / "raw"
+    output_root = tmp_path / "output" / "ws"
+    raw_dir.mkdir()
+    source = raw_dir / "A Test.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    artifact = output_root / "A Test" / "auto" / "A Test_content_list.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        json.dumps([{"type": "text", "text": "ok"}]),
+        encoding="utf-8",
+    )
+    os.utime(artifact, (source.stat().st_mtime - 10, source.stat().st_mtime - 10))
+
+    content = asyncio.run(
+        _DummyProcessor()._try_load_existing_mineru_output(
+            file_path=source,
+            output_dir=str(output_root),
+            parse_method="auto",
+        )
+    )
+
+    assert content == [{"type": "text", "text": "ok"}]
+
+
 def test_mineru_preparse_runs_for_missing_or_stale_artifact(monkeypatch, tmp_path):
     raw_dir = tmp_path / "raw"
     storage_root = tmp_path / "internal"
@@ -536,6 +561,35 @@ def test_mineru_preparse_reuses_legacy_root_converted_pdf(tmp_path):
     assert pdf_path == legacy_pdf
 
 
+def test_mineru_preparse_reuses_legacy_root_converted_pdf_even_if_older(
+    monkeypatch, tmp_path
+):
+    from raganything.parser import MineruParser
+
+    output_root = tmp_path / "output" / "ws"
+    source = tmp_path / "raw" / "A Test.docx"
+    source.parent.mkdir()
+    source.write_text("docx", encoding="utf-8")
+    legacy_pdf = output_root / "A Test.pdf"
+    legacy_pdf.parent.mkdir(parents=True)
+    legacy_pdf.write_bytes(b"%PDF")
+    os.utime(
+        legacy_pdf,
+        (source.stat().st_mtime - 10, source.stat().st_mtime - 10),
+    )
+    called = []
+    monkeypatch.setattr(
+        MineruParser,
+        "convert_office_to_pdf",
+        lambda doc_path, output_dir: called.append((doc_path, output_dir)),
+    )
+
+    pdf_path = build_internal._prepare_mineru_preparse_input(source, output_root)
+
+    assert pdf_path == legacy_pdf
+    assert called == []
+
+
 def test_mineru_preparse_records_conversion_failure_and_continues(
     monkeypatch, tmp_path
 ):
@@ -590,6 +644,8 @@ def test_mineru_preparse_records_conversion_failure_and_continues(
     )
     assert "Bad File.docx" in commands
     assert "lo_profile_" in commands
+    assert "manual_convert_failed=1" in commands
+    assert "One or more manual conversions failed." in commands
 
 
 def test_build_returns_failure_for_preparse_failure_and_skips_ingest(

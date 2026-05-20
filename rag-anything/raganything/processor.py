@@ -1041,11 +1041,11 @@ class ProcessorMixin:
         try:
             source_mtime = file_path.stat().st_mtime
             if latest_json.stat().st_mtime < source_mtime:
-                self.logger.debug(
-                    "Found MinerU output but it is older than source file, skip reuse: %s",
+                self.logger.warning(
+                    "Reusing MinerU output older than source file: %s. "
+                    "Delete the artifact to force reparsing after source content changes.",
                     latest_json,
                 )
-                return None
         except Exception as exc:
             self.logger.debug("Failed to compare mtime for MinerU reuse: %s", exc)
 
