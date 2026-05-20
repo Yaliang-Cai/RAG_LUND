@@ -19,3 +19,21 @@ router = APIRouter(tags=["graph-edit"])
 
 class PropertyUpdate(BaseModel):
     properties: dict[str, Any] = Field(default_factory=dict)
+
+
+def get_service(request: Request):
+    """Resolved via app.dependency_overrides in app.py; tests override directly."""
+    return request.app.state.service
+
+
+def get_gov(request: Request):
+    return request.app.state.gov
+
+
+@router.get("/graph/{workspace_id}/nodes/{node_id}")
+async def get_node(workspace_id: str, node_id: str, service=Depends(get_service)):
+    rag = await service.get_rag(workspace_id)
+    node = await rag.chunk_entity_relation_graph.get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
+    return {"id": node_id, "properties": dict(node)}
