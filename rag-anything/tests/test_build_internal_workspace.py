@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import os
 import subprocess
 import sys
 from enum import Enum
@@ -8,10 +11,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from scripts import build_internal_workspace as build_internal
+from raganything.processor import ProcessorMixin
 
 
 class _FakeEnum(Enum):
     VALUE = "value"
+
+
+class _DummyProcessor(ProcessorMixin):
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(parser="mineru")
+        self.logger = logging.getLogger("dummy_processor")
+
+    def _resolve_mineru_method(self, parse_method, **kwargs):
+        return parse_method or "auto"
 
 
 class _FakeDocStatus:
@@ -172,6 +185,18 @@ def _patch_fake_service(monkeypatch, *, fail_names=None):
     fake = _FakeService(fail_names=fail_names)
     monkeypatch.setattr(
         build_internal,
+        "preparse_mineru_files",
+        lambda profile, files, report_dir: {
+            "enabled": True,
+            "output_dir": str(profile.output_dir / profile.workspace_id),
+            "candidate_count": len(files),
+            "skipped_count": len(files),
+            "parsed_count": 0,
+            "pending_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        build_internal,
         "build_local_settings",
         lambda profile: SimpleNamespace(
             working_dir_root=str(profile.working_dir_root),
@@ -237,6 +262,9 @@ def test_local_env_enables_internal_build_defaults():
     assert env["ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE"] == "true"
     assert env["CONTEXT_ZERO_WINDOW_CONTENT_TYPES"]
     assert env["RAGANYTHING_SERIALIZE_MINERU"] == "true"
+    assert env["MINERU_VLLM_GPU_MEMORY_UTILIZATION"] == "0.1"
+    assert env["MAX_SOURCE_IDS_PER_ENTITY"] == "99999"
+    assert env["MAX_SOURCE_IDS_PER_RELATION"] == "99999"
     assert env["MAX_CONCURRENT_FILES"] == "4"
 
 
@@ -268,6 +296,161 @@ def test_supported_files_are_top_level_only(tmp_path):
     files = build_internal.collect_supported_files(tmp_path)
 
     assert [p.name for p in files] == ["a.pdf", "b.txt"]
+
+
+def test_mineru_preparse_skips_valid_new_artifact(monkeypatch, tmp_path):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "a.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    artifact = (
+        storage_root
+        / "output"
+        / "ws"
+        / "a"
+        / "auto"
+        / "a_content_list.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps([{"type": "text", "text": "ok"}]), encoding="utf-8")
+    os.utime(artifact, (source.stat().st_mtime + 1, source.stat().st_mtime + 1))
+    called = []
+    monkeypatch.setattr(
+        build_internal,
+        "_run_mineru_preparse_command",
+        lambda input_dir, output_root: called.append((input_dir, output_root)),
+    )
+
+    summary = build_internal.preparse_mineru_files(
+        profile,
+        [source],
+        tmp_path / "reports",
+    )
+
+    assert called == []
+    assert summary["skipped_count"] == 1
+    assert summary["parsed_count"] == 0
+
+
+def test_mineru_preparse_skips_valid_legacy_safe_stem_artifact(monkeypatch, tmp_path):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "A Test.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    artifact = (
+        storage_root
+        / "output"
+        / "ws"
+        / "A_Test"
+        / "A Test"
+        / "auto"
+        / "A Test_content_list.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps([{"type": "text", "text": "ok"}]), encoding="utf-8")
+    os.utime(artifact, (source.stat().st_mtime + 1, source.stat().st_mtime + 1))
+    called = []
+    monkeypatch.setattr(
+        build_internal,
+        "_run_mineru_preparse_command",
+        lambda input_dir, output_root: called.append((input_dir, output_root)),
+    )
+
+    summary = build_internal.preparse_mineru_files(
+        profile,
+        [source],
+        tmp_path / "reports",
+    )
+
+    assert called == []
+    assert summary["skipped_count"] == 1
+    assert summary["parsed_count"] == 0
+
+
+def test_processor_reuses_legacy_safe_stem_mineru_output(tmp_path):
+    raw_dir = tmp_path / "raw"
+    output_root = tmp_path / "output" / "ws"
+    raw_dir.mkdir()
+    source = raw_dir / "A Test.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    artifact = (
+        output_root
+        / "A_Test"
+        / "A Test"
+        / "auto"
+        / "A Test_content_list.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    image_path = artifact.parent / "images" / "x.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"png")
+    artifact.write_text(
+        json.dumps([{"type": "image", "img_path": "images/x.png"}]),
+        encoding="utf-8",
+    )
+    os.utime(artifact, (source.stat().st_mtime + 1, source.stat().st_mtime + 1))
+
+    content = asyncio.run(
+        _DummyProcessor()._try_load_existing_mineru_output(
+            file_path=source,
+            output_dir=str(output_root),
+            parse_method="auto",
+        )
+    )
+
+    assert content == [{"type": "image", "img_path": str(image_path.resolve())}]
+
+
+def test_mineru_preparse_runs_for_missing_or_stale_artifact(monkeypatch, tmp_path):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "a.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    calls = []
+
+    def fake_run(input_dir, output_root):
+        calls.append((input_dir, output_root))
+        artifact = output_root / "a" / "auto" / "a_content_list.json"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text(
+            json.dumps([{"type": "text", "text": "ok"}]),
+            encoding="utf-8",
+        )
+        os.utime(artifact, (source.stat().st_mtime + 1, source.stat().st_mtime + 1))
+
+    monkeypatch.setattr(build_internal, "_run_mineru_preparse_command", fake_run)
+
+    summary = build_internal.preparse_mineru_files(
+        profile,
+        [source],
+        tmp_path / "reports",
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1] == storage_root / "output" / "ws"
+    assert summary["pending_count"] == 1
+    assert summary["parsed_count"] == 1
 
 
 def test_script_file_help_runs_from_repo_root():
@@ -357,6 +540,10 @@ def test_build_uses_local_service_batches_and_exports_reports(monkeypatch, tmp_p
     ]
     assert all(call["workspace_id"] == "ws" for call in fake.ingest_calls)
     assert all(call["serialize_by_workspace_id"] is False for call in fake.ingest_calls)
+    assert all(
+        Path(call["output_dir"]) == storage_root / "output" / "ws"
+        for call in fake.ingest_calls
+    )
     assert fake.synonym_calls == [("ws", False, True)]
     report_dir = sorted((storage_root / "reports").iterdir())[0]
     summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
@@ -365,6 +552,8 @@ def test_build_uses_local_service_batches_and_exports_reports(monkeypatch, tmp_p
         ["c.pdf"],
     ]
     assert summary["failed_count"] == 0
+    assert summary["mineru_preparse"]["enabled"] is True
+    assert summary["mineru_preparse"]["skipped_count"] == 3
     assert Path(summary["log_file"]).exists()
     log_text = Path(summary["log_file"]).read_text(encoding="utf-8")
     assert "Internal build start" in log_text

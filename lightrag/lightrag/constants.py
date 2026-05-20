@@ -100,8 +100,8 @@ DEFAULT_MIN_RERANK_SCORE = 0.0
 DEFAULT_RERANK_BINDING = "null"
 
 # Default source ids limit in meta data for entity and relation
-DEFAULT_MAX_SOURCE_IDS_PER_ENTITY = 300
-DEFAULT_MAX_SOURCE_IDS_PER_RELATION = 300
+DEFAULT_MAX_SOURCE_IDS_PER_ENTITY = 99999
+DEFAULT_MAX_SOURCE_IDS_PER_RELATION = 99999
 ### control chunk_ids limitation method: FIFO, FIFO
 ###    FIFO: First in first out
 ###    KEEP: Keep oldest (less merge action and faster)

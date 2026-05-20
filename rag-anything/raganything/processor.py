@@ -970,9 +970,14 @@ class ProcessorMixin:
         if direct_json.exists():
             candidates.append(direct_json)
 
-        stem_subdir = base_output_dir / file_stem
-        if stem_subdir.is_dir():
-            candidates.extend(stem_subdir.rglob(f"{file_stem}_content_list.json"))
+        safe_stem = (
+            "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in file_stem.strip())
+            or "file"
+        )
+        for subdir_name in dict.fromkeys((file_stem, safe_stem)):
+            stem_subdir = base_output_dir / subdir_name
+            if stem_subdir.is_dir():
+                candidates.extend(stem_subdir.rglob(f"{file_stem}_content_list.json"))
 
         if not candidates:
             return None
@@ -1016,6 +1021,8 @@ class ProcessorMixin:
             ".pptx",
             ".xls",
             ".xlsx",
+            ".txt",
+            ".md",
             ".html",
             ".htm",
             ".xhtml",
@@ -1044,8 +1051,13 @@ class ProcessorMixin:
 
         resolved_method = self._resolve_mineru_method(parse_method, **kwargs)
         parser = MineruParser()
+        read_base_output_dir = base_output_dir
+        for parent in latest_json.parents:
+            if parent.name == file_stem:
+                read_base_output_dir = parent.parent
+                break
         content_list, _ = parser._read_output_files(
-            base_output_dir,
+            read_base_output_dir,
             file_stem,
             method=resolved_method,
         )

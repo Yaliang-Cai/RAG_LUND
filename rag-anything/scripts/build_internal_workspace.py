@@ -12,7 +12,9 @@ import io
 import json
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -40,6 +42,7 @@ from raganything.constants import (
     DEFAULT_LLM_MODEL_MAX_ASYNC,
     DEFAULT_MAX_ASYNC_INGEST,
     DEFAULT_MAX_PARALLEL_INSERT,
+    DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION,
     DEFAULT_SUPPORTED_FILE_EXTENSIONS,
 )
 
@@ -50,6 +53,33 @@ PROD_STORAGE_ROOT = Path("/data/y50056788/Yaliang/internal")
 
 DEFAULT_INGEST_TIMEOUT_SECONDS = 7200.0
 DEFAULT_MAX_FILE_ATTEMPTS = 2
+MINERU_DIRECT_EXTENSIONS = {
+    ".pdf",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".gif",
+    ".webp",
+}
+MINERU_OFFICE_EXTENSIONS = {
+    ".doc",
+    ".docx",
+    ".ppt",
+    ".pptx",
+    ".xls",
+    ".xlsx",
+}
+MINERU_TEXT_EXTENSIONS = {
+    ".txt",
+    ".md",
+}
+MINERU_PREPARSE_EXTENSIONS = (
+    MINERU_DIRECT_EXTENSIONS | MINERU_OFFICE_EXTENSIONS | MINERU_TEXT_EXTENSIONS
+)
+INTERNAL_SOURCE_IDS_LIMIT = 99999
 
 LOGGER = logging.getLogger("internal_build")
 
@@ -275,6 +305,10 @@ def build_local_env(
 ) -> dict[str, str]:
     env = dict(os.environ if base_env is None else base_env)
     max_async_ingest = max(1, int(max_async_ingest))
+    mineru_gpu_memory_utilization = env.get(
+        "MINERU_VLLM_GPU_MEMORY_UTILIZATION",
+        str(DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION),
+    )
     env.update(
         {
             "RAGANYTHING_WORKDIR_ROOT": _path_env(profile.working_dir_root),
@@ -290,6 +324,11 @@ def build_local_env(
             "ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE": "true",
             "CONTEXT_ZERO_WINDOW_CONTENT_TYPES": DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
             "RAGANYTHING_SERIALIZE_MINERU": "true",
+            "MINERU_VLLM_GPU_MEMORY_UTILIZATION": str(
+                mineru_gpu_memory_utilization
+            ),
+            "MAX_SOURCE_IDS_PER_ENTITY": str(INTERNAL_SOURCE_IDS_LIMIT),
+            "MAX_SOURCE_IDS_PER_RELATION": str(INTERNAL_SOURCE_IDS_LIMIT),
             "MAX_CONCURRENT_FILES": str(max_async_ingest),
         }
     )
@@ -462,6 +501,255 @@ def _safe_stem(path: Path) -> str:
 def _iter_batches(items: list[Path], batch_size: int) -> Iterable[list[Path]]:
     for start in range(0, len(items), batch_size):
         yield items[start : start + batch_size]
+
+
+def _mineru_workspace_output_dir(profile: BuildProfile) -> Path:
+    return profile.output_dir / profile.workspace_id
+
+
+def _mineru_content_json_candidates(output_root: Path, source_path: Path) -> list[Path]:
+    stem = source_path.stem
+    safe_stem = _safe_stem(source_path)
+    candidates: list[Path] = []
+    direct_json = output_root / f"{stem}_content_list.json"
+    if direct_json.exists():
+        candidates.append(direct_json)
+
+    for subdir_name in dict.fromkeys((stem, safe_stem)):
+        subdir = output_root / subdir_name
+        if subdir.is_dir():
+            candidates.extend(subdir.rglob(f"{stem}_content_list.json"))
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(candidate)
+    return deduped
+
+
+def _read_nonempty_content_list(json_path: Path) -> list[Any] | None:
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if isinstance(payload, list) and payload:
+        return payload
+    return None
+
+
+def _find_valid_mineru_artifact(output_root: Path, source_path: Path) -> Path | None:
+    source_mtime = source_path.stat().st_mtime
+    valid_candidates: list[Path] = []
+    for candidate in _mineru_content_json_candidates(output_root, source_path):
+        try:
+            if candidate.stat().st_mtime < source_mtime:
+                continue
+        except OSError:
+            continue
+        if _read_nonempty_content_list(candidate) is not None:
+            valid_candidates.append(candidate)
+    if not valid_candidates:
+        return None
+    try:
+        return max(valid_candidates, key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return valid_candidates[0]
+
+
+def _should_preparse_with_mineru(file_path: Path) -> bool:
+    return file_path.suffix.lower() in MINERU_PREPARSE_EXTENSIONS
+
+
+def _prepare_mineru_preparse_input(file_path: Path, output_root: Path) -> Path:
+    suffix = file_path.suffix.lower()
+    if suffix in MINERU_OFFICE_EXTENSIONS:
+        pdf_path = output_root / f"{file_path.stem}.pdf"
+        try:
+            if (
+                pdf_path.exists()
+                and pdf_path.stat().st_size > 0
+                and pdf_path.stat().st_mtime >= file_path.stat().st_mtime
+            ):
+                LOGGER.info(
+                    "Reusing LibreOffice PDF for MinerU preparse file=%s pdf=%s",
+                    file_path.name,
+                    pdf_path,
+                )
+                return pdf_path
+        except OSError:
+            pass
+        from raganything.parser import MineruParser
+
+        LOGGER.info(
+            "Converting Office document before MinerU preparse file=%s output_dir=%s",
+            file_path.name,
+            output_root,
+        )
+        return MineruParser.convert_office_to_pdf(file_path, output_root)
+    if suffix in MINERU_TEXT_EXTENSIONS:
+        pdf_path = output_root / f"{file_path.stem}.pdf"
+        try:
+            if (
+                pdf_path.exists()
+                and pdf_path.stat().st_size > 0
+                and pdf_path.stat().st_mtime >= file_path.stat().st_mtime
+            ):
+                LOGGER.info(
+                    "Reusing text PDF for MinerU preparse file=%s pdf=%s",
+                    file_path.name,
+                    pdf_path,
+                )
+                return pdf_path
+        except OSError:
+            pass
+        from raganything.parser import MineruParser
+
+        LOGGER.info(
+            "Converting text document before MinerU preparse file=%s output_dir=%s",
+            file_path.name,
+            output_root,
+        )
+        return MineruParser.convert_text_to_pdf(file_path, output_root)
+    return file_path
+
+
+def _stage_mineru_input(input_path: Path, staging_dir: Path, used_names: set[str]) -> Path:
+    staged_path = staging_dir / input_path.name
+    if staged_path.name in used_names:
+        raise RuntimeError(
+            "MinerU preparse input name collision for "
+            f"{input_path.name}. Use unique source file stems."
+        )
+    used_names.add(staged_path.name)
+    try:
+        os.symlink(input_path, staged_path)
+    except Exception:
+        try:
+            os.link(input_path, staged_path)
+        except Exception:
+            shutil.copy2(input_path, staged_path)
+    return staged_path
+
+
+def _run_mineru_preparse_command(input_dir: Path, output_root: Path) -> None:
+    from raganything.parser import MineruParser
+
+    MineruParser._run_mineru_command(
+        input_path=input_dir,
+        output_dir=output_root,
+        method="auto",
+    )
+
+
+def preparse_mineru_files(
+    profile: BuildProfile,
+    files: list[Path],
+    report_dir: Path,
+) -> dict[str, Any]:
+    output_root = _mineru_workspace_output_dir(profile)
+    output_root.mkdir(parents=True, exist_ok=True)
+    candidates = [path for path in files if _should_preparse_with_mineru(path)]
+    summary: dict[str, Any] = {
+        "enabled": True,
+        "output_dir": _path_env(output_root),
+        "candidate_count": len(candidates),
+        "skipped_count": 0,
+        "parsed_count": 0,
+        "pending_count": 0,
+        "skipped": [],
+        "parsed": [],
+        "missing_after_parse": [],
+    }
+
+    pending: list[Path] = []
+    for file_path in candidates:
+        existing = _find_valid_mineru_artifact(output_root, file_path)
+        if existing is not None:
+            summary["skipped"].append(
+                {
+                    "file": file_path.name,
+                    "artifact": _path_env(existing),
+                }
+            )
+            continue
+        pending.append(file_path)
+
+    summary["skipped_count"] = len(summary["skipped"])
+    summary["pending_count"] = len(pending)
+    if not pending:
+        LOGGER.info(
+            "MinerU preparse skipped for all files candidate_count=%d output_dir=%s",
+            len(candidates),
+            output_root,
+        )
+        return summary
+
+    LOGGER.info(
+        "MinerU preparse start pending=%d skipped=%d output_dir=%s",
+        len(pending),
+        summary["skipped_count"],
+        output_root,
+    )
+    report_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="mineru_preparse_", dir=report_dir
+    ) as temp_dir:
+        staging_dir = Path(temp_dir) / "inputs"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        used_names: set[str] = set()
+        staged_records: list[dict[str, str]] = []
+        for file_path in pending:
+            mineru_input = _prepare_mineru_preparse_input(file_path, output_root)
+            staged_input = _stage_mineru_input(mineru_input, staging_dir, used_names)
+            staged_records.append(
+                {
+                    "file": file_path.name,
+                    "mineru_input": _path_env(mineru_input),
+                    "staged_input": _path_env(staged_input),
+                }
+            )
+
+        LOGGER.info(
+            "Executing MinerU preparse directory input_dir=%s files=%d",
+            staging_dir,
+            len(staged_records),
+        )
+        _run_mineru_preparse_command(staging_dir, output_root)
+
+    parsed_records: list[dict[str, str]] = []
+    missing_records: list[dict[str, str]] = []
+    for file_path in pending:
+        artifact = _find_valid_mineru_artifact(output_root, file_path)
+        if artifact is None:
+            missing_records.append({"file": file_path.name})
+            continue
+        parsed_records.append(
+            {
+                "file": file_path.name,
+                "artifact": _path_env(artifact),
+            }
+        )
+
+    summary["parsed"] = parsed_records
+    summary["parsed_count"] = len(parsed_records)
+    summary["missing_after_parse"] = missing_records
+    if missing_records:
+        missing_names = ", ".join(record["file"] for record in missing_records)
+        raise RuntimeError(
+            "MinerU preparse completed but content_list artifacts are missing "
+            f"or stale for: {missing_names}"
+        )
+
+    LOGGER.info(
+        "MinerU preparse complete parsed=%d skipped=%d output_dir=%s",
+        summary["parsed_count"],
+        summary["skipped_count"],
+        output_root,
+    )
+    return summary
 
 
 def _json_safe(value: Any) -> Any:
@@ -859,7 +1147,7 @@ async def _ingest_one(
     timeout_seconds: float,
     max_attempts: int,
 ) -> dict[str, Any]:
-    output_dir = profile.output_dir / profile.workspace_id / _safe_stem(file_path)
+    output_dir = _mineru_workspace_output_dir(profile)
     output_dir.mkdir(parents=True, exist_ok=True)
     attempts: list[dict[str, Any]] = []
     for attempt in range(1, max(1, int(max_attempts)) + 1):
@@ -1029,7 +1317,7 @@ async def _run_build_async(
         index_profile=index_profile,
         allow_legacy_adoption=bool(args.allow_legacy_index_profile_adoption),
     )
-    service = create_local_rag_service(settings)
+    service = None
     start_time = time.time()
     summary = _summary_base(
         profile=profile,
@@ -1056,6 +1344,21 @@ async def _run_build_async(
             max_async_ingest,
             recycle_service_every,
         )
+        if getattr(args, "skip_mineru_preparse", False):
+            summary["mineru_preparse"] = {
+                "enabled": False,
+                "reason": "disabled_by_cli",
+                "output_dir": _path_env(_mineru_workspace_output_dir(profile)),
+            }
+            LOGGER.info("MinerU preparse disabled by CLI")
+        else:
+            summary["mineru_preparse"] = preparse_mineru_files(
+                profile,
+                files,
+                report_dir,
+            )
+
+        service = create_local_rag_service(settings)
         batch_results: list[dict[str, Any]] = []
         attempted_since_recycle = 0
         for batch_index, batch in enumerate(
@@ -1188,9 +1491,10 @@ async def _run_build_async(
         print(f"Reports written to {report_dir}")
         return 1 if failed_results else 0
     finally:
-        cleanup = getattr(service, "cleanup_workspace_instance", None)
-        if callable(cleanup):
-            await _maybe_await(cleanup(profile.workspace_id))
+        if service is not None:
+            cleanup = getattr(service, "cleanup_workspace_instance", None)
+            if callable(cleanup):
+                await _maybe_await(cleanup(profile.workspace_id))
 
 
 async def _run_report_async(
@@ -1384,6 +1688,11 @@ def run_build(args: argparse.Namespace) -> int:
                 files=files,
             )
             summary["dry_run"] = True
+            summary["mineru_preparse"] = {
+                "enabled": not bool(args.skip_mineru_preparse),
+                "dry_run": True,
+                "output_dir": _path_env(_mineru_workspace_output_dir(profile)),
+            }
             _attach_log_summary(summary, log_context)
             _write_json(report_dir / "summary.json", summary)
             LOGGER.info("Dry-run build complete reports=%s", report_dir)
@@ -1509,6 +1818,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delete-llm-cache", action="store_true")
     parser.add_argument("--doc-id", default=None)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--skip-mineru-preparse",
+        action="store_true",
+        help=(
+            "Disable the default MinerU preparse stage and let each ingest parse "
+            "through the normal LocalRagService path."
+        ),
+    )
     parser.add_argument(
         "--allow-legacy-index-profile-adoption",
         action="store_true",
