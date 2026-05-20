@@ -453,6 +453,49 @@ def test_mineru_preparse_runs_for_missing_or_stale_artifact(monkeypatch, tmp_pat
     assert summary["parsed_count"] == 1
 
 
+def test_mineru_preparse_converts_office_pdf_inside_file_dir(monkeypatch, tmp_path):
+    from raganything.parser import MineruParser
+
+    output_root = tmp_path / "output" / "ws"
+    source = tmp_path / "raw" / "A Test.docx"
+    source.parent.mkdir()
+    source.write_text("docx", encoding="utf-8")
+    calls = []
+
+    def fake_convert(doc_path, output_dir):
+        calls.append((Path(doc_path), Path(output_dir)))
+        pdf = Path(output_dir) / "A Test.pdf"
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        pdf.write_bytes(b"%PDF")
+        os.utime(pdf, (source.stat().st_mtime + 1, source.stat().st_mtime + 1))
+        return pdf
+
+    monkeypatch.setattr(MineruParser, "convert_office_to_pdf", fake_convert)
+
+    pdf_path = build_internal._prepare_mineru_preparse_input(source, output_root)
+
+    assert calls == [(source, output_root / "A_Test")]
+    assert pdf_path == output_root / "A_Test" / "A Test.pdf"
+
+
+def test_mineru_preparse_reuses_legacy_root_converted_pdf(tmp_path):
+    output_root = tmp_path / "output" / "ws"
+    source = tmp_path / "raw" / "A Test.docx"
+    source.parent.mkdir()
+    source.write_text("docx", encoding="utf-8")
+    legacy_pdf = output_root / "A Test.pdf"
+    legacy_pdf.parent.mkdir(parents=True)
+    legacy_pdf.write_bytes(b"%PDF")
+    os.utime(
+        legacy_pdf,
+        (source.stat().st_mtime + 1, source.stat().st_mtime + 1),
+    )
+
+    pdf_path = build_internal._prepare_mineru_preparse_input(source, output_root)
+
+    assert pdf_path == legacy_pdf
+
+
 def test_script_file_help_runs_from_repo_root():
     result = subprocess.run(
         [sys.executable, "scripts/build_internal_workspace.py", "--help"],

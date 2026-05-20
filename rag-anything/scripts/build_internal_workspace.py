@@ -563,56 +563,66 @@ def _should_preparse_with_mineru(file_path: Path) -> bool:
     return file_path.suffix.lower() in MINERU_PREPARSE_EXTENSIONS
 
 
+def _converted_pdf_paths(file_path: Path, output_root: Path) -> tuple[Path, ...]:
+    preferred_dir = output_root / _safe_stem(file_path)
+    preferred_pdf = preferred_dir / f"{file_path.stem}.pdf"
+    legacy_root_pdf = output_root / f"{file_path.stem}.pdf"
+    if preferred_pdf == legacy_root_pdf:
+        return (preferred_pdf,)
+    return (preferred_pdf, legacy_root_pdf)
+
+
+def _valid_converted_pdf(pdf_path: Path, source_path: Path) -> bool:
+    try:
+        return (
+            pdf_path.exists()
+            and pdf_path.stat().st_size > 0
+            and pdf_path.stat().st_mtime >= source_path.stat().st_mtime
+        )
+    except OSError:
+        return False
+
+
 def _prepare_mineru_preparse_input(file_path: Path, output_root: Path) -> Path:
     suffix = file_path.suffix.lower()
     if suffix in MINERU_OFFICE_EXTENSIONS:
-        pdf_path = output_root / f"{file_path.stem}.pdf"
-        try:
-            if (
-                pdf_path.exists()
-                and pdf_path.stat().st_size > 0
-                and pdf_path.stat().st_mtime >= file_path.stat().st_mtime
-            ):
+        preferred_pdf, *legacy_pdfs = _converted_pdf_paths(file_path, output_root)
+        for pdf_path in (preferred_pdf, *legacy_pdfs):
+            if _valid_converted_pdf(pdf_path, file_path):
                 LOGGER.info(
                     "Reusing LibreOffice PDF for MinerU preparse file=%s pdf=%s",
                     file_path.name,
                     pdf_path,
                 )
                 return pdf_path
-        except OSError:
-            pass
         from raganything.parser import MineruParser
 
+        preferred_pdf.parent.mkdir(parents=True, exist_ok=True)
         LOGGER.info(
             "Converting Office document before MinerU preparse file=%s output_dir=%s",
             file_path.name,
-            output_root,
+            preferred_pdf.parent,
         )
-        return MineruParser.convert_office_to_pdf(file_path, output_root)
+        return MineruParser.convert_office_to_pdf(file_path, preferred_pdf.parent)
     if suffix in MINERU_TEXT_EXTENSIONS:
-        pdf_path = output_root / f"{file_path.stem}.pdf"
-        try:
-            if (
-                pdf_path.exists()
-                and pdf_path.stat().st_size > 0
-                and pdf_path.stat().st_mtime >= file_path.stat().st_mtime
-            ):
+        preferred_pdf, *legacy_pdfs = _converted_pdf_paths(file_path, output_root)
+        for pdf_path in (preferred_pdf, *legacy_pdfs):
+            if _valid_converted_pdf(pdf_path, file_path):
                 LOGGER.info(
                     "Reusing text PDF for MinerU preparse file=%s pdf=%s",
                     file_path.name,
                     pdf_path,
                 )
                 return pdf_path
-        except OSError:
-            pass
         from raganything.parser import MineruParser
 
+        preferred_pdf.parent.mkdir(parents=True, exist_ok=True)
         LOGGER.info(
             "Converting text document before MinerU preparse file=%s output_dir=%s",
             file_path.name,
-            output_root,
+            preferred_pdf.parent,
         )
-        return MineruParser.convert_text_to_pdf(file_path, output_root)
+        return MineruParser.convert_text_to_pdf(file_path, preferred_pdf.parent)
     return file_path
 
 
