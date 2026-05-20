@@ -544,13 +544,19 @@ def _find_valid_mineru_artifact(output_root: Path, source_path: Path) -> Path | 
     source_mtime = source_path.stat().st_mtime
     valid_candidates: list[Path] = []
     for candidate in _mineru_content_json_candidates(output_root, source_path):
+        if _read_nonempty_content_list(candidate) is None:
+            continue
         try:
             if candidate.stat().st_mtime < source_mtime:
-                continue
+                LOGGER.warning(
+                    "Reusing MinerU artifact older than source file=%s artifact=%s. "
+                    "Delete the artifact to force reparsing after source content changes.",
+                    source_path.name,
+                    candidate,
+                )
         except OSError:
-            continue
-        if _read_nonempty_content_list(candidate) is not None:
-            valid_candidates.append(candidate)
+            pass
+        valid_candidates.append(candidate)
     if not valid_candidates:
         return None
     try:

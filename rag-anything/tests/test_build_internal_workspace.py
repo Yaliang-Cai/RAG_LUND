@@ -381,6 +381,46 @@ def test_mineru_preparse_skips_valid_legacy_safe_stem_artifact(monkeypatch, tmp_
     assert summary["parsed_count"] == 0
 
 
+def test_mineru_preparse_skips_nonempty_artifact_even_if_older(monkeypatch, tmp_path):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "a.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    artifact = (
+        storage_root
+        / "output"
+        / "ws"
+        / "a"
+        / "auto"
+        / "a_content_list.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps([{"type": "text", "text": "ok"}]), encoding="utf-8")
+    os.utime(artifact, (source.stat().st_mtime - 10, source.stat().st_mtime - 10))
+    called = []
+    monkeypatch.setattr(
+        build_internal,
+        "_run_mineru_preparse_command",
+        lambda input_dir, output_root: called.append((input_dir, output_root)),
+    )
+
+    summary = build_internal.preparse_mineru_files(
+        profile,
+        [source],
+        tmp_path / "reports",
+    )
+
+    assert called == []
+    assert summary["skipped_count"] == 1
+
+
 def test_processor_reuses_legacy_safe_stem_mineru_output(tmp_path):
     raw_dir = tmp_path / "raw"
     output_root = tmp_path / "output" / "ws"
