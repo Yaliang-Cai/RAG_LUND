@@ -9,6 +9,7 @@ describe('AppStore', () => {
       theme: 'dark',
       selectedFileId: null,
       pendingPageNum: null,
+      pendingChunkText: null,
       lastSeenJobStatuses: {},
     })
   })
@@ -30,5 +31,12 @@ describe('AppStore', () => {
     expect(useAppStore.getState().pendingPageNum).toBe(5)
     act(() => useAppStore.getState().setPendingPageNum(null))
     expect(useAppStore.getState().pendingPageNum).toBeNull()
+  })
+
+  it('sets pendingChunkText and clears it', () => {
+    act(() => useAppStore.getState().setPendingChunkText('hello world'))
+    expect(useAppStore.getState().pendingChunkText).toBe('hello world')
+    act(() => useAppStore.getState().setPendingChunkText(null))
+    expect(useAppStore.getState().pendingChunkText).toBeNull()
   })
 })

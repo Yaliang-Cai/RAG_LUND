@@ -11,6 +11,8 @@ interface AppStore {
   setSelectedFile: (id: string | null) => void
   pendingPageNum: number | null
   setPendingPageNum: (n: number | null) => void
+  pendingChunkText: string | null
+  setPendingChunkText: (t: string | null) => void
   lastSeenJobStatuses: Record<string, string>
   setLastSeenJobStatuses: (statuses: Record<string, string>) => void
   // Chat history — persists across navigation (not persisted to localStorage)
@@ -30,6 +32,8 @@ export const useAppStore = create<AppStore>()(
       setSelectedFile: (id) => set({ selectedFileId: id }),
       pendingPageNum: null,
       setPendingPageNum: (n) => set({ pendingPageNum: n }),
+      pendingChunkText: null,
+      setPendingChunkText: (t) => set({ pendingChunkText: t }),
       lastSeenJobStatuses: {},
       setLastSeenJobStatuses: (statuses) => set({ lastSeenJobStatuses: statuses }),
       chatMessages: [],

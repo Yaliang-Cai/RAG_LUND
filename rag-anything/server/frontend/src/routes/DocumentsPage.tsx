@@ -11,7 +11,14 @@ import { Button } from '@/components/ui/button'
 
 export default function DocumentsPage() {
   const workspaceId = useAppStore((s) => s.workspaceId)
-  const { pendingPageNum, setPendingPageNum, selectedFileId, setSelectedFile } = useAppStore()
+  const {
+    pendingPageNum,
+    setPendingPageNum,
+    pendingChunkText,
+    setPendingChunkText,
+    selectedFileId,
+    setSelectedFile,
+  } = useAppStore()
   const { data: files = [] } = useFiles(workspaceId)
   const { data: workspaces = [] } = useWorkspaces()
   const workspace = workspaces.find((w) => w.workspace_id === workspaceId)
@@ -33,6 +40,11 @@ export default function DocumentsPage() {
   useEffect(() => {
     if (pendingPageNum !== null) setTab('pdf')
   }, [pendingPageNum])
+
+  // Chunk jump for text chunks: force markdown tab when pendingChunkText is set
+  useEffect(() => {
+    if (pendingChunkText !== null) setTab('markdown')
+  }, [pendingChunkText])
 
   const isPdf = selectedFilename?.toLowerCase().endsWith('.pdf') ?? false
 
@@ -75,7 +87,13 @@ export default function DocumentsPage() {
               Select a file to preview
             </div>
           )}
-          {selectedFilename && tab === 'markdown' && <MarkdownViewer content={mdContent} />}
+          {selectedFilename && tab === 'markdown' && (
+            <MarkdownViewer
+              content={mdContent}
+              scrollToText={pendingChunkText}
+              onScrollComplete={() => setPendingChunkText(null)}
+            />
+          )}
           {selectedFilename && tab === 'pdf' && isPdf && (
             <PdfViewer
               url={getUploadUrl(workspaceId, selectedFilename)}

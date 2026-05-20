@@ -2,9 +2,9 @@ import { Children, isValidElement, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
 import { AgenticTrace } from './AgenticTrace'
-import { CitationChip } from './CitationChip'
 import { InlineCitation } from './InlineCitation'
 import { ReasoningTrace } from './ReasoningTrace'
+import { ReferenceList } from './ReferenceList'
 import { cn } from '@/lib/utils'
 import type { SourceNode, TraceType, ChunkRef } from '@/types'
 
@@ -150,16 +150,12 @@ export function MessageBubble({ message, workspaceId: _workspaceId }: MessageBub
         )}
       </div>
       {!isUser && message.reasoning && <ReasoningTrace text={message.reasoning} />}
+      {!isUser && <ReferenceList chunks={message.chunks} />}
       {!isUser && message.traceType === 'agentic' && (
         <AgenticTrace
           traceType={message.traceType}
           metadata={message.traceMetadata ?? {}}
         />
-      )}
-      {!isUser && message.sourceNodes && message.sourceNodes.length > 0 && (
-        <div className="flex flex-wrap gap-1 max-w-[80%]">
-          {message.sourceNodes.map((n, i) => <CitationChip key={i} node={n} />)}
-        </div>
       )}
     </div>
   )
