@@ -26,12 +26,20 @@ The Documents page already supports external citation jumps via `setPendingPageN
 
 ## Design
 
-### Backend (small)
+### Backend
 
-Two changes in `server/app.py`:
+**No changes required.** Investigation of the ingestion path showed:
 
-1. **New helper** `_extract_page_from_content(content: str) -> int | None`. RAG-Anything's parser injects page markers as plain text into chunk content (see CLAUDE.md note on parser behavior; native `page_idx` is not stored). Regex-match known markers (e.g. `[来自: <file>, 第 N 页]`, `Page N`, etc.) and return the page number, else `None`. Best-effort.
-2. **Backfill `chunk.page_idx`** in the stream meta event. Before yielding the `meta` event from `_generate()` in `/query/stream`, walk `data.chunks` and set `chunk["page_idx"]` from the helper whenever it's missing/null.
+- LightRAG already plumbs `page_idx` end-to-end via `convert_to_user_format` (`lightrag/utils.py:3611`).
+- **Multimodal chunks** (image/table/equation descriptions) write `page_idx` to both the chunk KV store and the chunks_vdb on insertion (`raganything/modalprocessors.py:608, 622`) → `data.chunks[i].page_idx` is populated naturally.
+- **Plain-text chunks** lose `page_idx`: `separate_content` (`raganything/utils.py:14`) joins all text items with `\n\n` before calling `insert_text_content → lightrag.ainsert(joined_text)`, and LightRAG's chunker stores no page metadata for the resulting chunks → `data.chunks[i].page_idx` is `None`.
+
+Rather than patching the ingestion path (would require re-indexing every existing corpus), the click-through has two branches based on `page_idx`:
+
+- Has `page_idx` (multimodal chunks): jump to the **PDF** at that page using the existing `setPendingPageNum` channel.
+- No `page_idx` (text chunks): jump to the **markdown preview** and scroll to the first substring match of the chunk's content, flash-highlight briefly.
+
+This means zero indexing changes and old documents work immediately.
 
 `_extract_source_nodes` becomes unused by the frontend. Keep it for now (the `done` event's `source_nodes` field stays in the wire protocol to avoid version churn); remove in a follow-up after frontend stops reading it.
 
@@ -50,8 +58,15 @@ Two changes in `server/app.py`:
   - Whole row clickable.
 - Click handler:
   1. `useNavigate()` → `/documents`.
-  2. `setSelectedFilename(basename(file_path))` (Zustand store action).
-  3. If `page_idx != null` → `setPendingPageNum(page_idx)`; else leave it `null`.
+  2. `setSelectedFile(basename(file_path))` (Zustand store action).
+  3. If `page_idx != null` → `setPendingPageNum(page_idx)` (DocumentsPage switches to PDF tab, PdfViewer jumps).
+  4. Else → `setPendingChunkText(chunk.content)` (new store action; MarkdownViewer finds the first substring match and scrolls to it).
+
+### Store + MarkdownViewer changes
+
+- Add `pendingChunkText: string | null` to the Zustand store with `setPendingChunkText`, mirroring the existing `pendingPageNum` shape.
+- DocumentsPage forces `tab='markdown'` (not `'pdf'`) when `pendingChunkText` is set, and passes the text to `MarkdownViewer` as a `scrollToText?: string` prop along with an `onScrollComplete?: () => void` callback to clear the pending state once consumed.
+- `MarkdownViewer` accepts `scrollToText`; on prop change, after the next render flush it searches the rendered DOM for the first occurrence of `scrollToText.slice(0, 80)` (trimmed of leading/trailing whitespace and punctuation) using `TreeWalker`, calls `range.scrollIntoView`, and flashes a `bg-yellow-300/30` highlight for ~2 seconds. Match failure: silent no-op, file is still opened.
 
 Styling: match the existing collapsed-panel look of `AgenticTrace.tsx` (border, bg-secondary/50, text-xs, max-w-[80%]) so the two panels stack consistently.
 
@@ -76,7 +91,7 @@ Agentic mode requires **zero additional code**: it uses the same `useStreamQuery
 ```
 LightRAG retrieval
    └─ stream meta event {data: {chunks: [{id, file_path, content, page_idx?…}, …]}}
-         │ backend: _extract_page_from_content backfills page_idx if missing
+         │ page_idx populated only for multimodal chunks (image/table/equation)
          ▼
    useStreamQuery → finalMetadata.data.chunks
          │
@@ -85,16 +100,15 @@ LightRAG retrieval
    MessageBubble → <ReferenceList chunks={message.chunks} />
          │ user clicks row
          ▼
-   navigate('/documents') + store.setSelectedFilename + store.setPendingPageNum
-         │
-   DocumentsPage useEffect (line 32-34) switches PDF tab → PdfViewer jumps to page
+   navigate('/documents') + store.setSelectedFile + (
+       page_idx != null  → store.setPendingPageNum   → PdfViewer jumps to page
+       page_idx == null  → store.setPendingChunkText → MarkdownViewer scrolls to match
+   )
 ```
 
 ## Testing
 
-**Backend** (`tests/server/`):
-- Unit test `_extract_page_from_content` with: each known marker format (Chinese, English, bare `Page N`), missing marker (returns `None`), edge cases (page 0, page in middle of content, multiple markers — first wins).
-- Optional integration: assert a stream `meta` event payload has `page_idx` populated for a fixture chunk whose content embeds a marker.
+**Backend**: no changes, no new tests.
 
 **Frontend** (`server/frontend/src/components/chat/__tests__/`):
 - `ReferenceList.test.tsx`:
@@ -103,18 +117,22 @@ LightRAG retrieval
   - Clicking header toggles open/closed.
   - Renders one row per chunk with id / filename / page / excerpt.
   - Excerpt truncated to 120 chars with ellipsis.
-  - Row click invokes `setSelectedFilename` + navigate, and `setPendingPageNum` when page available.
-  - Row with `page_idx == null` is still clickable; `setPendingPageNum` not called (or called with `null`).
+  - Row click invokes `setSelectedFile` + navigate; when `page_idx != null` also `setPendingPageNum`; when `page_idx == null` also `setPendingChunkText`.
   - Page suffix `· 第 N 页` hidden when null.
 
+- `MarkdownViewer.test.tsx`:
+  - When `scrollToText` prop is set, the matching node is highlighted and `onScrollComplete` is called.
+  - When no match found, `onScrollComplete` still called (cleanup), no error.
+
 **Manual acceptance**:
-1. Upload a PDF, ask a question in `hybrid` mode → expand list → click row → Documents page opens correct file at correct page.
-2. Repeat in `agentic` mode → same behavior; Agentic trace still appears below the list.
-3. Question in `naive` mode that returns no chunks → no list shown, no error.
+1. Upload a PDF, ask a question in `hybrid` mode → expand list. Click a multimodal chunk row (has 第 N 页) → Documents page opens the PDF at the correct page.
+2. Click a plain-text chunk row (no page suffix) → Documents page opens the markdown tab, scrolls to a matching passage, briefly highlights it.
+3. Repeat in `agentic` mode → same behavior; Agentic trace still appears below the list.
+4. Question in `naive` mode that returns no chunks → no list shown, no error.
 
 ## Risks & mitigations
 
-- **Parser marker format drift** → `_extract_page_from_content` covered by unit tests for every format we currently know; add new formats as we discover them. Log a debug-level warning when content looks chunk-like but no marker matched.
+- **Markdown text-match miss** when the chunk straddles token boundaries or contains markdown syntax not present verbatim in the rendered DOM → degrade silently: file is still opened on the markdown tab, just no scroll/highlight.
 - **Empty `data.chunks`** in some retrieval modes → `ReferenceList` returns `null`, safe.
 - **Wire protocol**: `source_nodes` field in the `done` event stays for now (deprecated, unused) to avoid coupling this change to a protocol break.
 
