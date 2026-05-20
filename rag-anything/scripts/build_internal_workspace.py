@@ -607,7 +607,7 @@ def _manual_convert_command(source_path: Path, pdf_path: Path) -> str:
             'profile="$(mktemp -d /tmp/lo_profile_XXXXXX)"',
             'status=0',
             "mkdir -p \"$out\"",
-            'timeout "${LIBREOFFICE_CONVERT_TIMEOUT_SECONDS:-300}" \\',
+            'timeout "${LIBREOFFICE_CONVERT_TIMEOUT_SECONDS:-60}" \\',
             '  libreoffice "-env:UserInstallation=file://${profile}" \\',
             '  --headless --convert-to pdf --outdir "$out" "$src" || status=$?',
             'rm -rf "$profile"',

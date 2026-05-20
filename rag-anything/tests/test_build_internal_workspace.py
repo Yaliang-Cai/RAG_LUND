@@ -719,7 +719,7 @@ def test_build_returns_failure_for_preparse_failure_and_skips_ingest(
     assert summary["succeeded_count"] == 1
 
 
-def test_libreoffice_timeout_defaults_to_300_and_env_override(monkeypatch, tmp_path):
+def test_libreoffice_timeout_defaults_to_60_and_env_override(monkeypatch, tmp_path):
     from raganything.parser import MineruParser
     import raganything.parser as parser_module
 
@@ -742,7 +742,7 @@ def test_libreoffice_timeout_defaults_to_300_and_env_override(monkeypatch, tmp_p
     monkeypatch.setenv("LIBREOFFICE_CONVERT_TIMEOUT_SECONDS", "600")
     MineruParser.convert_office_to_pdf(source, output_dir)
 
-    assert timeouts == [300, 600]
+    assert timeouts == [60, 600]
 
 
 def test_script_file_help_runs_from_repo_root():

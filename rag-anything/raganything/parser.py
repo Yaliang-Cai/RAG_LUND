@@ -36,7 +36,7 @@ T = TypeVar("T")
 _TRUE_SET = {"1", "true", "yes", "y", "on"}
 _MINERU_COMMAND_LOCK = threading.Lock()
 _MINERU_LOCK_STATE = threading.local()
-DEFAULT_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS = 300
+DEFAULT_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS = 60
 
 
 def _serialize_mineru_commands_enabled() -> bool:
