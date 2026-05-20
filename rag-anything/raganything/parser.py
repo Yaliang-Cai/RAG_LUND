@@ -36,6 +36,7 @@ T = TypeVar("T")
 _TRUE_SET = {"1", "true", "yes", "y", "on"}
 _MINERU_COMMAND_LOCK = threading.Lock()
 _MINERU_LOCK_STATE = threading.local()
+DEFAULT_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS = 300
 
 
 def _serialize_mineru_commands_enabled() -> bool:
@@ -45,6 +46,29 @@ def _serialize_mineru_commands_enabled() -> bool:
         .lower()
         in _TRUE_SET
     )
+
+
+def _libreoffice_convert_timeout_seconds() -> int:
+    raw_value = os.environ.get("LIBREOFFICE_CONVERT_TIMEOUT_SECONDS")
+    if raw_value is None:
+        return DEFAULT_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS
+    try:
+        timeout = int(raw_value)
+    except (TypeError, ValueError):
+        logging.getLogger(__name__).warning(
+            "Invalid LIBREOFFICE_CONVERT_TIMEOUT_SECONDS=%r; using %d",
+            raw_value,
+            DEFAULT_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS
+    if timeout <= 0:
+        logging.getLogger(__name__).warning(
+            "Invalid LIBREOFFICE_CONVERT_TIMEOUT_SECONDS=%r; using %d",
+            raw_value,
+            DEFAULT_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS
+    return timeout
 
 
 class MineruExecutionError(Exception):
@@ -140,7 +164,7 @@ class Parser:
                         convert_subprocess_kwargs = {
                             "capture_output": True,
                             "text": True,
-                            "timeout": 60,  # 60 second timeout
+                            "timeout": _libreoffice_convert_timeout_seconds(),
                             "encoding": "utf-8",
                             "errors": "ignore",
                         }

@@ -536,6 +536,159 @@ def test_mineru_preparse_reuses_legacy_root_converted_pdf(tmp_path):
     assert pdf_path == legacy_pdf
 
 
+def test_mineru_preparse_records_conversion_failure_and_continues(
+    monkeypatch, tmp_path
+):
+    from raganything.parser import MineruParser
+
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    bad_doc = raw_dir / "Bad File.docx"
+    good_pdf = raw_dir / "Good File.pdf"
+    bad_doc.write_text("docx", encoding="utf-8")
+    good_pdf.write_text("pdf", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+
+    def fake_convert(doc_path, output_dir):
+        raise RuntimeError("conversion failed")
+
+    def fake_run(input_dir, output_root):
+        staged_names = sorted(path.name for path in Path(input_dir).iterdir())
+        assert staged_names == ["Good File.pdf"]
+        artifact = output_root / "Good File" / "auto" / "Good File_content_list.json"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text(
+            json.dumps([{"type": "text", "text": "ok"}]),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(MineruParser, "convert_office_to_pdf", fake_convert)
+    monkeypatch.setattr(build_internal, "_run_mineru_preparse_command", fake_run)
+
+    report_dir = tmp_path / "reports"
+    summary = build_internal.preparse_mineru_files(
+        profile,
+        [bad_doc, good_pdf],
+        report_dir,
+    )
+
+    assert summary["failed_count"] == 1
+    assert summary["conversion_failed"][0]["file"] == "Bad File.docx"
+    assert summary["parsed_count"] == 1
+    failures = json.loads(
+        (report_dir / "mineru_preparse_failures.json").read_text(encoding="utf-8")
+    )
+    assert failures[0]["file"] == "Bad File.docx"
+    commands = (report_dir / "manual_convert_commands.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "Bad File.docx" in commands
+    assert "lo_profile_" in commands
+
+
+def test_build_returns_failure_for_preparse_failure_and_skips_ingest(
+    monkeypatch, tmp_path
+):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    bad_doc = raw_dir / "bad.docx"
+    good_pdf = raw_dir / "good.pdf"
+    bad_doc.write_text("docx", encoding="utf-8")
+    good_pdf.write_text("pdf", encoding="utf-8")
+    fake = _FakeService()
+
+    monkeypatch.setattr(
+        build_internal,
+        "build_local_settings",
+        lambda profile, **kwargs: object(),
+    )
+    monkeypatch.setattr(build_internal, "create_local_rag_service", lambda settings: fake)
+    monkeypatch.setattr(
+        build_internal,
+        "preparse_mineru_files",
+        lambda profile, files, report_dir: {
+            "enabled": True,
+            "output_dir": str(profile.output_dir / profile.workspace_id),
+            "candidate_count": 2,
+            "skipped_count": 0,
+            "parsed_count": 1,
+            "pending_count": 2,
+            "failed_count": 1,
+            "conversion_failed": [
+                {
+                    "file": bad_doc.name,
+                    "source_path": str(bad_doc.resolve()),
+                    "error": "conversion failed",
+                }
+            ],
+        },
+    )
+
+    rc = build_internal.run_build(
+        SimpleNamespace(
+            profile="test",
+            raw_dir=str(raw_dir),
+            storage_root=str(storage_root),
+            workspace_id="ws",
+            max_async_ingest=4,
+            file_batch_size=4,
+            max_file_attempts=1,
+            ingest_timeout_seconds=30,
+            recycle_service_every=0,
+            delete_doc_id=None,
+            delete_first_file=False,
+            delete_workspace=False,
+            delete_llm_cache=False,
+            doc_id=None,
+            dry_run=False,
+            allow_legacy_index_profile_adoption=False,
+            skip_mineru_preparse=False,
+            delete_check=False,
+        )
+    )
+
+    assert rc == 1
+    assert [Path(call["file_path"]).name for call in fake.ingest_calls] == ["good.pdf"]
+    report_dir = sorted((storage_root / "reports").iterdir())[0]
+    summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["failed_count"] == 1
+    assert summary["failed_files"][0]["file"] == "bad.docx"
+    assert summary["succeeded_count"] == 1
+
+
+def test_libreoffice_timeout_defaults_to_300_and_env_override(monkeypatch, tmp_path):
+    from raganything.parser import MineruParser
+    import raganything.parser as parser_module
+
+    source = tmp_path / "a.docx"
+    source.write_text("docx", encoding="utf-8")
+    output_dir = tmp_path / "out"
+    timeouts = []
+
+    def fake_run(cmd, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        outdir = Path(cmd[cmd.index("--outdir") + 1])
+        outdir.mkdir(parents=True, exist_ok=True)
+        (outdir / "a.pdf").write_bytes(b"%PDF" + b"x" * 200)
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(parser_module.subprocess, "run", fake_run)
+    monkeypatch.delenv("LIBREOFFICE_CONVERT_TIMEOUT_SECONDS", raising=False)
+
+    MineruParser.convert_office_to_pdf(source, output_dir)
+    monkeypatch.setenv("LIBREOFFICE_CONVERT_TIMEOUT_SECONDS", "600")
+    MineruParser.convert_office_to_pdf(source, output_dir)
+
+    assert timeouts == [300, 600]
+
+
 def test_script_file_help_runs_from_repo_root():
     result = subprocess.run(
         [sys.executable, "scripts/build_internal_workspace.py", "--help"],
