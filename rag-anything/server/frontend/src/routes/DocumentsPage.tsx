@@ -97,7 +97,7 @@ export default function DocumentsPage() {
           {selectedFilename && tab === 'pdf' && isPdf && (
             <PdfViewer
               url={getUploadUrl(workspaceId, selectedFilename)}
-              initialPage={pendingPageNum ?? 1}
+              initialPage={pendingPageNum}
               onPageSet={() => setPendingPageNum(null)}
             />
           )}

@@ -150,7 +150,7 @@ export function MessageBubble({ message, workspaceId: _workspaceId }: MessageBub
         )}
       </div>
       {!isUser && message.reasoning && <ReasoningTrace text={message.reasoning} />}
-      {!isUser && <ReferenceList chunks={message.chunks} />}
+      {!isUser && <ReferenceList messageId={message.id} chunks={message.chunks} />}
       {!isUser && message.traceType === 'agentic' && (
         <AgenticTrace
           traceType={message.traceType}

@@ -10,6 +10,7 @@ describe('AppStore', () => {
       selectedFileId: null,
       pendingPageNum: null,
       pendingChunkText: null,
+      openReferences: {},
       lastSeenJobStatuses: {},
     })
   })
@@ -38,5 +39,15 @@ describe('AppStore', () => {
     expect(useAppStore.getState().pendingChunkText).toBe('hello world')
     act(() => useAppStore.getState().setPendingChunkText(null))
     expect(useAppStore.getState().pendingChunkText).toBeNull()
+  })
+
+  it('toggles openReferences per message id', () => {
+    act(() => useAppStore.getState().toggleOpenReference('m1'))
+    expect(useAppStore.getState().openReferences['m1']).toBe(true)
+    act(() => useAppStore.getState().toggleOpenReference('m1'))
+    expect(useAppStore.getState().openReferences['m1']).toBe(false)
+    act(() => useAppStore.getState().toggleOpenReference('m2'))
+    expect(useAppStore.getState().openReferences['m2']).toBe(true)
+    expect(useAppStore.getState().openReferences['m1']).toBe(false)
   })
 })

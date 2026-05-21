@@ -12,18 +12,24 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 
 interface PdfViewerProps {
   url: string
-  initialPage?: number
+  /** When set to a number, the viewer jumps to that page and calls onPageSet
+   *  to acknowledge. Pass null to mean "no pending jump". */
+  initialPage?: number | null
   onPageSet?: () => void
 }
 
-export function PdfViewer({ url, initialPage = 1, onPageSet }: PdfViewerProps) {
+export function PdfViewer({ url, initialPage, onPageSet }: PdfViewerProps) {
   const [numPages, setNumPages] = useState<number>(0)
-  const [currentPage, setCurrentPage] = useState(initialPage)
+  const [currentPage, setCurrentPage] = useState<number>(
+    typeof initialPage === 'number' && initialPage > 0 ? initialPage : 1,
+  )
   const [scale, setScale] = useState(1.0)
 
   useEffect(() => {
-    setCurrentPage(initialPage)
-    onPageSet?.()
+    if (typeof initialPage === 'number' && initialPage > 0) {
+      setCurrentPage(initialPage)
+      onPageSet?.()
+    }
   }, [initialPage]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (

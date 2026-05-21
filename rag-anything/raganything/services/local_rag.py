@@ -2377,7 +2377,11 @@ class LocalRagService:
                         "sub_questions": trace.get("sub_questions"),
                     }
                 }
-                yield {"type": "meta", "data": {}, "metadata": meta_payload}
+                yield {
+                    "type": "meta",
+                    "data": {"chunks": final.get("chunks", [])},
+                    "metadata": meta_payload,
+                }
                 yield {"type": "chunk", "text": str(final.get("answer") or "")}
             except Exception as exc:
                 self.logger.error("stream_query (agentic branch) error: %s", exc)

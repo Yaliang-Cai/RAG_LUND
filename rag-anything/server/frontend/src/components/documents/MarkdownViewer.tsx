@@ -16,8 +16,14 @@ interface MarkdownViewerProps {
 // the chunk content and the rendered DOM, then keep the first 80 chars as
 // the substring to look for.
 function buildNeedle(raw: string): string {
-  const trimmed = raw.replace(/^[\s\p{P}]+|[\s\p{P}]+$/gu, '')
-  return trimmed.slice(0, 80).trim()
+  // Strip markdown formatting characters (#, *, _, `, ~, >, brackets, parens)
+  // so the substring search works against rendered DOM text where those are gone.
+  const stripped = raw
+    .replace(/[`*_~#>[\]()]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s\p{P}]+|[\s\p{P}]+$/gu, '')
+    .trim()
+  return stripped.slice(0, 60).trim()
 }
 
 function findTextNode(root: HTMLElement, needle: string): { node: Text; offset: number } | null {
@@ -38,6 +44,10 @@ export function MarkdownViewer({ content, scrollToText, onScrollComplete }: Mark
 
   useEffect(() => {
     if (!scrollToText) return
+    // Wait until markdown has actually been rendered before attempting to find
+    // the needle. Otherwise the first run (with empty content) fails and we
+    // clear pendingChunkText prematurely.
+    if (!content) return
     const root = containerRef.current
     if (!root) return
 

@@ -343,6 +343,7 @@ class AdaptiveAgentGraph:
             "confidence": confidence,
             "grounded": grounded,
             "ungrounded_claims": final.get("ungrounded_claims", []),
+            "chunks": final.get("chunks", []),
             "trace": {
                 **final.get("routing_trace", {}),
                 "retrieve_cycles_used": final.get("retrieve_cycle", 0),

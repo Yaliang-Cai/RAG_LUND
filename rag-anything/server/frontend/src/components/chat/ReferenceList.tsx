@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { useAppStore } from '@/store'
@@ -6,6 +5,7 @@ import { cn } from '@/lib/utils'
 import type { ChunkRef } from '@/types'
 
 interface ReferenceListProps {
+  messageId: string
   chunks?: ChunkRef[]
 }
 
@@ -33,10 +33,13 @@ function chunkPage(c: ChunkRef): number | null {
   return typeof p === 'number' ? p : null
 }
 
-export function ReferenceList({ chunks }: ReferenceListProps) {
-  const [open, setOpen] = useState(false)
+export function ReferenceList({ messageId, chunks }: ReferenceListProps) {
   const navigate = useNavigate()
-  const { setSelectedFile, setPendingPageNum, setPendingChunkText } = useAppStore()
+  const open = useAppStore((s) => !!s.openReferences[messageId])
+  const toggleOpenReference = useAppStore((s) => s.toggleOpenReference)
+  const setSelectedFile = useAppStore((s) => s.setSelectedFile)
+  const setPendingPageNum = useAppStore((s) => s.setPendingPageNum)
+  const setPendingChunkText = useAppStore((s) => s.setPendingChunkText)
 
   if (!chunks || chunks.length === 0) return null
 
@@ -58,10 +61,10 @@ export function ReferenceList({ chunks }: ReferenceListProps) {
     <div className="mt-1 rounded-lg border border-border bg-secondary/50 text-xs overflow-hidden max-w-[80%]">
       <button
         className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-muted-foreground hover:text-foreground transition-colors"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => toggleOpenReference(messageId)}
       >
         {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
-        <span>引用 ({chunks.length})</span>
+        <span>References ({chunks.length})</span>
       </button>
       {open && (
         <ul className="divide-y divide-border">
@@ -89,7 +92,7 @@ export function ReferenceList({ chunks }: ReferenceListProps) {
                   </span>
                   <span className="truncate font-medium">{chunkFilename(c)}</span>
                   {page !== null && (
-                    <span className="text-muted-foreground shrink-0">· 第 {page} 页</span>
+                    <span className="text-muted-foreground shrink-0">· p.{page}</span>
                   )}
                 </div>
                 <p className="mt-1 text-muted-foreground line-clamp-2">{chunkExcerpt(c)}</p>

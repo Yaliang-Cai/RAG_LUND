@@ -11,10 +11,10 @@ vi.mock('react-router-dom', async () => {
   return { ...actual, useNavigate: () => navigateMock }
 })
 
-function renderList(chunks?: ChunkRef[]) {
+function renderList(chunks?: ChunkRef[], messageId = 'm1') {
   return render(
     <MemoryRouter>
-      <ReferenceList chunks={chunks} />
+      <ReferenceList messageId={messageId} chunks={chunks} />
     </MemoryRouter>,
   )
 }
@@ -26,6 +26,7 @@ describe('ReferenceList', () => {
       selectedFileId: null,
       pendingPageNum: null,
       pendingChunkText: null,
+      openReferences: {},
     })
   })
 
@@ -41,10 +42,9 @@ describe('ReferenceList', () => {
 
   it('renders collapsed by default and toggles open', () => {
     renderList([{ id: 'DC1', file_path: '/a/b/foo.pdf', content: 'hello world' }])
-    expect(screen.getByText(/引用 \(1\)/)).toBeTruthy()
-    // Row content hidden when collapsed
+    expect(screen.getByText(/References \(1\)/)).toBeTruthy()
     expect(screen.queryByText('foo.pdf')).toBeNull()
-    fireEvent.click(screen.getByText(/引用 \(1\)/))
+    fireEvent.click(screen.getByText(/References \(1\)/))
     expect(screen.getByText('foo.pdf')).toBeTruthy()
   })
 
@@ -53,14 +53,27 @@ describe('ReferenceList', () => {
       { id: 'DC1', file_path: 'a.pdf', content: 'x', page_idx: 4 },
       { id: 'DC2', file_path: 'a.pdf', content: 'y' },
     ])
-    fireEvent.click(screen.getByText(/引用 \(2\)/))
-    expect(screen.getByText(/第 4 页/)).toBeTruthy()
-    expect(screen.queryAllByText(/第/).length).toBe(1)
+    fireEvent.click(screen.getByText(/References \(2\)/))
+    expect(screen.getByText(/p\.4/)).toBeTruthy()
+    expect(screen.queryAllByText(/p\./).length).toBe(1)
+  })
+
+  it('open state persists across remount via store', () => {
+    const { unmount } = renderList(
+      [{ id: 'DC1', file_path: 'a.pdf', content: 'hello' }],
+      'msg-x',
+    )
+    fireEvent.click(screen.getByText(/References \(1\)/))
+    expect(screen.getByText('a.pdf')).toBeTruthy()
+    unmount()
+    // Remount with same id — should still be open
+    renderList([{ id: 'DC1', file_path: 'a.pdf', content: 'hello' }], 'msg-x')
+    expect(screen.getByText('a.pdf')).toBeTruthy()
   })
 
   it('multimodal chunk (page_idx set) → sets pendingPageNum, not pendingChunkText', () => {
     renderList([{ id: 'DC1', file_path: 'a.pdf', content: 'mm', page_idx: 7 }])
-    fireEvent.click(screen.getByText(/引用 \(1\)/))
+    fireEvent.click(screen.getByText(/References \(1\)/))
     fireEvent.click(screen.getByText('a.pdf'))
     const s = useAppStore.getState()
     expect(s.selectedFileId).toBe('a.pdf')
@@ -71,7 +84,7 @@ describe('ReferenceList', () => {
 
   it('text chunk (no page_idx) → sets pendingChunkText, not pendingPageNum', () => {
     renderList([{ id: 'DC1', file_path: 'a.pdf', content: 'long passage of text' }])
-    fireEvent.click(screen.getByText(/引用 \(1\)/))
+    fireEvent.click(screen.getByText(/References \(1\)/))
     fireEvent.click(screen.getByText('a.pdf'))
     const s = useAppStore.getState()
     expect(s.selectedFileId).toBe('a.pdf')
@@ -83,7 +96,7 @@ describe('ReferenceList', () => {
   it('truncates excerpt to 120 chars', () => {
     const long = 'a'.repeat(200)
     renderList([{ id: 'DC1', file_path: 'a.pdf', content: long }])
-    fireEvent.click(screen.getByText(/引用 \(1\)/))
+    fireEvent.click(screen.getByText(/References \(1\)/))
     const para = screen.getByText(/a+…$/)
     expect(para.textContent!.length).toBeLessThanOrEqual(121)
     expect(para.textContent!.endsWith('…')).toBe(true)

@@ -13,6 +13,9 @@ interface AppStore {
   setPendingPageNum: (n: number | null) => void
   pendingChunkText: string | null
   setPendingChunkText: (t: string | null) => void
+  // Per-message ReferenceList open state — in-memory only, survives navigation
+  openReferences: Record<string, boolean>
+  toggleOpenReference: (id: string) => void
   lastSeenJobStatuses: Record<string, string>
   setLastSeenJobStatuses: (statuses: Record<string, string>) => void
   // Chat history — persists across navigation (not persisted to localStorage)
@@ -34,6 +37,11 @@ export const useAppStore = create<AppStore>()(
       setPendingPageNum: (n) => set({ pendingPageNum: n }),
       pendingChunkText: null,
       setPendingChunkText: (t) => set({ pendingChunkText: t }),
+      openReferences: {},
+      toggleOpenReference: (id) =>
+        set((s) => ({
+          openReferences: { ...s.openReferences, [id]: !s.openReferences[id] },
+        })),
       lastSeenJobStatuses: {},
       setLastSeenJobStatuses: (statuses) => set({ lastSeenJobStatuses: statuses }),
       chatMessages: [],
