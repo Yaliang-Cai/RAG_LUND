@@ -709,6 +709,8 @@ def test_mineru_preparse_records_conversion_failure_and_continues(
     )
     assert "Bad File.docx" in commands
     assert "lo_profile_" in commands
+    assert "manual_convert_logs" in commands
+    assert "soffice" in commands
     assert "manual_convert_failed=1" in commands
     assert "One or more manual conversions failed." in commands
 
