@@ -713,6 +713,127 @@ def test_mineru_preparse_records_conversion_failure_and_continues(
     assert "One or more manual conversions failed." in commands
 
 
+def test_mineru_preparse_skips_historical_conversion_failure_without_manual_pdf(
+    monkeypatch, tmp_path
+):
+    from raganything.parser import MineruParser
+
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    bad_doc = raw_dir / "Bad File.docx"
+    bad_doc.write_text("docx", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    old_report = storage_root / "reports" / "old"
+    old_report.mkdir(parents=True)
+    (old_report / "mineru_preparse_failures.json").write_text(
+        json.dumps(
+            [
+                {
+                    "file": bad_doc.name,
+                    "source_path": str(bad_doc.resolve()),
+                    "error": "previous conversion failed",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    convert_calls = []
+    run_calls = []
+    monkeypatch.setattr(
+        MineruParser,
+        "convert_office_to_pdf",
+        lambda doc_path, output_dir: convert_calls.append((doc_path, output_dir)),
+    )
+    monkeypatch.setattr(
+        build_internal,
+        "_run_mineru_preparse_command",
+        lambda input_dir, output_root: run_calls.append((input_dir, output_root)),
+    )
+
+    report_dir = storage_root / "reports" / "new"
+    summary = build_internal.preparse_mineru_files(profile, [bad_doc], report_dir)
+
+    assert convert_calls == []
+    assert run_calls == []
+    assert summary["failed_count"] == 1
+    assert summary["historical_failure_skipped_count"] == 1
+    assert summary["conversion_failed"][0]["file"] == bad_doc.name
+    assert "Previous MinerU preparse conversion failed" in summary["conversion_failed"][0]["error"]
+    assert (report_dir / "mineru_preparse_failures.json").exists()
+    assert (report_dir / "manual_convert_commands.sh").exists()
+
+
+def test_mineru_preparse_recovers_historical_conversion_failure_with_manual_pdf(
+    monkeypatch, tmp_path
+):
+    from raganything.parser import MineruParser
+
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    bad_doc = raw_dir / "Bad File.docx"
+    bad_doc.write_text("docx", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    old_report = storage_root / "reports" / "old"
+    old_report.mkdir(parents=True)
+    (old_report / "mineru_preparse_failures.json").write_text(
+        json.dumps(
+            [
+                {
+                    "file": bad_doc.name,
+                    "source_path": str(bad_doc.resolve()),
+                    "error": "previous conversion failed",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_root = storage_root / "output" / "ws"
+    manual_pdf = output_root / "Bad_File" / "Bad File.pdf"
+    manual_pdf.parent.mkdir(parents=True)
+    manual_pdf.write_bytes(b"%PDF")
+    convert_calls = []
+    monkeypatch.setattr(
+        MineruParser,
+        "convert_office_to_pdf",
+        lambda doc_path, output_dir: convert_calls.append((doc_path, output_dir)),
+    )
+
+    def fake_run(input_dir, output_root):
+        staged_names = sorted(path.name for path in Path(input_dir).iterdir())
+        assert staged_names == ["Bad File.pdf"]
+        artifact = output_root / "Bad File" / "auto" / "Bad File_content_list.json"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text(
+            json.dumps([{"type": "text", "text": "ok"}]),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(build_internal, "_run_mineru_preparse_command", fake_run)
+
+    summary = build_internal.preparse_mineru_files(
+        profile,
+        [bad_doc],
+        storage_root / "reports" / "new",
+    )
+
+    assert convert_calls == []
+    assert summary["failed_count"] == 0
+    assert summary["historical_failure_skipped_count"] == 0
+    assert summary["parsed_count"] == 1
+
+
 def test_build_returns_failure_for_preparse_failure_and_skips_ingest(
     monkeypatch, tmp_path
 ):

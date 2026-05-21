@@ -595,6 +595,83 @@ def _valid_converted_pdf(pdf_path: Path, source_path: Path) -> bool:
         return False
 
 
+def _find_valid_converted_pdf(file_path: Path, output_root: Path) -> Path | None:
+    for pdf_path in _converted_pdf_paths(file_path, output_root):
+        if _valid_converted_pdf(pdf_path, file_path):
+            return pdf_path
+    return None
+
+
+def _load_historical_preparse_conversion_failures(
+    profile: BuildProfile, current_report_dir: Path
+) -> dict[Path, dict[str, str]]:
+    failures: dict[Path, dict[str, str]] = {}
+    reports_dir = profile.reports_dir
+    if not reports_dir.exists():
+        return failures
+    try:
+        current_report_resolved = current_report_dir.expanduser().resolve()
+    except OSError:
+        current_report_resolved = current_report_dir.expanduser()
+
+    failure_files = list(reports_dir.glob("*/mineru_preparse_failures.json"))
+
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    for failure_file in sorted(failure_files, key=_mtime):
+        try:
+            if failure_file.parent.expanduser().resolve() == current_report_resolved:
+                continue
+        except OSError:
+            pass
+        try:
+            payload = json.loads(failure_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, list):
+            continue
+        for record in payload:
+            if not isinstance(record, dict):
+                continue
+            source_path = record.get("source_path")
+            if not source_path:
+                continue
+            try:
+                key = Path(str(source_path)).expanduser().resolve()
+            except OSError:
+                key = Path(str(source_path)).expanduser()
+            normalized_record = {
+                str(k): str(v) for k, v in record.items() if v is not None
+            }
+            normalized_record["previous_report"] = _path_env(failure_file)
+            failures[key] = normalized_record
+    return failures
+
+
+def _historical_conversion_failure_record(
+    file_path: Path,
+    output_root: Path,
+    previous_failure: dict[str, str],
+) -> dict[str, str]:
+    message = (
+        "Previous MinerU preparse conversion failed and no manual PDF exists; "
+        "skipping LibreOffice retry. Create the recommended PDF and rerun the "
+        "same build command."
+    )
+    record = _conversion_failure_record(file_path, output_root, RuntimeError(message))
+    previous_error = previous_failure.get("error")
+    previous_report = previous_failure.get("previous_report")
+    if previous_error:
+        record["previous_error"] = previous_error
+    if previous_report:
+        record["previous_report"] = previous_report
+    return record
+
+
 def _shell_quote(value: str | Path) -> str:
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
@@ -683,17 +760,17 @@ def _write_mineru_preparse_failure_reports(
 def _prepare_mineru_preparse_input(file_path: Path, output_root: Path) -> Path:
     suffix = file_path.suffix.lower()
     if suffix in MINERU_OFFICE_EXTENSIONS:
-        preferred_pdf, *legacy_pdfs = _converted_pdf_paths(file_path, output_root)
-        for pdf_path in (preferred_pdf, *legacy_pdfs):
-            if _valid_converted_pdf(pdf_path, file_path):
-                LOGGER.info(
-                    "Reusing LibreOffice PDF for MinerU preparse file=%s pdf=%s",
-                    file_path.name,
-                    pdf_path,
-                )
-                return pdf_path
+        existing_pdf = _find_valid_converted_pdf(file_path, output_root)
+        if existing_pdf is not None:
+            LOGGER.info(
+                "Reusing LibreOffice PDF for MinerU preparse file=%s pdf=%s",
+                file_path.name,
+                existing_pdf,
+            )
+            return existing_pdf
         from raganything.parser import MineruParser
 
+        preferred_pdf = _converted_pdf_paths(file_path, output_root)[0]
         preferred_pdf.parent.mkdir(parents=True, exist_ok=True)
         LOGGER.info(
             "Converting Office document before MinerU preparse file=%s output_dir=%s",
@@ -702,17 +779,17 @@ def _prepare_mineru_preparse_input(file_path: Path, output_root: Path) -> Path:
         )
         return MineruParser.convert_office_to_pdf(file_path, preferred_pdf.parent)
     if suffix in MINERU_TEXT_EXTENSIONS:
-        preferred_pdf, *legacy_pdfs = _converted_pdf_paths(file_path, output_root)
-        for pdf_path in (preferred_pdf, *legacy_pdfs):
-            if _valid_converted_pdf(pdf_path, file_path):
-                LOGGER.info(
-                    "Reusing text PDF for MinerU preparse file=%s pdf=%s",
-                    file_path.name,
-                    pdf_path,
-                )
-                return pdf_path
+        existing_pdf = _find_valid_converted_pdf(file_path, output_root)
+        if existing_pdf is not None:
+            LOGGER.info(
+                "Reusing text PDF for MinerU preparse file=%s pdf=%s",
+                file_path.name,
+                existing_pdf,
+            )
+            return existing_pdf
         from raganything.parser import MineruParser
 
+        preferred_pdf = _converted_pdf_paths(file_path, output_root)[0]
         preferred_pdf.parent.mkdir(parents=True, exist_ok=True)
         LOGGER.info(
             "Converting text document before MinerU preparse file=%s output_dir=%s",
@@ -770,10 +847,15 @@ def preparse_mineru_files(
         "parsed": [],
         "missing_after_parse": [],
         "conversion_failed": [],
+        "historical_failure_skipped": [],
+        "historical_failure_skipped_count": 0,
         "failed_count": 0,
     }
 
     pending: list[Path] = []
+    historical_failures = _load_historical_preparse_conversion_failures(
+        profile, report_dir
+    )
     for file_path in candidates:
         existing = _find_valid_mineru_artifact(output_root, file_path)
         if existing is not None:
@@ -784,14 +866,47 @@ def preparse_mineru_files(
                 }
             )
             continue
+        try:
+            resolved_file_path = file_path.expanduser().resolve()
+        except OSError:
+            resolved_file_path = file_path.expanduser()
+        previous_failure = historical_failures.get(resolved_file_path)
+        if (
+            previous_failure is not None
+            and file_path.suffix.lower()
+            in (MINERU_OFFICE_EXTENSIONS | MINERU_TEXT_EXTENSIONS)
+            and _find_valid_converted_pdf(file_path, output_root) is None
+        ):
+            failure = _historical_conversion_failure_record(
+                file_path,
+                output_root,
+                previous_failure,
+            )
+            summary["conversion_failed"].append(failure)
+            summary["historical_failure_skipped"].append(failure)
+            LOGGER.warning(
+                "Skipping previously failed MinerU preparse conversion until manual PDF exists file=%s",
+                file_path.name,
+            )
+            continue
         pending.append(file_path)
 
     summary["skipped_count"] = len(summary["skipped"])
     summary["pending_count"] = len(pending)
+    summary["historical_failure_skipped_count"] = len(
+        summary["historical_failure_skipped"]
+    )
     if not pending:
+        summary["failed_count"] = len(summary["conversion_failed"])
+        if summary["conversion_failed"]:
+            _write_mineru_preparse_failure_reports(
+                report_dir,
+                list(summary["conversion_failed"]),
+            )
         LOGGER.info(
-            "MinerU preparse skipped for all files candidate_count=%d output_dir=%s",
+            "MinerU preparse skipped for all stageable files candidate_count=%d failed=%d output_dir=%s",
             len(candidates),
+            summary["failed_count"],
             output_root,
         )
         return summary
