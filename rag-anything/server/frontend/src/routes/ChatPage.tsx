@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { useStreamQuery } from '@/hooks/useStreamQuery'
 import { useAppStore } from '@/store'
+import { useQuerySettings } from '@/store/querySettings'
 import { MessageList } from '@/components/chat/MessageList'
 import { ChatInput } from '@/components/chat/ChatInput'
 import { Button } from '@/components/ui/button'
@@ -8,12 +9,13 @@ import { SquarePen } from 'lucide-react'
 import { postMultimodalQuery } from '@/api/query'
 import type { Message } from '@/components/chat/MessageBubble'
 import type { TraceType, QueryParams, ChunkRef } from '@/types'
+import type { ModeKey } from '@/config/modePresets'
 
 let msgId = 0
 
 const MAX_HISTORY_TURNS = 5
 
-function modeToTraceType(mode: string): TraceType {
+function modeToTraceType(mode: ModeKey): TraceType {
   // Trace panels are only meaningful for agentic mode; other modes hide it.
   return mode === 'agentic' ? 'agentic' : null
 }
@@ -47,10 +49,10 @@ export default function ChatPage() {
 
   const handleSend = useCallback(async (
     query: string,
-    mode: string,
-    profile: string,
     images: File[],
   ) => {
+    const qs = useQuerySettings.getState()
+    const mode = qs.mode
     const imagePreviews = images.length > 0 ? images.map((f) => URL.createObjectURL(f)) : undefined
     const userMsg: Message = {
       id: String(++msgId),
@@ -68,7 +70,7 @@ export default function ChatPage() {
           workspace_id: workspaceId,
           query,
           images,
-          mode,
+          mode: qs.mode === 'naive' ? 'naive' : 'mix',
         })
         setMessages((prev) => [
           ...prev,
@@ -106,16 +108,43 @@ export default function ChatPage() {
     // ── Branch B: text-only → streaming ──
     const history = buildHistory(messagesRef.current)
 
-    // vlm_enhanced is intentionally NOT sent from the frontend:
-    // backend default (DEFAULT_VLM_ENHANCED=True) lets RAGAnything auto-route,
-    // and aquery_vlm_enhanced already falls back to text when chunks have no images.
-    // send() returns a final snapshot accumulated inside the SSE loop, so we
-    // don't depend on React having flushed setState calls before this awaits.
+    // Backend `mode`:
+    //   naive  → 'naive'
+    //   lightrag/multihop → 'auto' with profile locked
+    //   agentic → 'agentic' (streaming branch in stream_query)
+    // For agentic with explicit profile (not Auto), still send 'auto' so
+    // the router locks the profile instead of going through the agent graph.
+    let backendMode: QueryParams['mode']
+    let profile: string | undefined
+    if (mode === 'naive') {
+      backendMode = 'naive'
+    } else if (mode === 'agentic') {
+      if (qs.agenticProfile && qs.agenticProfile !== 'auto') {
+        backendMode = 'auto'
+        profile = qs.agenticProfile
+      } else {
+        backendMode = 'agentic'
+      }
+    } else {
+      // lightrag, multihop
+      backendMode = 'auto'
+      profile = mode === 'lightrag' ? 'semantic' : 'multihop'
+    }
+
     const snap = await send({
       workspace_id: workspaceId,
       query,
-      mode: mode as QueryParams['mode'],
-      profile: mode === 'auto' && profile ? profile : undefined,
+      mode: backendMode,
+      profile,
+      top_k: qs.top_k,
+      chunk_top_k: qs.chunk_top_k,
+      enable_rerank: qs.enable_rerank,
+      qdrant_retrieval_mode: qs.qdrant_retrieval_mode,
+      rerank_candidate_cap: qs.rerank_candidate_cap,
+      ppr_damping: qs.ppr_damping,
+      ppr_top_k: qs.ppr_top_k,
+      ppr_synonym_weight_mode: qs.ppr_synonym_weight_mode,
+      recognition_top_k: qs.recognition_top_k,
       conversation_history: history.length > 0 ? history : undefined,
     })
 

@@ -2340,6 +2340,7 @@ class LocalRagService:
         exclude_synonym_edges: bool | None = None,
         qdrant_retrieval_mode: str | None = None,
         profile: str | None = None,
+        rerank_candidate_cap: int | None = None,
         conversation_history: list[dict] | None = None,
         vlm_enhanced: bool = False,
     ):
@@ -2451,13 +2452,27 @@ class LocalRagService:
             rag_instance = await self.get_rag(workspace_id)
             await rag_instance._ensure_lightrag_initialized()
 
+            # Naive mode "rerank candidate cap": inflate chunk_top_k so vector
+            # retrieval returns up to `cap` candidates, let LightRAG rerank
+            # them, then truncate metadata chunks back to the user-visible
+            # chunk_top_k after the call returns.
+            display_chunk_top_k = chunk_top_k
+            effective_chunk_top_k = chunk_top_k
+            if (
+                mode == "naive"
+                and enable_rerank
+                and rerank_candidate_cap is not None
+                and rerank_candidate_cap > chunk_top_k
+            ):
+                effective_chunk_top_k = min(rerank_candidate_cap, 200)
+
             # Funnel raw stream_query args through the same defaults pipeline
             # that query()/query_with_trace() use, so QueryParam is identical
             # regardless of which entry point the caller hit.
             raw_kwargs: dict[str, Any] = {
                 "mode": mode,
                 "top_k": top_k,
-                "chunk_top_k": chunk_top_k,
+                "chunk_top_k": effective_chunk_top_k,
                 "enable_rerank": enable_rerank,
                 "rerank_score_scope": "all",
                 "stream": True,
@@ -2481,10 +2496,21 @@ class LocalRagService:
             param = QueryParam(**qp_kwargs)
             result = await rag_instance.lightrag.aquery_llm(query, param=param)
 
+            # Post-truncate metadata chunks for naive candidate-cap mode so
+            # the UI only displays the user-visible chunk_top_k citations.
+            data_payload = result.get("data", {}) or {}
+            if (
+                mode == "naive"
+                and effective_chunk_top_k != display_chunk_top_k
+                and isinstance(data_payload.get("chunks"), list)
+            ):
+                data_payload = dict(data_payload)
+                data_payload["chunks"] = data_payload["chunks"][:display_chunk_top_k]
+
             # Yield meta first (citations, entities, chunks, relationships)
             yield {
                 "type": "meta",
-                "data": result.get("data", {}),
+                "data": data_payload,
                 "metadata": result.get("metadata", {}),
             }
 

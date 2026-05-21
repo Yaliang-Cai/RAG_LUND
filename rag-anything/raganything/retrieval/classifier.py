@@ -9,37 +9,33 @@ from .profiles import PROFILE_REGISTRY
 logger = logging.getLogger(__name__)
 
 _CONFIDENCE_THRESHOLD = 0.6
-_ROUTER_PROFILES = {"precise", "semantic", "local", "multihop"}  # full excluded
+_ROUTER_PROFILES = {"semantic", "multihop"}  # full excluded (fallback only)
 
 _CLASSIFIER_PROMPT = """\
 You are a retrieval routing classifier. Given a user query, select the most
 appropriate retrieval profile from the list below.
 
-Available profiles (ordered from narrow to broad):
+Available profiles:
 
-- precise: Query contains hard constraints that require exact lexical matching.
-  Signals: specific IDs, error codes, version numbers, rare proper nouns, abbreviations.
-  Examples: "What is the impact scope of CVE-2026-001?"
-            "Status of order ID ORD-20260424-8821"
-
-- semantic: Default workhorse for everyday knowledge queries. No graph traversal needed.
-  Signals: factual questions, process/procedure explanations, concept definitions, summaries.
-           Single topic, no multi-entity reasoning.
+- semantic: Default workhorse for everyday knowledge queries. Uses LightRAG mix
+  retrieval plus vector hybrid search; suitable when no complex cross-document
+  reasoning is needed.
+  Signals: factual questions, process/procedure explanations, concept definitions,
+           summaries. Single topic or single focal entity.
   Examples: "What is the company leave policy?"
             "How does the attention mechanism work?"
+            "What are the upstream systems of the payment service?"
 
-- local: Query is tightly focused on ONE specific entity and its direct properties or relationships.
-  Signals: "What are the [attributes/dependencies] of X?"
-  Examples: "What are the upstream systems of the payment service?"
-
-- multihop: Query involves MULTIPLE distinct entities requiring cross-document reasoning.
+- multihop: Query involves MULTIPLE distinct entities requiring cross-document
+  reasoning, comparison, or causal analysis. Uses PPR graph walk plus vector
+  hybrid.
   Signals: two or more named entities, causal/comparative language.
   Examples: "How did the network partition in region A cause failures in region B?"
             "Compare the indexing strategies used by LightRAG and HippoRAG2."
 
 Key disambiguation rules:
-- If the query asks about one entity → prefer local over multihop.
-- If no entity graph is needed → prefer semantic over local.
+- Single entity / single topic → semantic.
+- Multiple entities with reasoning/comparison/causality → multihop.
 - When genuinely unsure → choose semantic (it is the safe default).{avoid_instruction}
 
 First briefly state your reasoning in one sentence, then output JSON.

@@ -2,7 +2,17 @@ from dataclasses import dataclass, field
 
 
 KNOWN_PATHS: frozenset[str] = frozenset(
-    ["naive", "hybrid", "mix", "ppr", "local_kg", "qdrant_hybrid", "qdrant_sparse", "qdrant_chunks_hybrid", "gfm"]
+    [
+        "naive",
+        "hybrid",
+        "mix",
+        "ppr",
+        "local_kg",
+        "qdrant_hybrid",
+        "qdrant_sparse",
+        "qdrant_chunks_hybrid",
+        "gfm",
+    ]
 )
 
 
@@ -15,8 +25,8 @@ class RetrievalProfile:
     rrf_k: int = 60
     enable_rerank: bool = True
     min_rerank_score: float = 0.3
-    rerank_candidate_cap: int = 30      # was 60
-    min_rrf_score: float = 0.01         # NEW
+    rerank_candidate_cap: int = 30
+    min_rrf_score: float = 0.01
     max_concurrent_paths: int | None = None
     path_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
 
@@ -42,28 +52,18 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
     p.name: p
     for p in [
         RetrievalProfile(
-            name="precise",
-            description="Queries with hard constraints: specific IDs, error codes, rare proper nouns, abbreviations",
-            paths=["qdrant_sparse"],
-            rrf_weights={"qdrant_sparse": 1.0},
-        ),
-        RetrievalProfile(
             name="semantic",
-            description="Default workhorse: factual Q&A, process explanations, concept definitions, summaries — no complex reasoning required",
-            paths=["qdrant_chunks_hybrid"],
-            rrf_weights={"qdrant_chunks_hybrid": 1.0},
-        ),
-        RetrievalProfile(
-            name="local",
-            description="Single focal entity: attributes, direct relationships, or status of one specific entity",
-            paths=["local_kg", "qdrant_chunks_hybrid"],
-            rrf_weights={"local_kg": 1.0, "qdrant_chunks_hybrid": 0.8},
+            description="Factual Q&A, process explanations, concept definitions — LightRAG mix + vector hybrid",
+            paths=["mix", "qdrant_hybrid"],
+            rrf_weights={"mix": 1.0, "qdrant_hybrid": 0.8},
+            enable_rerank=True,
         ),
         RetrievalProfile(
             name="multihop",
-            description="Multiple entities requiring cross-document logical reasoning, comparison, or causal analysis",
-            paths=["ppr", "hybrid"],
-            rrf_weights={"ppr": 1.0, "hybrid": 0.8},
+            description="Multi-entity cross-document reasoning — PPR walk + vector hybrid (no rerank)",
+            paths=["ppr", "qdrant_hybrid"],
+            rrf_weights={"ppr": 1.0, "qdrant_hybrid": 0.8},
+            enable_rerank=False,
         ),
         RetrievalProfile(
             name="full",
@@ -76,20 +76,6 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
                 "qdrant_sparse": 0.9,
             },
             max_concurrent_paths=None,
-        ),
-        RetrievalProfile(
-            name="gfm_multihop",
-            description="Multi-hop reasoning via GFM graph + PPR walk (toggle either path below)",
-            paths=[
-                # "gfm",    # uncomment to enable GFM graph retrieval
-                "ppr",
-                "hybrid",
-            ],
-            rrf_weights={
-                # "gfm": 1.0,   # uncomment together with path above
-                "ppr":    0.8,
-                "hybrid": 0.6,
-            },
         ),
     ]
 }

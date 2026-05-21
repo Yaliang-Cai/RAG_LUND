@@ -233,7 +233,7 @@ async def test_two_check_failures_returns_none():
 
 async def test_cache_hit_skips_classifier():
     cache = RouterCache()
-    cache.put("cached query", "local")
+    cache.put("cached query", "semantic")
     classifier = _classifier("semantic")  # would return semantic, but cache wins
 
     graph = AdaptiveAgentGraph(

@@ -64,8 +64,8 @@ def test_get_avoid_profiles_returns_failed_profile():
 def test_lru_eviction():
     cache = RouterCache(maxsize=2)
     cache.put("q1", "semantic")
-    cache.put("q2", "local")
-    cache.put("q3", "precise")  # evicts q1
+    cache.put("q2", "multihop")
+    cache.put("q3", "full")  # evicts q1
     assert cache.get("q1") is None
     assert cache.get("q2") is not None
     assert cache.get("q3") is not None

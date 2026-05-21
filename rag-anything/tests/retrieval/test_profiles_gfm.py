@@ -1,21 +1,13 @@
-class TestGFMMultihopProfile:
+class TestGFMPath:
+    """GFM path remains a known retrieval path even though no built-in
+    profile currently uses it (the gfm_multihop profile was removed in
+    the 2026-05-21 profile registry cleanup). Keeping the path name in
+    KNOWN_PATHS lets ad-hoc profile configs still reference it."""
+
     def test_gfm_in_known_paths(self):
         from raganything.retrieval.profiles import KNOWN_PATHS
         assert "gfm" in KNOWN_PATHS
 
-    def test_gfm_multihop_profile_exists(self):
+    def test_gfm_multihop_profile_removed(self):
         from raganything.retrieval.profiles import PROFILE_REGISTRY
-        assert "gfm_multihop" in PROFILE_REGISTRY
-
-    def test_gfm_multihop_default_excludes_gfm(self):
-        from raganything.retrieval.profiles import PROFILE_REGISTRY
-        profile = PROFILE_REGISTRY["gfm_multihop"]
-        # GFM is commented out by default
-        assert "gfm" not in profile.paths
-        assert "ppr" in profile.paths
-        assert "hybrid" in profile.paths
-
-    def test_gfm_multihop_rrf_weights_match_paths(self):
-        from raganything.retrieval.profiles import PROFILE_REGISTRY
-        profile = PROFILE_REGISTRY["gfm_multihop"]
-        assert set(profile.paths) == set(profile.rrf_weights.keys())
+        assert "gfm_multihop" not in PROFILE_REGISTRY

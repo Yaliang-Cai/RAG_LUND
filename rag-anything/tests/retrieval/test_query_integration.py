@@ -28,7 +28,7 @@ async def test_aquery_auto_mode_calls_router():
     router_mock = MagicMock()
     router_mock.route = AsyncMock(return_value=(
         [{"chunk_id": "c1", "content": "answer chunk", "file_path": "f.pdf"}],
-        {"profile": "local", "confidence": 0.9, "reasoning": "r",
+        {"profile": "semantic", "confidence": 0.9, "reasoning": "r",
          "paths_activated": ["hybrid"], "paths_failed": [],
          "chunks_per_path": {"hybrid": 1}, "chunks_after_rrf": 1,
          "chunks_after_rerank": 1, "chunks_after_threshold": 1,
@@ -46,7 +46,7 @@ async def test_aquery_auto_mode_passes_profile_kwarg():
     mixin = _make_mixin([])
     router_mock = MagicMock()
     router_mock.route = AsyncMock(return_value=([], {
-        "profile": "precise", "confidence": 1.0, "reasoning": "",
+        "profile": "semantic", "confidence": 1.0, "reasoning": "",
         "paths_activated": [], "paths_failed": [],
         "chunks_per_path": {}, "chunks_after_rrf": 0,
         "chunks_after_rerank": 0, "chunks_after_threshold": 0,
@@ -54,10 +54,10 @@ async def test_aquery_auto_mode_passes_profile_kwarg():
     }))
 
     with patch("raganything.query.RetrievalRouter", return_value=router_mock):
-        await QueryMixin.aquery(mixin, "CVE-2026-001", mode="auto", profile="precise")
+        await QueryMixin.aquery(mixin, "CVE-2026-001", mode="auto", profile="semantic")
 
     _, call_kwargs = router_mock.route.call_args
-    assert call_kwargs.get("profile_name") == "precise"
+    assert call_kwargs.get("profile_name") == "semantic"
 
 
 async def test_aquery_non_auto_mode_unchanged():
@@ -106,7 +106,7 @@ async def test_aquery_auto_return_trace_includes_routing():
     mixin = _make_mixin([])
     router_mock = MagicMock()
     routing_trace = {
-        "profile": "local",
+        "profile": "semantic",
         "confidence": 0.9,
         "reasoning": "factual query",
         "paths_activated": ["hybrid", "naive"],
@@ -127,6 +127,6 @@ async def test_aquery_auto_return_trace_includes_routing():
     assert isinstance(result, dict)
     assert "answer" in result
     assert "trace" in result
-    assert result["trace"]["routing"]["profile"] == "local"
+    assert result["trace"]["routing"]["profile"] == "semantic"
     assert "latency_per_path" in result["trace"]["routing"]
     assert result["trace"]["routing"]["latency_per_path"]["classifier"] == 0.12

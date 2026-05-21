@@ -249,6 +249,7 @@ class QueryRequest(BaseModel):
     ppr_synonym_weight_mode: Literal["raw", "plus_one"] = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
     qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] = DEFAULT_QDRANT_RETRIEVAL_MODE
     profile: Optional[str] = None  # auto mode only; None = LLM classifier decides
+    rerank_candidate_cap: Optional[int] = None  # naive mode only: pre-rerank pool size
     conversation_history: list[dict] = []
 
 class EvaluateRequest(BaseModel):
@@ -716,6 +717,7 @@ async def query_stream_endpoint(
                 ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
                 qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
                 profile=payload.profile,
+                rerank_candidate_cap=payload.rerank_candidate_cap,
                 conversation_history=payload.conversation_history,
                 vlm_enhanced=payload.vlm_enhanced,
             ):

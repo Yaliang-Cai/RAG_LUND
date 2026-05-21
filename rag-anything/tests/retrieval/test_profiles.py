@@ -8,7 +8,19 @@ from raganything.retrieval.profiles import (
 
 
 def test_all_builtin_profiles_present():
-    assert set(PROFILE_REGISTRY.keys()) == {"precise", "semantic", "local", "multihop", "full", "gfm_multihop"}
+    assert set(PROFILE_REGISTRY.keys()) == {"semantic", "multihop", "full"}
+
+
+def test_semantic_profile_shape():
+    p = PROFILE_REGISTRY["semantic"]
+    assert p.paths == ["mix", "qdrant_hybrid"]
+    assert p.enable_rerank is True
+
+
+def test_multihop_profile_shape():
+    p = PROFILE_REGISTRY["multihop"]
+    assert p.paths == ["ppr", "qdrant_hybrid"]
+    assert p.enable_rerank is False
 
 
 def test_profile_paths_are_known():
@@ -30,7 +42,7 @@ def test_full_profile_has_no_semaphore():
 
 
 def test_simple_profiles_have_no_semaphore():
-    for name in ("precise", "local", "multihop", "semantic"):
+    for name in ("multihop", "semantic"):
         assert PROFILE_REGISTRY[name].max_concurrent_paths is None
 
 

@@ -13,12 +13,12 @@ async def _make_llm(response_str: str) -> AsyncMock:
 async def test_valid_classification():
     llm = await _make_llm(json.dumps({
         "reasoning": "clear factual query",
-        "profile": "local",
+        "profile": "semantic",
         "confidence": 0.9,
     }))
     clf = QueryClassifier(llm)
     name, meta = await clf.classify("How many parameters does BERT have?")
-    assert name == "local"
+    assert name == "semantic"
     assert meta["confidence"] == 0.9
     assert "reasoning" in meta
     assert meta["latency"] >= 0.0
@@ -27,7 +27,7 @@ async def test_valid_classification():
 async def test_low_confidence_falls_back_to_semantic():
     llm = await _make_llm(json.dumps({
         "reasoning": "unsure",
-        "profile": "local",
+        "profile": "multihop",
         "confidence": 0.4,
     }))
     clf = QueryClassifier(llm)
