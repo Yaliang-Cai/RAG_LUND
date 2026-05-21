@@ -278,6 +278,7 @@ def test_local_env_enables_internal_build_defaults():
     assert env["CONTEXT_ZERO_WINDOW_CONTENT_TYPES"]
     assert env["RAGANYTHING_SERIALIZE_MINERU"] == "true"
     assert env["MINERU_VLLM_GPU_MEMORY_UTILIZATION"] == "0.1"
+    assert env["LIBREOFFICE_CONVERT_TIMEOUT_SECONDS"] == "900"
     assert env["RAGANYTHING_PRELOAD_RERANKER_MODEL"] == "false"
     assert env["MAX_SOURCE_IDS_PER_ENTITY"] == "99999"
     assert env["MAX_SOURCE_IDS_PER_RELATION"] == "99999"
@@ -299,6 +300,22 @@ def test_local_env_allows_max_async_ingest_override():
     )
 
     assert env["MAX_CONCURRENT_FILES"] == "1"
+
+
+def test_local_env_preserves_explicit_libreoffice_timeout():
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=Path("/tmp/raw"),
+        storage_root=Path("/tmp/internal"),
+        workspace_id="demo_ws",
+    )
+
+    env = build_internal.build_local_env(
+        profile,
+        base_env={"LIBREOFFICE_CONVERT_TIMEOUT_SECONDS": "1200"},
+    )
+
+    assert env["LIBREOFFICE_CONVERT_TIMEOUT_SECONDS"] == "1200"
 
 
 def test_local_rag_settings_reads_preload_reranker_env(monkeypatch):
@@ -711,7 +728,7 @@ def test_mineru_preparse_records_conversion_failure_and_continues(
     assert "lo_profile_" in commands
     assert "manual_convert_logs" in commands
     assert "soffice" in commands
-    assert 'TIMEOUT_SEC="${LIBREOFFICE_CONVERT_TIMEOUT_SECONDS:-900}"' in commands
+    assert 'TIMEOUT_SEC="${LIBREOFFICE_CONVERT_TIMEOUT_SECONDS:-1800}"' in commands
     assert "writer_pdf_Export" in commands
     assert "SAL_USE_VCLPLUGIN" in commands
     assert "pkill -9" in commands
