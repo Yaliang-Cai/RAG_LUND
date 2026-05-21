@@ -222,6 +222,7 @@ async def _remove_relation_edge_and_vector(
             exc,
         )
 
+
 try:
     from transformers import AutoImageProcessor
 except Exception:  # pragma: no cover - optional dependency
@@ -367,7 +368,9 @@ _EQUATION_WITH_TITLE_RE = _re.compile(
     r"^(?:eq|equation|formula)\.?\s*(?:[A-Za-z]?\d+(?:\.\d+)*|[A-Za-z])\s*[:\-]\s*.+$",
     _re.IGNORECASE,
 )
-_MODAL_ENTITY_SUFFIX_RE = _re.compile(r"\s*\((?:table|image|equation)\)$", _re.IGNORECASE)
+_MODAL_ENTITY_SUFFIX_RE = _re.compile(
+    r"\s*\((?:table|image|equation)\)$", _re.IGNORECASE
+)
 _IMAGE_STEM_NO_EXT_RE = _re.compile(r"^image(?:_|-)[a-z0-9]{4,}$", _re.IGNORECASE)
 _PAGE_NUMBER_ENTITY_RE = _re.compile(r"^page\s+\d+$", _re.IGNORECASE)
 _COORDINATE_ENTITY_RE = _re.compile(r"^coordinates?\s*\[[^\]]+\]$", _re.IGNORECASE)
@@ -404,7 +407,9 @@ def _is_relative_multisegment_path(text: str) -> bool:
     if "/" not in text and "\\" not in text:
         return False
 
-    segments = [seg.strip() for seg in _PATH_SEGMENT_SPLIT_RE.split(text) if seg.strip()]
+    segments = [
+        seg.strip() for seg in _PATH_SEGMENT_SPLIT_RE.split(text) if seg.strip()
+    ]
     if len(segments) < 3:
         return False
 
@@ -614,8 +619,10 @@ def _normalize_word_case(word: str, uppercase_allowlist: set[str]) -> str:
         # Preserve words with meaningful internal capitals (OpenAI, iPhone).
         has_upper = any(ch.isupper() for ch in piece)
         has_lower = any(ch.islower() for ch in piece)
-        if has_upper and has_lower and (
-            piece[:1].islower() or any(ch.isupper() for ch in piece[1:])
+        if (
+            has_upper
+            and has_lower
+            and (piece[:1].islower() or any(ch.isupper() for ch in piece[1:]))
         ):
             normalized_pieces.append(piece)
             continue
@@ -680,7 +687,9 @@ def _normalize_high_level_keyword(
         # Keep explicit uppercase/mixed-case signals; lowercase the rest.
         has_upper = any(ch.isupper() for ch in canonical_word)
         has_lower = any(ch.islower() for ch in canonical_word)
-        if canonical_word.isupper() or (has_upper and has_lower and _re.search(r"[A-Z]", canonical_word[1:])):
+        if canonical_word.isupper() or (
+            has_upper and has_lower and _re.search(r"[A-Z]", canonical_word[1:])
+        ):
             lowered_words.append(canonical_word)
         else:
             lowered_words.append(canonical_word.lower())
@@ -917,17 +926,13 @@ def _build_query_cache_params(
         "ppr_post_rerank_fusion": getattr(
             query_param, "ppr_post_rerank_fusion", "none"
         ),
-        "ppr_post_rerank_rrf_k": getattr(
-            query_param, "ppr_post_rerank_rrf_k", 60
-        ),
+        "ppr_post_rerank_rrf_k": getattr(query_param, "ppr_post_rerank_rrf_k", 60),
         "ppr_synonym_weight_mode": query_param.ppr_synonym_weight_mode,
         "qdrant_retrieval_mode": query_param.qdrant_retrieval_mode,
         "keyword_fanout_mode": getattr(query_param, "keyword_fanout_mode", "joined"),
         "keyword_entity_rrf_k": getattr(query_param, "keyword_entity_rrf_k", 10),
         "keyword_relation_rrf_k": getattr(query_param, "keyword_relation_rrf_k", 20),
-        "answer_context_mode": getattr(
-            query_param, "answer_context_mode", "kg_prompt"
-        ),
+        "answer_context_mode": getattr(query_param, "answer_context_mode", "kg_prompt"),
         "kg_chunk_selection_source": getattr(
             query_param, "kg_chunk_selection_source", "truncated"
         ),
@@ -943,10 +948,14 @@ def _build_query_cache_params(
     }
 
 
-def _compute_query_cache_args_hash(query: str, query_cache_params: dict[str, Any]) -> str:
+def _compute_query_cache_args_hash(
+    query: str, query_cache_params: dict[str, Any]
+) -> str:
     """Compute query-cache hash from user query + canonical cache params."""
     payload = {"query": query, **query_cache_params}
-    payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    payload_json = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return compute_args_hash(payload_json)
 
 
@@ -959,9 +968,11 @@ def _should_bypass_cache(query_param: QueryParam, cache_type: str) -> bool:
 
 
 def _resolve_answer_context_mode(query_param: QueryParam) -> str:
-    answer_context_mode = str(
-        getattr(query_param, "answer_context_mode", "kg_prompt") or "kg_prompt"
-    ).strip().lower()
+    answer_context_mode = (
+        str(getattr(query_param, "answer_context_mode", "kg_prompt") or "kg_prompt")
+        .strip()
+        .lower()
+    )
     if getattr(query_param, "mode", None) in ("ppr", "ppr_local"):
         return "chunk_only_prompt"
     return answer_context_mode or "kg_prompt"
@@ -985,9 +996,14 @@ def _resolve_kg_chunk_selection_inputs(
     truncation_result: dict[str, Any],
     query_param: QueryParam,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
-    selection_source = str(
-        getattr(query_param, "kg_chunk_selection_source", "truncated") or "truncated"
-    ).strip().lower()
+    selection_source = (
+        str(
+            getattr(query_param, "kg_chunk_selection_source", "truncated")
+            or "truncated"
+        )
+        .strip()
+        .lower()
+    )
     if selection_source == "untruncated":
         return (
             search_result.get("final_entities", []),
@@ -1126,10 +1142,7 @@ async def _keyword_rrf_query_vector_storage(
         per_keyword_hits.append(
             {
                 "keyword": keyword,
-                "hits": [
-                    _search_hit_debug_item(item, store_kind)
-                    for item in results
-                ],
+                "hits": [_search_hit_debug_item(item, store_kind) for item in results],
             }
         )
 
@@ -1152,9 +1165,11 @@ _QWEN_IMAGE_PROCESSOR_CACHE: dict[str, Any] = {}
 
 
 def _resolve_image_token_estimate_method(query_param: QueryParam) -> str:
-    method = str(
-        getattr(query_param, "image_token_estimate_method", "qwen_vl") or "qwen_vl"
-    ).strip().lower()
+    method = (
+        str(getattr(query_param, "image_token_estimate_method", "qwen_vl") or "qwen_vl")
+        .strip()
+        .lower()
+    )
     if method == "qwen_vl":
         return method
     raise ValueError(
@@ -2442,9 +2457,11 @@ async def _rebuild_single_entity(
                 "description": final_description,
                 "entity_type": entity_type,
                 "source_id": GRAPH_FIELD_SEP.join(source_chunk_ids),
-                "file_path": GRAPH_FIELD_SEP.join(file_paths)
-                if file_paths
-                else current_entity.get("file_path", "unknown_source"),
+                "file_path": (
+                    GRAPH_FIELD_SEP.join(file_paths)
+                    if file_paths
+                    else current_entity.get("file_path", "unknown_source")
+                ),
                 "created_at": int(time.time()),
                 "truncate": truncation_info,
             }
@@ -2768,10 +2785,10 @@ async def _rebuild_single_relationship(
         if "weight" in rel_data and rel_data.get("weight") is not None:
             weights.append(rel_data.get("weight"))
         if rel_data.get("file_path"):
-                file_path = rel_data["file_path"]
-                if file_path and file_path not in seen_paths:
-                    file_paths_list.append(file_path)
-                    seen_paths.add(file_path)
+            file_path = rel_data["file_path"]
+            if file_path and file_path not in seen_paths:
+                file_paths_list.append(file_path)
+                seen_paths.add(file_path)
 
     # Apply count limit
     max_file_paths = global_config.get("max_file_paths")
@@ -2829,7 +2846,9 @@ async def _rebuild_single_relationship(
             )
 
     if weights:
-        weight_raw = sum(_to_non_negative_float(weight, default=1.0) for weight in weights)
+        weight_raw = sum(
+            _to_non_negative_float(weight, default=1.0) for weight in weights
+        )
     else:
         current_raw = (
             _extract_existing_factual_weight_raw(current_relationship)
@@ -2840,10 +2859,16 @@ async def _rebuild_single_relationship(
             current_source_ids = split_string_by_multi_markers(
                 str(current_relationship.get("source_id", "") or ""), [GRAPH_FIELD_SEP]
             )
-            current_source_count = len([chunk_id for chunk_id in current_source_ids if chunk_id])
-            remaining_source_count = len([chunk_id for chunk_id in limited_chunk_ids if chunk_id])
+            current_source_count = len(
+                [chunk_id for chunk_id in current_source_ids if chunk_id]
+            )
+            remaining_source_count = len(
+                [chunk_id for chunk_id in limited_chunk_ids if chunk_id]
+            )
             if current_source_count > 0 and remaining_source_count > 0:
-                weight_raw = current_raw * (remaining_source_count / current_source_count)
+                weight_raw = current_raw * (
+                    remaining_source_count / current_source_count
+                )
             elif remaining_source_count > 0:
                 weight_raw = float(remaining_source_count)
             else:
@@ -2885,12 +2910,14 @@ async def _rebuild_single_relationship(
         "weight": weight,
         "weight_raw": weight_raw,
         "source_id": GRAPH_FIELD_SEP.join(limited_chunk_ids),
-        "file_path": GRAPH_FIELD_SEP.join([fp for fp in file_paths_list if fp])
-        if file_paths_list
-        else (
-            current_relationship.get("file_path", "unknown_source")
-            if current_is_factual
-            else "unknown_source"
+        "file_path": (
+            GRAPH_FIELD_SEP.join([fp for fp in file_paths_list if fp])
+            if file_paths_list
+            else (
+                current_relationship.get("file_path", "unknown_source")
+                if current_is_factual
+                else "unknown_source"
+            )
         ),
         "truncate": truncation_info,
         "created_at": edge_created_at,
@@ -3039,6 +3066,7 @@ async def _merge_nodes_then_upsert(
     entity_chunks_storage: BaseKVStorage | None = None,
 ):
     """Get existing nodes from knowledge graph use name,if exists, merge data, else create, then upsert."""
+    replay_nodes_data = list(nodes_data)
     incoming_entity_name = ""
     for dp in nodes_data:
         candidate_name = dp.get("entity_name") if isinstance(dp, dict) else None
@@ -3093,16 +3121,6 @@ async def _merge_nodes_then_upsert(
 
     # 2. Merging new source ids with existing ones
     full_source_ids = merge_source_ids(existing_full_source_ids, new_source_ids)
-
-    if entity_chunks_storage is not None and full_source_ids:
-        await entity_chunks_storage.upsert(
-            {
-                entity_name: {
-                    "chunk_ids": full_source_ids,
-                    "count": len(full_source_ids),
-                }
-            }
-        )
 
     # 3. Finalize source_id by applying source ids limit
     limit_method = global_config.get("source_ids_limit_method")
@@ -3163,6 +3181,15 @@ async def _merge_nodes_then_upsert(
     # Nothing new to merge: keep existing entity as-is.
     if not nodes_data:
         if already_node:
+            if entity_chunks_storage is not None and full_source_ids:
+                await entity_chunks_storage.upsert(
+                    {
+                        entity_name: {
+                            "chunk_ids": full_source_ids,
+                            "count": len(full_source_ids),
+                        }
+                    }
+                )
             if (
                 limit_method == SOURCE_IDS_LIMIT_METHOD_KEEP
                 and len(existing_full_source_ids) >= max_source_limit
@@ -3177,10 +3204,70 @@ async def _merge_nodes_then_upsert(
             unchanged_node = dict(already_node)
             if incoming_entity_name and not unchanged_node.get("entity_name"):
                 unchanged_node["entity_name"] = incoming_entity_name
+            if entity_vdb is not None:
+                _disambig = global_config.get("enable_entity_disambiguation", True)
+                existing_entity_type = unchanged_node.get("entity_type")
+                if (
+                    not isinstance(existing_entity_type, str)
+                    or not existing_entity_type.strip()
+                ):
+                    existing_entity_type = "UNKNOWN"
+                existing_entity_name = (
+                    unchanged_node.get("entity_name")
+                    or incoming_entity_name
+                    or entity_name
+                )
+                if (
+                    _disambig
+                    and existing_entity_name == entity_name
+                    and "|" in entity_name
+                ):
+                    parsed_name, parsed_type = entity_name.rsplit("|", 1)
+                    if parsed_name:
+                        existing_entity_name = parsed_name
+                    if parsed_type and existing_entity_type == "UNKNOWN":
+                        existing_entity_type = parsed_type
+                existing_source_id = unchanged_node.get(
+                    "source_id"
+                ) or GRAPH_FIELD_SEP.join(source_ids)
+                existing_file_path = unchanged_node.get("file_path", "unknown_source")
+                existing_description = str(unchanged_node.get("description", ""))
+                entity_vdb_id = compute_entity_vdb_id(
+                    existing_entity_name, existing_entity_type, _disambig
+                )
+                data_for_vdb = {
+                    entity_vdb_id: {
+                        "entity_id": entity_name,
+                        "entity_name": existing_entity_name,
+                        "entity_type": existing_entity_type,
+                        "content": f"{existing_entity_name}\n{existing_description}",
+                        "source_id": existing_source_id,
+                        "file_path": existing_file_path,
+                    }
+                }
+                await safe_vdb_operation_with_exception(
+                    operation=lambda payload=data_for_vdb: entity_vdb.upsert(payload),
+                    operation_name="entity_replay_repair_upsert",
+                    entity_name=existing_entity_name,
+                    max_retries=3,
+                    retry_delay=0.1,
+                )
             unchanged_node["_changed"] = False
             return unchanged_node
-        logger.error(f"Internal Error: already_node missing for `{entity_name}`")
-        raise ValueError(f"Internal Error: already_node missing for `{entity_name}`")
+        recovery_nodes = [dp for dp in replay_nodes_data if isinstance(dp, dict)]
+        if not recovery_nodes:
+            logger.error(f"Internal Error: already_node missing for `{entity_name}`")
+            raise ValueError(
+                f"Internal Error: already_node missing for `{entity_name}`"
+            )
+        logger.warning(
+            "Recovering missing graph node for `%s` from replay evidence "
+            "(chunk_refs=%d, replay_records=%d)",
+            entity_name,
+            len(existing_full_source_ids),
+            len(recovery_nodes),
+        )
+        nodes_data = recovery_nodes
 
     # 6.1 Finalize source_id
     source_id = GRAPH_FIELD_SEP.join(source_ids)
@@ -3374,6 +3461,15 @@ async def _merge_nodes_then_upsert(
             max_retries=3,
             retry_delay=0.1,
         )
+    if entity_chunks_storage is not None and full_source_ids:
+        await entity_chunks_storage.upsert(
+            {
+                entity_name: {
+                    "chunk_ids": full_source_ids,
+                    "count": len(full_source_ids),
+                }
+            }
+        )
     node_data["_changed"] = True
     return node_data
 
@@ -3397,6 +3493,8 @@ async def _merge_edges_then_upsert(
 ):
     if src_id == tgt_id:
         return None
+
+    replay_edges_data = list(edges_data)
 
     strict_endpoint_match = bool(
         global_config.get(
@@ -3508,16 +3606,6 @@ async def _merge_edges_then_upsert(
     # 2. Merge new source ids with existing ones
     full_source_ids = merge_source_ids(existing_full_source_ids, new_source_ids)
 
-    if relation_chunks_storage is not None and full_source_ids:
-        await relation_chunks_storage.upsert(
-            {
-                storage_key: {
-                    "chunk_ids": full_source_ids,
-                    "count": len(full_source_ids),
-                }
-            }
-        )
-
     # 3. Finalize source_id by applying source ids limit
     limit_method = global_config.get("source_ids_limit_method")
     max_source_limit = global_config.get("max_source_ids_per_relation")
@@ -3576,6 +3664,15 @@ async def _merge_edges_then_upsert(
     # Nothing new to merge: keep existing edge as-is.
     if not edges_data:
         if already_edge:
+            if relation_chunks_storage is not None and full_source_ids:
+                await relation_chunks_storage.upsert(
+                    {
+                        storage_key: {
+                            "chunk_ids": full_source_ids,
+                            "count": len(full_source_ids),
+                        }
+                    }
+                )
             if (
                 limit_method == SOURCE_IDS_LIMIT_METHOD_KEEP
                 and len(existing_full_source_ids) >= max_source_limit
@@ -3587,11 +3684,83 @@ async def _merge_edges_then_upsert(
                 logger.debug(
                     f"Skipped `{src_id}`~`{tgt_id}`: no new source evidence (idempotent replay)"
                 )
+            if relationships_vdb is not None and _is_factual_or_legacy_edge(
+                already_edge
+            ):
+                vdb_src_id, vdb_tgt_id = src_id, tgt_id
+                if vdb_src_id > vdb_tgt_id:
+                    vdb_src_id, vdb_tgt_id = vdb_tgt_id, vdb_src_id
+                rel_vdb_id = compute_mdhash_id(vdb_src_id + vdb_tgt_id, prefix="rel-")
+                rel_vdb_id_reverse = compute_mdhash_id(
+                    vdb_tgt_id + vdb_src_id, prefix="rel-"
+                )
+                try:
+                    await relationships_vdb.delete([rel_vdb_id, rel_vdb_id_reverse])
+                except Exception as e:
+                    logger.debug(
+                        f"Could not delete old relationship vector records {rel_vdb_id}, {rel_vdb_id_reverse}: {e}"
+                    )
+                existing_keywords = str(already_edge.get("keywords", ""))
+                existing_description = str(already_edge.get("description", ""))
+                existing_source_id = already_edge.get(
+                    "source_id"
+                ) or GRAPH_FIELD_SEP.join(source_ids)
+                existing_file_path = already_edge.get("file_path", "unknown_source")
+                vdb_data = {
+                    rel_vdb_id: {
+                        "src_id": vdb_src_id,
+                        "tgt_id": vdb_tgt_id,
+                        "source_id": existing_source_id,
+                        "content": f"{existing_keywords}\t{vdb_src_id}\n{vdb_tgt_id}\n{existing_description}",
+                        "keywords": existing_keywords,
+                        "description": existing_description,
+                        "weight": already_edge.get("weight", 1.0),
+                        "weight_raw": already_edge.get("weight_raw", 1.0),
+                        "file_path": existing_file_path,
+                        "edge_type": already_edge.get("edge_type", FACTUAL_EDGE_TYPE),
+                        "provenance": already_edge.get(
+                            "provenance", FACTUAL_EDGE_PROVENANCE
+                        ),
+                    }
+                }
+                await safe_vdb_operation_with_exception(
+                    operation=lambda payload=vdb_data: relationships_vdb.upsert(
+                        payload
+                    ),
+                    operation_name="relationship_replay_repair_upsert",
+                    entity_name=f"{vdb_src_id}-{vdb_tgt_id}",
+                    max_retries=3,
+                    retry_delay=0.2,
+                )
             return dict(already_edge)
-        logger.error(f"Internal Error: already_edge missing for `{src_id}`~`{tgt_id}`")
-        raise ValueError(
-            f"Internal Error: already_edge missing for `{src_id}`~`{tgt_id}`"
+        recovery_edges = [dp for dp in replay_edges_data if isinstance(dp, dict)]
+        if not recovery_edges:
+            logger.error(
+                f"Internal Error: already_edge missing for `{src_id}`~`{tgt_id}`"
+            )
+            raise ValueError(
+                f"Internal Error: already_edge missing for `{src_id}`~`{tgt_id}`"
+            )
+        logger.warning(
+            "Recovering missing graph edge for `%s`~`%s` from replay evidence "
+            "(chunk_refs=%d, replay_records=%d)",
+            src_id,
+            tgt_id,
+            len(existing_full_source_ids),
+            len(recovery_edges),
         )
+        edges_data = recovery_edges
+        source_weight_increments = {}
+        for edge_data in edges_data:
+            source_id_value = str(edge_data.get("source_id", "") or "").strip()
+            if not source_id_value:
+                continue
+            edge_weight = edge_data.get("weight", 1.0)
+            parsed_weight = _to_non_negative_float(edge_weight, default=1.0)
+            source_weight_increments[source_id_value] = max(
+                source_weight_increments.get(source_id_value, 0.0),
+                parsed_weight,
+            )
 
     # 6.1 Finalize source_id
     source_id = GRAPH_FIELD_SEP.join(source_ids)
@@ -3606,7 +3775,9 @@ async def _merge_edges_then_upsert(
         edge_weight = edge_data.get("weight", 1.0)
         source_less_weight_sum += _to_non_negative_float(edge_weight, default=1.0)
     weight_raw = (
-        already_weight_raw + sum(source_weight_increments.values()) + source_less_weight_sum
+        already_weight_raw
+        + sum(source_weight_increments.values())
+        + source_less_weight_sum
     )
     weight = _factual_weight_from_raw(weight_raw)
 
@@ -3862,7 +4033,9 @@ async def _merge_edges_then_upsert(
             # 1. Get existing full source_ids from entity_chunks_storage
             existing_full_source_ids = []
             if entity_chunks_storage is not None:
-                stored_chunks = await entity_chunks_storage.get_by_id(existing_entity_id)
+                stored_chunks = await entity_chunks_storage.get_by_id(
+                    existing_entity_id
+                )
                 if stored_chunks and isinstance(stored_chunks, dict):
                     existing_full_source_ids = [
                         chunk_id
@@ -4045,6 +4218,15 @@ async def _merge_edges_then_upsert(
             entity_name=f"{src_id}-{tgt_id}",
             max_retries=3,
             retry_delay=0.2,
+        )
+    if relation_chunks_storage is not None and full_source_ids:
+        await relation_chunks_storage.upsert(
+            {
+                storage_key: {
+                    "chunk_ids": full_source_ids,
+                    "count": len(full_source_ids),
+                }
+            }
         )
 
     return edge_data
@@ -4992,9 +5174,23 @@ async def kg_query(
     logger.debug(f"Low-level  keywords: {ll_keywords}")
 
     # Handle empty keywords
-    if ll_keywords == [] and query_param.mode in ["local", "hybrid", "mix", "rrf", "ppr", "ppr_local"]:
+    if ll_keywords == [] and query_param.mode in [
+        "local",
+        "hybrid",
+        "mix",
+        "rrf",
+        "ppr",
+        "ppr_local",
+    ]:
         logger.warning("low_level_keywords is empty")
-    if hl_keywords == [] and query_param.mode in ["global", "hybrid", "mix", "rrf", "ppr", "ppr_local"]:
+    if hl_keywords == [] and query_param.mode in [
+        "global",
+        "hybrid",
+        "mix",
+        "rrf",
+        "ppr",
+        "ppr_local",
+    ]:
         logger.warning("high_level_keywords is empty")
     if hl_keywords == [] and ll_keywords == []:
         if len(query) < 50:
@@ -5288,9 +5484,8 @@ async def extract_keywords_only(
             "high_level_keywords": hl_keywords,
             "low_level_keywords": ll_keywords,
         }
-        if (
-            not _should_bypass_cache(param, "keywords")
-            and hashing_kv.global_config.get("enable_llm_cache")
+        if not _should_bypass_cache(param, "keywords") and hashing_kv.global_config.get(
+            "enable_llm_cache"
         ):
             # Save to cache with query parameters
             queryparam_dict = {
@@ -5976,7 +6171,9 @@ async def _merge_all_chunks(
 
     # RRF path: Reciprocal Rank Fusion merge
     if query_param is not None and query_param.mode == "rrf":
-        ranking_lists = [lst for lst in [vector_chunks, entity_chunks, relation_chunks] if lst]
+        ranking_lists = [
+            lst for lst in [vector_chunks, entity_chunks, relation_chunks] if lst
+        ]
         if not ranking_lists:
             return []
         rrf_k = getattr(query_param, "rrf_k", 60)
@@ -6066,6 +6263,7 @@ async def _build_context_str(
     Build the final LLM context string with token processing.
     This includes dynamic token calculation and final chunk truncation.
     """
+
     def _empty_rerank_chunk_debug() -> dict[str, Any]:
         raw_scope = str(getattr(query_param, "rerank_score_scope", "all") or "all")
         scope = raw_scope.strip().lower()
@@ -6232,11 +6430,20 @@ async def _build_context_str(
             chunk_image_tokens = 0
             new_paths_for_chunk: list[str] = []
 
-            if estimate_image_tokens is not None and len(selected_image_paths) < image_cap:
+            if (
+                estimate_image_tokens is not None
+                and len(selected_image_paths) < image_cap
+            ):
                 for image_path in _extract_image_paths_from_chunk(chunk):
-                    if image_path in selected_image_paths or image_path in new_paths_for_chunk:
+                    if (
+                        image_path in selected_image_paths
+                        or image_path in new_paths_for_chunk
+                    ):
                         continue
-                    if len(selected_image_paths) + len(new_paths_for_chunk) >= image_cap:
+                    if (
+                        len(selected_image_paths) + len(new_paths_for_chunk)
+                        >= image_cap
+                    ):
                         break
 
                     token_value = estimate_image_tokens(image_path)
@@ -6291,7 +6498,7 @@ async def _build_context_str(
     for i, chunk in enumerate(truncated_chunks):
         chunks_context.append(
             {
-                "id": chunk.get("id", ""),        # chunk-level inline citation identifier
+                "id": chunk.get("id", ""),  # chunk-level inline citation identifier
                 "reference_id": chunk["reference_id"],
                 "content": chunk["content"],
             }
@@ -6430,8 +6637,10 @@ async def _rerank_kg_results(
         search_result["final_relations"] = reranked
         kg_rerank_debug["relations"] = [
             {
-                "src_id": item.get("src_id") or (item.get("src_tgt") or [None, None])[0],
-                "tgt_id": item.get("tgt_id") or (item.get("src_tgt") or [None, None])[1],
+                "src_id": item.get("src_id")
+                or (item.get("src_tgt") or [None, None])[0],
+                "tgt_id": item.get("tgt_id")
+                or (item.get("src_tgt") or [None, None])[1],
                 "rerank_score": item.get("rerank_score"),
             }
             for item in reranked
@@ -6481,14 +6690,18 @@ async def _build_query_context(
         if query_param.mode not in ("mix", "rrf", "ppr", "ppr_local"):
             return None
         else:
-            if not search_result["chunk_tracking"] and not search_result.get("ppr_chunks"):
+            if not search_result["chunk_tracking"] and not search_result.get(
+                "ppr_chunks"
+            ):
                 return None
 
     # Stage 1.5 (optional): Rerank entities and relations by query relevance.
     # PPR modes surface chunk-only context after graph propagation, so KG rerank
     # here is unnecessary overhead for mode="ppr"/"ppr_local".
     # enable_kg_rerank is independent of enable_rerank (chunk rerank).
-    _kg_rerank_enabled = getattr(query_param, "enable_kg_rerank", query_param.enable_rerank)
+    _kg_rerank_enabled = getattr(
+        query_param, "enable_kg_rerank", query_param.enable_rerank
+    )
     if (
         query_param.mode not in ("ppr", "ppr_local")
         and _kg_rerank_enabled
@@ -6584,9 +6797,7 @@ async def _build_query_context(
         "merged_chunks_count": len(merged_chunks),
         "final_chunks_count": len(raw_data.get("data", {}).get("chunks", [])),
     }
-    raw_data["metadata"]["retrieval_debug"] = search_result.get(
-        "retrieval_debug", {}
-    )
+    raw_data["metadata"]["retrieval_debug"] = search_result.get("retrieval_debug", {})
 
     logger.debug(
         f"[_build_query_context] Context length: {len(context) if context else 0}"
@@ -6673,10 +6884,13 @@ async def _recognition_memory_filter(
     }
 
     # --- Step 3: Independent min-max normalisation ---
-    norm_vdb = _min_max_norm({
-        nd["entity_id"]: nd.get("vdb_score", 0.0)
-        for nd in top_nodes if nd.get("entity_id")
-    })
+    norm_vdb = _min_max_norm(
+        {
+            nd["entity_id"]: nd.get("vdb_score", 0.0)
+            for nd in top_nodes
+            if nd.get("entity_id")
+        }
+    )
     norm_fact = _min_max_norm(fact_scores)
 
     # --- Step 4: Build unified candidate list for difflib matching ---
@@ -6684,19 +6898,23 @@ async def _recognition_memory_filter(
     # entity_display_lines: "id: description" strings shown in the LLM prompt
     entity_id_desc_pairs = [
         (nd["entity_id"], (nd.get("description") or "").strip()[:120])
-        for nd in top_nodes if nd.get("entity_id")
+        for nd in top_nodes
+        if nd.get("entity_id")
     ]
     entity_vdb_ids = [eid for eid, _ in entity_id_desc_pairs]
     entity_display_lines = [
-        f"{eid}: {desc}" if desc else eid
-        for eid, desc in entity_id_desc_pairs
+        f"{eid}: {desc}" if desc else eid for eid, desc in entity_id_desc_pairs
     ]
 
     # triplet endpoints may include entities absent from entity VDB results
-    triplet_eids = list(dict.fromkeys(
-        eid for rel in top_rels
-        for eid in (rel.get("src_id"), rel.get("tgt_id")) if eid
-    ))
+    triplet_eids = list(
+        dict.fromkeys(
+            eid
+            for rel in top_rels
+            for eid in (rel.get("src_id"), rel.get("tgt_id"))
+            if eid
+        )
+    )
     all_candidate_ids = list(dict.fromkeys(entity_vdb_ids + triplet_eids))
 
     if not all_candidate_ids:
@@ -6775,7 +6993,9 @@ async def _recognition_memory_filter(
         min_prompt_tokens = 256
         max_completion_tokens = max(1, max_context_tokens - min_prompt_tokens)
         completion_max_tokens = min(completion_max_tokens, max_completion_tokens)
-        max_reserved_tokens = max(0, max_context_tokens - completion_max_tokens - min_prompt_tokens)
+        max_reserved_tokens = max(
+            0, max_context_tokens - completion_max_tokens - min_prompt_tokens
+        )
         reserved_tokens = min(reserved_tokens, max_reserved_tokens)
         token_budget = max(
             min_prompt_tokens,
@@ -6785,7 +7005,9 @@ async def _recognition_memory_filter(
         selected_entities: list[str] = []
         selected_facts: list[str] = []
 
-        def _fits_budget(candidate_entities: list[str], candidate_facts: list[str]) -> bool:
+        def _fits_budget(
+            candidate_entities: list[str], candidate_facts: list[str]
+        ) -> bool:
             candidate_prompt = _compose_prompt(candidate_entities, candidate_facts)
             return len(tokenizer.encode(candidate_prompt)) <= token_budget
 
@@ -6795,7 +7017,9 @@ async def _recognition_memory_filter(
         if triplet_lines and _fits_budget(selected_entities, [triplet_lines[0]]):
             selected_facts.append(triplet_lines[0])
 
-        for line in entity_display_lines[1:] if selected_entities else entity_display_lines:
+        for line in (
+            entity_display_lines[1:] if selected_entities else entity_display_lines
+        ):
             candidate_entities = selected_entities + [line]
             if _fits_budget(candidate_entities, selected_facts):
                 selected_entities = candidate_entities
@@ -6807,9 +7031,8 @@ async def _recognition_memory_filter(
 
         prompt = _compose_prompt(selected_entities, selected_facts)
         prompt_tokens = len(tokenizer.encode(prompt))
-        if (
-            len(selected_entities) < len(entity_vdb_ids)
-            or len(selected_facts) < len(triplet_lines)
+        if len(selected_entities) < len(entity_vdb_ids) or len(selected_facts) < len(
+            triplet_lines
         ):
             logger.warning(
                 "PPR(global): recognition prompt truncated by token budget "
@@ -6835,9 +7058,7 @@ async def _recognition_memory_filter(
 
     # --- Step 6: LLM call ---
     try:
-        llm_output: str = await llm_model_func(
-            prompt, max_tokens=completion_max_tokens
-        )
+        llm_output: str = await llm_model_func(prompt, max_tokens=completion_max_tokens)
     except TypeError:
         # Backward compatibility for custom llm_model_func without max_tokens kwarg.
         llm_output = await llm_model_func(prompt)
@@ -6859,7 +7080,9 @@ async def _recognition_memory_filter(
             continue
         # Remove anything after the first ": " that the LLM may have copied from the prompt
         candidate_id = line.split(": ")[0].strip()
-        matches = difflib.get_close_matches(candidate_id, all_candidate_ids, n=1, cutoff=recognition_difflib_cutoff)
+        matches = difflib.get_close_matches(
+            candidate_id, all_candidate_ids, n=1, cutoff=recognition_difflib_cutoff
+        )
         if matches:
             recognized_ids.add(matches[0])
 
@@ -6948,7 +7171,9 @@ async def _ppr_rank_chunks_global(
     # Normalise entity seeds to sum=1
     entity_total = sum(entity_seed_weights.values())
     if entity_total > 0:
-        entity_seed_weights = {k: v / entity_total for k, v in entity_seed_weights.items()}
+        entity_seed_weights = {
+            k: v / entity_total for k, v in entity_seed_weights.items()
+        }
 
     # HippoRAG2-aligned full-graph chunk pool: ALL chunks in the knowledge graph are
     # included as PPR nodes, not just neighbours of seed entities.  This enables true
@@ -7102,7 +7327,9 @@ async def _ppr_rank_chunks(
         rel_results = [r for r in rel_results if not _is_synonym_edge(r)]
         filtered = before - len(rel_results)
         if filtered > 0:
-            logger.info(f"PPR: excluded {filtered} SYNONYM relation seeds by query flag")
+            logger.info(
+                f"PPR: excluded {filtered} SYNONYM relation seeds by query flag"
+            )
 
     if use_global and query_param.recognition_top_k > 0:
         # --- Recognition Memory path (global PPR only) ---
@@ -8227,10 +8454,7 @@ async def naive_query(
     budget_history_tokens = history_tokens
     buffer_tokens = 200  # reserved for reference list and safety buffer
     fixed_overhead_tokens = (
-        sys_prompt_tokens
-        + query_tokens
-        + budget_history_tokens
-        + buffer_tokens
+        sys_prompt_tokens + query_tokens + budget_history_tokens + buffer_tokens
     )
     available_chunk_tokens = max_total_tokens - fixed_overhead_tokens
     if available_chunk_tokens < 0:
@@ -8283,11 +8507,20 @@ async def naive_query(
             chunk_image_tokens = 0
             new_paths_for_chunk: list[str] = []
 
-            if estimate_image_tokens is not None and len(selected_image_paths) < image_cap:
+            if (
+                estimate_image_tokens is not None
+                and len(selected_image_paths) < image_cap
+            ):
                 for image_path in _extract_image_paths_from_chunk(chunk):
-                    if image_path in selected_image_paths or image_path in new_paths_for_chunk:
+                    if (
+                        image_path in selected_image_paths
+                        or image_path in new_paths_for_chunk
+                    ):
                         continue
-                    if len(selected_image_paths) + len(new_paths_for_chunk) >= image_cap:
+                    if (
+                        len(selected_image_paths) + len(new_paths_for_chunk)
+                        >= image_cap
+                    ):
                         break
 
                     token_value = estimate_image_tokens(image_path)
