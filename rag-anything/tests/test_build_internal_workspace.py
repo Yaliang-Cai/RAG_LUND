@@ -711,6 +711,10 @@ def test_mineru_preparse_records_conversion_failure_and_continues(
     assert "lo_profile_" in commands
     assert "manual_convert_logs" in commands
     assert "soffice" in commands
+    assert 'TIMEOUT_SEC="${LIBREOFFICE_CONVERT_TIMEOUT_SECONDS:-900}"' in commands
+    assert "writer_pdf_Export" in commands
+    assert "SAL_USE_VCLPLUGIN" in commands
+    assert "pkill -9" in commands
     assert "manual_convert_failed=1" in commands
     assert "One or more manual conversions failed." in commands
 
