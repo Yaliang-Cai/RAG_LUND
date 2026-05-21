@@ -323,6 +323,7 @@ def build_local_env(
             "RAGANYTHING_STRICT_RELATION_ENDPOINT_ENTITY_MATCH": "true",
             "ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE": "true",
             "CONTEXT_ZERO_WINDOW_CONTENT_TYPES": DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
+            "RAGANYTHING_PRELOAD_RERANKER_MODEL": "false",
             "RAGANYTHING_SERIALIZE_MINERU": "true",
             "MINERU_VLLM_GPU_MEMORY_UTILIZATION": str(
                 mineru_gpu_memory_utilization
@@ -1271,6 +1272,7 @@ def _settings_summary(settings: Any, env: dict[str, str]) -> dict[str, Any]:
         "enable_entity_surface_normalization",
         "enable_keyword_case_normalization",
         "strict_relation_endpoint_entity_match",
+        "preload_reranker_model",
     ):
         if hasattr(settings, key):
             summary[key] = _json_safe(getattr(settings, key))

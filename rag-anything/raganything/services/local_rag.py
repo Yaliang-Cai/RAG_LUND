@@ -21,6 +21,7 @@ import argparse
 import gc
 import ipaddress
 import shutil
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -149,6 +150,7 @@ _INLINE_CITATION_INSTRUCTION = (
 )
 
 _MODEL_CACHE: Dict[str, Any] = {}
+_MODEL_CACHE_LOCK = threading.Lock()
 _INTERNAL_OPENAI_KWARGS = {
     "hashing_kv",
     "keyword_extraction",
@@ -165,6 +167,7 @@ class LocalRagSettings:
     rerank_batch_size: int = DEFAULT_RERANK_BATCH_SIZE
     rerank_enable_oom_backoff: bool = DEFAULT_RERANK_ENABLE_OOM_BACKOFF
     rerank_min_batch_size: int = DEFAULT_RERANK_MIN_BATCH_SIZE
+    preload_reranker_model: bool = True
     min_rerank_score: float = DEFAULT_MIN_RERANK_SCORE
     tokenizer_model_path: str = DEFAULT_TOKENIZER_MODEL_PATH
     vision_model_path: str = DEFAULT_VISION_MODEL_PATH
@@ -291,6 +294,11 @@ class LocalRagSettings:
                     str(DEFAULT_RERANK_MIN_BATCH_SIZE),
                 )
             ),
+            preload_reranker_model=os.getenv(
+                "RAGANYTHING_PRELOAD_RERANKER_MODEL",
+                "true",
+            ).lower()
+            in {"1", "true", "yes", "y", "on"},
             min_rerank_score=float(
                 os.getenv(
                     "RAGANYTHING_MIN_RERANK_SCORE",
@@ -625,6 +633,26 @@ def _model_cache_key(settings: LocalRagSettings) -> str:
     return f"{settings.embedding_model_path}|{settings.rerank_model_path}|{settings.device}"
 
 
+def _embedding_model_cache_key(settings: LocalRagSettings) -> str:
+    return f"embedding|{settings.embedding_model_path}|{settings.device}"
+
+
+def _reranker_model_cache_key(settings: LocalRagSettings) -> str:
+    return f"reranker|{settings.rerank_model_path}|{settings.device}"
+
+
+def _get_or_load_cached_model(key: str, factory: Callable[[], Any]) -> Any:
+    cached = _MODEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with _MODEL_CACHE_LOCK:
+        cached = _MODEL_CACHE.get(key)
+        if cached is None:
+            cached = factory()
+            _MODEL_CACHE[key] = cached
+        return cached
+
+
 def _resolve_ingest_serialize_by_workspace_id(
     default_serialize_by_workspace_id: bool,
     serialize_by_workspace_id: Optional[bool],
@@ -646,22 +674,35 @@ def _resolve_ingest_serialize_by_workspace_id(
     return effective_serialize, False
 
 
-def load_models(settings: LocalRagSettings) -> tuple[SentenceTransformer, CrossEncoder]:
-    key = _model_cache_key(settings)
-    if key in _MODEL_CACHE:
-        return _MODEL_CACHE[key]
+def load_embedding_model(settings: LocalRagSettings) -> SentenceTransformer:
+    return _get_or_load_cached_model(
+        _embedding_model_cache_key(settings),
+        lambda: SentenceTransformer(
+            settings.embedding_model_path,
+            trust_remote_code=True,
+            device=settings.device,
+        ),
+    )
 
-    st_model = SentenceTransformer(
-        settings.embedding_model_path,
-        trust_remote_code=True,
-        device=settings.device,
+
+def load_reranker_model(settings: LocalRagSettings) -> CrossEncoder:
+    return _get_or_load_cached_model(
+        _reranker_model_cache_key(settings),
+        lambda: CrossEncoder(
+            settings.rerank_model_path,
+            device=settings.device,
+            trust_remote_code=True,
+        ),
     )
-    reranker_model = CrossEncoder(
-        settings.rerank_model_path,
-        device=settings.device,
-        trust_remote_code=True,
+
+
+def load_models(settings: LocalRagSettings) -> tuple[SentenceTransformer, CrossEncoder | None]:
+    st_model = load_embedding_model(settings)
+    reranker_model = (
+        load_reranker_model(settings)
+        if settings.preload_reranker_model
+        else None
     )
-    _MODEL_CACHE[key] = (st_model, reranker_model)
     return st_model, reranker_model
 
 
@@ -772,14 +813,23 @@ def _next_rerank_batch_size(current_batch_size: int, min_batch_size: int) -> int
 
 def build_rerank_func(
     settings: LocalRagSettings,
-    reranker_model: CrossEncoder,
+    reranker_model: CrossEncoder | None,
     logger: logging.Logger,
+    *,
+    model_loader: Callable[[LocalRagSettings], CrossEncoder] = load_reranker_model,
 ):
+    loaded_reranker_model = reranker_model
+
     async def rerank_func(
         query: str, documents: list[str], top_n: int | None
     ) -> list[dict]:
+        nonlocal loaded_reranker_model
         if not documents:
             return []
+
+        if loaded_reranker_model is None:
+            logger.info("Lazy-loading reranker model for first rerank call.")
+            loaded_reranker_model = model_loader(settings)
 
         pairs = [[query, doc] for doc in documents]
         batch_size = max(1, int(settings.rerank_batch_size))
@@ -788,7 +838,7 @@ def build_rerank_func(
 
         while True:
             try:
-                scores = reranker_model.predict(pairs, batch_size=batch_size)
+                scores = loaded_reranker_model.predict(pairs, batch_size=batch_size)
                 results = [
                     {"index": i, "relevance_score": float(score)}
                     for i, score in enumerate(scores)
@@ -1612,10 +1662,11 @@ class LocalRagService:
             self.settings.exclude_synonym_edges,
         )
         self.logger.info(
-            "Rerank batch guard configured: batch_size=%s, oom_backoff=%s, min_batch_size=%s",
+            "Rerank batch guard configured: batch_size=%s, oom_backoff=%s, min_batch_size=%s, preload_model=%s",
             self.settings.rerank_batch_size,
             self.settings.rerank_enable_oom_backoff,
             self.settings.rerank_min_batch_size,
+            self.settings.preload_reranker_model,
         )
         self.logger.info(
             "Text request timeout configured: %.1fs",

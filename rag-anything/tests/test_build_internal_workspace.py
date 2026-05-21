@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 import sys
+import types
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -137,6 +138,20 @@ class _FakeRagWrapper:
         return None
 
 
+def _stub_sentence_transformers(monkeypatch):
+    stub = types.ModuleType("sentence_transformers")
+
+    class _DummyCrossEncoder:
+        pass
+
+    class _DummySentenceTransformer:
+        pass
+
+    stub.CrossEncoder = _DummyCrossEncoder
+    stub.SentenceTransformer = _DummySentenceTransformer
+    monkeypatch.setitem(sys.modules, "sentence_transformers", stub)
+
+
 class _FakeService:
     def __init__(self, settings=None, fail_names=None) -> None:
         self.settings = settings or SimpleNamespace(enable_synonym_linking=True)
@@ -263,6 +278,7 @@ def test_local_env_enables_internal_build_defaults():
     assert env["CONTEXT_ZERO_WINDOW_CONTENT_TYPES"]
     assert env["RAGANYTHING_SERIALIZE_MINERU"] == "true"
     assert env["MINERU_VLLM_GPU_MEMORY_UTILIZATION"] == "0.1"
+    assert env["RAGANYTHING_PRELOAD_RERANKER_MODEL"] == "false"
     assert env["MAX_SOURCE_IDS_PER_ENTITY"] == "99999"
     assert env["MAX_SOURCE_IDS_PER_RELATION"] == "99999"
     assert env["MAX_CONCURRENT_FILES"] == "4"
@@ -283,6 +299,55 @@ def test_local_env_allows_max_async_ingest_override():
     )
 
     assert env["MAX_CONCURRENT_FILES"] == "1"
+
+
+def test_local_rag_settings_reads_preload_reranker_env(monkeypatch):
+    _stub_sentence_transformers(monkeypatch)
+    from raganything.services.local_rag import LocalRagSettings
+
+    monkeypatch.setenv("RAGANYTHING_PRELOAD_RERANKER_MODEL", "false")
+
+    settings = LocalRagSettings.from_env()
+
+    assert settings.preload_reranker_model is False
+
+
+def test_rerank_func_lazy_loads_when_model_not_preloaded(monkeypatch):
+    _stub_sentence_transformers(monkeypatch)
+    from raganything.services.local_rag import build_rerank_func
+
+    class _RecordingReranker:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def predict(self, pairs, batch_size=32):
+            self.calls.append({"pairs": len(pairs), "batch_size": int(batch_size)})
+            return [0.1, 0.7]
+
+    reranker = _RecordingReranker()
+    load_calls = []
+    settings = SimpleNamespace(
+        rerank_batch_size=32,
+        rerank_enable_oom_backoff=True,
+        rerank_min_batch_size=4,
+    )
+
+    def _load_model(load_settings):
+        load_calls.append(load_settings)
+        return reranker
+
+    rerank_func = build_rerank_func(
+        settings,
+        None,
+        logging.getLogger(__name__),
+        model_loader=_load_model,
+    )
+
+    results = asyncio.run(rerank_func("query", ["a", "b"], top_n=1))
+
+    assert load_calls == [settings]
+    assert reranker.calls == [{"pairs": 2, "batch_size": 32}]
+    assert results == [{"index": 1, "relevance_score": 0.7}]
 
 
 def test_supported_files_are_top_level_only(tmp_path):
