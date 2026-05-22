@@ -280,6 +280,8 @@ def test_local_env_enables_internal_build_defaults():
     assert env["MINERU_VLLM_GPU_MEMORY_UTILIZATION"] == "0.1"
     assert env["LIBREOFFICE_CONVERT_TIMEOUT_SECONDS"] == "900"
     assert env["RAGANYTHING_PRELOAD_RERANKER_MODEL"] == "false"
+    assert env["RAGANYTHING_PRESERVE_EXISTING_LOGGING"] == "true"
+    assert env["RAGANYTHING_DISABLE_LOCAL_RUN_LOG"] == "true"
     assert env["MAX_SOURCE_IDS_PER_ENTITY"] == "99999"
     assert env["MAX_SOURCE_IDS_PER_RELATION"] == "99999"
     assert env["MAX_CONCURRENT_FILES"] == "4"
@@ -327,6 +329,21 @@ def test_local_rag_settings_reads_preload_reranker_env(monkeypatch):
     settings = LocalRagSettings.from_env()
 
     assert settings.preload_reranker_model is False
+
+
+def test_local_rag_preserves_internal_build_logging_without_run_log(
+    monkeypatch, tmp_path
+):
+    _stub_sentence_transformers(monkeypatch)
+    from raganything.services.local_rag import LocalRagSettings, configure_logging
+
+    monkeypatch.setenv("RAGANYTHING_PRESERVE_EXISTING_LOGGING", "true")
+    settings = LocalRagSettings(log_dir=str(tmp_path / "logs"))
+
+    logger = configure_logging(settings)
+
+    assert logger.name == "raganything.services.local_rag"
+    assert not list((tmp_path / "logs").glob("run_*.log"))
 
 
 def test_rerank_func_lazy_loads_when_model_not_preloaded(monkeypatch):
@@ -1115,6 +1132,26 @@ def test_internal_log_captures_stdout_and_stderr(tmp_path):
     assert "stdout detail line" in log_text
     assert "stderr ERROR detail line" in log_text
     assert summary["error_count"] >= 1
+
+
+def test_internal_log_bridges_non_propagating_logger(tmp_path):
+    context = build_internal.setup_build_logging(tmp_path)
+    bridged_logger = logging.getLogger("test_internal_bridge_logger")
+    old_propagate = bridged_logger.propagate
+    old_level = bridged_logger.level
+    try:
+        bridged_logger.propagate = False
+        build_internal._bridge_logger_to_internal_build_log(context, bridged_logger)
+        bridged_logger.info("bridged lightrag-style detail")
+        summary = {}
+        build_internal._attach_log_summary(summary, context)
+    finally:
+        bridged_logger.propagate = old_propagate
+        bridged_logger.setLevel(old_level)
+        build_internal.close_build_logging(context)
+
+    log_text = Path(summary["log_file"]).read_text(encoding="utf-8")
+    assert "bridged lightrag-style detail" in log_text
 
 
 def test_report_command_collects_storage_without_ingest(monkeypatch, tmp_path):

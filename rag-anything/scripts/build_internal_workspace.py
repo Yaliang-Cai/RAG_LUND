@@ -84,6 +84,7 @@ MINERU_PREPARSE_EXTENSIONS = (
 INTERNAL_SOURCE_IDS_LIMIT = 99999
 
 LOGGER = logging.getLogger("internal_build")
+_ACTIVE_BUILD_LOG_CONTEXT: "BuildLogContext | None" = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,12 @@ class _CountingFileHandler(logging.FileHandler):
         super().emit(record)
 
 
+class _InternalConsoleHandler(logging.StreamHandler):
+    def __init__(self, stream: Any) -> None:
+        super().__init__(stream)
+        self._internal_build_handler = True
+
+
 class _TeeTextStream(io.TextIOBase):
     def __init__(self, original: Any, mirror: Any) -> None:
         self._original = original
@@ -159,12 +166,14 @@ class _TeeTextStream(io.TextIOBase):
 class BuildLogContext:
     log_file: Path
     handler: _CountingFileHandler
+    console_handler: _InternalConsoleHandler
     root_logger: logging.Logger
     old_root_level: int
     old_logger_levels: dict[str, int]
     old_stdout: Any
     old_stderr: Any
     stream_mirror: Any
+    bridged_loggers: list[logging.Logger] = dataclasses.field(default_factory=list)
 
     @property
     def warning_count(self) -> int:
@@ -180,6 +189,8 @@ def _path_env(path: Path) -> str:
 
 
 def setup_build_logging(report_dir: Path) -> BuildLogContext:
+    global _ACTIVE_BUILD_LOG_CONTEXT
+
     report_dir.mkdir(parents=True, exist_ok=True)
     log_file = report_dir / "internal_build.log"
     root_logger = logging.getLogger()
@@ -203,6 +214,16 @@ def setup_build_logging(report_dir: Path) -> BuildLogContext:
         )
     )
     root_logger.addHandler(handler)
+
+    console_handler = _InternalConsoleHandler(sys.stderr)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+    )
+    root_logger.addHandler(console_handler)
+
     if root_logger.level > logging.INFO or root_logger.level == logging.NOTSET:
         root_logger.setLevel(logging.INFO)
 
@@ -215,9 +236,10 @@ def setup_build_logging(report_dir: Path) -> BuildLogContext:
     old_stderr = sys.stderr
     sys.stdout = _TeeTextStream(old_stdout, stream_mirror)
     sys.stderr = _TeeTextStream(old_stderr, stream_mirror)
-    return BuildLogContext(
+    context = BuildLogContext(
         log_file=log_file,
         handler=handler,
+        console_handler=console_handler,
         root_logger=root_logger,
         old_root_level=old_root_level,
         old_logger_levels=old_logger_levels,
@@ -225,21 +247,84 @@ def setup_build_logging(report_dir: Path) -> BuildLogContext:
         old_stderr=old_stderr,
         stream_mirror=stream_mirror,
     )
+    _ACTIVE_BUILD_LOG_CONTEXT = context
+    _bridge_lightrag_logs_to_internal_build_log(context)
+    return context
 
 
 def close_build_logging(context: BuildLogContext) -> None:
+    global _ACTIVE_BUILD_LOG_CONTEXT
+
     sys.stdout.flush()
     sys.stderr.flush()
     sys.stdout = context.old_stdout
     sys.stderr = context.old_stderr
     context.handler.flush()
+    context.console_handler.flush()
     context.root_logger.removeHandler(context.handler)
+    context.root_logger.removeHandler(context.console_handler)
+    for logger in list(context.bridged_loggers):
+        if context.handler in logger.handlers:
+            logger.removeHandler(context.handler)
     context.handler.close()
+    context.console_handler.close()
     context.stream_mirror.flush()
     context.stream_mirror.close()
     context.root_logger.setLevel(context.old_root_level)
     for logger_name, level in context.old_logger_levels.items():
         logging.getLogger(logger_name).setLevel(level)
+    if _ACTIVE_BUILD_LOG_CONTEXT is context:
+        _ACTIVE_BUILD_LOG_CONTEXT = None
+
+
+def _bridge_logger_to_internal_build_log(
+    context: BuildLogContext,
+    logger: logging.Logger,
+) -> bool:
+    if context.handler in logger.handlers:
+        return False
+    logger.addHandler(context.handler)
+    logger.setLevel(logging.INFO)
+    context.bridged_loggers.append(logger)
+    return True
+
+
+def _bridge_lightrag_logs_to_internal_build_log(
+    context: BuildLogContext | None = None,
+) -> None:
+    context = context or _ACTIVE_BUILD_LOG_CONTEXT
+    if context is None:
+        return
+
+    for logger_name in (
+        "raganything",
+        "raganything.processor",
+        "raganything.parser",
+    ):
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.INFO)
+        logger.propagate = True
+
+    try:
+        from lightrag.utils import logger as lightrag_logger
+    except Exception as exc:
+        LOGGER.debug("LightRAG logger bridge not ready: %s", exc)
+        return
+
+    attached = _bridge_logger_to_internal_build_log(context, lightrag_logger)
+    lightrag_logger.setLevel(logging.INFO)
+    lightrag_logger.propagate = False
+    for handler in lightrag_logger.handlers:
+        stream = getattr(handler, "stream", None)
+        if getattr(stream, "_internal_build_stream", False):
+            try:
+                handler.setStream(context.old_stderr)
+            except Exception:
+                pass
+    LOGGER.info(
+        "LightRAG log bridge ready (attached internal file handler: %s)",
+        int(attached),
+    )
 
 
 def _count_log_markers(log_file: Path) -> tuple[int, int]:
@@ -330,6 +415,8 @@ def build_local_env(
             "ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE": "true",
             "CONTEXT_ZERO_WINDOW_CONTENT_TYPES": DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
             "RAGANYTHING_PRELOAD_RERANKER_MODEL": "false",
+            "RAGANYTHING_PRESERVE_EXISTING_LOGGING": "true",
+            "RAGANYTHING_DISABLE_LOCAL_RUN_LOG": "true",
             "RAGANYTHING_SERIALIZE_MINERU": "true",
             "MINERU_VLLM_GPU_MEMORY_UTILIZATION": str(
                 mineru_gpu_memory_utilization
@@ -416,7 +503,9 @@ def build_local_settings(profile: BuildProfile):
 def create_local_rag_service(settings):
     from raganything.services.local_rag import LocalRagService
 
-    return LocalRagService(settings)
+    service = LocalRagService(settings)
+    _bridge_lightrag_logs_to_internal_build_log()
+    return service
 
 
 def _clear_cuda_cache() -> None:

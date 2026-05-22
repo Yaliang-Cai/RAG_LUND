@@ -157,6 +157,14 @@ _INTERNAL_OPENAI_KWARGS = {
     "enable_cot",
     "max_tokens",
 }
+_TRUE_ENV_VALUES = {"1", "true", "yes", "y", "on"}
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in _TRUE_ENV_VALUES
 
 
 @dataclass
@@ -587,9 +595,35 @@ class LocalRagSettings:
 
 
 def configure_logging(settings: LocalRagSettings) -> logging.Logger:
+    if _env_flag("RAGANYTHING_PRESERVE_EXISTING_LOGGING"):
+        for logger_name in ("", "raganything", "lightrag"):
+            logger = logging.getLogger(logger_name)
+            if logger.level > logging.INFO or logger.level == logging.NOTSET:
+                logger.setLevel(logging.INFO)
+        return logging.getLogger(__name__)
+
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    disable_local_run_log = _env_flag("RAGANYTHING_DISABLE_LOCAL_RUN_LOG")
     log_file_path = Path(settings.log_dir) / f"run_{timestamp}.log"
-    log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    handlers: dict[str, dict[str, Any]] = {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "default",
+            "stream": "ext://sys.stdout",
+        },
+    }
+    logger_handlers = ["console"]
+    if not disable_local_run_log:
+        log_file_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers["file"] = {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "detailed",
+            "filename": str(log_file_path),
+            "maxBytes": DEFAULT_LOG_MAX_BYTES,
+            "backupCount": DEFAULT_LOG_BACKUP_COUNT,
+            "encoding": "utf-8",
+        }
+        logger_handlers.append("file")
 
     logging.config.dictConfig(
         {
@@ -601,23 +635,9 @@ def configure_logging(settings: LocalRagSettings) -> logging.Logger:
                     "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
                 },
             },
-            "handlers": {
-                "console": {
-                    "class": "logging.StreamHandler",
-                    "formatter": "default",
-                    "stream": "ext://sys.stdout",
-                },
-                "file": {
-                    "class": "logging.handlers.RotatingFileHandler",
-                    "formatter": "detailed",
-                    "filename": str(log_file_path),
-                    "maxBytes": DEFAULT_LOG_MAX_BYTES,
-                    "backupCount": DEFAULT_LOG_BACKUP_COUNT,
-                    "encoding": "utf-8",
-                },
-            },
+            "handlers": handlers,
             "loggers": {
-                "": {"handlers": ["console", "file"], "level": "INFO"},
+                "": {"handlers": logger_handlers, "level": "INFO"},
             },
         }
     )
