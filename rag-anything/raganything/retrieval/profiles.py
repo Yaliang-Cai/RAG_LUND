@@ -53,16 +53,18 @@ PROFILE_REGISTRY: dict[str, RetrievalProfile] = {
     for p in [
         RetrievalProfile(
             name="semantic",
-            description="Factual Q&A, process explanations, concept definitions — LightRAG mix + vector hybrid",
-            paths=["mix", "qdrant_hybrid"],
-            rrf_weights={"mix": 1.0, "qdrant_hybrid": 0.8},
-            enable_rerank=True,
+            description="Factual Q&A, process explanations, concept definitions — LightRAG mix only",
+            paths=["mix"],
+            rrf_weights={"mix": 1.0},
+            # mix already reranks internally via process_chunks_unified; the
+            # router-level second pass is redundant for single-path profiles.
+            enable_rerank=False,
         ),
         RetrievalProfile(
             name="multihop",
-            description="Multi-entity cross-document reasoning — PPR walk + vector hybrid (no rerank)",
-            paths=["ppr", "qdrant_hybrid"],
-            rrf_weights={"ppr": 1.0, "qdrant_hybrid": 0.8},
+            description="Multi-entity cross-document reasoning — HippoRAG2 PPR only",
+            paths=["ppr"],
+            rrf_weights={"ppr": 1.0},
             enable_rerank=False,
         ),
         RetrievalProfile(

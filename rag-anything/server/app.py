@@ -48,6 +48,8 @@ from raganything.constants import (
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
     DEFAULT_RECOGNITION_TOP_K,
+    DEFAULT_LINKING_TOP_K,
+    DEFAULT_PPR_QA_TOP_K,
     DEFAULT_QDRANT_RETRIEVAL_MODE,
     SUPPORTED_IMAGE_EXTENSIONS,
     DEFAULT_MAX_IMAGE_SIZE_MB,
@@ -246,7 +248,8 @@ class QueryRequest(BaseModel):
     ppr_top_k: int = DEFAULT_PPR_TOP_K
     passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
     recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K
-    ppr_synonym_weight_mode: Literal["raw", "plus_one"] = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
+    linking_top_k: int = DEFAULT_LINKING_TOP_K
+    ppr_qa_top_k: int = DEFAULT_PPR_QA_TOP_K
     qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] = DEFAULT_QDRANT_RETRIEVAL_MODE
     profile: Optional[str] = None  # auto mode only; None = LLM classifier decides
     rerank_candidate_cap: Optional[int] = None  # naive mode only: pre-rerank pool size
@@ -667,7 +670,8 @@ async def query_endpoint(
         ppr_top_k=payload.ppr_top_k,
         passage_node_weight=payload.passage_node_weight,
         recognition_top_k=payload.recognition_top_k,
-        ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
+        linking_top_k=payload.linking_top_k,
+        ppr_qa_top_k=payload.ppr_qa_top_k,
         qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
     )
 
@@ -714,7 +718,8 @@ async def query_stream_endpoint(
                 ppr_top_k=payload.ppr_top_k,
                 passage_node_weight=payload.passage_node_weight,
                 recognition_top_k=payload.recognition_top_k,
-                ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
+                linking_top_k=payload.linking_top_k,
+                ppr_qa_top_k=payload.ppr_qa_top_k,
                 qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
                 profile=payload.profile,
                 rerank_candidate_cap=payload.rerank_candidate_cap,

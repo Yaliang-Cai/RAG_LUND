@@ -13,13 +13,20 @@ def test_all_builtin_profiles_present():
 
 def test_semantic_profile_shape():
     p = PROFILE_REGISTRY["semantic"]
-    assert p.paths == ["mix", "qdrant_hybrid"]
-    assert p.enable_rerank is True
+    # Single-path: LightRAG mix already does KG+vector hybrid internally and
+    # reranks via process_chunks_unified; a router-level second rerank would
+    # be redundant for a one-path profile.
+    assert p.paths == ["mix"]
+    assert p.rrf_weights == {"mix": 1.0}
+    assert p.enable_rerank is False
 
 
 def test_multihop_profile_shape():
     p = PROFILE_REGISTRY["multihop"]
-    assert p.paths == ["ppr", "qdrant_hybrid"]
+    # Single-path: HippoRAG2 PPR only; qdrant_hybrid no longer paired here
+    # so the qdrant_retrieval_mode UI switch is honored end-to-end.
+    assert p.paths == ["ppr"]
+    assert p.rrf_weights == {"ppr": 1.0}
     assert p.enable_rerank is False
 
 

@@ -287,10 +287,8 @@ class QueryMixin:
             if return_trace_auto:
                 return {
                     "answer": answer,
-                    "trace": {
-                        "routing": routing_trace,
-                        "data": {"chunks": final_chunks},
-                    },
+                    "trace": {"routing": routing_trace},
+                    "data": {"chunks": final_chunks},
                 }
             return answer
         # ── end mode="auto" ───────────────────────────────────────────────

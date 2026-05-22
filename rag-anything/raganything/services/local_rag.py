@@ -2336,6 +2336,8 @@ class LocalRagService:
         ppr_top_k: int | None = None,
         passage_node_weight: float | None = None,
         recognition_top_k: int | None = None,
+        linking_top_k: int | None = None,
+        ppr_qa_top_k: int | None = None,
         ppr_synonym_weight_mode: str | None = None,
         exclude_synonym_edges: bool | None = None,
         qdrant_retrieval_mode: str | None = None,
@@ -2392,6 +2394,19 @@ class LocalRagService:
         # ── Non-streaming branch: auto+profile override ──
         if mode == "auto" and profile:
             try:
+                extra: dict[str, Any] = {}
+                for k, v in {
+                    "ppr_damping": ppr_damping,
+                    "ppr_top_k": ppr_top_k,
+                    "passage_node_weight": passage_node_weight,
+                    "recognition_top_k": recognition_top_k,
+                    "linking_top_k": linking_top_k,
+                    "ppr_qa_top_k": ppr_qa_top_k,
+                    "ppr_synonym_weight_mode": ppr_synonym_weight_mode,
+                    "qdrant_retrieval_mode": qdrant_retrieval_mode,
+                }.items():
+                    if v is not None:
+                        extra[k] = v
                 result = await self.query_with_trace(
                     workspace_id, query,
                     mode=mode,
@@ -2401,6 +2416,7 @@ class LocalRagService:
                     enable_rerank=enable_rerank,
                     conversation_history=conversation_history or [],
                     profile=profile,
+                    **extra,
                 )
                 trace = result.get("trace", {})
                 yield {
@@ -2485,6 +2501,8 @@ class LocalRagService:
                 "ppr_top_k": ppr_top_k,
                 "passage_node_weight": passage_node_weight,
                 "recognition_top_k": recognition_top_k,
+                "linking_top_k": linking_top_k,
+                "ppr_qa_top_k": ppr_qa_top_k,
                 "exclude_synonym_edges": exclude_synonym_edges,
                 "ppr_synonym_weight_mode": ppr_synonym_weight_mode,
                 "qdrant_retrieval_mode": qdrant_retrieval_mode,
