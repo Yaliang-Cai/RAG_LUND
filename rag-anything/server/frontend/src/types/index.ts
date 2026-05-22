@@ -109,8 +109,9 @@ export interface QueryParams {
   rerank_candidate_cap?: number
   ppr_damping?: number
   ppr_top_k?: number
-  ppr_synonym_weight_mode?: 'raw' | 'plus_one'
   recognition_top_k?: number
+  linking_top_k?: number
+  ppr_qa_top_k?: number
   return_graph?: boolean
   conversation_history?: { role: string; content: string }[]
   vlm_enhanced?: boolean

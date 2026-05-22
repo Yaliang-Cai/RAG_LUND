@@ -143,8 +143,9 @@ export default function ChatPage() {
       rerank_candidate_cap: qs.rerank_candidate_cap,
       ppr_damping: qs.ppr_damping,
       ppr_top_k: qs.ppr_top_k,
-      ppr_synonym_weight_mode: qs.ppr_synonym_weight_mode,
       recognition_top_k: qs.recognition_top_k,
+      linking_top_k: qs.linking_top_k,
+      ppr_qa_top_k: qs.ppr_qa_top_k,
       conversation_history: history.length > 0 ? history : undefined,
     })
 

@@ -6,7 +6,6 @@ import {
   type ModeConfig,
   type QdrantRetrievalMode,
   type AgenticProfile,
-  type PprSynonymWeightMode,
 } from '@/config/modePresets'
 
 export interface QuerySettingsState {
@@ -21,8 +20,9 @@ export interface QuerySettingsState {
   rerank_candidate_cap?: number
   ppr_damping?: number
   ppr_top_k?: number
-  ppr_synonym_weight_mode?: PprSynonymWeightMode
   recognition_top_k?: number
+  linking_top_k?: number
+  ppr_qa_top_k?: number
   agenticProfile?: AgenticProfile
 
   setMode: (m: ModeKey) => void
@@ -40,8 +40,9 @@ function snapshotFromPreset(mode: ModeKey): Omit<QuerySettingsState, 'mode' | 's
     rerank_candidate_cap: p.rerank_candidate_cap,
     ppr_damping: p.ppr_damping,
     ppr_top_k: p.ppr_top_k,
-    ppr_synonym_weight_mode: p.ppr_synonym_weight_mode,
     recognition_top_k: p.recognition_top_k,
+    linking_top_k: p.linking_top_k,
+    ppr_qa_top_k: p.ppr_qa_top_k,
     agenticProfile: p.agenticProfile,
   }
 }

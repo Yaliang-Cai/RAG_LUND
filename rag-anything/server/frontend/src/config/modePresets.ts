@@ -7,7 +7,6 @@ export type ModeKey = 'naive' | 'lightrag' | 'multihop' | 'agentic'
 
 export type QdrantRetrievalMode = 'hybrid' | 'bm25' | 'dense'
 export type AgenticProfile = 'auto' | 'semantic' | 'multihop' | 'full'
-export type PprSynonymWeightMode = 'raw' | 'plus_one'
 
 export interface ModeConfig {
   // Sent to backend `mode` field
@@ -27,8 +26,9 @@ export interface ModeConfig {
   // Multi-hop only
   ppr_damping?: number
   ppr_top_k?: number
-  ppr_synonym_weight_mode?: PprSynonymWeightMode
-  recognition_top_k?: number
+  recognition_top_k?: number   // 0 = disabled, >0 = enabled (treated as flag)
+  linking_top_k?: number       // HippoRAG2 link_top_k: PPR seed entity cap
+  ppr_qa_top_k?: number        // HippoRAG2 qa_top_k: chunks fed to LLM
 
   // Agentic only — UI dropdown for picking the router profile
   agenticProfile?: AgenticProfile
@@ -74,8 +74,9 @@ export const MODE_PRESETS: Record<ModeKey, ModeConfig> = {
     qdrant_retrieval_mode: 'hybrid',
     ppr_damping: 0.5,
     ppr_top_k: 50,
-    ppr_synonym_weight_mode: 'plus_one',
-    recognition_top_k: 20,
+    recognition_top_k: 20,    // > 0 enables Recognition Memory
+    linking_top_k: 5,
+    ppr_qa_top_k: 5,
     topKVisible: true,
   },
   agentic: {

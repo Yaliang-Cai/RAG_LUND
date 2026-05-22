@@ -49,8 +49,9 @@ export async function openQueryStream(params: QueryParams): Promise<Response> {
   if (params.rerank_candidate_cap != null) body.rerank_candidate_cap = params.rerank_candidate_cap
   if (params.ppr_damping != null) body.ppr_damping = params.ppr_damping
   if (params.ppr_top_k != null) body.ppr_top_k = params.ppr_top_k
-  if (params.ppr_synonym_weight_mode) body.ppr_synonym_weight_mode = params.ppr_synonym_weight_mode
   if (params.recognition_top_k != null) body.recognition_top_k = params.recognition_top_k
+  if (params.linking_top_k != null) body.linking_top_k = params.linking_top_k
+  if (params.ppr_qa_top_k != null) body.ppr_qa_top_k = params.ppr_qa_top_k
   if (params.conversation_history && params.conversation_history.length > 0) {
     body.conversation_history = params.conversation_history
   }

@@ -58,15 +58,19 @@ export function QuerySettings() {
           </>
         )}
 
-        <span className="text-muted-foreground ml-2">chunk_top_k</span>
-        <Input
-          type="number"
-          min={1}
-          value={s.chunk_top_k}
-          onChange={(e) => s.setField('chunk_top_k', Math.max(1, Number(e.target.value) || 1))}
-          className="h-7 w-16 text-xs"
-        />
-        <ResetButton onClick={() => s.resetField('chunk_top_k')} title="Reset chunk_top_k" />
+        {s.mode !== 'multihop' && (
+          <>
+            <span className="text-muted-foreground ml-2">chunk_top_k</span>
+            <Input
+              type="number"
+              min={1}
+              value={s.chunk_top_k}
+              onChange={(e) => s.setField('chunk_top_k', Math.max(1, Number(e.target.value) || 1))}
+              className="h-7 w-16 text-xs"
+            />
+            <ResetButton onClick={() => s.resetField('chunk_top_k')} title="Reset chunk_top_k" />
+          </>
+        )}
 
         <label className="flex items-center gap-1.5 ml-2 cursor-pointer">
           <input

@@ -1,6 +1,6 @@
 import { RotateCcw } from 'lucide-react'
 import { useQuerySettings } from '@/store/querySettings'
-import type { AgenticProfile, PprSynonymWeightMode, QdrantRetrievalMode } from '@/config/modePresets'
+import { MODE_PRESETS, type AgenticProfile, type QdrantRetrievalMode } from '@/config/modePresets'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 
@@ -103,8 +103,8 @@ export function AdvancedOptions() {
             />
           </Row>
           <Row
-            label="PPR top_k"
-            tooltip="Maximum chunks pulled by the PPR walk before fusion."
+            label="PPR retrieval top_k"
+            tooltip="Pool size returned by the PPR walk before truncation to qa_top_k."
             onReset={() => s.resetField('ppr_top_k')}
           >
             <Input
@@ -116,33 +116,58 @@ export function AdvancedOptions() {
             />
           </Row>
           <Row
-            label="PPR synonym weight mode"
-            tooltip="raw = raw edge weight; plus_one = (weight + 1), smoother for sparse synonym graphs."
-            onReset={() => s.resetField('ppr_synonym_weight_mode')}
+            label="Recognition Memory"
+            tooltip="When enabled, an LLM step prunes hybrid-retrieved entities/relations into a focused PPR seed set (HippoRAG2 recognition memory). Disable to skip the LLM call and use direct score merge."
+            onReset={() => s.resetField('recognition_top_k')}
           >
-            <Select
-              value={s.ppr_synonym_weight_mode ?? 'plus_one'}
-              onValueChange={(v) => v && s.setField('ppr_synonym_weight_mode', v as PprSynonymWeightMode)}
-            >
-              <SelectTrigger className="h-7 w-28 text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="plus_one" className="text-xs">plus_one</SelectItem>
-                <SelectItem value="raw" className="text-xs">raw</SelectItem>
-              </SelectContent>
-            </Select>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={(s.recognition_top_k ?? 0) > 0}
+                onChange={(e) =>
+                  s.setField('recognition_top_k', e.target.checked
+                    ? (MODE_PRESETS.multihop.recognition_top_k ?? 20)
+                    : 0)
+                }
+                className="cursor-pointer"
+              />
+              <span className="text-xs text-muted-foreground">
+                {(s.recognition_top_k ?? 0) > 0 ? 'Enabled' : 'Disabled'}
+              </span>
+            </label>
           </Row>
           <Row
-            label="Recognition top_k"
-            tooltip="Max candidate entities surfaced during cognitive recall before PPR seeding."
-            onReset={() => s.resetField('recognition_top_k')}
+            label="Linking top_k"
+            tooltip="HippoRAG2 link_top_k: maximum seed entities passed to PPR after recognition. Lower = tighter focus, higher = broader exploration."
+            onReset={() => s.resetField('linking_top_k')}
           >
             <Input
               type="number"
               min={1}
-              value={s.recognition_top_k ?? 20}
-              onChange={(e) => s.setField('recognition_top_k', Math.max(1, Number(e.target.value) || 20))}
+              value={s.linking_top_k ?? 5}
+              onChange={(e) => s.setField('linking_top_k', Math.max(1, Number(e.target.value) || 5))}
+              className="h-7 w-20 text-xs"
+            />
+          </Row>
+          <Row
+            label="PPR QA top_k"
+            tooltip="HippoRAG2 qa_top_k: number of PPR-ranked chunks fed to the LLM as context. Replaces chunk_top_k for the multi-hop path."
+            onReset={() => {
+              s.resetField('ppr_qa_top_k')
+              s.resetField('chunk_top_k')
+            }}
+          >
+            <Input
+              type="number"
+              min={1}
+              value={s.ppr_qa_top_k ?? 5}
+              onChange={(e) => {
+                const v = Math.max(1, Number(e.target.value) || 5)
+                s.setField('ppr_qa_top_k', v)
+                // Mirror to chunk_top_k so the router's final [:chunk_top_k]
+                // truncation does not silently shrink the LLM context.
+                s.setField('chunk_top_k', v)
+              }}
               className="h-7 w-20 text-xs"
             />
           </Row>
