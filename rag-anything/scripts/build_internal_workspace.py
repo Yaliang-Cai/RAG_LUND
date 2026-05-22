@@ -50,6 +50,8 @@ TEST_RAW_DIR = Path("/data/y50056788/Yaliang/datasets_raw_test")
 TEST_STORAGE_ROOT = Path("/data/y50056788/Yaliang/internal_test")
 PROD_RAW_DIR = Path("/data/y50056788/Yaliang/datasets_raw")
 PROD_STORAGE_ROOT = Path("/data/y50056788/Yaliang/internal")
+RAN2_133_BIS_RAW_DIR = Path("/data/y50056788/Yaliang/datasets_raw_RAN2_133_BIS")
+RAN2_133_BIS_STORAGE_ROOT = Path("/data/y50056788/Yaliang/internal_RAN2_133_BIS")
 
 DEFAULT_INGEST_TIMEOUT_SECONDS = 7200.0
 DEFAULT_MAX_FILE_ATTEMPTS = 2
@@ -387,8 +389,12 @@ def resolve_profile(
         default_raw_dir = PROD_RAW_DIR
         default_storage_root = PROD_STORAGE_ROOT
         default_workspace_id = "internal"
+    elif profile_name == "ran2_133_bis":
+        default_raw_dir = RAN2_133_BIS_RAW_DIR
+        default_storage_root = RAN2_133_BIS_STORAGE_ROOT
+        default_workspace_id = "internal_RAN2_133_BIS"
     else:
-        raise ValueError("profile must be 'test' or 'prod'")
+        raise ValueError("profile must be 'test', 'prod', or 'ran2_133_bis'")
 
     return BuildProfile(
         name=profile_name,
@@ -2351,7 +2357,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("build", "report", "delete-doc"),
         default="build",
     )
-    parser.add_argument("--profile", choices=("test", "prod"), default="test")
+    parser.add_argument(
+        "--profile",
+        choices=("test", "prod", "ran2_133_bis"),
+        default="test",
+    )
     parser.add_argument("--raw-dir", default=None)
     parser.add_argument("--storage-root", default=None)
     parser.add_argument("--workspace-id", default=None)
