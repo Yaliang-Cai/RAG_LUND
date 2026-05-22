@@ -11,6 +11,8 @@ from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from scripts import build_internal_workspace as build_internal
 from raganything.processor import ProcessorMixin
 
@@ -617,6 +619,88 @@ def test_mineru_preparse_runs_for_missing_or_stale_artifact(monkeypatch, tmp_pat
     assert summary["parsed_count"] == 1
 
 
+def test_mineru_preparse_retries_missing_artifact_as_single_file(
+    monkeypatch, tmp_path
+):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "a.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    calls = []
+
+    def fake_run(input_path, output_root):
+        calls.append(Path(input_path))
+        if len(calls) == 2:
+            artifact = output_root / "a" / "auto" / "a_content_list.json"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text(
+                json.dumps([{"type": "text", "text": "ok"}]),
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr(build_internal, "_run_mineru_preparse_command", fake_run)
+
+    summary = build_internal.preparse_mineru_files(
+        profile,
+        [source],
+        tmp_path / "reports",
+    )
+
+    assert len(calls) == 2
+    assert calls[0].name == "inputs"
+    assert calls[1].name == "a.pdf"
+    assert summary["parsed_count"] == 1
+    assert summary["failed_count"] == 0
+    assert summary["missing_after_parse"] == []
+
+
+def test_mineru_preparse_writes_missing_artifact_reports(monkeypatch, tmp_path):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "missing.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    monkeypatch.setattr(
+        build_internal,
+        "_run_mineru_preparse_command",
+        lambda input_path, output_root: None,
+    )
+
+    report_dir = tmp_path / "reports"
+    summary = build_internal.preparse_mineru_files(profile, [source], report_dir)
+
+    assert summary["failed_count"] == 1
+    missing = json.loads(
+        (report_dir / "mineru_preparse_missing_artifacts.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    all_failures = json.loads(
+        (report_dir / "mineru_preparse_failures_all.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    preparse_summary = json.loads(
+        (report_dir / "mineru_preparse_summary.json").read_text(encoding="utf-8")
+    )
+    assert missing[0]["file"] == "missing.pdf"
+    assert all_failures[0]["stage"] == "mineru_preparse_missing_artifact"
+    assert preparse_summary["failed_count"] == 1
+
+
 def test_mineru_preparse_converts_office_pdf_inside_file_dir(monkeypatch, tmp_path):
     from raganything.parser import MineruParser
 
@@ -943,6 +1027,74 @@ def test_build_returns_failure_for_preparse_failure_and_skips_ingest(
     assert summary["failed_count"] == 1
     assert summary["failed_files"][0]["file"] == "bad.docx"
     assert summary["succeeded_count"] == 1
+
+
+def test_build_writes_partial_summary_after_preparse_if_later_stage_fails(
+    monkeypatch, tmp_path
+):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "a.pdf"
+    source.write_text("pdf", encoding="utf-8")
+
+    monkeypatch.setattr(
+        build_internal,
+        "build_local_settings",
+        lambda profile, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        build_internal,
+        "preparse_mineru_files",
+        lambda profile, files, report_dir: {
+            "enabled": True,
+            "output_dir": str(profile.output_dir / profile.workspace_id),
+            "candidate_count": 1,
+            "skipped_count": 1,
+            "parsed_count": 0,
+            "pending_count": 0,
+            "failed_count": 0,
+            "conversion_failed": [],
+            "missing_after_parse": [],
+        },
+    )
+    monkeypatch.setattr(
+        build_internal,
+        "create_local_rag_service",
+        lambda settings: (_ for _ in ()).throw(RuntimeError("warmup failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="warmup failed"):
+        build_internal.run_build(
+            SimpleNamespace(
+                profile="test",
+                raw_dir=str(raw_dir),
+                storage_root=str(storage_root),
+                workspace_id="ws",
+                max_async_ingest=4,
+                file_batch_size=4,
+                max_file_attempts=1,
+                ingest_timeout_seconds=30,
+                recycle_service_every=0,
+                delete_doc_id=None,
+                delete_first_file=False,
+                delete_workspace=False,
+                delete_llm_cache=False,
+                doc_id=None,
+                dry_run=False,
+                allow_legacy_index_profile_adoption=False,
+                skip_mineru_preparse=False,
+                delete_check=False,
+            )
+        )
+
+    report_dir = sorted((storage_root / "reports").iterdir())[0]
+    partial = json.loads(
+        (report_dir / "summary.partial.json").read_text(encoding="utf-8")
+    )
+    assert partial["status"] == "preparse_complete"
+    assert partial["mineru_preparse"]["failed_count"] == 0
+    assert Path(partial["log_file"]).exists()
 
 
 def test_libreoffice_timeout_defaults_to_60_and_env_override(monkeypatch, tmp_path):

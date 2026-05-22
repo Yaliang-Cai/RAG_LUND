@@ -357,6 +357,20 @@ def _attach_log_summary(
     summary["error_count"] = max(log_context.error_count, marker_errors)
 
 
+def _write_partial_summary(
+    report_dir: Path,
+    summary: dict[str, Any],
+    log_context: BuildLogContext,
+    *,
+    status: str,
+) -> None:
+    partial = dict(summary)
+    partial["status"] = status
+    partial["is_partial"] = True
+    _attach_log_summary(partial, log_context)
+    _write_json(report_dir / "summary.partial.json", partial)
+
+
 def resolve_profile(
     profile: str,
     *,
@@ -931,6 +945,25 @@ def _write_mineru_preparse_failure_reports(
     )
 
 
+def _write_mineru_preparse_reports(
+    report_dir: Path,
+    summary: dict[str, Any],
+) -> None:
+    conversion_failures = list(summary.get("conversion_failed", []) or [])
+    missing_artifacts = list(summary.get("missing_after_parse", []) or [])
+    if conversion_failures:
+        _write_mineru_preparse_failure_reports(report_dir, conversion_failures)
+    _write_json(
+        report_dir / "mineru_preparse_missing_artifacts.json",
+        missing_artifacts,
+    )
+    _write_json(
+        report_dir / "mineru_preparse_failures_all.json",
+        _preparse_failure_results(summary),
+    )
+    _write_json(report_dir / "mineru_preparse_summary.json", summary)
+
+
 def _prepare_mineru_preparse_input(file_path: Path, output_root: Path) -> Path:
     suffix = file_path.suffix.lower()
     if suffix in MINERU_OFFICE_EXTENSIONS:
@@ -1023,6 +1056,9 @@ def preparse_mineru_files(
         "conversion_failed": [],
         "historical_failure_skipped": [],
         "historical_failure_skipped_count": 0,
+        "single_retry_count": 0,
+        "single_retry_succeeded_count": 0,
+        "single_retry_failed_count": 0,
         "failed_count": 0,
     }
 
@@ -1072,11 +1108,7 @@ def preparse_mineru_files(
     )
     if not pending:
         summary["failed_count"] = len(summary["conversion_failed"])
-        if summary["conversion_failed"]:
-            _write_mineru_preparse_failure_reports(
-                report_dir,
-                list(summary["conversion_failed"]),
-            )
+        _write_mineru_preparse_reports(report_dir, summary)
         LOGGER.info(
             "MinerU preparse skipped for all stageable files candidate_count=%d failed=%d output_dir=%s",
             len(candidates),
@@ -1138,16 +1170,48 @@ def preparse_mineru_files(
         else:
             LOGGER.warning("MinerU preparse has no stageable inputs after conversion")
 
+    retry_errors: dict[Path, str] = {}
+    retry_inputs: list[tuple[Path, Path]] = []
+    for record, file_path in zip(staged_records, staged_source_paths):
+        if _find_valid_mineru_artifact(output_root, file_path) is None:
+            retry_inputs.append((file_path, Path(record["mineru_input"])))
+
+    if retry_inputs:
+        summary["single_retry_count"] = len(retry_inputs)
+        LOGGER.warning(
+            "MinerU preparse missing artifacts after directory parse; retrying files individually count=%d files=%s",
+            len(retry_inputs),
+            ", ".join(file_path.name for file_path, _ in retry_inputs),
+        )
+    for file_path, mineru_input in retry_inputs:
+        try:
+            LOGGER.info(
+                "Retrying MinerU preparse as single file file=%s input=%s",
+                file_path.name,
+                mineru_input,
+            )
+            _run_mineru_preparse_command(mineru_input, output_root)
+        except Exception as exc:
+            retry_errors[file_path] = str(exc)
+            LOGGER.exception(
+                "Single-file MinerU preparse retry failed file=%s input=%s",
+                file_path.name,
+                mineru_input,
+            )
+
     parsed_records: list[dict[str, str]] = []
     missing_records: list[dict[str, str]] = []
     for file_path in staged_source_paths:
         artifact = _find_valid_mineru_artifact(output_root, file_path)
         if artifact is None:
+            error = retry_errors.get(
+                file_path, "content_list artifact missing after MinerU preparse"
+            )
             missing_records.append(
                 {
                     "file": file_path.name,
                     "source_path": _path_env(file_path),
-                    "error": "content_list artifact missing after MinerU preparse",
+                    "error": error,
                 }
             )
             continue
@@ -1161,12 +1225,12 @@ def preparse_mineru_files(
     summary["parsed"] = parsed_records
     summary["parsed_count"] = len(parsed_records)
     summary["missing_after_parse"] = missing_records
+    summary["single_retry_succeeded_count"] = (
+        summary["single_retry_count"] - len(missing_records)
+    )
+    summary["single_retry_failed_count"] = len(missing_records)
     summary["failed_count"] = len(summary["conversion_failed"]) + len(missing_records)
-    if summary["conversion_failed"]:
-        _write_mineru_preparse_failure_reports(
-            report_dir,
-            list(summary["conversion_failed"]),
-        )
+    _write_mineru_preparse_reports(report_dir, summary)
     if missing_records:
         LOGGER.error(
             "MinerU preparse completed with missing artifacts: %s",
@@ -1815,6 +1879,12 @@ async def _run_build_async(
             max_async_ingest,
             recycle_service_every,
         )
+        _write_partial_summary(
+            report_dir,
+            summary,
+            log_context,
+            status="build_start",
+        )
         if getattr(args, "skip_mineru_preparse", False):
             summary["mineru_preparse"] = {
                 "enabled": False,
@@ -1841,6 +1911,13 @@ async def _run_build_async(
                 "Skipping %d files with MinerU preparse failures before ingest",
                 len(preparse_failed_paths),
             )
+        summary["ingest_planned_count"] = len(ingest_files)
+        _write_partial_summary(
+            report_dir,
+            summary,
+            log_context,
+            status="preparse_complete",
+        )
 
         service = create_local_rag_service(settings)
         batch_results: list[dict[str, Any]] = []
@@ -1881,6 +1958,14 @@ async def _run_build_async(
                 batch_index,
                 len(results) - len(failed_in_batch),
                 len(failed_in_batch),
+            )
+            summary["batch_results"] = batch_results
+            summary["elapsed_seconds"] = time.time() - start_time
+            _write_partial_summary(
+                report_dir,
+                summary,
+                log_context,
+                status=f"batch_{batch_index}_complete",
             )
             for result in results:
                 for attempt in result.get("attempts", []):
