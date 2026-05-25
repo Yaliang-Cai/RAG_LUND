@@ -39,10 +39,13 @@ from raganything.constants import (
     DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
     DEFAULT_EMBEDDING_BATCH_NUM,
     DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
+    DEFAULT_LLM_CONTEXT_MAX_TOKENS,
+    DEFAULT_LLM_CONTEXT_RESERVED_TOKENS,
     DEFAULT_LLM_MODEL_MAX_ASYNC,
     DEFAULT_MAX_ASYNC_INGEST,
     DEFAULT_MAX_PARALLEL_INSERT,
     DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION,
+    DEFAULT_MULTIMODAL_ITEM_PARALLELISM,
     DEFAULT_SUPPORTED_FILE_EXTENSIONS,
 )
 
@@ -420,6 +423,10 @@ def build_local_env(
         "LIBREOFFICE_CONVERT_TIMEOUT_SECONDS",
         str(DEFAULT_BUILD_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS),
     )
+    multimodal_item_parallelism = env.get(
+        "RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM",
+        str(DEFAULT_MULTIMODAL_ITEM_PARALLELISM or 3),
+    )
     env.update(
         {
             "RAGANYTHING_WORKDIR_ROOT": _path_env(profile.working_dir_root),
@@ -438,6 +445,17 @@ def build_local_env(
             "RAGANYTHING_PRESERVE_EXISTING_LOGGING": "true",
             "RAGANYTHING_DISABLE_LOCAL_RUN_LOG": "true",
             "RAGANYTHING_SERIALIZE_MINERU": "true",
+            "RAGANYTHING_LLM_CONTEXT_MAX_TOKENS": env.get(
+                "RAGANYTHING_LLM_CONTEXT_MAX_TOKENS",
+                str(DEFAULT_LLM_CONTEXT_MAX_TOKENS),
+            ),
+            "RAGANYTHING_LLM_CONTEXT_RESERVED_TOKENS": env.get(
+                "RAGANYTHING_LLM_CONTEXT_RESERVED_TOKENS",
+                str(DEFAULT_LLM_CONTEXT_RESERVED_TOKENS),
+            ),
+            "RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM": str(
+                multimodal_item_parallelism
+            ),
             "MINERU_VLLM_GPU_MEMORY_UTILIZATION": str(
                 mineru_gpu_memory_utilization
             ),
@@ -624,18 +642,42 @@ def _mineru_workspace_output_dir(profile: BuildProfile) -> Path:
     return profile.output_dir / profile.workspace_id
 
 
-def _mineru_content_json_candidates(output_root: Path, source_path: Path) -> list[Path]:
+def _primary_mineru_content_json_candidates(
+    output_root: Path, source_path: Path
+) -> tuple[list[Path], list[Path]]:
     stem = source_path.stem
     safe_stem = _safe_stem(source_path)
     candidates: list[Path] = []
+    searched_roots: list[Path] = [output_root]
     direct_json = output_root / f"{stem}_content_list.json"
     if direct_json.exists():
         candidates.append(direct_json)
 
     for subdir_name in dict.fromkeys((stem, safe_stem)):
         subdir = output_root / subdir_name
+        searched_roots.append(subdir)
         if subdir.is_dir():
             candidates.extend(subdir.rglob(f"{stem}_content_list.json"))
+    return candidates, searched_roots
+
+
+def _mineru_content_json_candidates(
+    output_root: Path, source_path: Path
+) -> tuple[list[Path], list[Path], set[str]]:
+    stem = source_path.stem
+    primary_candidates, searched_roots = _primary_mineru_content_json_candidates(
+        output_root, source_path
+    )
+    candidates: list[Path] = list(primary_candidates)
+    fallback_keys: set[str] = set()
+    if output_root.is_dir():
+        searched_roots.append(output_root / "**")
+        primary_keys = {str(path) for path in primary_candidates}
+        for candidate in output_root.rglob(f"{stem}_content_list.json"):
+            key = str(candidate)
+            if key not in primary_keys:
+                fallback_keys.add(key)
+            candidates.append(candidate)
 
     deduped: list[Path] = []
     seen: set[str] = set()
@@ -644,7 +686,19 @@ def _mineru_content_json_candidates(output_root: Path, source_path: Path) -> lis
         if key not in seen:
             seen.add(key)
             deduped.append(candidate)
-    return deduped
+    return deduped, searched_roots, fallback_keys
+
+
+def _content_list_reject_reason(json_path: Path) -> str | None:
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return f"unreadable_json:{type(exc).__name__}:{exc}"
+    if isinstance(payload, list) and payload:
+        return None
+    if isinstance(payload, list):
+        return "empty_list"
+    return f"not_list:{type(payload).__name__}"
 
 
 def _read_nonempty_content_list(json_path: Path) -> list[Any] | None:
@@ -657,11 +711,18 @@ def _read_nonempty_content_list(json_path: Path) -> list[Any] | None:
     return None
 
 
-def _find_valid_mineru_artifact(output_root: Path, source_path: Path) -> Path | None:
+def _inspect_mineru_artifacts(output_root: Path, source_path: Path) -> dict[str, Any]:
     source_mtime = source_path.stat().st_mtime
+    candidates, searched_roots, fallback_keys = _mineru_content_json_candidates(
+        output_root, source_path
+    )
     valid_candidates: list[Path] = []
-    for candidate in _mineru_content_json_candidates(output_root, source_path):
-        if _read_nonempty_content_list(candidate) is None:
+    reject_reasons: list[dict[str, str]] = []
+    recovered_by_fallback = False
+    for candidate in candidates:
+        reason = _content_list_reject_reason(candidate)
+        if reason is not None:
+            reject_reasons.append({"path": _path_env(candidate), "reason": reason})
             continue
         try:
             if candidate.stat().st_mtime < source_mtime:
@@ -674,12 +735,25 @@ def _find_valid_mineru_artifact(output_root: Path, source_path: Path) -> Path | 
         except OSError:
             pass
         valid_candidates.append(candidate)
-    if not valid_candidates:
-        return None
-    try:
-        return max(valid_candidates, key=lambda path: path.stat().st_mtime)
-    except OSError:
-        return valid_candidates[0]
+    artifact = None
+    if valid_candidates:
+        try:
+            artifact = max(valid_candidates, key=lambda path: path.stat().st_mtime)
+        except OSError:
+            artifact = valid_candidates[0]
+    if artifact is not None and str(artifact) in fallback_keys:
+        recovered_by_fallback = True
+    return {
+        "artifact": artifact,
+        "recovered_by_fallback": bool(artifact and recovered_by_fallback),
+        "searched_roots": [_path_env(path) for path in searched_roots],
+        "candidate_paths": [_path_env(path) for path in candidates],
+        "candidate_reject_reasons": reject_reasons,
+    }
+
+
+def _find_valid_mineru_artifact(output_root: Path, source_path: Path) -> Path | None:
+    return _inspect_mineru_artifacts(output_root, source_path).get("artifact")
 
 
 def _should_preparse_with_mineru(file_path: Path) -> bool:
@@ -1059,12 +1133,16 @@ def preparse_mineru_files(
         "skipped": [],
         "parsed": [],
         "missing_after_parse": [],
+        "recovered_by_fallback": [],
         "conversion_failed": [],
         "historical_failure_skipped": [],
         "historical_failure_skipped_count": 0,
         "single_retry_count": 0,
         "single_retry_succeeded_count": 0,
         "single_retry_failed_count": 0,
+        "conversion_failed_count": 0,
+        "missing_artifact_count": 0,
+        "recovered_by_fallback_count": 0,
         "failed_count": 0,
     }
 
@@ -1073,14 +1151,22 @@ def preparse_mineru_files(
         profile, report_dir
     )
     for file_path in candidates:
-        existing = _find_valid_mineru_artifact(output_root, file_path)
+        artifact_info = _inspect_mineru_artifacts(output_root, file_path)
+        existing = artifact_info.get("artifact")
         if existing is not None:
-            summary["skipped"].append(
-                {
-                    "file": file_path.name,
-                    "artifact": _path_env(existing),
-                }
-            )
+            skipped_record = {
+                "file": file_path.name,
+                "artifact": _path_env(existing),
+            }
+            if artifact_info.get("recovered_by_fallback"):
+                skipped_record["recovered_by_fallback"] = True
+                summary["recovered_by_fallback"].append(skipped_record)
+                LOGGER.info(
+                    "Recovered MinerU artifact by fallback search file=%s artifact=%s",
+                    file_path.name,
+                    existing,
+                )
+            summary["skipped"].append(skipped_record)
             continue
         try:
             resolved_file_path = file_path.expanduser().resolve()
@@ -1112,13 +1198,18 @@ def preparse_mineru_files(
     summary["historical_failure_skipped_count"] = len(
         summary["historical_failure_skipped"]
     )
+    summary["conversion_failed_count"] = len(summary["conversion_failed"])
+    summary["recovered_by_fallback_count"] = len(summary["recovered_by_fallback"])
     if not pending:
-        summary["failed_count"] = len(summary["conversion_failed"])
+        summary["missing_artifact_count"] = 0
+        summary["failed_count"] = summary["conversion_failed_count"]
         _write_mineru_preparse_reports(report_dir, summary)
         LOGGER.info(
-            "MinerU preparse skipped for all stageable files candidate_count=%d failed=%d output_dir=%s",
+            "MinerU preparse skipped for all stageable files candidate_count=%d conversion_failed=%d missing_artifacts=%d recovered_by_fallback=%d output_dir=%s",
             len(candidates),
-            summary["failed_count"],
+            summary["conversion_failed_count"],
+            summary["missing_artifact_count"],
+            summary["recovered_by_fallback_count"],
             output_root,
         )
         return summary
@@ -1179,7 +1270,8 @@ def preparse_mineru_files(
     retry_errors: dict[Path, str] = {}
     retry_inputs: list[tuple[Path, Path]] = []
     for record, file_path in zip(staged_records, staged_source_paths):
-        if _find_valid_mineru_artifact(output_root, file_path) is None:
+        artifact_info = _inspect_mineru_artifacts(output_root, file_path)
+        if artifact_info.get("artifact") is None:
             retry_inputs.append((file_path, Path(record["mineru_input"])))
 
     if retry_inputs:
@@ -1206,9 +1298,10 @@ def preparse_mineru_files(
             )
 
     parsed_records: list[dict[str, str]] = []
-    missing_records: list[dict[str, str]] = []
+    missing_records: list[dict[str, Any]] = []
     for file_path in staged_source_paths:
-        artifact = _find_valid_mineru_artifact(output_root, file_path)
+        artifact_info = _inspect_mineru_artifacts(output_root, file_path)
+        artifact = artifact_info.get("artifact")
         if artifact is None:
             error = retry_errors.get(
                 file_path, "content_list artifact missing after MinerU preparse"
@@ -1216,17 +1309,32 @@ def preparse_mineru_files(
             missing_records.append(
                 {
                     "file": file_path.name,
+                    "stem": file_path.stem,
+                    "safe_stem": _safe_stem(file_path),
                     "source_path": _path_env(file_path),
+                    "output_root": _path_env(output_root),
+                    "searched_roots": artifact_info.get("searched_roots", []),
+                    "candidate_paths": artifact_info.get("candidate_paths", []),
+                    "candidate_reject_reasons": artifact_info.get(
+                        "candidate_reject_reasons", []
+                    ),
                     "error": error,
                 }
             )
             continue
-        parsed_records.append(
-            {
-                "file": file_path.name,
-                "artifact": _path_env(artifact),
-            }
-        )
+        parsed_record = {
+            "file": file_path.name,
+            "artifact": _path_env(artifact),
+        }
+        if artifact_info.get("recovered_by_fallback"):
+            parsed_record["recovered_by_fallback"] = True
+            summary["recovered_by_fallback"].append(parsed_record)
+            LOGGER.info(
+                "Recovered MinerU artifact by fallback search file=%s artifact=%s",
+                file_path.name,
+                artifact,
+            )
+        parsed_records.append(parsed_record)
 
     summary["parsed"] = parsed_records
     summary["parsed_count"] = len(parsed_records)
@@ -1235,7 +1343,12 @@ def preparse_mineru_files(
         summary["single_retry_count"] - len(missing_records)
     )
     summary["single_retry_failed_count"] = len(missing_records)
-    summary["failed_count"] = len(summary["conversion_failed"]) + len(missing_records)
+    summary["conversion_failed_count"] = len(summary["conversion_failed"])
+    summary["missing_artifact_count"] = len(missing_records)
+    summary["recovered_by_fallback_count"] = len(summary["recovered_by_fallback"])
+    summary["failed_count"] = (
+        summary["conversion_failed_count"] + summary["missing_artifact_count"]
+    )
     _write_mineru_preparse_reports(report_dir, summary)
     if missing_records:
         LOGGER.error(
@@ -1244,9 +1357,12 @@ def preparse_mineru_files(
         )
 
     LOGGER.info(
-        "MinerU preparse complete parsed=%d skipped=%d failed=%d output_dir=%s",
+        "MinerU preparse complete parsed=%d skipped=%d conversion_failed=%d missing_artifacts=%d recovered_by_fallback=%d failed=%d output_dir=%s",
         summary["parsed_count"],
         summary["skipped_count"],
+        summary["conversion_failed_count"],
+        summary["missing_artifact_count"],
+        summary["recovered_by_fallback_count"],
         summary["failed_count"],
         output_root,
     )
@@ -1607,15 +1723,10 @@ def _write_audit_reports(
     graph_stats_payload: dict[str, Any],
 ) -> None:
     documents = list(documents_payload.get("documents", []))
-    entities = list(entities_payload.get("entities", []))
-    relations = list(relations_payload.get("relations", []))
+    _ = entities_payload, relations_payload
     _write_json(report_dir / "documents.json", documents_payload)
-    _write_json(report_dir / "entities.json", entities_payload)
-    _write_json(report_dir / "relations.json", relations_payload)
     _write_json(report_dir / "graph_stats.json", graph_stats_payload)
     _write_csv(report_dir / "documents.csv", documents)
-    _write_csv(report_dir / "entities.csv", entities)
-    _write_csv(report_dir / "relations.csv", relations)
 
 
 def _settings_summary(settings: Any, env: dict[str, str]) -> dict[str, Any]:
@@ -1632,6 +1743,9 @@ def _settings_summary(settings: Any, env: dict[str, str]) -> dict[str, Any]:
         "enable_keyword_case_normalization",
         "strict_relation_endpoint_entity_match",
         "preload_reranker_model",
+        "llm_context_max_tokens",
+        "llm_context_reserved_tokens",
+        "multimodal_item_parallelism",
     ):
         if hasattr(settings, key):
             summary[key] = _json_safe(getattr(settings, key))
@@ -1674,6 +1788,10 @@ def _summary_base(
             "lightrag_max_parallel_insert": DEFAULT_MAX_PARALLEL_INSERT,
             "embedding_batch_num": DEFAULT_EMBEDDING_BATCH_NUM,
             "embedding_func_max_async": DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
+            "multimodal_item_parallelism": env.get(
+                "RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM",
+                str(DEFAULT_MULTIMODAL_ITEM_PARALLELISM or DEFAULT_MAX_PARALLEL_INSERT),
+            ),
             "recycle_service_every": recycle_service_every,
         },
         "retries": [],

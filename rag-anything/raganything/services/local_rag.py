@@ -68,6 +68,8 @@ from raganything.constants import (
     DEFAULT_TEMPERATURE,
     DEFAULT_QUERY_MAX_TOKENS,
     DEFAULT_INGEST_MAX_TOKENS,
+    DEFAULT_LLM_CONTEXT_MAX_TOKENS,
+    DEFAULT_LLM_CONTEXT_RESERVED_TOKENS,
     DEFAULT_VLM_ENABLE_JSON_SCHEMA,
     DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD,
     DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE,
@@ -75,6 +77,7 @@ from raganything.constants import (
     DEFAULT_MULTIMODAL_BATCH_WATCHDOG_SECONDS,
     DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS,
     DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK,
+    DEFAULT_MULTIMODAL_ITEM_PARALLELISM,
     DEFAULT_CHUNKING_STRATEGY,
     DEFAULT_CHUNK_TOKEN_SIZE,
     DEFAULT_CHUNK_OVERLAP_TOKEN_SIZE,
@@ -201,6 +204,8 @@ class LocalRagSettings:
     temperature: float = DEFAULT_TEMPERATURE
     query_max_tokens: int = DEFAULT_QUERY_MAX_TOKENS
     ingest_max_tokens: int = DEFAULT_INGEST_MAX_TOKENS
+    llm_context_max_tokens: int = DEFAULT_LLM_CONTEXT_MAX_TOKENS
+    llm_context_reserved_tokens: int = DEFAULT_LLM_CONTEXT_RESERVED_TOKENS
 
     vlm_enable_json_schema: bool = DEFAULT_VLM_ENABLE_JSON_SCHEMA
     multimodal_item_timeout_seconds: float = DEFAULT_MULTIMODAL_ITEM_TIMEOUT_SECONDS
@@ -209,6 +214,7 @@ class LocalRagSettings:
     )
     multimodal_cancel_grace_seconds: float = DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS
     multimodal_enable_strict_fallback: bool = DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK
+    multimodal_item_parallelism: int | None = DEFAULT_MULTIMODAL_ITEM_PARALLELISM
     image_token_estimate_method: str = DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD
     image_token_model_name_or_path: str = ""
     image_wrapper_tokens_per_image: int = DEFAULT_IMAGE_WRAPPER_TOKENS_PER_IMAGE
@@ -347,6 +353,18 @@ class LocalRagSettings:
             ingest_max_tokens=int(
                 os.getenv("RAGANYTHING_INGEST_MAX_TOKENS", str(DEFAULT_INGEST_MAX_TOKENS))
             ),
+            llm_context_max_tokens=int(
+                os.getenv(
+                    "RAGANYTHING_LLM_CONTEXT_MAX_TOKENS",
+                    str(DEFAULT_LLM_CONTEXT_MAX_TOKENS),
+                )
+            ),
+            llm_context_reserved_tokens=int(
+                os.getenv(
+                    "RAGANYTHING_LLM_CONTEXT_RESERVED_TOKENS",
+                    str(DEFAULT_LLM_CONTEXT_RESERVED_TOKENS),
+                )
+            ),
             vlm_enable_json_schema=os.getenv(
                 "RAGANYTHING_VLM_ENABLE_JSON_SCHEMA", str(DEFAULT_VLM_ENABLE_JSON_SCHEMA)
             ).lower()
@@ -374,6 +392,11 @@ class LocalRagSettings:
                 str(DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK),
             ).lower()
             in {"1", "true", "yes", "y", "on"},
+            multimodal_item_parallelism=(
+                int(os.getenv("RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM"))
+                if os.getenv("RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM")
+                else DEFAULT_MULTIMODAL_ITEM_PARALLELISM
+            ),
             image_token_estimate_method=os.getenv(
                 "RAGANYTHING_IMAGE_TOKEN_ESTIMATE_METHOD",
                 DEFAULT_IMAGE_TOKEN_ESTIMATE_METHOD,
@@ -984,6 +1007,84 @@ def _is_entity_extraction_call(system_prompt: Any, prompt: Any) -> bool:
     )
 
 
+def _iter_message_text_parts(content: Any):
+    if content is None:
+        return
+    if isinstance(content, str):
+        yield content
+        return
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict):
+                item_type = str(item.get("type", "")).lower()
+                if item_type in {"text", "input_text"}:
+                    yield str(item.get("text", ""))
+                elif item_type in {"image_url", "input_image"}:
+                    continue
+            elif isinstance(item, str):
+                yield item
+        return
+    yield str(content)
+
+
+def _estimate_message_tokens(
+    messages: list[dict[str, Any]], tokenizer: Tokenizer | None
+) -> int:
+    total = 0
+    for message in messages:
+        total += 4  # conservative per-message chat wrapper overhead
+        for text in _iter_message_text_parts(message.get("content")):
+            if not text:
+                continue
+            if tokenizer is not None:
+                try:
+                    total += len(tokenizer.encode(text))
+                    continue
+                except Exception:
+                    pass
+            total += max(1, len(str(text)) // 4)
+    return total + 2
+
+
+def _cap_max_tokens_for_context(
+    *,
+    settings: LocalRagSettings,
+    messages: list[dict[str, Any]],
+    requested_max_tokens: int,
+    tokenizer: Tokenizer | None,
+    logger: logging.Logger,
+    operation_name: str,
+) -> tuple[int, int]:
+    requested = max(1, int(requested_max_tokens))
+    context_limit = max(1, int(settings.llm_context_max_tokens))
+    reserve = max(0, int(settings.llm_context_reserved_tokens))
+    input_tokens = _estimate_message_tokens(messages, tokenizer)
+    available = context_limit - input_tokens - reserve
+    if available < 1:
+        logger.error(
+            "LLM input exceeds context budget: op=%s input_tokens=%d context_limit=%d reserve=%d requested_max_tokens=%d",
+            operation_name,
+            input_tokens,
+            context_limit,
+            reserve,
+            requested,
+        )
+        return 1, input_tokens
+    if requested > available:
+        capped = max(1, available)
+        logger.warning(
+            "LLM max_tokens adjusted for context budget: op=%s input_tokens=%d requested=%d adjusted=%d context_limit=%d reserve=%d",
+            operation_name,
+            input_tokens,
+            requested,
+            capped,
+            context_limit,
+            reserve,
+        )
+        return capped, input_tokens
+    return requested, input_tokens
+
+
 def _is_transient_llm_exception(exc: BaseException) -> bool:
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
         return True
@@ -1067,6 +1168,7 @@ def build_llm_model_func(
     client: AsyncOpenAI,
     logger: logging.Logger,
     model_name: str,
+    tokenizer: Tokenizer | None = None,
 ):
     async def llm_model_func(
         prompt, system_prompt=None, history_messages=None, **kwargs
@@ -1116,6 +1218,15 @@ def build_llm_model_func(
             if history_messages:
                 messages.extend(history_messages)
             messages.append({"role": "user", "content": prompt})
+        operation_name = "ingest" if is_ingest_call else "query"
+        max_tokens, input_tokens = _cap_max_tokens_for_context(
+            settings=settings,
+            messages=messages,
+            requested_max_tokens=max_tokens,
+            tokenizer=tokenizer,
+            logger=logger,
+            operation_name=operation_name,
+        )
 
         # Streaming path: return async generator so LightRAG wraps it as response_iterator
         if is_streaming:
@@ -1162,7 +1273,7 @@ def build_llm_model_func(
 
             response = await _run_llm_with_transient_retry(
                 logger=logger,
-                operation_name="ingest" if is_ingest_call else "query",
+                operation_name=operation_name,
                 call=_request_once,
                 max_attempts=retry_attempts,
                 base_delay=retry_base_delay,
@@ -1189,8 +1300,11 @@ def build_vision_model_func(
     client: AsyncOpenAI,
     logger: logging.Logger,
     model_name: str,
+    tokenizer: Tokenizer | None = None,
 ):
-    llm_fallback = build_llm_model_func(settings, client, logger, model_name)
+    llm_fallback = build_llm_model_func(
+        settings, client, logger, model_name, tokenizer=tokenizer
+    )
     schema_stats = {"total": 0, "success": 0, "fallback": 0}
     item_timeout = max(1.0, float(settings.multimodal_item_timeout_seconds))
     query_retry_attempts, query_retry_base_delay, query_retry_max_delay = (
@@ -1218,12 +1332,20 @@ def build_vision_model_func(
             )
 
             async def _request_once():
+                capped_max_tokens, _ = _cap_max_tokens_for_context(
+                    settings=settings,
+                    messages=messages_payload,
+                    requested_max_tokens=settings.ingest_max_tokens,
+                    tokenizer=tokenizer,
+                    logger=logger,
+                    operation_name=f"vision_ingest:{task_type}",
+                )
                 return await asyncio.wait_for(
                     client.chat.completions.create(
                         model=model_name,
                         messages=messages_payload,
                         temperature=settings.temperature,
-                        max_tokens=settings.ingest_max_tokens,
+                        max_tokens=capped_max_tokens,
                         **request_kwargs,
                     ),
                     timeout=item_timeout,
@@ -1743,12 +1865,14 @@ class LocalRagService:
             self.text_client,
             self.logger,
             text_model,
+            tokenizer=self.lightrag_tokenizer,
         )
         self.vision_model_func = build_vision_model_func(
             self.settings,
             self.vision_client,
             self.logger,
             vision_model,
+            tokenizer=self.lightrag_tokenizer,
         )
         self._safe_ingest_call, self._safe_query_call = self._build_resilience_wrappers()
         if self.settings.enable_metrics_callback:
@@ -2020,6 +2144,10 @@ class LocalRagService:
         addon_params["multimodal_cancel_grace_seconds"] = float(
             self.settings.multimodal_cancel_grace_seconds
         )
+        if self.settings.multimodal_item_parallelism is not None:
+            addon_params["multimodal_item_parallelism"] = int(
+                max(1, self.settings.multimodal_item_parallelism)
+            )
         addon_params["multimodal_transient_retry_attempts"] = int(
             max(2, min(3, self.settings.resilience_max_attempts))
         )

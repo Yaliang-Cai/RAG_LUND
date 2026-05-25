@@ -11,6 +11,7 @@ Includes:
 
 import re
 import json
+import os
 import time
 import base64
 from typing import Dict, Any, Tuple, List
@@ -40,10 +41,91 @@ from raganything.constants import (
     DEFAULT_CONTEXT_FILTER_CONTENT_TYPES,
     DEFAULT_ENABLE_TYPE_BASED_CONTEXT_WINDOW_OVERRIDE,
     DEFAULT_CONTEXT_ZERO_WINDOW_CONTENT_TYPES,
+    DEFAULT_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS,
+    DEFAULT_MULTIMODAL_CHUNK_MAX_TOKENS,
 )
 
 _BACKSPACE_CHAR = "\x08"
 _FORMFEED_CHAR = "\x0c"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _modal_prompt_token_budget() -> int:
+    return max(
+        256,
+        _env_int(
+            "RAGANYTHING_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS",
+            DEFAULT_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS,
+        ),
+    )
+
+
+def _modal_chunk_token_budget() -> int:
+    return max(
+        256,
+        _env_int(
+            "RAGANYTHING_MULTIMODAL_CHUNK_MAX_TOKENS",
+            DEFAULT_MULTIMODAL_CHUNK_MAX_TOKENS,
+        ),
+    )
+
+
+def _modal_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    if isinstance(value, tuple):
+        return ", ".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+def _approx_token_count(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, (len(text) + 3) // 4)
+
+
+def _truncate_modal_text(value: Any, *, max_tokens: int, field_name: str) -> str:
+    text = _modal_text(value)
+    if _approx_token_count(text) <= max_tokens:
+        return text
+
+    char_limit = max(256, max_tokens * 4)
+    marker = (
+        f"\n[TRUNCATED {field_name}: original_chars={len(text)} "
+        f"kept_chars<={char_limit} max_tokens={max_tokens}]\n"
+    )
+    remaining = max(128, char_limit - len(marker))
+    head_chars = max(64, int(remaining * 0.7))
+    tail_chars = max(64, remaining - head_chars)
+    head = text[:head_chars].rstrip()
+    tail = text[-tail_chars:].lstrip()
+    return f"{head}{marker}{tail}"
+
+
+def _prompt_modal_text(value: Any, field_name: str) -> str:
+    return _truncate_modal_text(
+        value,
+        max_tokens=_modal_prompt_token_budget(),
+        field_name=field_name,
+    )
+
+
+def _chunk_modal_text(value: Any, field_name: str) -> str:
+    return _truncate_modal_text(
+        value,
+        max_tokens=_modal_chunk_token_budget(),
+        field_name=field_name,
+    )
 
 
 @dataclass
@@ -995,6 +1077,8 @@ class ImageModalProcessor(BaseModalProcessor):
             footnotes = content_data.get(
                 "image_footnote", content_data.get("img_footnote", [])
             )
+            prompt_captions = _prompt_modal_text(captions, "image_caption")
+            prompt_footnotes = _prompt_modal_text(footnotes, "image_footnote")
 
             # Validate image path
             if not image_path:
@@ -1022,8 +1106,8 @@ class ImageModalProcessor(BaseModalProcessor):
                     if entity_name
                     else "unique descriptive name for this image",
                     image_path=image_path,
-                    captions=captions if captions else "None",
-                    footnotes=footnotes if footnotes else "None",
+                    captions=prompt_captions if prompt_captions else "None",
+                    footnotes=prompt_footnotes if prompt_footnotes else "None",
                 )
             else:
                 vision_prompt = PROMPTS["vision_prompt"].format(
@@ -1031,8 +1115,8 @@ class ImageModalProcessor(BaseModalProcessor):
                     if entity_name
                     else "unique descriptive name for this image",
                     image_path=image_path,
-                    captions=captions if captions else "None",
-                    footnotes=footnotes if footnotes else "None",
+                    captions=prompt_captions if prompt_captions else "None",
+                    footnotes=prompt_footnotes if prompt_footnotes else "None",
                 )
 
             # Encode image to base64
@@ -1107,8 +1191,12 @@ class ImageModalProcessor(BaseModalProcessor):
 
             modal_chunk = PROMPTS["image_chunk"].format(
                 image_path=image_path,
-                captions=", ".join(captions) if captions else "None",
-                footnotes=", ".join(footnotes) if footnotes else "None",
+                captions=_chunk_modal_text(captions, "image_caption")
+                if captions
+                else "None",
+                footnotes=_chunk_modal_text(footnotes, "image_footnote")
+                if footnotes
+                else "None",
                 enhanced_caption=enhanced_caption,
             )
 
@@ -1216,6 +1304,13 @@ class TableModalProcessor(BaseModalProcessor):
             table_caption = content_data.get("table_caption", [])
             table_body = content_data.get("table_body", "")
             table_footnote = content_data.get("table_footnote", [])
+            prompt_table_caption = _prompt_modal_text(
+                table_caption, "table_caption"
+            )
+            prompt_table_body = _prompt_modal_text(table_body, "table_body")
+            prompt_table_footnote = _prompt_modal_text(
+                table_footnote, "table_footnote"
+            )
 
             # Extract context for current item
             context = ""
@@ -1232,9 +1327,13 @@ class TableModalProcessor(BaseModalProcessor):
                     if entity_name
                     else "descriptive name for this table",
                     table_img_path=table_img_path,
-                    table_caption=table_caption if table_caption else "None",
-                    table_body=table_body,
-                    table_footnote=table_footnote if table_footnote else "None",
+                    table_caption=prompt_table_caption
+                    if prompt_table_caption
+                    else "None",
+                    table_body=prompt_table_body,
+                    table_footnote=prompt_table_footnote
+                    if prompt_table_footnote
+                    else "None",
                 )
             else:
                 table_prompt = PROMPTS["table_prompt"].format(
@@ -1242,9 +1341,13 @@ class TableModalProcessor(BaseModalProcessor):
                     if entity_name
                     else "descriptive name for this table",
                     table_img_path=table_img_path,
-                    table_caption=table_caption if table_caption else "None",
-                    table_body=table_body,
-                    table_footnote=table_footnote if table_footnote else "None",
+                    table_caption=prompt_table_caption
+                    if prompt_table_caption
+                    else "None",
+                    table_body=prompt_table_body,
+                    table_footnote=prompt_table_footnote
+                    if prompt_table_footnote
+                    else "None",
                 )
 
             # Call LLM for table analysis
@@ -1313,9 +1416,13 @@ class TableModalProcessor(BaseModalProcessor):
             # Build complete table content
             modal_chunk = PROMPTS["table_chunk"].format(
                 table_img_path=table_img_path,
-                table_caption=", ".join(table_caption) if table_caption else "None",
-                table_body=table_body,
-                table_footnote=", ".join(table_footnote) if table_footnote else "None",
+                table_caption=_chunk_modal_text(table_caption, "table_caption")
+                if table_caption
+                else "None",
+                table_body=_chunk_modal_text(table_body, "table_body"),
+                table_footnote=_chunk_modal_text(table_footnote, "table_footnote")
+                if table_footnote
+                else "None",
                 enhanced_caption=enhanced_caption,
             )
 
@@ -1421,6 +1528,10 @@ class EquationModalProcessor(BaseModalProcessor):
 
             equation_text = content_data.get("text")
             equation_format = content_data.get("text_format", "")
+            prompt_equation_text = _prompt_modal_text(equation_text, "equation_text")
+            prompt_equation_format = _prompt_modal_text(
+                equation_format, "equation_format"
+            )
 
             # Extract context for current item
             context = ""
@@ -1433,16 +1544,16 @@ class EquationModalProcessor(BaseModalProcessor):
                     "equation_prompt_with_context", PROMPTS["equation_prompt"]
                 ).format(
                     context=context,
-                    equation_text=equation_text,
-                    equation_format=equation_format,
+                    equation_text=prompt_equation_text,
+                    equation_format=prompt_equation_format,
                     entity_name=entity_name
                     if entity_name
                     else "descriptive name for this equation",
                 )
             else:
                 equation_prompt = PROMPTS["equation_prompt"].format(
-                    equation_text=equation_text,
-                    equation_format=equation_format,
+                    equation_text=prompt_equation_text,
+                    equation_format=prompt_equation_format,
                     entity_name=entity_name
                     if entity_name
                     else "descriptive name for this equation",
@@ -1511,8 +1622,10 @@ class EquationModalProcessor(BaseModalProcessor):
 
             # Build complete equation content
             modal_chunk = PROMPTS["equation_chunk"].format(
-                equation_text=equation_text,
-                equation_format=equation_format,
+                equation_text=_chunk_modal_text(equation_text, "equation_text"),
+                equation_format=_chunk_modal_text(
+                    equation_format, "equation_format"
+                ),
                 enhanced_caption=enhanced_caption,
             )
 
@@ -1612,6 +1725,10 @@ class GenericModalProcessor(BaseModalProcessor):
             if item_info:
                 context = self._get_context_for_item(item_info)
 
+            prompt_content = _prompt_modal_text(
+                modal_content, f"{content_type}_content"
+            )
+
             # Build generic analysis prompt with context
             if context:
                 generic_prompt = PROMPTS.get(
@@ -1622,7 +1739,7 @@ class GenericModalProcessor(BaseModalProcessor):
                     entity_name=entity_name
                     if entity_name
                     else f"descriptive name for this {content_type}",
-                    content=str(modal_content),
+                    content=prompt_content,
                 )
             else:
                 generic_prompt = PROMPTS["generic_prompt"].format(
@@ -1630,7 +1747,7 @@ class GenericModalProcessor(BaseModalProcessor):
                     entity_name=entity_name
                     if entity_name
                     else f"descriptive name for this {content_type}",
-                    content=str(modal_content),
+                    content=prompt_content,
                 )
 
             # Call LLM for generic analysis
@@ -1687,7 +1804,7 @@ class GenericModalProcessor(BaseModalProcessor):
             # Build complete content
             modal_chunk = PROMPTS["generic_chunk"].format(
                 content_type=content_type.title(),
-                content=str(modal_content),
+                content=_chunk_modal_text(modal_content, f"{content_type}_content"),
                 enhanced_caption=enhanced_caption,
             )
 

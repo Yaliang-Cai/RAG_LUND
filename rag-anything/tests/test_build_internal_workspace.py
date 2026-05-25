@@ -318,6 +318,9 @@ def test_local_env_enables_internal_build_defaults():
     assert env["MAX_SOURCE_IDS_PER_ENTITY"] == "99999"
     assert env["MAX_SOURCE_IDS_PER_RELATION"] == "99999"
     assert env["MAX_CONCURRENT_FILES"] == "4"
+    assert env["RAGANYTHING_LLM_CONTEXT_MAX_TOKENS"] == "65536"
+    assert env["RAGANYTHING_LLM_CONTEXT_RESERVED_TOKENS"] == "512"
+    assert env["RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM"] == "3"
 
 
 def test_local_env_allows_max_async_ingest_override():
@@ -362,6 +365,35 @@ def test_local_rag_settings_reads_preload_reranker_env(monkeypatch):
     settings = LocalRagSettings.from_env()
 
     assert settings.preload_reranker_model is False
+
+
+def test_local_rag_settings_reads_llm_context_and_multimodal_parallelism_env(
+    monkeypatch,
+):
+    _stub_sentence_transformers(monkeypatch)
+    from raganything.services.local_rag import LocalRagSettings
+
+    monkeypatch.setenv("RAGANYTHING_LLM_CONTEXT_MAX_TOKENS", "32768")
+    monkeypatch.setenv("RAGANYTHING_LLM_CONTEXT_RESERVED_TOKENS", "256")
+    monkeypatch.setenv("RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM", "3")
+
+    settings = LocalRagSettings.from_env()
+
+    assert settings.llm_context_max_tokens == 32768
+    assert settings.llm_context_reserved_tokens == 256
+    assert settings.multimodal_item_parallelism == 3
+
+
+def test_multimodal_guardrails_can_override_item_parallelism():
+    processor = _DummyProcessor()
+    processor.lightrag = SimpleNamespace(
+        addon_params={"multimodal_item_parallelism": "3"},
+        max_parallel_insert=4,
+    )
+
+    guardrails = processor._resolve_multimodal_batch_guardrails(total_items=10)
+
+    assert guardrails["parallelism"] == 3
 
 
 def test_local_rag_preserves_internal_build_logging_without_run_log(
@@ -553,6 +585,49 @@ def test_mineru_preparse_skips_nonempty_artifact_even_if_older(monkeypatch, tmp_
     assert summary["skipped_count"] == 1
 
 
+def test_mineru_preparse_recovers_nested_artifact_by_fallback_search(
+    monkeypatch, tmp_path
+):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "R2-2601385 Use cases.docx"
+    source.write_text("docx", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    output_root = storage_root / "output" / "ws"
+    artifact = (
+        output_root
+        / "legacy_mineru_output"
+        / source.stem
+        / "hybrid_auto"
+        / f"{source.stem}_content_list.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps([{"type": "text", "text": "ok"}]), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        build_internal,
+        "_run_mineru_preparse_command",
+        lambda input_dir, output_root: calls.append((input_dir, output_root)),
+    )
+
+    summary = build_internal.preparse_mineru_files(
+        profile,
+        [source],
+        tmp_path / "reports",
+    )
+
+    assert calls == []
+    assert summary["skipped_count"] == 1
+    assert summary["recovered_by_fallback_count"] == 1
+    assert summary["skipped"][0]["artifact"] == build_internal._path_env(artifact)
+
+
 def test_processor_reuses_legacy_safe_stem_mineru_output(tmp_path):
     raw_dir = tmp_path / "raw"
     output_root = tmp_path / "output" / "ws"
@@ -728,8 +803,14 @@ def test_mineru_preparse_writes_missing_artifact_reports(monkeypatch, tmp_path):
         (report_dir / "mineru_preparse_summary.json").read_text(encoding="utf-8")
     )
     assert missing[0]["file"] == "missing.pdf"
+    assert missing[0]["stem"] == "missing"
+    assert missing[0]["output_root"]
+    assert missing[0]["searched_roots"]
+    assert "candidate_reject_reasons" in missing[0]
     assert all_failures[0]["stage"] == "mineru_preparse_missing_artifact"
     assert preparse_summary["failed_count"] == 1
+    assert preparse_summary["missing_artifact_count"] == 1
+    assert preparse_summary["conversion_failed_count"] == 0
 
 
 def test_mineru_preparse_converts_office_pdf_inside_file_dir(monkeypatch, tmp_path):
@@ -1261,8 +1342,13 @@ def test_build_uses_local_service_batches_and_exports_reports(monkeypatch, tmp_p
     assert "Build batch complete" in log_text
     assert summary["error_count"] == 0
     assert json.loads((report_dir / "documents.json").read_text(encoding="utf-8"))["count"] == 2
-    assert json.loads((report_dir / "entities.json").read_text(encoding="utf-8"))["count"] == 1
-    assert json.loads((report_dir / "relations.json").read_text(encoding="utf-8"))["count"] == 1
+    assert not (report_dir / "entities.json").exists()
+    assert not (report_dir / "relations.json").exists()
+    assert not (report_dir / "entities.csv").exists()
+    assert not (report_dir / "relations.csv").exists()
+    assert json.loads((report_dir / "graph_stats.json").read_text(encoding="utf-8"))[
+        "entity_count"
+    ] == 1
 
 
 def test_build_failure_is_written_to_internal_log(monkeypatch, tmp_path):
@@ -1360,8 +1446,10 @@ def test_report_command_collects_storage_without_ingest(monkeypatch, tmp_path):
     assert Path(summary["log_file"]).exists()
     assert summary["error_count"] == 0
     assert (report_dir / "documents.csv").exists()
-    assert (report_dir / "entities.csv").exists()
-    assert (report_dir / "relations.csv").exists()
+    assert not (report_dir / "entities.csv").exists()
+    assert not (report_dir / "relations.csv").exists()
+    assert not (report_dir / "entities.json").exists()
+    assert not (report_dir / "relations.json").exists()
 
 
 def test_delete_doc_deletes_storage_then_rebuilds_synonyms(monkeypatch, tmp_path):

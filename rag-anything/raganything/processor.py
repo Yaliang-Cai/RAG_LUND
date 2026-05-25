@@ -124,13 +124,18 @@ class ProcessorMixin:
             if category in {"timeout", "parse", "model", "cancelled", "other"}
             else "other"
         )
+        error_class = type(error).__name__
+        error_message = str(error)
         return {
             "status": "failed",
             "index": index,
+            "item_index": index,
             "type": content_type or "unknown",
             "item": item,
             "category": normalized_category,
-            "error": str(error),
+            "error": error_message,
+            "error_class": error_class,
+            "error_message": error_message,
         }
 
     def _normalize_multimodal_task_result(
@@ -212,7 +217,11 @@ class ProcessorMixin:
                 )
             ),
         )
-        parallelism = max(1, int(getattr(self.lightrag, "max_parallel_insert", 2)))
+        configured_parallelism = addon_params.get("multimodal_item_parallelism")
+        if configured_parallelism is not None:
+            parallelism = max(1, int(configured_parallelism))
+        else:
+            parallelism = max(1, int(getattr(self.lightrag, "max_parallel_insert", 2)))
 
         retry_attempts, retry_base_delay, retry_max_delay = (
             self._get_multimodal_retry_policy()

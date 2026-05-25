@@ -53,6 +53,13 @@ DEFAULT_MULTIMODAL_CANCEL_GRACE_SECONDS = 10
 # Enable two-stage strict fallback for multimodal ingest:
 # strict=true first, then fallback strict=false path on failure.
 DEFAULT_MULTIMODAL_ENABLE_STRICT_FALLBACK = True
+# Per-document multimodal item concurrency. None means fall back to
+# LightRAG max_parallel_insert.
+DEFAULT_MULTIMODAL_ITEM_PARALLELISM = None
+# Approximate token budgets used to keep modal prompts/chunks inside model and
+# embedding limits. Runtime can override via environment variables.
+DEFAULT_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS = 48000
+DEFAULT_MULTIMODAL_CHUNK_MAX_TOKENS = 6000
 
 # =============================================================================
 # Batch processing
@@ -256,6 +263,8 @@ DEFAULT_MAX_TOKEN_SIZE = 8192
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_QUERY_MAX_TOKENS = 2048
 DEFAULT_INGEST_MAX_TOKENS = 8192
+DEFAULT_LLM_CONTEXT_MAX_TOKENS = 65536
+DEFAULT_LLM_CONTEXT_RESERVED_TOKENS = 512
 
 # =============================================================================
 # Local deployment - VLM parameters
