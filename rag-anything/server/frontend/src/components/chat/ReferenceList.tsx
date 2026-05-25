@@ -28,9 +28,17 @@ function chunkExcerpt(c: ChunkRef): string {
   return raw.length > 120 ? raw.slice(0, 120) + '…' : raw
 }
 
+// Normalize to a 1-based page number for display/navigation.
+// LightRAG emits `page_idx` 0-based (see raganything/processor.py docstring),
+// while `page_num`, when present, is already 1-based. PdfViewer expects 1-based.
 function chunkPage(c: ChunkRef): number | null {
-  const p = c.page_idx ?? c.page_num
-  return typeof p === 'number' ? p : null
+  if (typeof c.page_idx === 'number') return c.page_idx + 1
+  if (typeof c.page_num === 'number') return c.page_num
+  return null
+}
+
+function isPdfName(name: string): boolean {
+  return name.toLowerCase().endsWith('.pdf')
 }
 
 export function ReferenceList({ messageId, chunks }: ReferenceListProps) {
@@ -47,7 +55,9 @@ export function ReferenceList({ messageId, chunks }: ReferenceListProps) {
     const filename = chunkFilename(c)
     setSelectedFile(filename)
     const page = chunkPage(c)
-    if (page !== null) {
+    // Only PDFs get a page jump; non-PDFs (md, txt, ...) always use text-highlight,
+    // because LightRAG attaches page_idx=0 to every chunk regardless of source format.
+    if (isPdfName(filename) && page !== null) {
       setPendingPageNum(page)
       setPendingChunkText(null)
     } else {
