@@ -62,7 +62,9 @@ describe('useStreamQuery', () => {
     })
 
     expect(result.current.answer).toBe('72.3% accuracy')
-    expect(result.current.metadata).toEqual({ agentic_trace: fakeTrace })
+    // The hook folds the meta event's `data` field into metadata so ChatPage's
+    // extractChunks() can read metadata.data.chunks for the reference list.
+    expect(result.current.metadata).toEqual({ agentic_trace: fakeTrace, data: {} })
     expect(result.current.status).toBe('done')
   })
 })
