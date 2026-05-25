@@ -695,6 +695,50 @@ def test_mineru_preparse_reuses_bracketed_stem_artifact(monkeypatch, tmp_path):
     assert summary["skipped"][0]["artifact"] == build_internal._path_env(artifact)
 
 
+def test_mineru_preparse_does_not_accept_glob_pattern_near_match(
+    monkeypatch, tmp_path
+):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "Report [AB].pdf"
+    source.write_text("pdf", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    output_root = storage_root / "output" / "ws"
+    wrong_artifact = (
+        output_root
+        / source.stem
+        / "hybrid_auto"
+        / "Report A_content_list.json"
+    )
+    wrong_artifact.parent.mkdir(parents=True)
+    wrong_artifact.write_text(
+        json.dumps([{"type": "text", "text": "wrong"}]),
+        encoding="utf-8",
+    )
+    calls = []
+    monkeypatch.setattr(
+        build_internal,
+        "_run_mineru_preparse_command",
+        lambda input_dir, output_root: calls.append((input_dir, output_root)),
+    )
+
+    summary = build_internal.preparse_mineru_files(
+        profile,
+        [source],
+        tmp_path / "reports",
+    )
+
+    assert calls
+    assert summary["skipped_count"] == 0
+    assert summary["missing_artifact_count"] == 1
+
+
 def test_processor_reuses_legacy_safe_stem_mineru_output(tmp_path):
     raw_dir = tmp_path / "raw"
     output_root = tmp_path / "output" / "ws"
@@ -717,6 +761,33 @@ def test_processor_reuses_legacy_safe_stem_mineru_output(tmp_path):
         encoding="utf-8",
     )
     os.utime(artifact, (source.stat().st_mtime + 1, source.stat().st_mtime + 1))
+
+    content = asyncio.run(
+        _DummyProcessor()._try_load_existing_mineru_output(
+            file_path=source,
+            output_dir=str(output_root),
+            parse_method="auto",
+        )
+    )
+
+    assert content == [{"type": "image", "img_path": str(image_path.resolve())}]
+
+
+def test_processor_reuses_safe_stem_method_dir_without_stem_parent(tmp_path):
+    raw_dir = tmp_path / "raw"
+    output_root = tmp_path / "output" / "ws"
+    raw_dir.mkdir()
+    source = raw_dir / "A Test.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    artifact = output_root / "A_Test" / "hybrid_auto" / "A Test_content_list.json"
+    artifact.parent.mkdir(parents=True)
+    image_path = artifact.parent / "images" / "x.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"png")
+    artifact.write_text(
+        json.dumps([{"type": "image", "img_path": "images/x.png"}]),
+        encoding="utf-8",
+    )
 
     content = asyncio.run(
         _DummyProcessor()._try_load_existing_mineru_output(
@@ -792,6 +863,35 @@ def test_processor_reuses_bracketed_stem_mineru_output(tmp_path):
     )
 
     assert content == [{"type": "image", "img_path": str(image_path.resolve())}]
+
+
+def test_processor_does_not_reuse_glob_pattern_near_match(tmp_path):
+    raw_dir = tmp_path / "raw"
+    output_root = tmp_path / "output" / "ws"
+    raw_dir.mkdir()
+    source = raw_dir / "Report [AB].pdf"
+    source.write_text("pdf", encoding="utf-8")
+    wrong_artifact = (
+        output_root
+        / source.stem
+        / "hybrid_auto"
+        / "Report A_content_list.json"
+    )
+    wrong_artifact.parent.mkdir(parents=True)
+    wrong_artifact.write_text(
+        json.dumps([{"type": "text", "text": "wrong"}]),
+        encoding="utf-8",
+    )
+
+    content = asyncio.run(
+        _DummyProcessor()._try_load_existing_mineru_output(
+            file_path=source,
+            output_dir=str(output_root),
+            parse_method="auto",
+        )
+    )
+
+    assert content is None
 
 
 def test_processor_reuses_older_mineru_output(tmp_path):

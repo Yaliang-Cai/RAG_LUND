@@ -8,7 +8,6 @@ import os
 import time
 import hashlib
 import json
-import glob
 from typing import Dict, List, Any, Tuple, Optional, Callable, Awaitable
 from pathlib import Path
 
@@ -40,9 +39,19 @@ _HTTPX_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = ()
 _OPENAI_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = ()
 
 
-def _content_list_glob_pattern(file_stem: str) -> str:
-    # Path.rglob treats [] in 3GPP filenames as glob syntax; escape the literal filename.
-    return glob.escape(f"{file_stem}_content_list.json")
+def _content_list_filename(file_stem: str) -> str:
+    return f"{file_stem}_content_list.json"
+
+
+def _iter_content_list_matches(root: Path, file_stem: str) -> list[Path]:
+    if not root.is_dir():
+        return []
+    expected_name = _content_list_filename(file_stem)
+    return [
+        path
+        for path in root.rglob("*_content_list.json")
+        if path.name == expected_name
+    ]
 
 
 try:
@@ -982,7 +991,7 @@ class ProcessorMixin:
         """
         candidates: list[Path] = []
 
-        direct_json = base_output_dir / f"{file_stem}_content_list.json"
+        direct_json = base_output_dir / _content_list_filename(file_stem)
         if direct_json.exists():
             candidates.append(direct_json)
 
@@ -993,15 +1002,11 @@ class ProcessorMixin:
         for subdir_name in dict.fromkeys((file_stem, safe_stem)):
             stem_subdir = base_output_dir / subdir_name
             if stem_subdir.is_dir():
-                candidates.extend(
-                    stem_subdir.rglob(_content_list_glob_pattern(file_stem))
-                )
+                candidates.extend(_iter_content_list_matches(stem_subdir, file_stem))
 
         if base_output_dir.is_dir():
             primary_keys = {str(path) for path in candidates}
-            for candidate in base_output_dir.rglob(
-                _content_list_glob_pattern(file_stem)
-            ):
+            for candidate in _iter_content_list_matches(base_output_dir, file_stem):
                 if str(candidate) not in primary_keys:
                     candidates.append(candidate)
 
@@ -1109,11 +1114,7 @@ class ProcessorMixin:
 
         resolved_method = self._resolve_mineru_method(parse_method, **kwargs)
         parser = MineruParser()
-        read_base_output_dir = base_output_dir
-        for parent in latest_json.parents:
-            if parent.name == file_stem:
-                read_base_output_dir = parent.parent
-                break
+        read_base_output_dir = latest_json.parent
         content_list, _ = parser._read_output_files(
             read_base_output_dir,
             file_stem,

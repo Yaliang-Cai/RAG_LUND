@@ -6,7 +6,6 @@ import asyncio
 import csv
 import dataclasses
 import gc
-import glob
 import hashlib
 import inspect
 import io
@@ -642,9 +641,19 @@ def _safe_stem(path: Path) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in stem) or "file"
 
 
-def _content_list_glob_pattern(stem: str) -> str:
-    # Path.rglob treats [] in 3GPP filenames as glob syntax; escape the literal filename.
-    return glob.escape(f"{stem}_content_list.json")
+def _content_list_filename(stem: str) -> str:
+    return f"{stem}_content_list.json"
+
+
+def _iter_content_list_matches(root: Path, stem: str) -> list[Path]:
+    if not root.is_dir():
+        return []
+    expected_name = _content_list_filename(stem)
+    return [
+        path
+        for path in root.rglob("*_content_list.json")
+        if path.name == expected_name
+    ]
 
 
 def _iter_batches(items: list[Path], batch_size: int) -> Iterable[list[Path]]:
@@ -663,7 +672,7 @@ def _primary_mineru_content_json_candidates(
     safe_stem = _safe_stem(source_path)
     candidates: list[Path] = []
     searched_roots: list[Path] = [output_root]
-    direct_json = output_root / f"{stem}_content_list.json"
+    direct_json = output_root / _content_list_filename(stem)
     if direct_json.exists():
         candidates.append(direct_json)
 
@@ -671,7 +680,7 @@ def _primary_mineru_content_json_candidates(
         subdir = output_root / subdir_name
         searched_roots.append(subdir)
         if subdir.is_dir():
-            candidates.extend(subdir.rglob(_content_list_glob_pattern(stem)))
+            candidates.extend(_iter_content_list_matches(subdir, stem))
     return candidates, searched_roots
 
 
@@ -687,7 +696,7 @@ def _mineru_content_json_candidates(
     if output_root.is_dir():
         searched_roots.append(output_root / "**")
         primary_keys = {str(path) for path in primary_candidates}
-        for candidate in output_root.rglob(_content_list_glob_pattern(stem)):
+        for candidate in _iter_content_list_matches(output_root, stem):
             key = str(candidate)
             if key not in primary_keys:
                 fallback_keys.add(key)
