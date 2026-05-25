@@ -39,6 +39,12 @@ from raganything.constants import (
 _HTTPX_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = ()
 _OPENAI_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = ()
 
+
+def _content_list_glob_pattern(file_stem: str) -> str:
+    # Path.rglob treats [] in 3GPP filenames as glob syntax; escape the literal filename.
+    return glob.escape(f"{file_stem}_content_list.json")
+
+
 try:
     import httpx
 
@@ -988,13 +994,13 @@ class ProcessorMixin:
             stem_subdir = base_output_dir / subdir_name
             if stem_subdir.is_dir():
                 candidates.extend(
-                    stem_subdir.rglob(glob.escape(f"{file_stem}_content_list.json"))
+                    stem_subdir.rglob(_content_list_glob_pattern(file_stem))
                 )
 
         if base_output_dir.is_dir():
             primary_keys = {str(path) for path in candidates}
             for candidate in base_output_dir.rglob(
-                glob.escape(f"{file_stem}_content_list.json")
+                _content_list_glob_pattern(file_stem)
             ):
                 if str(candidate) not in primary_keys:
                     candidates.append(candidate)

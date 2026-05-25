@@ -643,6 +643,7 @@ def _safe_stem(path: Path) -> str:
 
 
 def _content_list_glob_pattern(stem: str) -> str:
+    # Path.rglob treats [] in 3GPP filenames as glob syntax; escape the literal filename.
     return glob.escape(f"{stem}_content_list.json")
 
 
