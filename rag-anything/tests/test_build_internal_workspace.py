@@ -287,6 +287,33 @@ def test_ran2_133_bis_profile_resolves_internal_paths():
     )
 
 
+def test_sa_175_profile_resolves_internal_paths():
+    profile = build_internal.resolve_profile("sa_175")
+
+    assert profile.raw_dir == Path("/data/y50056788/Yaliang/datasets_raw_SA_175")
+    assert profile.storage_root == Path("/data/y50056788/Yaliang/internal_SA_175")
+    assert profile.workspace_id == "internal_SA_175"
+    assert profile.output_dir == profile.storage_root / "output"
+    assert profile.working_dir_root == profile.storage_root / "rag_workspace"
+    assert profile.log_dir == profile.storage_root / "logs"
+    assert profile.reports_dir == profile.storage_root / "reports"
+
+    env = build_internal.build_local_env(profile, base_env={})
+
+    assert env["RAGANYTHING_WORKDIR_ROOT"] == (
+        "/data/y50056788/Yaliang/internal_SA_175/rag_workspace"
+    )
+    assert env["RAGANYTHING_OUTPUT_DIR"] == (
+        "/data/y50056788/Yaliang/internal_SA_175/output"
+    )
+    assert env["RAGANYTHING_UPLOADS_DIR"] == (
+        "/data/y50056788/Yaliang/internal_SA_175/uploads"
+    )
+    assert env["RAGANYTHING_LOG_DIR"] == (
+        "/data/y50056788/Yaliang/internal_SA_175/logs"
+    )
+
+
 def test_local_env_enables_internal_build_defaults():
     profile = build_internal.resolve_profile(
         "test",
