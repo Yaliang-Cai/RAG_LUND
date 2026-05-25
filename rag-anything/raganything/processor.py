@@ -988,14 +988,52 @@ class ProcessorMixin:
             if stem_subdir.is_dir():
                 candidates.extend(stem_subdir.rglob(f"{file_stem}_content_list.json"))
 
+        if base_output_dir.is_dir():
+            primary_keys = {str(path) for path in candidates}
+            for candidate in base_output_dir.rglob(f"{file_stem}_content_list.json"):
+                if str(candidate) not in primary_keys:
+                    candidates.append(candidate)
+
+        deduped_candidates: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped_candidates.append(candidate)
+        candidates = deduped_candidates
+
         if not candidates:
             return None
 
+        valid_candidates: list[Path] = []
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception as exc:
+                self.logger.warning(
+                    "Skipping unreadable MinerU content_list during reuse: %s (%s)",
+                    candidate,
+                    exc,
+                )
+                continue
+            if isinstance(payload, list) and payload:
+                valid_candidates.append(candidate)
+            else:
+                self.logger.warning(
+                    "Skipping empty or invalid MinerU content_list during reuse: %s",
+                    candidate,
+                )
+
+        if not valid_candidates:
+            return None
+
         try:
-            return max(candidates, key=lambda p: p.stat().st_mtime)
+            return max(valid_candidates, key=lambda p: p.stat().st_mtime)
         except Exception:
             # Fallback to the first existing candidate if stat fails unexpectedly.
-            return candidates[0]
+            return valid_candidates[0]
 
     async def _try_load_existing_mineru_output(
         self,

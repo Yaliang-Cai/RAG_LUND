@@ -662,6 +662,39 @@ def test_processor_reuses_legacy_safe_stem_mineru_output(tmp_path):
     assert content == [{"type": "image", "img_path": str(image_path.resolve())}]
 
 
+def test_processor_reuses_nested_mineru_output_by_fallback_search(tmp_path):
+    raw_dir = tmp_path / "raw"
+    output_root = tmp_path / "output" / "ws"
+    raw_dir.mkdir()
+    source = raw_dir / "R2-2601385 Use cases.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    artifact = (
+        output_root
+        / "legacy_mineru_output"
+        / source.stem
+        / "hybrid_auto"
+        / f"{source.stem}_content_list.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    image_path = artifact.parent / "images" / "x.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"png")
+    artifact.write_text(
+        json.dumps([{"type": "image", "img_path": "images/x.png"}]),
+        encoding="utf-8",
+    )
+
+    content = asyncio.run(
+        _DummyProcessor()._try_load_existing_mineru_output(
+            file_path=source,
+            output_dir=str(output_root),
+            parse_method="auto",
+        )
+    )
+
+    assert content == [{"type": "image", "img_path": str(image_path.resolve())}]
+
+
 def test_processor_reuses_older_mineru_output(tmp_path):
     raw_dir = tmp_path / "raw"
     output_root = tmp_path / "output" / "ws"
