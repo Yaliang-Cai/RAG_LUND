@@ -229,6 +229,36 @@ async def test_two_check_failures_returns_none():
     assert result["confidence"] == "none"
 
 
+# ── Retrieval params are threaded into every QueryParam ──────────────────────
+
+async def test_retrieval_params_threaded_into_queryparam():
+    """top_k/chunk_top_k/enable_rerank/qdrant_retrieval_mode passed to the graph
+    must reach the QueryParam handed to router.route — not fall back to
+    LightRAG's QueryParam defaults (40/20)."""
+    router = _router()
+    graph = AdaptiveAgentGraph(
+        _lightrag(),
+        top_k=10,
+        chunk_top_k=5,
+        enable_rerank=False,
+        qdrant_retrieval_mode="bm25",
+        _classifier=_classifier(),
+        _grader=_grader(sufficient=True),
+        _rewriter=_rewriter(),
+        _checker=_checker(grounded=True),
+        _router=router,
+        _cache=RouterCache(),
+    )
+    await graph.run("What is BERT?")
+
+    assert router.route.await_count >= 1
+    param = router.route.call_args.args[1]
+    assert param.top_k == 10
+    assert param.chunk_top_k == 5
+    assert param.enable_rerank is False
+    assert getattr(param, "qdrant_retrieval_mode", None) == "bm25"
+
+
 # ── Router cache integration ──────────────────────────────────────────────────
 
 async def test_cache_hit_skips_classifier():

@@ -37,8 +37,11 @@ export async function openQueryStream(params: QueryParams): Promise<Response> {
     workspace_id: params.workspace_id,
     query: params.query,
     mode: params.mode ?? 'hybrid',
+    // Fallbacks mirror the canonical backend defaults (raganything/constants.py:
+    // DEFAULT_TOP_K=10, DEFAULT_CHUNK_TOP_K=5). ChatPage always sends explicit
+    // values from the mode preset, so these only apply to direct callers.
     top_k: params.top_k ?? 10,
-    chunk_top_k: params.chunk_top_k ?? 10,
+    chunk_top_k: params.chunk_top_k ?? 5,
     enable_rerank: params.enable_rerank ?? true,
     return_graph: params.return_graph ?? false,
   }

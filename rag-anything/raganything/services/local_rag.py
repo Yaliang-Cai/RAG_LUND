@@ -2359,7 +2359,13 @@ class LocalRagService:
                 from raganything.retrieval.agent_graph import AdaptiveAgentGraph
                 rag_instance = await self.get_rag(workspace_id)
                 await rag_instance._ensure_lightrag_initialized()
-                graph = AdaptiveAgentGraph(rag_instance.lightrag)
+                graph = AdaptiveAgentGraph(
+                    rag_instance.lightrag,
+                    top_k=top_k,
+                    chunk_top_k=chunk_top_k,
+                    enable_rerank=enable_rerank,
+                    qdrant_retrieval_mode=qdrant_retrieval_mode,
+                )
                 final: dict[str, Any] = {}
                 async for kind, payload in graph.astream_run(query):
                     if kind == "step":

@@ -101,8 +101,13 @@ SUPPORTED_IMAGE_EXTENSIONS = [
 # =============================================================================
 # Query defaults (used by server and QueryRequest)
 # =============================================================================
-DEFAULT_TOP_K = 20        # default and max allowed value for top_k
-DEFAULT_CHUNK_TOP_K = 10  # final window size after reranking (chunk_top_k)
+DEFAULT_TOP_K = 10        # KG entity recall when caller sends no top_k
+DEFAULT_CHUNK_TOP_K = 5   # final chunk window after reranking (chunk_top_k)
+# Clamp ceilings are decoupled from the defaults above: the server caps incoming
+# top_k/chunk_top_k at these maxima, so lowering the defaults does not shrink the
+# range a power user (or the multihop ppr_qa_top_k mirror) can request.
+MAX_TOP_K = 20            # hard ceiling enforced by the server (env-overridable)
+MAX_CHUNK_TOP_K = 10
 DEFAULT_NAIVE_TOP_K = 20  # naive VDB retrieval count (mix/naive modes); independent of chunk_top_k
 DEFAULT_QUERY_MODE = "hybrid"   # "naive" | "local" | "global" | "hybrid" | "mix" | "rrf" | "ppr_local" | "ppr" | "gfm"
 DEFAULT_ENABLE_RERANK = True

@@ -30,6 +30,8 @@ from raganything.chunking import CHUNKING_STRATEGIES
 from raganything.constants import (
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
+    MAX_TOP_K as DEFAULT_MAX_TOP_K,
+    MAX_CHUNK_TOP_K as DEFAULT_MAX_CHUNK_TOP_K,
     DEFAULT_SUPPORTED_FILE_EXTENSIONS,
     DEFAULT_UPLOADS_DIR,
     DEFAULT_QUERY_MODE,
@@ -68,8 +70,8 @@ logger = logging.getLogger(__name__)
 APP_ROOT = Path(__file__).resolve().parent
 
 API_KEY_ENV = "RAGANYTHING_API_KEY"
-MAX_TOP_K = int(os.getenv("RAGANYTHING_MAX_TOP_K", str(DEFAULT_TOP_K)))
-MAX_CHUNK_TOP_K = int(os.getenv("RAGANYTHING_MAX_CHUNK_TOP_K", str(DEFAULT_CHUNK_TOP_K)))
+MAX_TOP_K = int(os.getenv("RAGANYTHING_MAX_TOP_K", str(DEFAULT_MAX_TOP_K)))
+MAX_CHUNK_TOP_K = int(os.getenv("RAGANYTHING_MAX_CHUNK_TOP_K", str(DEFAULT_MAX_CHUNK_TOP_K)))
 
 SUPPORTED_EXTENSIONS: Set[str] = {
     ext.strip().lower()

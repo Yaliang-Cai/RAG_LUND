@@ -22,6 +22,7 @@ from raganything.constants import (
     DEFAULT_MULTIMODAL_TOP_K,
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
+    DEFAULT_ENABLE_RERANK,
     DEFAULT_QDRANT_RETRIEVAL_MODE,
     SUPPORTED_IMAGE_EXTENSIONS,
     GFM_DATA_DIR,
@@ -297,7 +298,13 @@ class QueryMixin:
         if mode == "agentic":
             from raganything.retrieval.agent_graph import AdaptiveAgentGraph
             return_trace_agentic = bool(kwargs.pop("return_trace", False))
-            graph = AdaptiveAgentGraph(self.lightrag)
+            graph = AdaptiveAgentGraph(
+                self.lightrag,
+                top_k=kwargs.get("top_k", DEFAULT_TOP_K),
+                chunk_top_k=kwargs.get("chunk_top_k", DEFAULT_CHUNK_TOP_K),
+                enable_rerank=kwargs.get("enable_rerank", DEFAULT_ENABLE_RERANK),
+                qdrant_retrieval_mode=kwargs.get("qdrant_retrieval_mode"),
+            )
             return await graph.run(query, return_trace=return_trace_agentic)
         # ── end mode="agentic" ────────────────────────────────────────────
 

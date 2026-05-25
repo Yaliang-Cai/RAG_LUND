@@ -14,6 +14,9 @@ from raganything.constants import (
     DEFAULT_AGENTIC_MAX_CHECK_CYCLES,
     DEFAULT_AGENTIC_DECOMPOSE_MAX_SUBQUESTIONS,
     DEFAULT_AGENTIC_PARALLEL_RETRIEVE_CONCURRENCY,
+    DEFAULT_TOP_K,
+    DEFAULT_CHUNK_TOP_K,
+    DEFAULT_ENABLE_RERANK,
 )
 from .classifier import QueryClassifier
 from .grader import Grader, build_shared_prefix
@@ -71,6 +74,10 @@ class AdaptiveAgentGraph:
         lightrag: Any,
         llm_func: Any = None,
         *,
+        top_k: int = DEFAULT_TOP_K,
+        chunk_top_k: int = DEFAULT_CHUNK_TOP_K,
+        enable_rerank: bool = DEFAULT_ENABLE_RERANK,
+        qdrant_retrieval_mode: str | None = None,
         _classifier: QueryClassifier | None = None,
         _grader: Grader | None = None,
         _rewriter: Rewriter | None = None,
@@ -82,6 +89,14 @@ class AdaptiveAgentGraph:
     ) -> None:
         self._lightrag = lightrag
         self._llm = llm_func or lightrag.llm_model_func
+        # Retrieval knobs threaded from the caller's request. Used to build every
+        # QueryParam below; without this the nodes fall back to LightRAG's
+        # QueryParam defaults (top_k=40, chunk_top_k=20) and silently ignore the
+        # frontend's values.
+        self._top_k = top_k
+        self._chunk_top_k = chunk_top_k
+        self._enable_rerank = enable_rerank
+        self._qdrant_retrieval_mode = qdrant_retrieval_mode
         self._clf = _classifier or QueryClassifier(self._llm)
         self._grader = _grader or Grader(self._llm)
         self._rewriter = _rewriter or Rewriter(self._llm)
@@ -91,6 +106,23 @@ class AdaptiveAgentGraph:
         self._max_retrieve_cycles = max_retrieve_cycles
         self._max_check_cycles = max_check_cycles
         self._graph = self._build_graph()
+
+    def _make_param(self) -> QueryParam:
+        """Build a QueryParam carrying the caller's retrieval knobs.
+
+        mode is fixed to "hybrid" but ignored by the router (the profile's
+        paths decide the actual LightRAG mode). qdrant_retrieval_mode is set via
+        setattr because LightRAG's QueryParam may not declare it as a field.
+        """
+        param = QueryParam(
+            mode="hybrid",
+            top_k=self._top_k,
+            chunk_top_k=self._chunk_top_k,
+            enable_rerank=self._enable_rerank,
+        )
+        if self._qdrant_retrieval_mode is not None:
+            setattr(param, "qdrant_retrieval_mode", self._qdrant_retrieval_mode)
+        return param
 
     # ── Nodes ──────────────────────────────────────────────────────────────
 
@@ -121,7 +153,7 @@ class AdaptiveAgentGraph:
         }
 
     async def _node_retriever(self, state: AgentState) -> dict:
-        param = QueryParam(mode="hybrid")
+        param = self._make_param()
         routing_trace = dict(state.get("routing_trace", {}))
         routing_trace.setdefault("chunks_per_path", {})
         try:
@@ -176,7 +208,7 @@ class AdaptiveAgentGraph:
     async def _node_parallel_retriever(self, state: AgentState) -> dict:
         sub_qs = state["routing_trace"].get("sub_questions") or [state["query"]]
         sem = asyncio.Semaphore(DEFAULT_AGENTIC_PARALLEL_RETRIEVE_CONCURRENCY)
-        param = QueryParam(mode="hybrid")
+        param = self._make_param()
 
         async def _one(q: str) -> list[dict]:
             async with sem:
@@ -210,7 +242,7 @@ class AdaptiveAgentGraph:
 
     async def _node_targeted_retriever(self, state: AgentState) -> dict:
         new_q = " ".join(state["ungrounded_claims"]) or state["query"]
-        param = QueryParam(mode="hybrid")
+        param = self._make_param()
         new_chunks, _ = await self._router.route(new_q, param, profile_name=state["profile"])
         combined = _dedup_chunks(state["chunks"] + new_chunks)[:30]
         return {
