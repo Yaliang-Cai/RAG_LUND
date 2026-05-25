@@ -6,6 +6,7 @@ import asyncio
 import csv
 import dataclasses
 import gc
+import glob
 import hashlib
 import inspect
 import io
@@ -641,6 +642,10 @@ def _safe_stem(path: Path) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in stem) or "file"
 
 
+def _content_list_glob_pattern(stem: str) -> str:
+    return glob.escape(f"{stem}_content_list.json")
+
+
 def _iter_batches(items: list[Path], batch_size: int) -> Iterable[list[Path]]:
     for start in range(0, len(items), batch_size):
         yield items[start : start + batch_size]
@@ -665,7 +670,7 @@ def _primary_mineru_content_json_candidates(
         subdir = output_root / subdir_name
         searched_roots.append(subdir)
         if subdir.is_dir():
-            candidates.extend(subdir.rglob(f"{stem}_content_list.json"))
+            candidates.extend(subdir.rglob(_content_list_glob_pattern(stem)))
     return candidates, searched_roots
 
 
@@ -681,7 +686,7 @@ def _mineru_content_json_candidates(
     if output_root.is_dir():
         searched_roots.append(output_root / "**")
         primary_keys = {str(path) for path in primary_candidates}
-        for candidate in output_root.rglob(f"{stem}_content_list.json"):
+        for candidate in output_root.rglob(_content_list_glob_pattern(stem)):
             key = str(candidate)
             if key not in primary_keys:
                 fallback_keys.add(key)
@@ -1046,6 +1051,10 @@ def _write_mineru_preparse_reports(
         missing_artifacts,
     )
     _write_json(
+        report_dir / "mineru_preparse_pending.json",
+        list(summary.get("pending", []) or []),
+    )
+    _write_json(
         report_dir / "mineru_preparse_failures_all.json",
         _preparse_failure_results(summary),
     )
@@ -1138,6 +1147,7 @@ def preparse_mineru_files(
         "skipped_count": 0,
         "parsed_count": 0,
         "pending_count": 0,
+        "pending": [],
         "skipped": [],
         "parsed": [],
         "missing_after_parse": [],
@@ -1199,6 +1209,21 @@ def preparse_mineru_files(
                 file_path.name,
             )
             continue
+        summary["pending"].append(
+            {
+                "file": file_path.name,
+                "stem": file_path.stem,
+                "safe_stem": _safe_stem(file_path),
+                "source_path": _path_env(file_path),
+                "output_root": _path_env(output_root),
+                "reason": "no_valid_mineru_artifact_found_before_preparse",
+                "searched_roots": artifact_info.get("searched_roots", []),
+                "candidate_paths": artifact_info.get("candidate_paths", []),
+                "candidate_reject_reasons": artifact_info.get(
+                    "candidate_reject_reasons", []
+                ),
+            }
+        )
         pending.append(file_path)
 
     summary["skipped_count"] = len(summary["skipped"])
@@ -1208,6 +1233,8 @@ def preparse_mineru_files(
     )
     summary["conversion_failed_count"] = len(summary["conversion_failed"])
     summary["recovered_by_fallback_count"] = len(summary["recovered_by_fallback"])
+    report_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(report_dir / "mineru_preparse_pending.json", summary["pending"])
     if not pending:
         summary["missing_artifact_count"] = 0
         summary["failed_count"] = summary["conversion_failed_count"]

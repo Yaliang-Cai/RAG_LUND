@@ -8,6 +8,7 @@ import os
 import time
 import hashlib
 import json
+import glob
 from typing import Dict, List, Any, Tuple, Optional, Callable, Awaitable
 from pathlib import Path
 
@@ -986,11 +987,15 @@ class ProcessorMixin:
         for subdir_name in dict.fromkeys((file_stem, safe_stem)):
             stem_subdir = base_output_dir / subdir_name
             if stem_subdir.is_dir():
-                candidates.extend(stem_subdir.rglob(f"{file_stem}_content_list.json"))
+                candidates.extend(
+                    stem_subdir.rglob(glob.escape(f"{file_stem}_content_list.json"))
+                )
 
         if base_output_dir.is_dir():
             primary_keys = {str(path) for path in candidates}
-            for candidate in base_output_dir.rglob(f"{file_stem}_content_list.json"):
+            for candidate in base_output_dir.rglob(
+                glob.escape(f"{file_stem}_content_list.json")
+            ):
                 if str(candidate) not in primary_keys:
                     candidates.append(candidate)
 
