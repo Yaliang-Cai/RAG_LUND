@@ -2579,7 +2579,24 @@ class ProcessorMixin:
         try:
             current_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
             if not current_doc_status:
-                raise RuntimeError(f"Missing doc_status for document {doc_id}")
+                now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                current_doc_status = {
+                    "status": DocStatus.PROCESSED if mark_processed else DocStatus.PENDING,
+                    "content": "",
+                    "content_summary": "",
+                    "content_length": 0,
+                    "chunks_count": 0,
+                    "chunks_list": [],
+                    "created_at": now,
+                    "updated_at": now,
+                    "metadata": {},
+                    "error_msg": None,
+                }
+                self.logger.warning(
+                    "Missing doc_status for document %s while finalizing multimodal; "
+                    "creating minimal status for recovery",
+                    doc_id,
+                )
 
             existing_chunks_list = current_doc_status.get("chunks_list", [])
             merged_chunks_list = list(
@@ -2635,8 +2652,23 @@ class ProcessorMixin:
         """Persist multimodal failure state; raise if persistence fails."""
         current_doc_status = await self.lightrag.doc_status.get_by_id(doc_id)
         if not current_doc_status:
-            raise RuntimeError(
-                f"Missing doc_status for document {doc_id} while persisting multimodal failure"
+            now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+            current_doc_status = {
+                "status": DocStatus.FAILED,
+                "content": "",
+                "content_summary": "",
+                "content_length": 0,
+                "chunks_count": 0,
+                "chunks_list": [],
+                "created_at": now,
+                "updated_at": now,
+                "metadata": {},
+                "error_msg": str(error_msg)[:4096],
+            }
+            self.logger.warning(
+                "Missing doc_status for document %s while persisting multimodal failure; "
+                "creating minimal failed status for recovery",
+                doc_id,
             )
 
         updated_doc_status = {

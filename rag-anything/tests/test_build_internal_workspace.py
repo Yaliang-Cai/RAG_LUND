@@ -77,6 +77,12 @@ class _FakeDocStatus:
     async def get_by_id(self, doc_id: str):
         return self.docs.get(doc_id)
 
+    async def upsert(self, docs):
+        self.docs.update(docs)
+
+    async def index_done_callback(self):
+        return None
+
 
 class _FakeKV:
     def __init__(self, data=None) -> None:
@@ -348,9 +354,9 @@ def test_local_env_enables_internal_build_defaults():
     assert env["MAX_CONCURRENT_FILES"] == "4"
     assert env["RAGANYTHING_LLM_CONTEXT_MAX_TOKENS"] == "65536"
     assert env["RAGANYTHING_LLM_CONTEXT_RESERVED_TOKENS"] == "512"
-    assert env["RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM"] == "1"
-    assert env["RAGANYTHING_EMBEDDING_BATCH_NUM"] == "8"
-    assert env["RAGANYTHING_EMBEDDING_FUNC_MAX_ASYNC"] == "2"
+    assert env["RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM"] == "2"
+    assert env["RAGANYTHING_EMBEDDING_BATCH_NUM"] == "32"
+    assert env["RAGANYTHING_EMBEDDING_FUNC_MAX_ASYNC"] == "8"
     assert env["RAGANYTHING_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS"] == "48000"
     assert env["RAGANYTHING_MULTIMODAL_CHUNK_MAX_TOKENS"] == "6000"
 
@@ -430,6 +436,56 @@ def test_multimodal_guardrails_can_override_item_parallelism():
     guardrails = processor._resolve_multimodal_batch_guardrails(total_items=10)
 
     assert guardrails["parallelism"] == 3
+
+
+@pytest.mark.asyncio
+async def test_multimodal_failure_status_is_created_when_missing():
+    from raganything.base import DocStatus
+
+    processor = _DummyProcessor()
+    doc_status = _FakeDocStatus()
+    doc_status.docs.clear()
+    processor.lightrag = SimpleNamespace(doc_status=doc_status)
+
+    await processor._mark_multimodal_doc_status_failed(
+        "doc-missing",
+        "cuda out of memory",
+        failed_items=[{"item_index": 1, "error_message": "oom"}],
+        stage="stage4_er_extract_failed",
+    )
+
+    stored = doc_status.docs["doc-missing"]
+    assert stored["status"] == DocStatus.FAILED
+    assert stored["multimodal_processed"] is False
+    assert stored["multimodal_stage"] == "stage4_er_extract_failed"
+    assert stored["multimodal_failed_items"] == [
+        {"item_index": 1, "error_message": "oom"}
+    ]
+    assert "cuda out of memory" in stored["multimodal_error_msg"]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_finalize_status_is_created_when_missing():
+    from raganything.base import DocStatus
+
+    processor = _DummyProcessor()
+    doc_status = _FakeDocStatus()
+    doc_status.docs.clear()
+    processor.lightrag = SimpleNamespace(doc_status=doc_status)
+
+    await processor._finalize_multimodal_doc_status(
+        "doc-missing",
+        ["chunk-mm-1", "chunk-mm-2"],
+        mark_processed=True,
+    )
+
+    stored = doc_status.docs["doc-missing"]
+    assert stored["status"] == DocStatus.PROCESSED
+    assert stored["chunks_count"] == 2
+    assert stored["chunks_list"] == ["chunk-mm-1", "chunk-mm-2"]
+    assert stored["multimodal_chunk_ids"] == ["chunk-mm-1", "chunk-mm-2"]
+    assert stored["multimodal_processed"] is True
+    assert stored["multimodal_stage"] == "completed"
 
 
 def test_local_rag_preserves_internal_build_logging_without_run_log(
