@@ -55,3 +55,22 @@ async def test_table_processor_truncates_large_table_body_for_prompt_and_chunk(
     assert "truncated" in captured["prompt"].lower()
     assert len(captured["chunk"]) < len(body)
     assert "truncated" in captured["chunk"].lower()
+
+
+def test_processor_chunk_template_truncates_large_table_body(monkeypatch):
+    monkeypatch.setenv("RAGANYTHING_MULTIMODAL_CHUNK_MAX_TOKENS", "300")
+    from raganything.processor import ProcessorMixin
+
+    body = "\n".join(
+        f"row-{index},value-{index}," + ("x" * 120) for index in range(200)
+    )
+    processor = object.__new__(ProcessorMixin)
+
+    chunk = processor._apply_chunk_template(
+        "table",
+        {"table_body": body, "table_caption": ["caption"]},
+        "short analysis",
+    )
+
+    assert len(chunk) < len(body)
+    assert "truncated" in chunk.lower()

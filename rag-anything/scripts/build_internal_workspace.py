@@ -45,7 +45,9 @@ from raganything.constants import (
     DEFAULT_MAX_ASYNC_INGEST,
     DEFAULT_MAX_PARALLEL_INSERT,
     DEFAULT_MINERU_VLLM_GPU_MEMORY_UTILIZATION,
+    DEFAULT_MULTIMODAL_CHUNK_MAX_TOKENS,
     DEFAULT_MULTIMODAL_ITEM_PARALLELISM,
+    DEFAULT_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS,
     DEFAULT_SUPPORTED_FILE_EXTENSIONS,
 )
 
@@ -62,6 +64,11 @@ DEFAULT_INGEST_TIMEOUT_SECONDS = 7200.0
 DEFAULT_MAX_FILE_ATTEMPTS = 2
 DEFAULT_BUILD_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS = 900
 DEFAULT_MANUAL_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS = 1800
+DEFAULT_INTERNAL_MULTIMODAL_ITEM_PARALLELISM = 1
+DEFAULT_INTERNAL_EMBEDDING_BATCH_NUM = 8
+DEFAULT_INTERNAL_EMBEDDING_FUNC_MAX_ASYNC = 2
+DEFAULT_INTERNAL_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS = 12000
+DEFAULT_INTERNAL_MULTIMODAL_CHUNK_MAX_TOKENS = 2000
 MINERU_DIRECT_EXTENSIONS = {
     ".pdf",
     ".jpg",
@@ -433,7 +440,23 @@ def build_local_env(
     )
     multimodal_item_parallelism = env.get(
         "RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM",
-        str(DEFAULT_MULTIMODAL_ITEM_PARALLELISM or 3),
+        str(DEFAULT_MULTIMODAL_ITEM_PARALLELISM or DEFAULT_INTERNAL_MULTIMODAL_ITEM_PARALLELISM),
+    )
+    embedding_batch_num = env.get(
+        "RAGANYTHING_EMBEDDING_BATCH_NUM",
+        str(DEFAULT_INTERNAL_EMBEDDING_BATCH_NUM),
+    )
+    embedding_func_max_async = env.get(
+        "RAGANYTHING_EMBEDDING_FUNC_MAX_ASYNC",
+        str(DEFAULT_INTERNAL_EMBEDDING_FUNC_MAX_ASYNC),
+    )
+    multimodal_prompt_max_input_tokens = env.get(
+        "RAGANYTHING_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS",
+        str(DEFAULT_INTERNAL_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS),
+    )
+    multimodal_chunk_max_tokens = env.get(
+        "RAGANYTHING_MULTIMODAL_CHUNK_MAX_TOKENS",
+        str(DEFAULT_INTERNAL_MULTIMODAL_CHUNK_MAX_TOKENS),
     )
     env.update(
         {
@@ -453,6 +476,9 @@ def build_local_env(
             "RAGANYTHING_PRESERVE_EXISTING_LOGGING": "true",
             "RAGANYTHING_DISABLE_LOCAL_RUN_LOG": "true",
             "RAGANYTHING_SERIALIZE_MINERU": "true",
+            "PYTORCH_CUDA_ALLOC_CONF": env.get(
+                "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"
+            ),
             "RAGANYTHING_LLM_CONTEXT_MAX_TOKENS": env.get(
                 "RAGANYTHING_LLM_CONTEXT_MAX_TOKENS",
                 str(DEFAULT_LLM_CONTEXT_MAX_TOKENS),
@@ -463,6 +489,16 @@ def build_local_env(
             ),
             "RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM": str(
                 multimodal_item_parallelism
+            ),
+            "RAGANYTHING_EMBEDDING_BATCH_NUM": str(embedding_batch_num),
+            "RAGANYTHING_EMBEDDING_FUNC_MAX_ASYNC": str(
+                embedding_func_max_async
+            ),
+            "RAGANYTHING_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS": str(
+                multimodal_prompt_max_input_tokens
+            ),
+            "RAGANYTHING_MULTIMODAL_CHUNK_MAX_TOKENS": str(
+                multimodal_chunk_max_tokens
             ),
             "MINERU_VLLM_GPU_MEMORY_UTILIZATION": str(
                 mineru_gpu_memory_utilization
@@ -526,6 +562,27 @@ def _settings_summary_from_env(env: dict[str, str]) -> dict[str, Any]:
             "RAGANYTHING_STRICT_RELATION_ENDPOINT_ENTITY_MATCH"
         ]
         == "true",
+        "embedding_batch_num": int(
+            env.get("RAGANYTHING_EMBEDDING_BATCH_NUM", DEFAULT_EMBEDDING_BATCH_NUM)
+        ),
+        "embedding_func_max_async": int(
+            env.get(
+                "RAGANYTHING_EMBEDDING_FUNC_MAX_ASYNC",
+                DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
+            )
+        ),
+        "multimodal_prompt_max_input_tokens": int(
+            env.get(
+                "RAGANYTHING_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS",
+                DEFAULT_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS,
+            )
+        ),
+        "multimodal_chunk_max_tokens": int(
+            env.get(
+                "RAGANYTHING_MULTIMODAL_CHUNK_MAX_TOKENS",
+                DEFAULT_MULTIMODAL_CHUNK_MAX_TOKENS,
+            )
+        ),
     }
 
 
@@ -1791,6 +1848,8 @@ def _settings_summary(settings: Any, env: dict[str, str]) -> dict[str, Any]:
         "llm_context_max_tokens",
         "llm_context_reserved_tokens",
         "multimodal_item_parallelism",
+        "embedding_batch_num",
+        "embedding_func_max_async",
     ):
         if hasattr(settings, key):
             summary[key] = _json_safe(getattr(settings, key))
@@ -1831,11 +1890,24 @@ def _summary_base(
             "serialize_by_workspace_id": False,
             "lightrag_llm_model_max_async": DEFAULT_LLM_MODEL_MAX_ASYNC,
             "lightrag_max_parallel_insert": DEFAULT_MAX_PARALLEL_INSERT,
-            "embedding_batch_num": DEFAULT_EMBEDDING_BATCH_NUM,
-            "embedding_func_max_async": DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
+            "embedding_batch_num": env.get(
+                "RAGANYTHING_EMBEDDING_BATCH_NUM", str(DEFAULT_EMBEDDING_BATCH_NUM)
+            ),
+            "embedding_func_max_async": env.get(
+                "RAGANYTHING_EMBEDDING_FUNC_MAX_ASYNC",
+                str(DEFAULT_EMBEDDING_FUNC_MAX_ASYNC),
+            ),
             "multimodal_item_parallelism": env.get(
                 "RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM",
                 str(DEFAULT_MULTIMODAL_ITEM_PARALLELISM or DEFAULT_MAX_PARALLEL_INSERT),
+            ),
+            "multimodal_prompt_max_input_tokens": env.get(
+                "RAGANYTHING_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS",
+                str(DEFAULT_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS),
+            ),
+            "multimodal_chunk_max_tokens": env.get(
+                "RAGANYTHING_MULTIMODAL_CHUNK_MAX_TOKENS",
+                str(DEFAULT_MULTIMODAL_CHUNK_MAX_TOKENS),
             ),
             "recycle_service_every": recycle_service_every,
         },
@@ -2154,7 +2226,7 @@ async def _run_build_async(
                     service,
                     settings,
                     profile.workspace_id,
-                    clear_model_cache=False,
+                    clear_model_cache=True,
                 )
                 attempted_since_recycle = 0
 

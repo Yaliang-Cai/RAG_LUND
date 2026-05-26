@@ -2133,6 +2133,7 @@ class ProcessorMixin:
             Formatted chunk content using the appropriate template
         """
         from raganything.prompt import PROMPTS
+        from raganything.modalprocessors import _chunk_modal_text
 
         try:
             if content_type == "image":
@@ -2146,8 +2147,12 @@ class ProcessorMixin:
 
                 return PROMPTS["image_chunk"].format(
                     image_path=image_path,
-                    captions=", ".join(captions) if captions else "None",
-                    footnotes=", ".join(footnotes) if footnotes else "None",
+                    captions=_chunk_modal_text(captions, "image_caption")
+                    if captions
+                    else "None",
+                    footnotes=_chunk_modal_text(footnotes, "image_footnote")
+                    if footnotes
+                    else "None",
                     enhanced_caption=description,
                 )
 
@@ -2159,9 +2164,13 @@ class ProcessorMixin:
 
                 return PROMPTS["table_chunk"].format(
                     table_img_path=table_img_path,
-                    table_caption=", ".join(table_caption) if table_caption else "None",
-                    table_body=table_body,
-                    table_footnote=", ".join(table_footnote)
+                    table_caption=_chunk_modal_text(table_caption, "table_caption")
+                    if table_caption
+                    else "None",
+                    table_body=_chunk_modal_text(table_body, "table_body"),
+                    table_footnote=_chunk_modal_text(
+                        table_footnote, "table_footnote"
+                    )
                     if table_footnote
                     else "None",
                     enhanced_caption=description,
@@ -2172,7 +2181,7 @@ class ProcessorMixin:
                 equation_format = original_item.get("text_format", "")
 
                 return PROMPTS["equation_chunk"].format(
-                    equation_text=equation_text,
+                    equation_text=_chunk_modal_text(equation_text, "equation_text"),
                     equation_format=equation_format,
                     enhanced_caption=description,
                 )
@@ -2182,7 +2191,7 @@ class ProcessorMixin:
 
                 return PROMPTS["generic_chunk"].format(
                     content_type=content_type.title(),
-                    content=content,
+                    content=_chunk_modal_text(content, "generic_content"),
                     enhanced_caption=description,
                 )
 

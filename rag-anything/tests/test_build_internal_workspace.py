@@ -342,12 +342,17 @@ def test_local_env_enables_internal_build_defaults():
     assert env["RAGANYTHING_PRELOAD_RERANKER_MODEL"] == "false"
     assert env["RAGANYTHING_PRESERVE_EXISTING_LOGGING"] == "true"
     assert env["RAGANYTHING_DISABLE_LOCAL_RUN_LOG"] == "true"
+    assert env["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
     assert env["MAX_SOURCE_IDS_PER_ENTITY"] == "99999"
     assert env["MAX_SOURCE_IDS_PER_RELATION"] == "99999"
     assert env["MAX_CONCURRENT_FILES"] == "4"
     assert env["RAGANYTHING_LLM_CONTEXT_MAX_TOKENS"] == "65536"
     assert env["RAGANYTHING_LLM_CONTEXT_RESERVED_TOKENS"] == "512"
-    assert env["RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM"] == "3"
+    assert env["RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM"] == "1"
+    assert env["RAGANYTHING_EMBEDDING_BATCH_NUM"] == "8"
+    assert env["RAGANYTHING_EMBEDDING_FUNC_MAX_ASYNC"] == "2"
+    assert env["RAGANYTHING_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS"] == "12000"
+    assert env["RAGANYTHING_MULTIMODAL_CHUNK_MAX_TOKENS"] == "2000"
 
 
 def test_local_env_allows_max_async_ingest_override():
@@ -403,12 +408,16 @@ def test_local_rag_settings_reads_llm_context_and_multimodal_parallelism_env(
     monkeypatch.setenv("RAGANYTHING_LLM_CONTEXT_MAX_TOKENS", "32768")
     monkeypatch.setenv("RAGANYTHING_LLM_CONTEXT_RESERVED_TOKENS", "256")
     monkeypatch.setenv("RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM", "3")
+    monkeypatch.setenv("RAGANYTHING_EMBEDDING_BATCH_NUM", "7")
+    monkeypatch.setenv("RAGANYTHING_EMBEDDING_FUNC_MAX_ASYNC", "2")
 
     settings = LocalRagSettings.from_env()
 
     assert settings.llm_context_max_tokens == 32768
     assert settings.llm_context_reserved_tokens == 256
     assert settings.multimodal_item_parallelism == 3
+    assert settings.embedding_batch_num == 7
+    assert settings.embedding_func_max_async == 2
 
 
 def test_multimodal_guardrails_can_override_item_parallelism():

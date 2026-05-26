@@ -199,6 +199,8 @@ class LocalRagSettings:
     device: str = DEFAULT_DEVICE
 
     embedding_dim: int = DEFAULT_EMBEDDING_DIM
+    embedding_batch_num: int = DEFAULT_EMBEDDING_BATCH_NUM
+    embedding_func_max_async: int = DEFAULT_EMBEDDING_FUNC_MAX_ASYNC
     max_token_size: int = DEFAULT_MAX_TOKEN_SIZE
 
     temperature: float = DEFAULT_TEMPERATURE
@@ -345,6 +347,18 @@ class LocalRagSettings:
             output_dir=os.getenv("RAGANYTHING_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
             uploads_dir=os.getenv("RAGANYTHING_UPLOADS_DIR", DEFAULT_UPLOADS_DIR),
             embedding_dim=int(os.getenv("RAGANYTHING_EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM))),
+            embedding_batch_num=int(
+                os.getenv(
+                    "RAGANYTHING_EMBEDDING_BATCH_NUM",
+                    str(DEFAULT_EMBEDDING_BATCH_NUM),
+                )
+            ),
+            embedding_func_max_async=int(
+                os.getenv(
+                    "RAGANYTHING_EMBEDDING_FUNC_MAX_ASYNC",
+                    str(DEFAULT_EMBEDDING_FUNC_MAX_ASYNC),
+                )
+            ),
             max_token_size=int(os.getenv("RAGANYTHING_MAX_TOKEN_SIZE", str(DEFAULT_MAX_TOKEN_SIZE))),
             temperature=float(os.getenv("RAGANYTHING_TEMPERATURE", str(DEFAULT_TEMPERATURE))),
             query_max_tokens=int(
@@ -1793,6 +1807,11 @@ class LocalRagService:
             self.settings.vlm_enable_json_schema,
         )
         self.logger.info(
+            "Embedding concurrency configured: batch_num=%s, max_async=%s",
+            self.settings.embedding_batch_num,
+            self.settings.embedding_func_max_async,
+        )
+        self.logger.info(
             "Recognition caps configured: top_k=%s, prompt_max=%s, output_max=%s, reserved=%s",
             self.settings.recognition_top_k,
             self.settings.recognition_prompt_max_tokens,
@@ -2191,9 +2210,11 @@ class LocalRagService:
                 # 文档级最大并发插入数（LightRAG 默认 2）
                 "max_parallel_insert": DEFAULT_MAX_PARALLEL_INSERT,
                 # embedding 单批最大文本数（LightRAG 默认 10）
-                "embedding_batch_num": DEFAULT_EMBEDDING_BATCH_NUM,
+                "embedding_batch_num": max(1, int(self.settings.embedding_batch_num)),
                 # embedding 调用最大并发数（LightRAG 默认 8）
-                "embedding_func_max_async": DEFAULT_EMBEDDING_FUNC_MAX_ASYNC,
+                "embedding_func_max_async": max(
+                    1, int(self.settings.embedding_func_max_async)
+                ),
                 # rerank 后保留 chunk 的最低分数（LightRAG 默认 0.0 = 不过滤）
                 # BGE-reranker-v2-m3 相关 chunk 典型得分 >0.5，不相关 <0.3
                 "min_rerank_score": self.settings.min_rerank_score,
