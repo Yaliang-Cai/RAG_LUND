@@ -3,6 +3,14 @@ from __future__ import annotations
 import pytest
 
 
+class _WhitespaceTokenizer:
+    def encode(self, text):
+        return str(text).split()
+
+    def decode(self, tokens):
+        return " ".join(tokens)
+
+
 @pytest.mark.asyncio
 async def test_table_processor_truncates_large_table_body_for_prompt_and_chunk(
     monkeypatch,
@@ -74,3 +82,39 @@ def test_processor_chunk_template_truncates_large_table_body(monkeypatch):
 
     assert len(chunk) < len(body)
     assert "truncated" in chunk.lower()
+
+
+@pytest.mark.asyncio
+async def test_table_processor_fits_full_prompt_to_context_budget(monkeypatch):
+    monkeypatch.setenv("RAGANYTHING_LLM_CONTEXT_MAX_TOKENS", "800")
+    monkeypatch.setenv("RAGANYTHING_LLM_CONTEXT_RESERVED_TOKENS", "20")
+    monkeypatch.setenv("RAGANYTHING_INGEST_MAX_TOKENS", "40")
+    monkeypatch.setenv("RAGANYTHING_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS", "1000")
+    from raganything.modalprocessors import TableModalProcessor
+    from raganything.prompt import PROMPTS
+
+    processor = object.__new__(TableModalProcessor)
+    processor.tokenizer = _WhitespaceTokenizer()
+    captured = {}
+
+    async def fake_caption_func(prompt, system_prompt=None):
+        captured["prompt"] = prompt
+        captured["system_prompt"] = system_prompt
+        return "{}"
+
+    processor.modal_caption_func = fake_caption_func
+    processor._parse_table_response = lambda response, entity_name=None: (
+        "short analysis",
+        {"entity_name": "table", "entity_type": "table", "summary": "summary"},
+    )
+
+    body = " ".join(f"cell{index}" for index in range(1000))
+    await TableModalProcessor.generate_description_only(
+        processor,
+        {"table_body": body, "table_caption": ["caption"]},
+        "table",
+    )
+
+    full_input = f"{PROMPTS['TABLE_ANALYSIS_SYSTEM']}\n{captured['prompt']}"
+    assert len(processor.tokenizer.encode(full_input)) <= 740
+    assert "truncated" in captured["prompt"].lower()

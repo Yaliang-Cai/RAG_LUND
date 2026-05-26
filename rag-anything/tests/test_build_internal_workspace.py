@@ -351,8 +351,8 @@ def test_local_env_enables_internal_build_defaults():
     assert env["RAGANYTHING_MULTIMODAL_ITEM_PARALLELISM"] == "1"
     assert env["RAGANYTHING_EMBEDDING_BATCH_NUM"] == "8"
     assert env["RAGANYTHING_EMBEDDING_FUNC_MAX_ASYNC"] == "2"
-    assert env["RAGANYTHING_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS"] == "12000"
-    assert env["RAGANYTHING_MULTIMODAL_CHUNK_MAX_TOKENS"] == "2000"
+    assert env["RAGANYTHING_MULTIMODAL_PROMPT_MAX_INPUT_TOKENS"] == "48000"
+    assert env["RAGANYTHING_MULTIMODAL_CHUNK_MAX_TOKENS"] == "6000"
 
 
 def test_local_env_allows_max_async_ingest_override():

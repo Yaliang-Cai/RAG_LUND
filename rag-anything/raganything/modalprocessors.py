@@ -94,15 +94,58 @@ def _approx_token_count(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
 
 
-def _truncate_modal_text(value: Any, *, max_tokens: int, field_name: str) -> str:
+def _modal_token_count(text: str, tokenizer: Any = None) -> int:
+    if not text:
+        return 0
+    if tokenizer is not None:
+        try:
+            return len(tokenizer.encode(text))
+        except Exception:
+            pass
+    return _approx_token_count(text)
+
+
+def _decode_modal_tokens(tokens: List[Any], tokenizer: Any = None) -> str:
+    if tokenizer is not None:
+        try:
+            return tokenizer.decode(tokens)
+        except Exception:
+            pass
+    return "".join(str(token) for token in tokens)
+
+
+def _truncate_modal_text(
+    value: Any,
+    *,
+    max_tokens: int,
+    field_name: str,
+    tokenizer: Any = None,
+) -> str:
     text = _modal_text(value)
-    if _approx_token_count(text) <= max_tokens:
+    if _modal_token_count(text, tokenizer) <= max_tokens:
         return text
 
-    char_limit = max(256, max_tokens * 4)
     marker = (
         f"\n[TRUNCATED {field_name}: original_chars={len(text)} "
-        f"kept_chars<={char_limit} max_tokens={max_tokens}]\n"
+        f"max_tokens={max_tokens}]\n"
+    )
+    if tokenizer is not None:
+        try:
+            tokens = tokenizer.encode(text)
+            marker_tokens = max(1, _modal_token_count(marker, tokenizer))
+            remaining_tokens = max(32, max_tokens - marker_tokens)
+            head_tokens = max(16, int(remaining_tokens * 0.7))
+            tail_tokens = max(16, remaining_tokens - head_tokens)
+            head = _decode_modal_tokens(tokens[:head_tokens], tokenizer).rstrip()
+            tail = _decode_modal_tokens(tokens[-tail_tokens:], tokenizer).lstrip()
+            return f"{head}{marker}{tail}"
+        except Exception:
+            pass
+
+    char_limit = max(256, max_tokens * 4)
+    marker = marker.replace(
+        f"max_tokens={max_tokens}",
+        f"kept_chars<={char_limit} max_tokens={max_tokens}",
     )
     remaining = max(128, char_limit - len(marker))
     head_chars = max(64, int(remaining * 0.7))
@@ -126,6 +169,52 @@ def _chunk_modal_text(value: Any, field_name: str) -> str:
         max_tokens=_modal_chunk_token_budget(),
         field_name=field_name,
     )
+
+
+def _modal_llm_input_token_budget() -> int:
+    context_limit = max(
+        1,
+        _env_int("RAGANYTHING_LLM_CONTEXT_MAX_TOKENS", 65536),
+    )
+    reserve = max(0, _env_int("RAGANYTHING_LLM_CONTEXT_RESERVED_TOKENS", 512))
+    output_tokens = max(1, _env_int("RAGANYTHING_INGEST_MAX_TOKENS", 8192))
+    # Leave a small wrapper cushion for chat formatting differences between
+    # this local tokenizer estimate and the serving endpoint.
+    return max(256, context_limit - reserve - output_tokens - 256)
+
+
+def _fit_table_prompt_to_context_budget(
+    *,
+    table_body: Any,
+    build_prompt,
+    system_prompt: str,
+    tokenizer: Any = None,
+) -> str:
+    original_body = _modal_text(table_body)
+    prompt = build_prompt(_prompt_modal_text(original_body, "table_body"))
+    budget = _modal_llm_input_token_budget()
+    full_input = f"{system_prompt}\n{prompt}"
+    if _modal_token_count(full_input, tokenizer) <= budget:
+        return prompt
+
+    body_token_count = max(1, _modal_token_count(original_body, tokenizer))
+    target_body_tokens = min(body_token_count, _modal_prompt_token_budget())
+    for _ in range(6):
+        full_tokens = _modal_token_count(full_input, tokenizer)
+        if full_tokens <= budget:
+            return prompt
+        overflow = full_tokens - budget
+        target_body_tokens = max(256, target_body_tokens - overflow - 128)
+        fitted_body = _truncate_modal_text(
+            original_body,
+            max_tokens=target_body_tokens,
+            field_name="table_body",
+            tokenizer=tokenizer,
+        )
+        prompt = build_prompt(fitted_body)
+        full_input = f"{system_prompt}\n{prompt}"
+
+    return prompt
 
 
 @dataclass
@@ -1307,7 +1396,6 @@ class TableModalProcessor(BaseModalProcessor):
             prompt_table_caption = _prompt_modal_text(
                 table_caption, "table_caption"
             )
-            prompt_table_body = _prompt_modal_text(table_body, "table_body")
             prompt_table_footnote = _prompt_modal_text(
                 table_footnote, "table_footnote"
             )
@@ -1317,38 +1405,32 @@ class TableModalProcessor(BaseModalProcessor):
             if item_info:
                 context = self._get_context_for_item(item_info)
 
-            # Build table analysis prompt with context
-            if context:
-                table_prompt = PROMPTS.get(
-                    "table_prompt_with_context", PROMPTS["table_prompt"]
-                ).format(
-                    context=context,
-                    entity_name=entity_name
+            def _build_table_prompt(fitted_table_body: str) -> str:
+                prompt_kwargs = {
+                    "entity_name": entity_name
                     if entity_name
                     else "descriptive name for this table",
-                    table_img_path=table_img_path,
-                    table_caption=prompt_table_caption
+                    "table_img_path": table_img_path,
+                    "table_caption": prompt_table_caption
                     if prompt_table_caption
                     else "None",
-                    table_body=prompt_table_body,
-                    table_footnote=prompt_table_footnote
+                    "table_body": fitted_table_body,
+                    "table_footnote": prompt_table_footnote
                     if prompt_table_footnote
                     else "None",
-                )
-            else:
-                table_prompt = PROMPTS["table_prompt"].format(
-                    entity_name=entity_name
-                    if entity_name
-                    else "descriptive name for this table",
-                    table_img_path=table_img_path,
-                    table_caption=prompt_table_caption
-                    if prompt_table_caption
-                    else "None",
-                    table_body=prompt_table_body,
-                    table_footnote=prompt_table_footnote
-                    if prompt_table_footnote
-                    else "None",
-                )
+                }
+                if context:
+                    return PROMPTS.get(
+                        "table_prompt_with_context", PROMPTS["table_prompt"]
+                    ).format(context=context, **prompt_kwargs)
+                return PROMPTS["table_prompt"].format(**prompt_kwargs)
+
+            table_prompt = _fit_table_prompt_to_context_budget(
+                table_body=table_body,
+                build_prompt=_build_table_prompt,
+                system_prompt=PROMPTS["TABLE_ANALYSIS_SYSTEM"],
+                tokenizer=getattr(self, "tokenizer", None),
+            )
 
             # Call LLM for table analysis
             response = await self.modal_caption_func(

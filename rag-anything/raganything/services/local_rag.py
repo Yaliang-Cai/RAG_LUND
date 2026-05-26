@@ -803,27 +803,7 @@ def build_lightrag_tokenizer(
     )
 
 
-def build_embedding_func(
-    settings: LocalRagSettings, st_model: SentenceTransformer
-) -> EmbeddingFunc:
-    raw_model_path = str(settings.embedding_model_path or "").strip()
-    normalized_model_path = raw_model_path.rstrip("/\\")
-    model_name = Path(normalized_model_path).name if normalized_model_path else ""
-    if not model_name:
-        model_name = "embedding_model"
-
-    async def _compute_embedding(texts: list[str]) -> np.ndarray:
-        return st_model.encode(texts, normalize_embeddings=True)
-
-    return EmbeddingFunc(
-        embedding_dim=settings.embedding_dim,
-        max_token_size=settings.max_token_size,
-        model_name=model_name,
-        func=_compute_embedding,
-    )
-
-
-def _is_rerank_oom_exception(exc: BaseException) -> bool:
+def _is_cuda_oom_exception(exc: BaseException) -> bool:
     if torch is not None:
         cuda_oom_error = getattr(torch.cuda, "OutOfMemoryError", None)
         if cuda_oom_error is not None and isinstance(exc, cuda_oom_error):
@@ -841,7 +821,7 @@ def _is_rerank_oom_exception(exc: BaseException) -> bool:
     return any(marker in message for marker in oom_markers)
 
 
-def _best_effort_clear_rerank_cuda_cache(logger: logging.Logger) -> None:
+def _best_effort_clear_cuda_cache(logger: logging.Logger, *, context: str) -> None:
     gc.collect()
     if torch is None or not hasattr(torch, "cuda"):
         return
@@ -855,7 +835,62 @@ def _best_effort_clear_rerank_cuda_cache(logger: logging.Logger) -> None:
     try:
         torch.cuda.empty_cache()
     except Exception as exc:  # pragma: no cover - best effort cleanup
-        logger.debug("Skipping torch.cuda.empty_cache after rerank OOM: %s", exc)
+        logger.debug("Skipping torch.cuda.empty_cache after %s OOM: %s", context, exc)
+
+
+def build_embedding_func(
+    settings: LocalRagSettings, st_model: SentenceTransformer
+) -> EmbeddingFunc:
+    raw_model_path = str(settings.embedding_model_path or "").strip()
+    normalized_model_path = raw_model_path.rstrip("/\\")
+    model_name = Path(normalized_model_path).name if normalized_model_path else ""
+    if not model_name:
+        model_name = "embedding_model"
+
+    logger = logging.getLogger(__name__)
+
+    def _encode_with_oom_backoff(texts: list[str]) -> np.ndarray:
+        try:
+            return st_model.encode(
+                texts,
+                normalize_embeddings=True,
+                batch_size=max(1, min(len(texts), int(settings.embedding_batch_num))),
+            )
+        except Exception as exc:
+            if not _is_cuda_oom_exception(exc) or len(texts) <= 1:
+                raise
+            midpoint = max(1, len(texts) // 2)
+            logger.warning(
+                "Embedding CUDA OOM; splitting batch and retrying: batch_size=%d left=%d right=%d",
+                len(texts),
+                midpoint,
+                len(texts) - midpoint,
+            )
+            _best_effort_clear_cuda_cache(logger, context="embedding")
+            left = _encode_with_oom_backoff(texts[:midpoint])
+            right = _encode_with_oom_backoff(texts[midpoint:])
+            return np.concatenate([left, right], axis=0)
+
+    async def _compute_embedding(texts: list[str]) -> np.ndarray:
+        normalized_texts = list(texts)
+        if not normalized_texts:
+            return np.empty((0, settings.embedding_dim), dtype=np.float32)
+        return _encode_with_oom_backoff(normalized_texts)
+
+    return EmbeddingFunc(
+        embedding_dim=settings.embedding_dim,
+        max_token_size=settings.max_token_size,
+        model_name=model_name,
+        func=_compute_embedding,
+    )
+
+
+def _is_rerank_oom_exception(exc: BaseException) -> bool:
+    return _is_cuda_oom_exception(exc)
+
+
+def _best_effort_clear_rerank_cuda_cache(logger: logging.Logger) -> None:
+    _best_effort_clear_cuda_cache(logger, context="rerank")
 
 
 def _next_rerank_batch_size(current_batch_size: int, min_batch_size: int) -> int | None:

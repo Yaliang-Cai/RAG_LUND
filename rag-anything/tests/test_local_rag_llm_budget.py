@@ -5,6 +5,7 @@ import sys
 import types
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 
@@ -67,3 +68,29 @@ async def test_llm_model_func_reduces_max_tokens_when_context_is_nearly_full(
     assert result == "ok"
     assert captured["max_tokens"] < 8192
     assert captured["max_tokens"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_embedding_func_splits_batch_after_cuda_oom(monkeypatch):
+    _stub_sentence_transformers(monkeypatch)
+    from raganything.services.local_rag import LocalRagSettings, build_embedding_func
+
+    class _EmbeddingModel:
+        def __init__(self):
+            self.calls = []
+
+        def encode(self, texts, normalize_embeddings=True, **kwargs):
+            self.calls.append(list(texts))
+            if len(texts) > 1:
+                raise RuntimeError("CUDA out of memory")
+            index = 1.0 if texts[0] == "a" else 2.0
+            return np.array([[index, index]], dtype=np.float32)
+
+    model = _EmbeddingModel()
+    settings = LocalRagSettings(embedding_dim=2)
+    embedding_func = build_embedding_func(settings, model)
+
+    result = await embedding_func.func(["a", "b"])
+
+    assert result.tolist() == [[1.0, 1.0], [2.0, 2.0]]
+    assert model.calls == [["a", "b"], ["a"], ["b"]]
