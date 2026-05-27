@@ -1807,9 +1807,16 @@ def test_build_fast_resume_skips_only_complete_processed_documents(
     failed_mm = raw_dir / "failed-mm.pdf"
     for path in (done, incomplete, failed_mm):
         path.write_text(path.name, encoding="utf-8")
+    done_content = [{"type": "text", "text": "done content"}]
+    done_artifact = (
+        storage_root / "output" / "ws" / "done" / "hybrid_auto" / "done_content_list.json"
+    )
+    done_artifact.parent.mkdir(parents=True)
+    done_artifact.write_text(json.dumps(done_content), encoding="utf-8")
     fake = _patch_fake_service(monkeypatch)
+    done_doc_id = build_internal._content_based_doc_id_from_content_list(done_content)
     fake.rag.lightrag.doc_status.docs = {
-        "doc-done": {
+        done_doc_id: {
             "status": "processed",
             "file_path": str(done.resolve()),
             "chunks_count": 1,
@@ -1869,6 +1876,62 @@ def test_build_fast_resume_skips_only_complete_processed_documents(
     assert summary["fast_resume_skipped_files"] == ["done.pdf"]
     assert summary["fast_resume_unmatched_processed_count"] == 1
     assert summary["ingest_planned_count"] == 2
+
+
+def test_build_fast_resume_does_not_skip_when_artifact_doc_id_differs(
+    monkeypatch, tmp_path
+):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "changed.pdf"
+    source.write_text("changed", encoding="utf-8")
+    artifact = (
+        storage_root
+        / "output"
+        / "ws"
+        / "changed"
+        / "hybrid_auto"
+        / "changed_content_list.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        json.dumps([{"type": "text", "text": "new content"}]),
+        encoding="utf-8",
+    )
+    fake = _patch_fake_service(monkeypatch)
+    fake.rag.lightrag.doc_status.docs = {
+        "doc-old": {
+            "status": "processed",
+            "file_path": str(source.resolve()),
+            "chunks_count": 1,
+            "chunks_list": ["chunk-old"],
+            "multimodal_processed": True,
+            "multimodal_failed_items": [],
+        }
+    }
+
+    result = build_internal.main(
+        [
+            "--profile",
+            "test",
+            "--raw-dir",
+            str(raw_dir),
+            "--storage-root",
+            str(storage_root),
+            "--workspace-id",
+            "ws",
+        ]
+    )
+
+    assert result == 0
+    assert [Path(call["file_path"]).name for call in fake.ingest_calls] == [
+        "changed.pdf"
+    ]
+    report_dir = sorted((storage_root / "reports").iterdir())[0]
+    summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["fast_resume_skipped_count"] == 0
+    assert summary["fast_resume"]["doc_id_mismatch_count"] == 1
 
 
 def test_build_disable_fast_resume_keeps_complete_documents_in_ingest(

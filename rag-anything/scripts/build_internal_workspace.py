@@ -936,6 +936,31 @@ def _read_nonempty_content_list(json_path: Path) -> list[Any] | None:
     return None
 
 
+def _content_based_doc_id_from_content_list(content_list: list[Any]) -> str | None:
+    try:
+        from lightrag.utils import compute_mdhash_id
+
+        content_hash_data: list[str] = []
+        for item in content_list:
+            if isinstance(item, dict):
+                if item.get("type") == "text" and item.get("text"):
+                    content_hash_data.append(str(item["text"]).strip())
+                elif item.get("type") == "image" and item.get("img_path"):
+                    content_hash_data.append(f"image:{item['img_path']}")
+                elif item.get("type") == "table" and item.get("table_body"):
+                    content_hash_data.append(f"table:{item['table_body']}")
+                elif item.get("type") == "equation" and item.get("text"):
+                    content_hash_data.append(f"equation:{item['text']}")
+                else:
+                    content_hash_data.append(str(item))
+            else:
+                content_hash_data.append(str(item))
+        return compute_mdhash_id("\n".join(content_hash_data), prefix="doc-")
+    except Exception as exc:
+        LOGGER.warning("Failed to compute content-based doc_id from MinerU artifact: %s", exc)
+        return None
+
+
 def _inspect_mineru_artifacts(
     output_root: Path,
     source_path: Path,
@@ -1834,9 +1859,14 @@ async def _filter_fast_resume_files(
     raw_by_unique_basename = {
         path.name: path for path in files if raw_basename_counts[path.name] == 1
     }
+    output_root = _mineru_workspace_output_dir(profile)
+    artifact_index = _build_mineru_artifact_index(output_root, files)
     skipped_keys: set[str] = set()
     matched_documents: list[dict[str, str]] = []
     unmatched_processed_count = 0
+    artifact_missing_count = 0
+    doc_id_mismatch_count = 0
+    doc_id_unavailable_count = 0
 
     for document in documents:
         if not isinstance(document, dict) or not _is_fast_resume_complete_document(
@@ -1858,6 +1888,24 @@ async def _filter_fast_resume_files(
         if matched_path is None:
             unmatched_processed_count += 1
             continue
+        artifact_info = _inspect_mineru_artifacts(
+            output_root,
+            matched_path,
+            artifact_index=artifact_index,
+        )
+        artifact = artifact_info.get("artifact")
+        if artifact is None:
+            artifact_missing_count += 1
+            continue
+        expected_doc_id = _content_based_doc_id_from_content_list(
+            _read_nonempty_content_list(artifact) or []
+        )
+        if not expected_doc_id:
+            doc_id_unavailable_count += 1
+            continue
+        if expected_doc_id != str(document.get("doc_id", "")):
+            doc_id_mismatch_count += 1
+            continue
         matched_key = _resolved_path_key(matched_path)
         skipped_keys.add(matched_key)
         matched_documents.append(
@@ -1865,6 +1913,7 @@ async def _filter_fast_resume_files(
                 "file": matched_path.name,
                 "source_path": _path_env(matched_path),
                 "doc_id": str(document.get("doc_id", "")),
+                "artifact": _path_env(artifact),
                 "match": "resolved_path"
                 if resolved_key == matched_key
                 else "unique_basename",
@@ -1882,6 +1931,9 @@ async def _filter_fast_resume_files(
         "skipped_files": skipped_files,
         "skipped_documents": matched_documents,
         "unmatched_processed_count": unmatched_processed_count,
+        "artifact_missing_count": artifact_missing_count,
+        "doc_id_mismatch_count": doc_id_mismatch_count,
+        "doc_id_unavailable_count": doc_id_unavailable_count,
     }
     return filtered, summary
 
@@ -2434,6 +2486,9 @@ async def _run_build_async(
                 "skipped_files": [],
                 "skipped_documents": [],
                 "unmatched_processed_count": 0,
+                "artifact_missing_count": 0,
+                "doc_id_mismatch_count": 0,
+                "doc_id_unavailable_count": 0,
             }
         else:
             ingest_files, fast_resume_summary = await _filter_fast_resume_files(
