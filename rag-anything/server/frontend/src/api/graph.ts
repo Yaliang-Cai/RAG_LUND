@@ -20,11 +20,13 @@ export async function getSubgraph(
   return data
 }
 
+// Backend `/graph/{ws}/search` returns matching entity names as plain strings
+// (LightRAG `search_labels` -> list[str]), not node objects.
 export async function searchGraph(
   workspaceId: string,
   query: string
-): Promise<{ nodes: Array<{ id: string; label: string; type: string }> }> {
-  const { data } = await client.get(`/graph/${workspaceId}/search`, {
+): Promise<{ results: string[] }> {
+  const { data } = await client.get<{ results: string[] }>(`/graph/${workspaceId}/search`, {
     params: { q: query, limit: 20 },
   })
   return data

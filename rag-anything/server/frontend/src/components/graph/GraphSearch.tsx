@@ -7,7 +7,8 @@ import { toast } from 'sonner'
 
 interface GraphSearchProps {
   workspaceId: string
-  onResult: (nodeId: string) => void
+  // Receives the matched entity name, which equals the graph node's label.
+  onResult: (label: string) => void
 }
 
 export function GraphSearch({ workspaceId, onResult }: GraphSearchProps) {
@@ -17,7 +18,8 @@ export function GraphSearch({ workspaceId, onResult }: GraphSearchProps) {
     if (!query.trim()) return
     try {
       const result = await searchGraph(workspaceId, query)
-      if (result.nodes.length > 0) onResult(result.nodes[0].id)
+      const names = result.results ?? []
+      if (names.length > 0) onResult(names[0])
       else toast.info('No matching nodes found')
     } catch (err) {
       toast.error((err as Error).message)

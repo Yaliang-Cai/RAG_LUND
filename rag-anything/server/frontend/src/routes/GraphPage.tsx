@@ -13,7 +13,7 @@ export default function GraphPage() {
   const workspaceId = useAppStore((s) => s.workspaceId)
   const { data, isLoading } = useGraphOverview(workspaceId)
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null)
-  const [highlightId, setHighlightId] = useState<string | null>(null)
+  const [highlightLabel, setHighlightLabel] = useState<string | null>(null)
   const qc = useQueryClient()
 
   if (isLoading) {
@@ -35,7 +35,7 @@ export default function GraphPage() {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-3 px-4 py-2 border-b border-border shrink-0">
-        <GraphSearch workspaceId={workspaceId} onResult={setHighlightId} />
+        <GraphSearch workspaceId={workspaceId} onResult={setHighlightLabel} />
         <Button
           variant="ghost"
           size="icon-sm"
@@ -52,7 +52,7 @@ export default function GraphPage() {
         <ForceGraph
           data={data}
           onNodeClick={setSelectedNode}
-          highlightNodeId={highlightId}
+          highlightLabel={highlightLabel}
         />
       </div>
       <NodeSheet node={selectedNode} onClose={() => setSelectedNode(null)} />

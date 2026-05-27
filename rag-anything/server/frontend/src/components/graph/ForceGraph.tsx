@@ -17,13 +17,15 @@ function nodeColor(node: GraphNode): string {
 interface ForceGraphProps {
   data: GraphData
   onNodeClick?: (node: GraphNode) => void
-  highlightNodeId?: string | null
+  // Entity name to highlight. Matches on label (not id) so search works for
+  // both Neo4j (id == name) and Postgres/AGE (id == numeric) backends.
+  highlightLabel?: string | null
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyNode = any
 
-export function ForceGraph({ data, onNodeClick, highlightNodeId }: ForceGraphProps) {
+export function ForceGraph({ data, onNodeClick, highlightLabel }: ForceGraphProps) {
   const handleNodeClick = useCallback((node: AnyNode) => {
     onNodeClick?.(node as GraphNode)
   }, [onNodeClick])
@@ -31,12 +33,13 @@ export function ForceGraph({ data, onNodeClick, highlightNodeId }: ForceGraphPro
   const paintNode = useCallback((node: AnyNode, ctx: CanvasRenderingContext2D) => {
     const gn = node as GraphNode & { x: number; y: number }
     const color = nodeColor(gn)
-    const radius = gn.id === highlightNodeId ? 8 : 5
+    const isHighlighted = !!highlightLabel && gn.label === highlightLabel
+    const radius = isHighlighted ? 8 : 5
     ctx.beginPath()
     ctx.arc(gn.x, gn.y, radius, 0, 2 * Math.PI)
     ctx.fillStyle = color
     ctx.fill()
-    if (gn.id === highlightNodeId) {
+    if (isHighlighted) {
       ctx.strokeStyle = '#fff'
       ctx.lineWidth = 1.5
       ctx.stroke()
@@ -45,7 +48,7 @@ export function ForceGraph({ data, onNodeClick, highlightNodeId }: ForceGraphPro
     ctx.fillStyle = '#94a3b8'
     ctx.textAlign = 'center'
     ctx.fillText(gn.label ?? gn.id, gn.x, gn.y + 8)
-  }, [highlightNodeId])
+  }, [highlightLabel])
 
   const graphData = {
     nodes: data.nodes,

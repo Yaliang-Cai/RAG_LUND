@@ -841,6 +841,19 @@ async def evaluate_endpoint(
     return await service.evaluate_answer(payload.workspace_id, payload.query, payload.answer)
 
 
+def _kg_node_name(node) -> str:
+    """LightRAG KnowledgeGraphNode 的可读实体名。
+
+    Neo4j 后端把 ``node.id`` 设为实体名，但 Postgres/AGE 后端把 ``node.id`` 设为
+    内部数字 id，真正的名字存在 ``properties['entity_id']`` / ``labels`` 里。
+    展示时始终优先用实体名，避免界面显示一串数字。
+    """
+    name = node.properties.get("entity_id")
+    if not name and node.labels:
+        name = node.labels[0]
+    return name or node.id
+
+
 async def _get_query_subgraph(rag, retrieval, payload):
     """从查询关键词中提取子图用于可视化"""
     try:
@@ -868,7 +881,7 @@ async def _get_query_subgraph(rag, retrieval, payload):
         for n in kg.nodes:
             nodes.append({
                 "id": n.id,
-                "label": n.id,
+                "label": _kg_node_name(n),
                 "type": n.properties.get("entity_type", ""),
                 "description": n.properties.get("description", ""),
             })
@@ -991,7 +1004,7 @@ async def get_subgraph(
         nodes = [
             {
                 "id": n.id,
-                "label": n.id,
+                "label": _kg_node_name(n),
                 "type": n.properties.get("entity_type", ""),
                 "description": n.properties.get("description", ""),
             }
@@ -1090,7 +1103,7 @@ async def get_graph_overview(
                 "nodes": [
                     {
                         "id": n.id,
-                        "label": n.id,
+                        "label": _kg_node_name(n),
                         "type": n.properties.get("entity_type", ""),
                         "description": n.properties.get("description", ""),
                     }
