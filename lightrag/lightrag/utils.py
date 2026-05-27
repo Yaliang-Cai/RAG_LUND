@@ -2906,8 +2906,14 @@ async def process_chunks_unified(
         )
         rerank_scope = "all"
 
+    # Per-query override (QueryParam.min_rerank_score) takes precedence over the
+    # global default when explicitly set; None falls back to global_config.
+    param_min_rerank = getattr(query_param, "min_rerank_score", None)
     try:
-        min_rerank_score = float(global_config.get("min_rerank_score", 0.5))
+        if param_min_rerank is not None:
+            min_rerank_score = float(param_min_rerank)
+        else:
+            min_rerank_score = float(global_config.get("min_rerank_score", 0.5))
     except (TypeError, ValueError):
         min_rerank_score = 0.5
 

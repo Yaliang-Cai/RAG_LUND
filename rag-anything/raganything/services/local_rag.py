@@ -2331,6 +2331,7 @@ class LocalRagService:
         top_k: int = DEFAULT_TOP_K,
         chunk_top_k: int = DEFAULT_CHUNK_TOP_K,
         enable_rerank: bool = DEFAULT_ENABLE_RERANK,
+        min_rerank_score: float | None = None,
         multi_hop_depth: int | None = None,
         ppr_damping: float | None = None,
         ppr_top_k: int | None = None,
@@ -2364,6 +2365,7 @@ class LocalRagService:
                     top_k=top_k,
                     chunk_top_k=chunk_top_k,
                     enable_rerank=enable_rerank,
+                    min_rerank_score=min_rerank_score,
                     qdrant_retrieval_mode=qdrant_retrieval_mode,
                 )
                 final: dict[str, Any] = {}
@@ -2410,6 +2412,7 @@ class LocalRagService:
                     "ppr_qa_top_k": ppr_qa_top_k,
                     "ppr_synonym_weight_mode": ppr_synonym_weight_mode,
                     "qdrant_retrieval_mode": qdrant_retrieval_mode,
+                    "min_rerank_score": min_rerank_score,
                 }.items():
                     if v is not None:
                         extra[k] = v
@@ -2446,6 +2449,7 @@ class LocalRagService:
                     top_k=top_k,
                     chunk_top_k=chunk_top_k,
                     enable_rerank=enable_rerank,
+                    **({"min_rerank_score": min_rerank_score} if min_rerank_score is not None else {}),
                     conversation_history=conversation_history or [],
                     return_trace=False,
                 )
@@ -2512,6 +2516,7 @@ class LocalRagService:
                 "exclude_synonym_edges": exclude_synonym_edges,
                 "ppr_synonym_weight_mode": ppr_synonym_weight_mode,
                 "qdrant_retrieval_mode": qdrant_retrieval_mode,
+                "min_rerank_score": min_rerank_score,
             }.items():
                 if v is not None:
                     raw_kwargs[k] = v

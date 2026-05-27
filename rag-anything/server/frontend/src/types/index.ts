@@ -105,6 +105,7 @@ export interface QueryParams {
   top_k?: number
   chunk_top_k?: number
   enable_rerank?: boolean
+  min_rerank_score?: number
   qdrant_retrieval_mode?: 'hybrid' | 'bm25' | 'dense'
   rerank_candidate_cap?: number
   ppr_damping?: number

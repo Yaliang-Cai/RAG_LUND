@@ -49,6 +49,7 @@ export async function openQueryStream(params: QueryParams): Promise<Response> {
     body.profile = params.profile
   }
   if (params.qdrant_retrieval_mode) body.qdrant_retrieval_mode = params.qdrant_retrieval_mode
+  if (params.min_rerank_score != null) body.min_rerank_score = params.min_rerank_score
   if (params.rerank_candidate_cap != null) body.rerank_candidate_cap = params.rerank_candidate_cap
   if (params.ppr_damping != null) body.ppr_damping = params.ppr_damping
   if (params.ppr_top_k != null) body.ppr_top_k = params.ppr_top_k

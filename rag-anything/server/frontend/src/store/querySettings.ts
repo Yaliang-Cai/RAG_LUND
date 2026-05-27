@@ -16,6 +16,7 @@ export interface QuerySettingsState {
   top_k: number
   chunk_top_k: number
   enable_rerank: boolean
+  min_rerank_score: number
   qdrant_retrieval_mode: QdrantRetrievalMode
   rerank_candidate_cap?: number
   ppr_damping?: number
@@ -36,6 +37,7 @@ function snapshotFromPreset(mode: ModeKey): Omit<QuerySettingsState, 'mode' | 's
     top_k: p.top_k,
     chunk_top_k: p.chunk_top_k,
     enable_rerank: p.enable_rerank,
+    min_rerank_score: p.min_rerank_score,
     qdrant_retrieval_mode: p.qdrant_retrieval_mode,
     rerank_candidate_cap: p.rerank_candidate_cap,
     ppr_damping: p.ppr_damping,

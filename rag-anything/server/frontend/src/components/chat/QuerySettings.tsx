@@ -83,6 +83,26 @@ export function QuerySettings() {
         </label>
         <ResetButton onClick={() => s.resetField('enable_rerank')} title="Reset rerank" />
 
+        <span
+          className={cn('text-muted-foreground ml-2', !s.enable_rerank && 'opacity-40')}
+          title="Minimum rerank score: chunks scoring below this are dropped after reranking. 0 = no filtering. Only active when Rerank is on."
+        >
+          min score
+        </span>
+        <Input
+          type="number"
+          min={0}
+          max={1}
+          step={0.05}
+          disabled={!s.enable_rerank}
+          value={s.min_rerank_score}
+          onChange={(e) =>
+            s.setField('min_rerank_score', Math.min(1, Math.max(0, Number(e.target.value) || 0)))
+          }
+          className={cn('h-7 w-16 text-xs', !s.enable_rerank && 'opacity-40')}
+        />
+        <ResetButton onClick={() => s.resetField('min_rerank_score')} title="Reset min rerank score" />
+
         {hasAdvanced && (
           <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} className="ml-auto">
             <CollapsibleTrigger

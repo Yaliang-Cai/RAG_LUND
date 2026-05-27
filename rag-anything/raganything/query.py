@@ -191,6 +191,7 @@ class QueryMixin:
                 "enable_rerank",
                 "enable_kg_rerank",
                 "rerank_score_scope",
+                "min_rerank_score",
                 "max_tokens",
                 "temperature",
                 "user_prompt",

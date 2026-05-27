@@ -77,6 +77,7 @@ class AdaptiveAgentGraph:
         top_k: int = DEFAULT_TOP_K,
         chunk_top_k: int = DEFAULT_CHUNK_TOP_K,
         enable_rerank: bool = DEFAULT_ENABLE_RERANK,
+        min_rerank_score: float | None = None,
         qdrant_retrieval_mode: str | None = None,
         _classifier: QueryClassifier | None = None,
         _grader: Grader | None = None,
@@ -96,6 +97,7 @@ class AdaptiveAgentGraph:
         self._top_k = top_k
         self._chunk_top_k = chunk_top_k
         self._enable_rerank = enable_rerank
+        self._min_rerank_score = min_rerank_score
         self._qdrant_retrieval_mode = qdrant_retrieval_mode
         self._clf = _classifier or QueryClassifier(self._llm)
         self._grader = _grader or Grader(self._llm)
@@ -120,6 +122,8 @@ class AdaptiveAgentGraph:
             chunk_top_k=self._chunk_top_k,
             enable_rerank=self._enable_rerank,
         )
+        if self._min_rerank_score is not None:
+            param.min_rerank_score = self._min_rerank_score
         if self._qdrant_retrieval_mode is not None:
             setattr(param, "qdrant_retrieval_mode", self._qdrant_retrieval_mode)
         return param

@@ -116,11 +116,16 @@ class RetrievalRouter:
             reranked = candidate_pool
         chunks_after_rerank = len(reranked)
 
-        # 6. Threshold filter
+        # 6. Threshold filter — per-query override (param.min_rerank_score) wins
+        #    over the profile default when explicitly set.
+        param_min_rerank = getattr(param, "min_rerank_score", None)
+        min_rerank_score = (
+            param_min_rerank if param_min_rerank is not None else profile.min_rerank_score
+        )
         if profile.enable_rerank:
             filtered = [
                 c for c in reranked
-                if c.get("rerank_score", 1.0) >= profile.min_rerank_score
+                if c.get("rerank_score", 1.0) >= min_rerank_score
             ]
         else:
             filtered = reranked

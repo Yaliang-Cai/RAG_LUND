@@ -255,6 +255,7 @@ class QueryRequest(BaseModel):
     qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] = DEFAULT_QDRANT_RETRIEVAL_MODE
     profile: Optional[str] = None  # auto mode only; None = LLM classifier decides
     rerank_candidate_cap: Optional[int] = None  # naive mode only: pre-rerank pool size
+    min_rerank_score: Optional[float] = None  # per-query post-rerank filter; None = global default
     conversation_history: list[dict] = []
 
 class EvaluateRequest(BaseModel):
@@ -658,6 +659,10 @@ async def query_endpoint(
     _validate_workspace_id(payload.workspace_id)
     top_k = max(1, min(payload.top_k, MAX_TOP_K))
     chunk_top_k = max(1, min(payload.chunk_top_k, MAX_CHUNK_TOP_K))
+    min_rerank_score = (
+        None if payload.min_rerank_score is None
+        else max(0.0, min(1.0, payload.min_rerank_score))
+    )
 
     result = await service.query_with_trace(
         payload.workspace_id,
@@ -666,6 +671,7 @@ async def query_endpoint(
         top_k=top_k,
         chunk_top_k=chunk_top_k,
         enable_rerank=payload.enable_rerank,
+        min_rerank_score=min_rerank_score,
         vlm_enhanced=payload.vlm_enhanced,
         multi_hop_depth=payload.multi_hop_depth,
         ppr_damping=payload.ppr_damping,
@@ -706,6 +712,10 @@ async def query_stream_endpoint(
     _validate_workspace_id(payload.workspace_id)
     top_k = max(1, min(payload.top_k, MAX_TOP_K))
     chunk_top_k = max(1, min(payload.chunk_top_k, MAX_CHUNK_TOP_K))
+    min_rerank_score = (
+        None if payload.min_rerank_score is None
+        else max(0.0, min(1.0, payload.min_rerank_score))
+    )
 
     async def _generate():
         retrieval_data: dict = {}
@@ -715,6 +725,7 @@ async def query_stream_endpoint(
                 payload.workspace_id, payload.query,
                 mode=payload.mode, top_k=top_k,
                 chunk_top_k=chunk_top_k, enable_rerank=payload.enable_rerank,
+                min_rerank_score=min_rerank_score,
                 multi_hop_depth=payload.multi_hop_depth,
                 ppr_damping=payload.ppr_damping,
                 ppr_top_k=payload.ppr_top_k,

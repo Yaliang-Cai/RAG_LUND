@@ -18,6 +18,7 @@ export interface ModeConfig {
   top_k: number          // KG entity recall; ignored when topKVisible=false
   chunk_top_k: number    // final chunk window
   enable_rerank: boolean
+  min_rerank_score: number  // post-rerank score filter; chunks below are dropped
   qdrant_retrieval_mode: QdrantRetrievalMode
 
   // Naive mode only — pool size before rerank (= 4 * chunk_top_k by default)
@@ -52,6 +53,7 @@ export const MODE_PRESETS: Record<ModeKey, ModeConfig> = {
     top_k: 10,
     chunk_top_k: 5,
     enable_rerank: true,
+    min_rerank_score: 0.3,
     qdrant_retrieval_mode: 'hybrid',
     rerank_candidate_cap: 20, // = 4 * chunk_top_k
     topKVisible: false,
@@ -62,6 +64,7 @@ export const MODE_PRESETS: Record<ModeKey, ModeConfig> = {
     top_k: 10,
     chunk_top_k: 5,
     enable_rerank: true,
+    min_rerank_score: 0.3,
     qdrant_retrieval_mode: 'hybrid',
     topKVisible: true,
   },
@@ -71,6 +74,7 @@ export const MODE_PRESETS: Record<ModeKey, ModeConfig> = {
     top_k: 10,
     chunk_top_k: 5,
     enable_rerank: false,
+    min_rerank_score: 0.3,
     qdrant_retrieval_mode: 'hybrid',
     ppr_damping: 0.5,
     ppr_top_k: 50,
@@ -84,6 +88,7 @@ export const MODE_PRESETS: Record<ModeKey, ModeConfig> = {
     top_k: 10,
     chunk_top_k: 5,
     enable_rerank: true,
+    min_rerank_score: 0.3,
     qdrant_retrieval_mode: 'hybrid',
     agenticProfile: 'auto',
     topKVisible: true,

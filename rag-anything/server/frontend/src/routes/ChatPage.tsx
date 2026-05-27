@@ -139,6 +139,7 @@ export default function ChatPage() {
       top_k: qs.top_k,
       chunk_top_k: qs.chunk_top_k,
       enable_rerank: qs.enable_rerank,
+      min_rerank_score: qs.min_rerank_score,
       qdrant_retrieval_mode: qs.qdrant_retrieval_mode,
       rerank_candidate_cap: qs.rerank_candidate_cap,
       ppr_damping: qs.ppr_damping,
