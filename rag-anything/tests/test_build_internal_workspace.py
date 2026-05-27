@@ -94,6 +94,12 @@ class _FakeKV:
     async def get_by_ids(self, keys):
         return [self.data.get(key) for key in keys]
 
+    async def upsert(self, data):
+        self.data.update(data)
+
+    async def index_done_callback(self):
+        return None
+
 
 class _FakeVector:
     async def get_by_ids(self, keys):
@@ -486,6 +492,114 @@ async def test_multimodal_finalize_status_is_created_when_missing():
     assert stored["multimodal_chunk_ids"] == ["chunk-mm-1", "chunk-mm-2"]
     assert stored["multimodal_processed"] is True
     assert stored["multimodal_stage"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_multimodal_only_finalize_writes_full_doc_placeholder():
+    from raganything.base import DocStatus
+
+    processor = _DummyProcessor()
+    doc_status = _FakeDocStatus()
+    doc_status.docs.clear()
+    full_docs = _FakeKV()
+    processor.lightrag = SimpleNamespace(doc_status=doc_status, full_docs=full_docs)
+
+    await processor._finalize_multimodal_doc_status(
+        "doc-mm-only",
+        ["chunk-mm-1"],
+        mark_processed=True,
+        file_path="sheet.xlsx",
+    )
+
+    stored = doc_status.docs["doc-mm-only"]
+    assert stored["status"] == DocStatus.PROCESSED
+    assert stored["file_path"] == "sheet.xlsx"
+    assert stored["chunks_list"] == ["chunk-mm-1"]
+    assert stored["chunks_count"] == 1
+    assert stored["content_summary"] == "Multimodal-only document: sheet.xlsx"
+    assert stored["content_length"] > 0
+    assert full_docs.data["doc-mm-only"]["file_path"] == "sheet.xlsx"
+    assert "Processed multimodal chunks: 1" in full_docs.data["doc-mm-only"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_processed_failed_status_is_repaired_on_resume():
+    from raganything.base import DocStatus
+
+    processor = _DummyProcessor()
+    doc_status = _FakeDocStatus()
+    doc_status.docs.clear()
+    doc_status.docs["doc-mm"] = {
+        "status": DocStatus.FAILED,
+        "file_path": None,
+        "content_summary": "",
+        "content_length": 0,
+        "chunks_count": 1,
+        "chunks_list": ["chunk-mm-1"],
+        "multimodal_processed": True,
+        "multimodal_stage": "completed",
+        "multimodal_failed_items": [],
+        "multimodal_chunk_ids": ["chunk-mm-1"],
+        "error_msg": "CUDA out of memory",
+    }
+    full_docs = _FakeKV()
+    processor.lightrag = SimpleNamespace(doc_status=doc_status, full_docs=full_docs)
+
+    await processor._process_multimodal_content(
+        [{"type": "table"}],
+        "TDoc_List_Meeting_ RAN2#132.xlsx",
+        "doc-mm",
+    )
+
+    stored = doc_status.docs["doc-mm"]
+    assert stored["status"] == DocStatus.PROCESSED
+    assert stored["file_path"] == "TDoc_List_Meeting_ RAN2#132.xlsx"
+    assert stored["error_msg"] is None
+    assert stored["multimodal_processed"] is True
+    assert stored["multimodal_stage"] == "completed"
+    assert (
+        full_docs.data["doc-mm"]["file_path"]
+        == "TDoc_List_Meeting_ RAN2#132.xlsx"
+    )
+    assert "Multimodal-only document" in full_docs.data["doc-mm"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_processed_healthy_status_is_not_rewritten():
+    from raganything.base import DocStatus
+
+    processor = _DummyProcessor()
+    doc_status = _FakeDocStatus()
+    doc_status.docs.clear()
+    doc_status.docs["doc-ok"] = {
+        "status": DocStatus.PROCESSED,
+        "file_path": "healthy.xlsx",
+        "content_summary": "existing summary",
+        "content_length": 42,
+        "chunks_count": 1,
+        "chunks_list": ["chunk-mm-1"],
+        "multimodal_processed": True,
+        "multimodal_stage": "completed",
+        "multimodal_failed_items": [],
+        "multimodal_chunk_ids": ["chunk-mm-1"],
+        "error_msg": None,
+        "updated_at": "2026-05-27T00:00:00+00:00",
+    }
+    full_docs = _FakeKV(
+        {"doc-ok": {"content": "existing full doc", "file_path": "healthy.xlsx"}}
+    )
+    processor.lightrag = SimpleNamespace(doc_status=doc_status, full_docs=full_docs)
+
+    await processor._process_multimodal_content(
+        [{"type": "table"}],
+        "healthy.xlsx",
+        "doc-ok",
+    )
+
+    stored = doc_status.docs["doc-ok"]
+    assert stored["updated_at"] == "2026-05-27T00:00:00+00:00"
+    assert stored["status"] == DocStatus.PROCESSED
+    assert full_docs.data["doc-ok"]["content"] == "existing full doc"
 
 
 def test_local_rag_preserves_internal_build_logging_without_run_log(

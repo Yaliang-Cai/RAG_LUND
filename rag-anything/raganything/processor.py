@@ -390,7 +390,10 @@ class ProcessorMixin:
     ) -> List[str]:
         if not isinstance(doc_status, dict):
             return []
-        chunk_ids = doc_status.get("multimodal_chunk_ids")
+        return self._normalize_chunk_ids(doc_status.get("multimodal_chunk_ids"))
+
+    @staticmethod
+    def _normalize_chunk_ids(chunk_ids: Any) -> List[str]:
         if not isinstance(chunk_ids, list):
             return []
         normalized: List[str] = []
@@ -404,6 +407,142 @@ class ProcessorMixin:
             normalized.append(value)
             seen.add(value)
         return normalized
+
+    def _get_document_chunk_ids_from_status(
+        self, doc_status: Optional[Dict[str, Any]]
+    ) -> List[str]:
+        if not isinstance(doc_status, dict):
+            return []
+        chunk_ids = self._normalize_chunk_ids(doc_status.get("chunks_list"))
+        if chunk_ids:
+            return chunk_ids
+        return self._get_multimodal_chunk_ids_from_status(doc_status)
+
+    @staticmethod
+    def _is_missing_file_path(file_path: Any) -> bool:
+        value = str(file_path or "").strip()
+        return value == "" or value == "no-file-path"
+
+    @staticmethod
+    def _multimodal_full_doc_placeholder(
+        doc_id: str, file_path: str, chunk_ids: List[str]
+    ) -> str:
+        source = file_path or doc_id
+        return (
+            f"Multimodal-only document placeholder for {source}.\n"
+            f"Document ID: {doc_id}\n"
+            f"Processed multimodal chunks: {len(chunk_ids)}"
+        )
+
+    async def _ensure_multimodal_full_doc(
+        self,
+        doc_id: str,
+        file_path: str,
+        chunk_ids: List[str],
+    ) -> tuple[str, bool]:
+        full_docs = getattr(self.lightrag, "full_docs", None)
+        if full_docs is None:
+            return (
+                self._multimodal_full_doc_placeholder(doc_id, file_path, chunk_ids),
+                False,
+            )
+
+        placeholder = self._multimodal_full_doc_placeholder(
+            doc_id, file_path, chunk_ids
+        )
+        existing = await full_docs.get_by_id(doc_id)
+        if isinstance(existing, dict) and existing:
+            repaired = False
+            updated = dict(existing)
+            if (
+                file_path
+                and self._is_missing_file_path(existing.get("file_path"))
+                and hasattr(full_docs, "upsert")
+            ):
+                updated["file_path"] = file_path
+                repaired = True
+            if not str(existing.get("content") or "").strip() and hasattr(
+                full_docs, "upsert"
+            ):
+                updated["content"] = placeholder
+                repaired = True
+            if repaired:
+                await full_docs.upsert({doc_id: updated})
+                callback = getattr(full_docs, "index_done_callback", None)
+                if callable(callback):
+                    await callback()
+            return str(updated.get("content") or placeholder), repaired
+
+        if hasattr(full_docs, "upsert"):
+            await full_docs.upsert(
+                {
+                    doc_id: {
+                        "content": placeholder,
+                        "file_path": file_path or "no-file-path",
+                    }
+                }
+            )
+            callback = getattr(full_docs, "index_done_callback", None)
+            if callable(callback):
+                await callback()
+            return placeholder, True
+        return placeholder, False
+
+    async def _repair_completed_multimodal_doc_status(
+        self,
+        *,
+        doc_id: str,
+        file_path: str,
+        current_doc_status: Dict[str, Any],
+    ) -> None:
+        chunk_ids = self._get_document_chunk_ids_from_status(current_doc_status)
+        placeholder, full_doc_repaired = await self._ensure_multimodal_full_doc(
+            doc_id, file_path, chunk_ids
+        )
+        current_chunks_count = current_doc_status.get("chunks_count")
+        try:
+            chunks_count_matches = int(current_chunks_count) == len(chunk_ids)
+        except (TypeError, ValueError):
+            chunks_count_matches = False
+        needs_status_repair = (
+            full_doc_repaired
+            or current_doc_status.get("status") != DocStatus.PROCESSED
+            or self._is_missing_file_path(current_doc_status.get("file_path"))
+            or bool(current_doc_status.get("error_msg"))
+            or current_doc_status.get("multimodal_processed") is not True
+            or current_doc_status.get("multimodal_stage") != _MM_STAGE_COMPLETED
+            or bool(current_doc_status.get("multimodal_failed_items"))
+            or not chunks_count_matches
+        )
+        if not needs_status_repair:
+            return
+
+        updated_doc_status = {
+            **current_doc_status,
+            "status": DocStatus.PROCESSED,
+            "chunks_list": chunk_ids,
+            "chunks_count": len(chunk_ids),
+            "multimodal_processed": True,
+            "multimodal_stage": _MM_STAGE_COMPLETED,
+            "multimodal_error_msg": None,
+            "multimodal_failed_items": [],
+            "error_msg": None,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        }
+        if (
+            self._is_missing_file_path(updated_doc_status.get("file_path"))
+            and file_path
+        ):
+            updated_doc_status["file_path"] = file_path
+        if not updated_doc_status.get("content_summary"):
+            updated_doc_status["content_summary"] = (
+                f"Multimodal-only document: {file_path or doc_id}"
+            )
+        if not updated_doc_status.get("content_length"):
+            updated_doc_status["content_length"] = len(placeholder)
+
+        await self.lightrag.doc_status.upsert({doc_id: updated_doc_status})
+        await self.lightrag.doc_status.index_done_callback()
 
     def _should_resume_multimodal_from_stored_chunks(
         self, doc_status: Optional[Dict[str, Any]]
@@ -698,7 +837,10 @@ class ProcessorMixin:
             raise RuntimeError(f"{_MM_STAGE_MERGE_FAILED}: {exc}") from exc
 
         await self._finalize_multimodal_doc_status(
-            doc_id, list(lightrag_chunks.keys()), mark_processed=True
+            doc_id,
+            list(lightrag_chunks.keys()),
+            mark_processed=True,
+            file_path=file_path,
         )
 
     def _infer_multimodal_stage_from_error(self, error_msg: str) -> str:
@@ -1401,6 +1543,11 @@ class ProcessorMixin:
                 )
 
                 if multimodal_processed:
+                    await self._repair_completed_multimodal_doc_status(
+                        doc_id=doc_id,
+                        file_path=file_path,
+                        current_doc_status=existing_doc_status,
+                    )
                     self.logger.info(
                         f"Document {doc_id} multimodal content is already processed"
                     )
@@ -1688,7 +1835,9 @@ class ProcessorMixin:
             )
             raise MultimodalPartialFailureError(error_msg, failed_items)
 
-        await self._finalize_multimodal_doc_status(doc_id, multimodal_chunk_ids)
+        await self._finalize_multimodal_doc_status(
+            doc_id, multimodal_chunk_ids, file_path=file_name
+        )
 
     async def _process_multimodal_content_batch_type_aware(
         self, multimodal_items: List[Dict[str, Any]], file_path: str, doc_id: str
@@ -2012,6 +2161,7 @@ class ProcessorMixin:
             new_chunk_ids=chunk_ids,
             mark_processed=False,
             stage=_MM_STAGE_CHUNKS_STORED,
+            file_path=file_path,
         )
 
         # Stage 3.5: Store multimodal main entities to entities_vdb and full_entities
@@ -2062,13 +2212,16 @@ class ProcessorMixin:
                 chunk_ids,
                 mark_processed=False,
                 stage=_MM_STAGE_PARTIAL_FAILED,
+                file_path=file_path,
             )
             raise MultimodalPartialFailureError(
                 f"Multimodal batch failed for {len(failed_items)}/{len(results)} items",
                 failed_items,
             )
 
-        await self._finalize_multimodal_doc_status(doc_id, chunk_ids)
+        await self._finalize_multimodal_doc_status(
+            doc_id, chunk_ids, file_path=file_path
+        )
 
     def _convert_to_lightrag_chunks_type_aware(
         self, multimodal_data_list: List[Dict[str, Any]], file_path: str, doc_id: str
@@ -2574,6 +2727,7 @@ class ProcessorMixin:
         new_chunk_ids: List[str],
         mark_processed: bool = True,
         stage: Optional[str] = None,
+        file_path: Optional[str] = None,
     ) -> None:
         """Finalize multimodal doc_status with one atomic upsert."""
         try:
@@ -2617,11 +2771,31 @@ class ProcessorMixin:
                 "multimodal_chunk_ids": merged_multimodal_chunks,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
             }
+            clean_file_path = str(file_path or "").strip()
+            if (
+                clean_file_path
+                and self._is_missing_file_path(updated_doc_status.get("file_path"))
+            ):
+                updated_doc_status["file_path"] = clean_file_path
             if mark_processed:
+                placeholder, _ = await self._ensure_multimodal_full_doc(
+                    doc_id,
+                    clean_file_path or str(updated_doc_status.get("file_path") or ""),
+                    merged_chunks_list,
+                )
+                updated_doc_status["status"] = DocStatus.PROCESSED
                 updated_doc_status["multimodal_processed"] = True
                 updated_doc_status["multimodal_stage"] = _MM_STAGE_COMPLETED
                 updated_doc_status["multimodal_error_msg"] = None
                 updated_doc_status["multimodal_failed_items"] = []
+                updated_doc_status["error_msg"] = None
+                if not updated_doc_status.get("content_summary"):
+                    updated_doc_status["content_summary"] = (
+                        f"Multimodal-only document: "
+                        f"{updated_doc_status.get('file_path') or doc_id}"
+                    )
+                if not updated_doc_status.get("content_length"):
+                    updated_doc_status["content_length"] = len(placeholder)
             else:
                 updated_doc_status["multimodal_processed"] = False
                 if stage:
@@ -2867,7 +3041,9 @@ class ProcessorMixin:
             else:
                 # If no multimodal content, mark multimodal processing as complete
                 # This ensures the document status properly reflects completion of all processing
-                await self._finalize_multimodal_doc_status(doc_id, [])
+                await self._finalize_multimodal_doc_status(
+                    doc_id, [], file_path=file_name
+                )
                 self.logger.debug(
                     f"No multimodal content found in document {doc_id}, "
                     "marked multimodal processing as complete",
@@ -3219,7 +3395,7 @@ class ProcessorMixin:
         else:
             # If no multimodal content, mark multimodal processing as complete
             # This ensures the document status properly reflects completion of all processing
-            await self._finalize_multimodal_doc_status(doc_id, [])
+            await self._finalize_multimodal_doc_status(doc_id, [], file_path=file_ref)
             self.logger.debug(
                 f"No multimodal content found in document {doc_id}, marked multimodal processing as complete"
             )
