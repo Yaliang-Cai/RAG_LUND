@@ -16,6 +16,7 @@ import shutil
 import sys
 import tempfile
 import time
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -685,14 +686,89 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _file_record(path: Path) -> dict[str, Any]:
+def _file_hash_cache_path(profile: BuildProfile) -> Path:
+    return profile.storage_root / ".raw_file_hash_cache.json"
+
+
+def _load_file_hash_cache(profile: BuildProfile) -> dict[str, Any]:
+    cache_path = _file_hash_cache_path(profile)
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        LOGGER.warning(
+            "Ignoring unreadable raw file hash cache path=%s error=%s",
+            cache_path,
+            exc,
+        )
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_file_hash_cache(profile: BuildProfile, cache: dict[str, Any]) -> None:
+    cache_path = _file_hash_cache_path(profile)
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps(_json_safe(cache), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "Failed to write raw file hash cache path=%s error=%s",
+            cache_path,
+            exc,
+        )
+
+
+def _resolved_path_key(path: Path) -> str:
+    try:
+        return str(path.expanduser().resolve())
+    except OSError:
+        return str(path.expanduser().absolute())
+
+
+def _file_record(
+    path: Path, hash_cache: dict[str, Any] | None = None
+) -> dict[str, Any]:
     stat = path.stat()
+    sha256 = ""
+    if hash_cache is not None:
+        key = _resolved_path_key(path)
+        cached = hash_cache.get(key)
+        if (
+            isinstance(cached, dict)
+            and cached.get("size") == stat.st_size
+            and cached.get("mtime_ns") == stat.st_mtime_ns
+            and cached.get("sha256")
+        ):
+            sha256 = str(cached["sha256"])
+        else:
+            sha256 = _file_sha256(path)
+            hash_cache[key] = {
+                "path": _path_env(path),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "sha256": sha256,
+            }
+    else:
+        sha256 = _file_sha256(path)
     return {
         "name": path.name,
         "path": _path_env(path),
         "size": stat.st_size,
-        "sha256": _file_sha256(path),
+        "sha256": sha256,
     }
+
+
+def _file_records(profile: BuildProfile, files: list[Path]) -> list[dict[str, Any]]:
+    if not files:
+        return []
+    hash_cache = _load_file_hash_cache(profile)
+    records = [_file_record(path, hash_cache) for path in files]
+    _write_file_hash_cache(profile, hash_cache)
+    return records
 
 
 def _safe_stem(path: Path) -> str:
@@ -702,6 +778,45 @@ def _safe_stem(path: Path) -> str:
 
 def _content_list_filename(stem: str) -> str:
     return f"{stem}_content_list.json"
+
+
+@dataclass
+class MineruArtifactIndex:
+    by_name: dict[str, list[Path]]
+    ambiguous_stems: set[str]
+    scanned_count: int = 0
+
+    def candidates_for_name(self, filename: str) -> list[Path]:
+        return list(self.by_name.get(filename, []))
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _build_mineru_artifact_index(
+    output_root: Path, source_paths: list[Path]
+) -> MineruArtifactIndex:
+    stem_counts = Counter(path.stem for path in source_paths)
+    by_name: dict[str, list[Path]] = defaultdict(list)
+    scanned_count = 0
+    if output_root.is_dir():
+        for path in output_root.rglob("*_content_list.json"):
+            scanned_count += 1
+            by_name[path.name].append(path)
+    indexed = {
+        name: sorted(paths, key=lambda item: str(item))
+        for name, paths in by_name.items()
+    }
+    return MineruArtifactIndex(
+        by_name=indexed,
+        ambiguous_stems={stem for stem, count in stem_counts.items() if count > 1},
+        scanned_count=scanned_count,
+    )
 
 
 def _iter_content_list_matches(root: Path, stem: str) -> list[Path]:
@@ -725,10 +840,13 @@ def _mineru_workspace_output_dir(profile: BuildProfile) -> Path:
 
 
 def _primary_mineru_content_json_candidates(
-    output_root: Path, source_path: Path
+    output_root: Path,
+    source_path: Path,
+    artifact_index: MineruArtifactIndex | None = None,
 ) -> tuple[list[Path], list[Path]]:
     stem = source_path.stem
     safe_stem = _safe_stem(source_path)
+    expected_name = _content_list_filename(stem)
     candidates: list[Path] = []
     searched_roots: list[Path] = [output_root]
     direct_json = output_root / _content_list_filename(stem)
@@ -739,23 +857,48 @@ def _primary_mineru_content_json_candidates(
         subdir = output_root / subdir_name
         searched_roots.append(subdir)
         if subdir.is_dir():
-            candidates.extend(_iter_content_list_matches(subdir, stem))
+            if artifact_index is not None:
+                candidates.extend(
+                    candidate
+                    for candidate in artifact_index.candidates_for_name(expected_name)
+                    if _path_is_relative_to(candidate, subdir)
+                )
+            else:
+                candidates.extend(_iter_content_list_matches(subdir, stem))
     return candidates, searched_roots
 
 
 def _mineru_content_json_candidates(
-    output_root: Path, source_path: Path
-) -> tuple[list[Path], list[Path], set[str]]:
+    output_root: Path,
+    source_path: Path,
+    artifact_index: MineruArtifactIndex | None = None,
+) -> tuple[list[Path], list[Path], set[str], list[dict[str, str]]]:
     stem = source_path.stem
+    expected_name = _content_list_filename(stem)
     primary_candidates, searched_roots = _primary_mineru_content_json_candidates(
-        output_root, source_path
+        output_root, source_path, artifact_index=artifact_index
     )
     candidates: list[Path] = list(primary_candidates)
     fallback_keys: set[str] = set()
+    diagnostics: list[dict[str, str]] = []
     if output_root.is_dir():
         searched_roots.append(output_root / "**")
         primary_keys = {str(path) for path in primary_candidates}
-        for candidate in _iter_content_list_matches(output_root, stem):
+        if artifact_index is not None:
+            fallback_candidates: list[Path]
+            if stem in artifact_index.ambiguous_stems:
+                fallback_candidates = []
+                diagnostics.append(
+                    {
+                        "path": expected_name,
+                        "reason": "ambiguous_duplicate_raw_stem_fallback_disabled",
+                    }
+                )
+            else:
+                fallback_candidates = artifact_index.candidates_for_name(expected_name)
+        else:
+            fallback_candidates = _iter_content_list_matches(output_root, stem)
+        for candidate in fallback_candidates:
             key = str(candidate)
             if key not in primary_keys:
                 fallback_keys.add(key)
@@ -768,7 +911,7 @@ def _mineru_content_json_candidates(
         if key not in seen:
             seen.add(key)
             deduped.append(candidate)
-    return deduped, searched_roots, fallback_keys
+    return deduped, searched_roots, fallback_keys, diagnostics
 
 
 def _content_list_reject_reason(json_path: Path) -> str | None:
@@ -793,13 +936,19 @@ def _read_nonempty_content_list(json_path: Path) -> list[Any] | None:
     return None
 
 
-def _inspect_mineru_artifacts(output_root: Path, source_path: Path) -> dict[str, Any]:
+def _inspect_mineru_artifacts(
+    output_root: Path,
+    source_path: Path,
+    artifact_index: MineruArtifactIndex | None = None,
+) -> dict[str, Any]:
     source_mtime = source_path.stat().st_mtime
-    candidates, searched_roots, fallback_keys = _mineru_content_json_candidates(
-        output_root, source_path
+    candidates, searched_roots, fallback_keys, diagnostics = (
+        _mineru_content_json_candidates(
+            output_root, source_path, artifact_index=artifact_index
+        )
     )
     valid_candidates: list[Path] = []
-    reject_reasons: list[dict[str, str]] = []
+    reject_reasons: list[dict[str, str]] = list(diagnostics)
     recovered_by_fallback = False
     for candidate in candidates:
         reason = _content_list_reject_reason(candidate)
@@ -1232,13 +1381,20 @@ def preparse_mineru_files(
         "recovered_by_fallback_count": 0,
         "failed_count": 0,
     }
+    artifact_index = _build_mineru_artifact_index(output_root, candidates)
+    summary["artifact_index"] = {
+        "scanned_count": artifact_index.scanned_count,
+        "ambiguous_stems": sorted(artifact_index.ambiguous_stems),
+    }
 
     pending: list[Path] = []
     historical_failures = _load_historical_preparse_conversion_failures(
         profile, report_dir
     )
     for file_path in candidates:
-        artifact_info = _inspect_mineru_artifacts(output_root, file_path)
+        artifact_info = _inspect_mineru_artifacts(
+            output_root, file_path, artifact_index=artifact_index
+        )
         existing = artifact_info.get("artifact")
         if existing is not None:
             skipped_record = {
@@ -1371,10 +1527,17 @@ def preparse_mineru_files(
         else:
             LOGGER.warning("MinerU preparse has no stageable inputs after conversion")
 
+    artifact_index = _build_mineru_artifact_index(output_root, candidates)
+    summary["artifact_index"] = {
+        "scanned_count": artifact_index.scanned_count,
+        "ambiguous_stems": sorted(artifact_index.ambiguous_stems),
+    }
     retry_errors: dict[Path, str] = {}
     retry_inputs: list[tuple[Path, Path]] = []
     for record, file_path in zip(staged_records, staged_source_paths):
-        artifact_info = _inspect_mineru_artifacts(output_root, file_path)
+        artifact_info = _inspect_mineru_artifacts(
+            output_root, file_path, artifact_index=artifact_index
+        )
         if artifact_info.get("artifact") is None:
             retry_inputs.append((file_path, Path(record["mineru_input"])))
 
@@ -1401,10 +1564,18 @@ def preparse_mineru_files(
                 mineru_input,
             )
 
+    if retry_inputs:
+        artifact_index = _build_mineru_artifact_index(output_root, candidates)
+        summary["artifact_index"] = {
+            "scanned_count": artifact_index.scanned_count,
+            "ambiguous_stems": sorted(artifact_index.ambiguous_stems),
+        }
     parsed_records: list[dict[str, str]] = []
     missing_records: list[dict[str, Any]] = []
     for file_path in staged_source_paths:
-        artifact_info = _inspect_mineru_artifacts(output_root, file_path)
+        artifact_info = _inspect_mineru_artifacts(
+            output_root, file_path, artifact_index=artifact_index
+        )
         artifact = artifact_info.get("artifact")
         if artifact is None:
             error = retry_errors.get(
@@ -1622,6 +1793,97 @@ async def collect_documents(service: Any, workspace_id: str) -> dict[str, Any]:
         "count": len(documents),
         "documents": documents,
     }
+
+
+def _has_multimodal_failed_items(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return len(value) > 0
+    return True
+
+
+def _document_has_chunks(document: dict[str, Any]) -> bool:
+    chunk_count = document.get("chunks_count")
+    try:
+        if int(chunk_count) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return bool(_as_list(document.get("chunks_list", [])))
+
+
+def _is_fast_resume_complete_document(document: dict[str, Any]) -> bool:
+    return (
+        str(document.get("status", "")).lower() == "processed"
+        and document.get("multimodal_processed") is True
+        and _document_has_chunks(document)
+        and not _has_multimodal_failed_items(document.get("multimodal_failed_items"))
+    )
+
+
+async def _filter_fast_resume_files(
+    service: Any,
+    profile: BuildProfile,
+    files: list[Path],
+) -> tuple[list[Path], dict[str, Any]]:
+    documents_payload = await collect_documents(service, profile.workspace_id)
+    documents = list(documents_payload.get("documents", []))
+    raw_by_resolved = {_resolved_path_key(path): path for path in files}
+    raw_basename_counts = Counter(path.name for path in files)
+    raw_by_unique_basename = {
+        path.name: path for path in files if raw_basename_counts[path.name] == 1
+    }
+    skipped_keys: set[str] = set()
+    matched_documents: list[dict[str, str]] = []
+    unmatched_processed_count = 0
+
+    for document in documents:
+        if not isinstance(document, dict) or not _is_fast_resume_complete_document(
+            document
+        ):
+            continue
+        file_path_value = str(document.get("file_path") or "")
+        if not file_path_value:
+            unmatched_processed_count += 1
+            continue
+        matched_path: Path | None = None
+        resolved_key = _resolved_path_key(Path(file_path_value))
+        if resolved_key in raw_by_resolved:
+            matched_path = raw_by_resolved[resolved_key]
+        else:
+            basename = Path(file_path_value).name
+            if basename in raw_by_unique_basename:
+                matched_path = raw_by_unique_basename[basename]
+        if matched_path is None:
+            unmatched_processed_count += 1
+            continue
+        matched_key = _resolved_path_key(matched_path)
+        skipped_keys.add(matched_key)
+        matched_documents.append(
+            {
+                "file": matched_path.name,
+                "source_path": _path_env(matched_path),
+                "doc_id": str(document.get("doc_id", "")),
+                "match": "resolved_path"
+                if resolved_key == matched_key
+                else "unique_basename",
+            }
+        )
+
+    filtered = [path for path in files if _resolved_path_key(path) not in skipped_keys]
+    skipped_files = [
+        path.name for path in files if _resolved_path_key(path) in skipped_keys
+    ]
+    summary = {
+        "enabled": True,
+        "documents_scanned_count": len(documents),
+        "skipped_count": len(skipped_files),
+        "skipped_files": skipped_files,
+        "skipped_documents": matched_documents,
+        "unmatched_processed_count": unmatched_processed_count,
+    }
+    return filtered, summary
 
 
 def _source_chunks(value: Any) -> list[str]:
@@ -1876,7 +2138,7 @@ def _summary_base(
         "storage_root": _path_env(profile.storage_root),
         "report_dir": _path_env(report_dir),
         "file_count": len(files or []),
-        "files": [_file_record(path) for path in (files or [])],
+        "files": _file_records(profile, list(files or [])),
         "storage_roots": {
             "output": _path_env(profile.output_dir),
             "workspace": _path_env(profile.working_dir_root),
@@ -2163,6 +2425,41 @@ async def _run_build_async(
         )
 
         service = create_local_rag_service(settings)
+        if getattr(args, "disable_fast_resume", False):
+            fast_resume_summary = {
+                "enabled": False,
+                "reason": "disabled_by_cli",
+                "documents_scanned_count": 0,
+                "skipped_count": 0,
+                "skipped_files": [],
+                "skipped_documents": [],
+                "unmatched_processed_count": 0,
+            }
+        else:
+            ingest_files, fast_resume_summary = await _filter_fast_resume_files(
+                service,
+                profile,
+                ingest_files,
+            )
+            if fast_resume_summary["skipped_count"]:
+                LOGGER.info(
+                    "Fast resume skipped completed documents count=%d files=%s",
+                    fast_resume_summary["skipped_count"],
+                    ", ".join(fast_resume_summary["skipped_files"]),
+                )
+        summary["fast_resume"] = fast_resume_summary
+        summary["fast_resume_skipped_count"] = fast_resume_summary["skipped_count"]
+        summary["fast_resume_skipped_files"] = fast_resume_summary["skipped_files"]
+        summary["fast_resume_unmatched_processed_count"] = fast_resume_summary[
+            "unmatched_processed_count"
+        ]
+        summary["ingest_planned_count"] = len(ingest_files)
+        _write_partial_summary(
+            report_dir,
+            summary,
+            log_context,
+            status="fast_resume_complete",
+        )
         batch_results: list[dict[str, Any]] = []
         attempted_since_recycle = 0
         for batch_index, batch in enumerate(
@@ -2642,6 +2939,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Disable the default MinerU preparse stage and let each ingest parse "
             "through the normal LocalRagService path."
+        ),
+    )
+    parser.add_argument(
+        "--disable-fast-resume",
+        action="store_true",
+        help=(
+            "Disable build-level skipping of documents that doc_status already "
+            "marks as fully processed."
         ),
     )
     parser.add_argument(

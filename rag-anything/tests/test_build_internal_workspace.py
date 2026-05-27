@@ -51,7 +51,7 @@ class _FakeDocStatus:
             },
             "doc-2": {
                 "status": "processed",
-                "file_path": "/raw/b.pdf",
+                "file_path": "/raw/existing-b.pdf",
                 "chunks_count": 1,
                 "chunks_list": ["chunk-2"],
                 "multimodal_processed": True,
@@ -758,6 +758,99 @@ def test_mineru_preparse_reuses_bracketed_stem_artifact(monkeypatch, tmp_path):
     assert summary["skipped_count"] == 1
     assert summary["failed_count"] == 0
     assert summary["skipped"][0]["artifact"] == build_internal._path_env(artifact)
+
+
+def test_mineru_preparse_indexes_artifacts_once_for_bracketed_stem(
+    monkeypatch, tmp_path
+):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "R2-2601385 Report of [POST133][010][6G AI] Use cases.docx"
+    source.write_text("docx", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    output_root = storage_root / "output" / "ws"
+    artifact = (
+        output_root
+        / source.stem
+        / "hybrid_auto"
+        / f"{source.stem}_content_list.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps([{"type": "text", "text": "ok"}]), encoding="utf-8")
+
+    rglob_calls = []
+    original_rglob = Path.rglob
+
+    def counting_rglob(self, pattern):
+        rglob_calls.append((self, pattern))
+        return original_rglob(self, pattern)
+
+    monkeypatch.setattr(Path, "rglob", counting_rglob)
+    monkeypatch.setattr(
+        build_internal,
+        "_run_mineru_preparse_command",
+        lambda input_dir, output_root: pytest.fail("MinerU should not run"),
+    )
+
+    summary = build_internal.preparse_mineru_files(
+        profile,
+        [source],
+        tmp_path / "reports",
+    )
+
+    assert summary["skipped_count"] == 1
+    assert summary["failed_count"] == 0
+    assert rglob_calls == [(output_root, "*_content_list.json")]
+
+
+def test_mineru_preparse_does_not_use_fallback_index_for_duplicate_stems(
+    monkeypatch, tmp_path
+):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    first = raw_dir / "dup.pdf"
+    second = raw_dir / "dup.png"
+    first.write_text("pdf", encoding="utf-8")
+    second.write_text("png", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    output_root = storage_root / "output" / "ws"
+    fallback_artifact = (
+        output_root / "legacy_mineru_output" / "dup" / "hybrid_auto" / "dup_content_list.json"
+    )
+    fallback_artifact.parent.mkdir(parents=True)
+    fallback_artifact.write_text(
+        json.dumps([{"type": "text", "text": "wrong-for-one-of-two"}]),
+        encoding="utf-8",
+    )
+    calls = []
+    monkeypatch.setattr(
+        build_internal,
+        "_run_mineru_preparse_command",
+        lambda input_dir, output_root: calls.append((input_dir, output_root)),
+    )
+
+    summary = build_internal.preparse_mineru_files(
+        profile,
+        [first, second],
+        tmp_path / "reports",
+    )
+
+    assert calls
+    assert summary["skipped_count"] == 0
+    assert summary["missing_artifact_count"] == 2
+    assert "dup" in summary["artifact_index"]["ambiguous_stems"]
 
 
 def test_mineru_preparse_does_not_accept_glob_pattern_near_match(
@@ -1588,6 +1681,61 @@ def test_dry_run_writes_local_summary_without_server_fields(tmp_path):
     assert not (storage_root / "uploads").exists()
 
 
+def test_summary_file_hash_cache_reuses_unchanged_files(monkeypatch, tmp_path):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    source = raw_dir / "sample.pdf"
+    source.write_text("pdf", encoding="utf-8")
+    profile = build_internal.resolve_profile(
+        "test",
+        raw_dir=raw_dir,
+        storage_root=storage_root,
+        workspace_id="ws",
+    )
+    env = build_internal.build_local_env(
+        profile, base_env={}, max_async_ingest=1
+    )
+    calls = []
+
+    def fake_sha256(path):
+        calls.append(path)
+        return f"hash-{len(calls)}"
+
+    monkeypatch.setattr(build_internal, "_file_sha256", fake_sha256)
+
+    first = build_internal._summary_base(
+        profile=profile,
+        report_dir=storage_root / "reports" / "run1",
+        env=env,
+        max_async_ingest=1,
+        recycle_service_every=0,
+        files=[source],
+    )
+    second = build_internal._summary_base(
+        profile=profile,
+        report_dir=storage_root / "reports" / "run2",
+        env=env,
+        max_async_ingest=1,
+        recycle_service_every=0,
+        files=[source],
+    )
+    source.write_text("changed", encoding="utf-8")
+    third = build_internal._summary_base(
+        profile=profile,
+        report_dir=storage_root / "reports" / "run3",
+        env=env,
+        max_async_ingest=1,
+        recycle_service_every=0,
+        files=[source],
+    )
+
+    assert len(calls) == 2
+    assert first["files"][0]["sha256"] == "hash-1"
+    assert second["files"][0]["sha256"] == "hash-1"
+    assert third["files"][0]["sha256"] == "hash-2"
+
+
 def test_build_uses_local_service_batches_and_exports_reports(monkeypatch, tmp_path):
     raw_dir = tmp_path / "raw"
     storage_root = tmp_path / "internal"
@@ -1646,6 +1794,124 @@ def test_build_uses_local_service_batches_and_exports_reports(monkeypatch, tmp_p
     assert json.loads((report_dir / "graph_stats.json").read_text(encoding="utf-8"))[
         "entity_count"
     ] == 1
+
+
+def test_build_fast_resume_skips_only_complete_processed_documents(
+    monkeypatch, tmp_path
+):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    done = raw_dir / "done.pdf"
+    incomplete = raw_dir / "incomplete.pdf"
+    failed_mm = raw_dir / "failed-mm.pdf"
+    for path in (done, incomplete, failed_mm):
+        path.write_text(path.name, encoding="utf-8")
+    fake = _patch_fake_service(monkeypatch)
+    fake.rag.lightrag.doc_status.docs = {
+        "doc-done": {
+            "status": "processed",
+            "file_path": str(done.resolve()),
+            "chunks_count": 1,
+            "chunks_list": ["chunk-done"],
+            "multimodal_processed": True,
+            "multimodal_failed_items": [],
+        },
+        "doc-incomplete": {
+            "status": "processed",
+            "file_path": str(incomplete.resolve()),
+            "chunks_count": 1,
+            "chunks_list": ["chunk-incomplete"],
+            "multimodal_processed": False,
+            "multimodal_failed_items": [],
+        },
+        "doc-failed-mm": {
+            "status": "processed",
+            "file_path": str(failed_mm.resolve()),
+            "chunks_count": 1,
+            "chunks_list": ["chunk-failed"],
+            "multimodal_processed": True,
+            "multimodal_failed_items": [{"item": 1, "error": "timeout"}],
+        },
+        "doc-unmatched": {
+            "status": "processed",
+            "file_path": str((tmp_path / "other" / "outside.pdf").resolve()),
+            "chunks_count": 1,
+            "chunks_list": ["chunk-outside"],
+            "multimodal_processed": True,
+            "multimodal_failed_items": [],
+        },
+    }
+
+    result = build_internal.main(
+        [
+            "--profile",
+            "test",
+            "--raw-dir",
+            str(raw_dir),
+            "--storage-root",
+            str(storage_root),
+            "--workspace-id",
+            "ws",
+            "--max-async-ingest",
+            "2",
+        ]
+    )
+
+    assert result == 0
+    assert [Path(call["file_path"]).name for call in fake.ingest_calls] == [
+        "failed-mm.pdf",
+        "incomplete.pdf",
+    ]
+    report_dir = sorted((storage_root / "reports").iterdir())[0]
+    summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["fast_resume_skipped_count"] == 1
+    assert summary["fast_resume_skipped_files"] == ["done.pdf"]
+    assert summary["fast_resume_unmatched_processed_count"] == 1
+    assert summary["ingest_planned_count"] == 2
+
+
+def test_build_disable_fast_resume_keeps_complete_documents_in_ingest(
+    monkeypatch, tmp_path
+):
+    raw_dir = tmp_path / "raw"
+    storage_root = tmp_path / "internal"
+    raw_dir.mkdir()
+    done = raw_dir / "done.pdf"
+    done.write_text("done", encoding="utf-8")
+    fake = _patch_fake_service(monkeypatch)
+    fake.rag.lightrag.doc_status.docs = {
+        "doc-done": {
+            "status": "processed",
+            "file_path": str(done.resolve()),
+            "chunks_count": 1,
+            "chunks_list": ["chunk-done"],
+            "multimodal_processed": True,
+            "multimodal_failed_items": [],
+        }
+    }
+
+    result = build_internal.main(
+        [
+            "--profile",
+            "test",
+            "--raw-dir",
+            str(raw_dir),
+            "--storage-root",
+            str(storage_root),
+            "--workspace-id",
+            "ws",
+            "--disable-fast-resume",
+        ]
+    )
+
+    assert result == 0
+    assert [Path(call["file_path"]).name for call in fake.ingest_calls] == [
+        "done.pdf"
+    ]
+    report_dir = sorted((storage_root / "reports").iterdir())[0]
+    summary = json.loads((report_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["fast_resume"]["enabled"] is False
 
 
 def test_build_failure_is_written_to_internal_log(monkeypatch, tmp_path):
