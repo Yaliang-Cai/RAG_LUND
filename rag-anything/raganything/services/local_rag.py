@@ -2242,7 +2242,7 @@ class LocalRagService:
     def _apply_query_defaults(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         """Fill query kwargs with LocalRagSettings defaults and normalize string fields.
 
-        Shared by query(), query_with_trace(), stream_query() and query_with_multimodal()
+        Shared by query(), query_with_trace(), run_query() and query_with_multimodal()
         so all entry points produce a consistent QueryParam downstream.
         """
         normalized = dict(kwargs)
@@ -2323,7 +2323,7 @@ class LocalRagService:
 
         return await self._safe_query_call(_run_query_with_trace)
 
-    async def stream_query(
+    async def run_query(
         self,
         workspace_id: str,
         query: str,
@@ -2346,217 +2346,167 @@ class LocalRagService:
         rerank_candidate_cap: int | None = None,
         conversation_history: list[dict] | None = None,
         vlm_enhanced: bool = False,
-    ):
-        """Async generator — yields structured events via LightRAG aquery_llm().
+    ) -> dict[str, Any]:
+        """Sole entry point for ``POST /query``.
 
-        Event types:
-          {"type": "meta", "data": {...}, "metadata": {...}}   # citations + entities + chunks
-          {"type": "chunk", "text": str}                       # LLM token
-          {"type": "error", "text": str}                       # error
+        Returns ``{"answer": str, "data": dict, "metadata": dict}``. The four
+        branches (agentic / auto+profile / vlm / default) cover every mode
+        the frontend can send. The default branch calls ``aquery_llm`` with
+        ``stream=False`` so LightRAG's ``llm_response_cache`` actually writes
+        the result — repeating the same query then hits the cache on the
+        next call (the cache write is explicitly skipped for streaming
+        responses inside LightRAG, which is why the SSE endpoint that used
+        to live alongside this one was removed).
         """
-        # ── Streaming branch: agentic mode (per-node progress via astream) ──
+        # ── agentic mode (no streaming progress events) ──
         if mode == "agentic":
-            try:
-                from raganything.retrieval.agent_graph import AdaptiveAgentGraph
-                rag_instance = await self.get_rag(workspace_id)
-                await rag_instance._ensure_lightrag_initialized()
-                graph = AdaptiveAgentGraph(
-                    rag_instance.lightrag,
-                    top_k=top_k,
-                    chunk_top_k=chunk_top_k,
-                    enable_rerank=enable_rerank,
-                    min_rerank_score=min_rerank_score,
-                    qdrant_retrieval_mode=qdrant_retrieval_mode,
-                )
-                final: dict[str, Any] = {}
-                async for kind, payload in graph.astream_run(query):
-                    if kind == "step":
-                        # surface chain-of-thought progress to FE
-                        yield {"type": "reasoning", "text": f"→ {payload}\n"}
-                    elif kind == "final":
-                        final = payload
-                trace = final.get("trace", {})
-                meta_payload = {
-                    "agentic_trace": {
-                        "confidence": final.get("confidence"),
-                        "grounded": final.get("grounded"),
-                        "profile": trace.get("profile"),
-                        "router_cache_hit": trace.get("router_cache_hit", False),
-                        "retrieve_cycles_used": trace.get("retrieve_cycles_used", 0),
-                        "check_cycles_used": trace.get("check_cycles_used", 0),
-                        "rewrite_history": trace.get("rewrite_history", []),
-                        "sub_questions": trace.get("sub_questions"),
-                    }
-                }
-                yield {
-                    "type": "meta",
-                    "data": {"chunks": final.get("chunks", [])},
-                    "metadata": meta_payload,
-                }
-                yield {"type": "chunk", "text": str(final.get("answer") or "")}
-            except Exception as exc:
-                self.logger.error("stream_query (agentic branch) error: %s", exc)
-                yield {"type": "error", "text": str(exc)}
-            return
-
-        # ── Non-streaming branch: auto+profile override ──
-        if mode == "auto" and profile:
-            try:
-                extra: dict[str, Any] = {}
-                for k, v in {
-                    "ppr_damping": ppr_damping,
-                    "ppr_top_k": ppr_top_k,
-                    "passage_node_weight": passage_node_weight,
-                    "recognition_top_k": recognition_top_k,
-                    "linking_top_k": linking_top_k,
-                    "ppr_qa_top_k": ppr_qa_top_k,
-                    "ppr_synonym_weight_mode": ppr_synonym_weight_mode,
-                    "qdrant_retrieval_mode": qdrant_retrieval_mode,
-                    "min_rerank_score": min_rerank_score,
-                }.items():
-                    if v is not None:
-                        extra[k] = v
-                result = await self.query_with_trace(
-                    workspace_id, query,
-                    mode=mode,
-                    return_trace=True,
-                    top_k=top_k,
-                    chunk_top_k=chunk_top_k,
-                    enable_rerank=enable_rerank,
-                    conversation_history=conversation_history or [],
-                    profile=profile,
-                    **extra,
-                )
-                trace = result.get("trace", {})
-                yield {
-                    "type": "meta",
-                    "data": result.get("data", {}),
-                    "metadata": {"routing_trace": trace.get("routing", trace)},
-                }
-                yield {"type": "chunk", "text": result.get("answer", "")}
-            except Exception as exc:
-                self.logger.error("stream_query (auto branch) error: %s", exc)
-                yield {"type": "error", "text": str(exc)}
-            return
-
-        # ── Non-streaming branch: VLM enhanced query ──
-        if vlm_enhanced and mode not in ("agentic",):
-            try:
-                result = await self.query_with_trace(
-                    workspace_id, query,
-                    mode=mode,
-                    vlm_enhanced=True,
-                    top_k=top_k,
-                    chunk_top_k=chunk_top_k,
-                    enable_rerank=enable_rerank,
-                    **({"min_rerank_score": min_rerank_score} if min_rerank_score is not None else {}),
-                    conversation_history=conversation_history or [],
-                    return_trace=False,
-                )
-                answer = result.get("answer", result) if isinstance(result, dict) else str(result)
-                data = result.get("data", {}) if isinstance(result, dict) else {}
-                metadata = result.get("metadata", {}) if isinstance(result, dict) else {}
-                self.logger.info(
-                    "stream_query VLM branch: answer_len=%d data_keys=%s data.chunks=%d data.entities=%d data.relationships=%d metadata_keys=%s",
-                    len(answer or ""),
-                    list(data.keys()) if isinstance(data, dict) else "non-dict",
-                    len(data.get("chunks", [])) if isinstance(data, dict) else 0,
-                    len(data.get("entities", [])) if isinstance(data, dict) else 0,
-                    len(data.get("relationships", []) or data.get("relations", []) or []) if isinstance(data, dict) else 0,
-                    list(metadata.keys()) if isinstance(metadata, dict) else "non-dict",
-                )
-                yield {"type": "meta", "data": data, "metadata": metadata}
-                yield {"type": "chunk", "text": answer}
-            except Exception as exc:
-                self.logger.error("stream_query (vlm branch) error: %s", exc)
-                yield {"type": "error", "text": str(exc)}
-            return
-
-        try:
-            from lightrag import QueryParam
-            from raganything.query import _QUERY_PARAM_FIELDS
+            from raganything.retrieval.agent_graph import AdaptiveAgentGraph
             rag_instance = await self.get_rag(workspace_id)
             await rag_instance._ensure_lightrag_initialized()
-
-            # Naive mode "rerank candidate cap": inflate chunk_top_k so vector
-            # retrieval returns up to `cap` candidates, let LightRAG rerank
-            # them, then truncate metadata chunks back to the user-visible
-            # chunk_top_k after the call returns.
-            display_chunk_top_k = chunk_top_k
-            effective_chunk_top_k = chunk_top_k
-            if (
-                mode == "naive"
-                and enable_rerank
-                and rerank_candidate_cap is not None
-                and rerank_candidate_cap > chunk_top_k
-            ):
-                effective_chunk_top_k = min(rerank_candidate_cap, 200)
-
-            # Funnel raw stream_query args through the same defaults pipeline
-            # that query()/query_with_trace() use, so QueryParam is identical
-            # regardless of which entry point the caller hit.
-            raw_kwargs: dict[str, Any] = {
-                "mode": mode,
-                "top_k": top_k,
-                "chunk_top_k": effective_chunk_top_k,
-                "enable_rerank": enable_rerank,
-                "rerank_score_scope": "all",
-                "stream": True,
-                "include_references": True,
-                "conversation_history": conversation_history or [],
+            graph = AdaptiveAgentGraph(
+                rag_instance.lightrag,
+                top_k=top_k,
+                chunk_top_k=chunk_top_k,
+                enable_rerank=enable_rerank,
+                min_rerank_score=min_rerank_score,
+                qdrant_retrieval_mode=qdrant_retrieval_mode,
+            )
+            final: dict[str, Any] = {}
+            async for kind, payload in graph.astream_run(query):
+                if kind == "final":
+                    final = payload
+            trace = final.get("trace", {})
+            metadata = {
+                "agentic_trace": {
+                    "confidence": final.get("confidence"),
+                    "grounded": final.get("grounded"),
+                    "profile": trace.get("profile"),
+                    "router_cache_hit": trace.get("router_cache_hit", False),
+                    "retrieve_cycles_used": trace.get("retrieve_cycles_used", 0),
+                    "check_cycles_used": trace.get("check_cycles_used", 0),
+                    "rewrite_history": trace.get("rewrite_history", []),
+                    "sub_questions": trace.get("sub_questions"),
+                }
             }
+            return {
+                "answer": str(final.get("answer") or ""),
+                "data": {"chunks": final.get("chunks", [])},
+                "metadata": metadata,
+            }
+
+        # ── auto + profile override ──
+        if mode == "auto" and profile:
+            extra: dict[str, Any] = {}
             for k, v in {
-                "multi_hop_depth": multi_hop_depth,
                 "ppr_damping": ppr_damping,
                 "ppr_top_k": ppr_top_k,
                 "passage_node_weight": passage_node_weight,
                 "recognition_top_k": recognition_top_k,
                 "linking_top_k": linking_top_k,
                 "ppr_qa_top_k": ppr_qa_top_k,
-                "exclude_synonym_edges": exclude_synonym_edges,
                 "ppr_synonym_weight_mode": ppr_synonym_weight_mode,
                 "qdrant_retrieval_mode": qdrant_retrieval_mode,
                 "min_rerank_score": min_rerank_score,
             }.items():
                 if v is not None:
-                    raw_kwargs[k] = v
-            normalized = self._apply_query_defaults(raw_kwargs)
-            qp_kwargs = {k: v for k, v in normalized.items() if k in _QUERY_PARAM_FIELDS}
-            param = QueryParam(**qp_kwargs)
-            result = await rag_instance.lightrag.aquery_llm(query, param=param)
-
-            # Post-truncate metadata chunks for naive candidate-cap mode so
-            # the UI only displays the user-visible chunk_top_k citations.
-            data_payload = result.get("data", {}) or {}
-            if (
-                mode == "naive"
-                and effective_chunk_top_k != display_chunk_top_k
-                and isinstance(data_payload.get("chunks"), list)
-            ):
-                data_payload = dict(data_payload)
-                data_payload["chunks"] = data_payload["chunks"][:display_chunk_top_k]
-
-            # Yield meta first (citations, entities, chunks, relationships)
-            yield {
-                "type": "meta",
-                "data": data_payload,
-                "metadata": result.get("metadata", {}),
+                    extra[k] = v
+            result = await self.query_with_trace(
+                workspace_id, query,
+                mode=mode,
+                top_k=top_k,
+                chunk_top_k=chunk_top_k,
+                enable_rerank=enable_rerank,
+                conversation_history=conversation_history or [],
+                profile=profile,
+                **extra,
+            )
+            trace = result.get("trace", {})
+            return {
+                "answer": result.get("answer", ""),
+                "data": result.get("data", {}),
+                "metadata": {"routing_trace": trace.get("routing", trace)},
             }
 
-            # Then yield LLM tokens
-            llm_response = result.get("llm_response", {})
-            if llm_response.get("is_streaming"):
-                async for token in llm_response["response_iterator"]:
-                    if token:
-                        yield {"type": "chunk", "text": token}
-            else:
-                # Cache hit or non-streaming fallback
-                content = llm_response.get("content") or "No answer returned."
-                yield {"type": "chunk", "text": content}
+        # ── VLM-enhanced ──
+        if vlm_enhanced:
+            result = await self.query_with_trace(
+                workspace_id, query,
+                mode=mode,
+                vlm_enhanced=True,
+                top_k=top_k,
+                chunk_top_k=chunk_top_k,
+                enable_rerank=enable_rerank,
+                **({"min_rerank_score": min_rerank_score} if min_rerank_score is not None else {}),
+                conversation_history=conversation_history or [],
+            )
+            answer = result.get("answer", result) if isinstance(result, dict) else str(result)
+            data = result.get("data", {}) if isinstance(result, dict) else {}
+            metadata = result.get("metadata", {}) if isinstance(result, dict) else {}
+            return {"answer": answer, "data": data, "metadata": metadata}
 
-        except Exception as exc:
-            self.logger.error("stream_query error: %s", exc)
-            yield {"type": "error", "text": str(exc)}
+        # ── default: LightRAG aquery_llm without streaming so cache writes ──
+        from lightrag import QueryParam
+        from raganything.query import _QUERY_PARAM_FIELDS
+        rag_instance = await self.get_rag(workspace_id)
+        await rag_instance._ensure_lightrag_initialized()
+
+        display_chunk_top_k = chunk_top_k
+        effective_chunk_top_k = chunk_top_k
+        if (
+            mode == "naive"
+            and enable_rerank
+            and rerank_candidate_cap is not None
+            and rerank_candidate_cap > chunk_top_k
+        ):
+            effective_chunk_top_k = min(rerank_candidate_cap, 200)
+
+        raw_kwargs: dict[str, Any] = {
+            "mode": mode,
+            "top_k": top_k,
+            "chunk_top_k": effective_chunk_top_k,
+            "enable_rerank": enable_rerank,
+            "rerank_score_scope": "all",
+            "stream": False,
+            "include_references": True,
+            "conversation_history": conversation_history or [],
+        }
+        for k, v in {
+            "multi_hop_depth": multi_hop_depth,
+            "ppr_damping": ppr_damping,
+            "ppr_top_k": ppr_top_k,
+            "passage_node_weight": passage_node_weight,
+            "recognition_top_k": recognition_top_k,
+            "linking_top_k": linking_top_k,
+            "ppr_qa_top_k": ppr_qa_top_k,
+            "exclude_synonym_edges": exclude_synonym_edges,
+            "ppr_synonym_weight_mode": ppr_synonym_weight_mode,
+            "qdrant_retrieval_mode": qdrant_retrieval_mode,
+            "min_rerank_score": min_rerank_score,
+        }.items():
+            if v is not None:
+                raw_kwargs[k] = v
+        normalized = self._apply_query_defaults(raw_kwargs)
+        qp_kwargs = {k: v for k, v in normalized.items() if k in _QUERY_PARAM_FIELDS}
+        param = QueryParam(**qp_kwargs)
+        result = await rag_instance.lightrag.aquery_llm(query, param=param)
+
+        data_payload = result.get("data", {}) or {}
+        if (
+            mode == "naive"
+            and effective_chunk_top_k != display_chunk_top_k
+            and isinstance(data_payload.get("chunks"), list)
+        ):
+            data_payload = dict(data_payload)
+            data_payload["chunks"] = data_payload["chunks"][:display_chunk_top_k]
+
+        llm_response = result.get("llm_response", {}) or {}
+        # stream=False → content is the full string (cache hit or fresh).
+        answer = llm_response.get("content") or ""
+        return {
+            "answer": answer,
+            "data": data_payload,
+            "metadata": result.get("metadata", {}) or {},
+        }
 
     async def query_with_multimodal(
         self,

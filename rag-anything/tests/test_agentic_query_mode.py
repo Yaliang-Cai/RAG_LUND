@@ -19,7 +19,14 @@ async def test_agentic_mode_returns_string():
         result = await QueryMixin.aquery(rag, "test query", mode="agentic")
 
     assert result == "agentic answer"
-    MockGraph.assert_called_once_with(rag.lightrag)
+    # aquery threads retrieval knobs (top_k / chunk_top_k / enable_rerank /
+    # qdrant_retrieval_mode) into the graph constructor since
+    # 4798f9b ("thread query params into agentic graph"). The exact kwarg
+    # set is verified elsewhere — here we just confirm the lightrag
+    # instance is the first positional arg and the call happened once.
+    MockGraph.assert_called_once()
+    call_args = MockGraph.call_args
+    assert call_args.args[0] is rag.lightrag
     instance.run.assert_called_once_with("test query", return_trace=False)
 
 

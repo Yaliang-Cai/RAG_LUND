@@ -342,9 +342,11 @@ class AdaptiveAgentGraph:
     async def astream_run(self, query: str):
         """Run the graph and yield ('step', label) for each node, then ('final', result_dict).
 
-        Used by stream_query's agentic branch to surface chain-of-thought
-        progress to the frontend (as SSE 'reasoning' events) while the
-        graph executes.
+        Used by ``LocalRagService.run_query()``'s agentic branch: the
+        ``'step'`` events are currently discarded (the non-streaming
+        endpoint only returns the final dict), but the generator form is
+        kept so a future progress-streaming endpoint can be added without
+        re-plumbing the graph.
         """
         initial: AgentState = {
             "query": query,

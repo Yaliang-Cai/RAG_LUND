@@ -8,10 +8,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Literal, Optional, Set
 
-import json as _json
-
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -664,7 +662,7 @@ async def query_endpoint(
         else max(0.0, min(1.0, payload.min_rerank_score))
     )
 
-    result = await service.query_with_trace(
+    result = await service.run_query(
         payload.workspace_id,
         payload.query,
         mode=payload.mode,
@@ -681,6 +679,9 @@ async def query_endpoint(
         linking_top_k=payload.linking_top_k,
         ppr_qa_top_k=payload.ppr_qa_top_k,
         qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
+        profile=payload.profile,
+        rerank_candidate_cap=payload.rerank_candidate_cap,
+        conversation_history=payload.conversation_history,
     )
 
     answer = result.get("answer", "")
@@ -694,76 +695,15 @@ async def query_endpoint(
             rag, {"data": data, "metadata": metadata}, payload
         )
 
+    source_nodes = _extract_source_nodes({"data": data, "metadata": metadata})
+
     return {
         "answer": answer,
         "data": data,
         "metadata": metadata,
+        "source_nodes": source_nodes,
         "graph": graph_data,
     }
-
-
-@app.post("/query/stream")
-async def query_stream_endpoint(
-    payload: QueryRequest,
-    _auth: None = Depends(verify_api_key),
-    service: LocalRagService = Depends(get_service),
-):
-    """SSE streaming query: yields metadata first, then LLM answer tokens."""
-    _validate_workspace_id(payload.workspace_id)
-    top_k = max(1, min(payload.top_k, MAX_TOP_K))
-    chunk_top_k = max(1, min(payload.chunk_top_k, MAX_CHUNK_TOP_K))
-    min_rerank_score = (
-        None if payload.min_rerank_score is None
-        else max(0.0, min(1.0, payload.min_rerank_score))
-    )
-
-    async def _generate():
-        retrieval_data: dict = {}
-
-        try:
-            async for event in service.stream_query(
-                payload.workspace_id, payload.query,
-                mode=payload.mode, top_k=top_k,
-                chunk_top_k=chunk_top_k, enable_rerank=payload.enable_rerank,
-                min_rerank_score=min_rerank_score,
-                multi_hop_depth=payload.multi_hop_depth,
-                ppr_damping=payload.ppr_damping,
-                ppr_top_k=payload.ppr_top_k,
-                passage_node_weight=payload.passage_node_weight,
-                recognition_top_k=payload.recognition_top_k,
-                linking_top_k=payload.linking_top_k,
-                ppr_qa_top_k=payload.ppr_qa_top_k,
-                qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
-                profile=payload.profile,
-                rerank_candidate_cap=payload.rerank_candidate_cap,
-                conversation_history=payload.conversation_history,
-                vlm_enhanced=payload.vlm_enhanced,
-            ):
-                if event["type"] == "meta":
-                    retrieval_data = event  # keep for graph subquery
-                    yield f"data: {_json.dumps({'type': 'meta', 'data': event['data'], 'metadata': event['metadata']}, ensure_ascii=False)}\n\n"
-                elif event["type"] == "chunk":
-                    yield f"data: {_json.dumps({'type': 'chunk', 'text': event['text']}, ensure_ascii=False)}\n\n"
-                elif event["type"] == "reasoning":
-                    yield f"data: {_json.dumps({'type': 'reasoning', 'text': event['text']}, ensure_ascii=False)}\n\n"
-                elif event["type"] == "error":
-                    yield f"data: {_json.dumps({'type': 'error', 'text': event['text']}, ensure_ascii=False)}\n\n"
-        except Exception as exc:
-            yield f"data: {_json.dumps({'type': 'error', 'text': str(exc)}, ensure_ascii=False)}\n\n"
-
-        # Event final: done + optional graph + source_nodes
-        graph_data = None
-        if payload.return_graph:
-            rag = await service.get_rag(payload.workspace_id)
-            graph_data = await _get_query_subgraph(rag, retrieval_data, payload)
-        source_nodes = _extract_source_nodes(retrieval_data)
-        yield f"data: {_json.dumps({'type': 'done', 'graph': graph_data, 'source_nodes': source_nodes}, ensure_ascii=False)}\n\n"
-
-    return StreamingResponse(
-        _generate(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
 
 
 @app.post("/query/multimodal")

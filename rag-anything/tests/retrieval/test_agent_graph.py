@@ -155,7 +155,12 @@ async def test_cycle1_fail_triggers_decompose_with_full_profile():
 
 # ── 3 retrieval cycles all fail → END_INSUFFICIENT ───────────────────────────
 
-async def test_three_retrieve_failures_returns_none_without_generating():
+async def test_three_retrieve_failures_routes_to_end_insufficient():
+    """When the grader rejects every retrieval cycle, the main generator is
+    never run by the graph itself — but ``run()`` then invokes a *fallback*
+    generator so the user gets an "I couldn't find an answer" string instead
+    of a bare empty response (commit b38ab73).
+    """
     grader = _grader(sufficient=False)
 
     graph = AdaptiveAgentGraph(
@@ -167,7 +172,8 @@ async def test_three_retrieve_failures_returns_none_without_generating():
         _router=_router(),
         _cache=RouterCache(),
     )
-    # Patch llm so we can detect if generator was called
+    # Patch llm so we can count generator-suffix prompts. The main graph must
+    # not invoke the answer generator; only the post-run fallback may.
     call_log = []
     original_llm = graph._llm
     async def logged_llm(prompt, **kw):
@@ -176,11 +182,14 @@ async def test_three_retrieve_failures_returns_none_without_generating():
     graph._llm = logged_llm
 
     result = await graph.run("unanswerable query", return_trace=True)
-    assert result["answer"] is None
+    # Fallback always produces a response string; confidence stays "none"
+    # because the graph never marked the answer as grounded.
+    assert isinstance(result["answer"], str) and result["answer"] != ""
     assert result["confidence"] == "none"
-    # Generator suffix contains this phrase; it must NOT appear in any call
-    for call in call_log:
-        assert "Answer the question based ONLY" not in call
+    # The generator suffix should appear at most once (the fallback) — never
+    # in the graph's own flow when no chunks survived the grader.
+    generator_calls = [c for c in call_log if "Answer the question based ONLY" in c]
+    assert len(generator_calls) <= 1
 
 
 # ── Hallucination check: retry via targeted_retriever ────────────────────────
@@ -213,7 +222,13 @@ async def test_check_fail_triggers_targeted_retriever():
 
 # ── Hallucination check: 2 failures → END_INSUFFICIENT ───────────────────────
 
-async def test_two_check_failures_returns_none():
+async def test_two_check_failures_marks_ungrounded():
+    """When the hallucination check rejects the answer twice, the graph
+    reaches END_INSUFFICIENT. Since b38ab73 ``run()`` keeps the generator's
+    output (so the user still sees the candidate answer) but flags it as
+    ungrounded — confidence is "low" when there *is* a candidate answer,
+    "none" when there isn't.
+    """
     checker = _checker(grounded=False, claims=["unsupported claim"])
     graph = AdaptiveAgentGraph(
         _lightrag(),
@@ -225,8 +240,9 @@ async def test_two_check_failures_returns_none():
         _cache=RouterCache(),
     )
     result = await graph.run("query", return_trace=True)
-    assert result["answer"] is None
-    assert result["confidence"] == "none"
+    assert isinstance(result["answer"], str) and result["answer"] != ""
+    assert result["grounded"] is False
+    assert result["confidence"] in ("low", "none")
 
 
 # ── Retrieval params are threaded into every QueryParam ──────────────────────

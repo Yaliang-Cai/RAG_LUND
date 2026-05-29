@@ -1,4 +1,4 @@
-import type { QueryParams } from '@/types'
+import type { QueryParams, SourceNode } from '@/types'
 
 export interface MultimodalQueryResult {
   answer: string
@@ -32,14 +32,28 @@ export async function postMultimodalQuery(args: {
   return (await response.json()) as MultimodalQueryResult
 }
 
-export async function openQueryStream(params: QueryParams): Promise<Response> {
+export interface QueryResponse {
+  answer: string
+  data: Record<string, unknown>
+  metadata: Record<string, unknown>
+  source_nodes: SourceNode[]
+  graph: Record<string, unknown> | null
+}
+
+/**
+ * Non-streaming POST /query. The endpoint goes through LightRAG's
+ * ``aquery_llm(stream=False)`` path so identical queries hit
+ * ``llm_response_cache`` on the second call (LightRAG explicitly skips the
+ * cache write for streaming responses, which is why we no longer use SSE).
+ */
+export async function postQuery(params: QueryParams): Promise<QueryResponse> {
   const body: Record<string, unknown> = {
     workspace_id: params.workspace_id,
     query: params.query,
     mode: params.mode ?? 'hybrid',
-    // Fallbacks mirror the canonical backend defaults (raganything/constants.py:
-    // DEFAULT_TOP_K=10, DEFAULT_CHUNK_TOP_K=5). ChatPage always sends explicit
-    // values from the mode preset, so these only apply to direct callers.
+    // Fallbacks mirror raganything/constants.py defaults; ChatPage always
+    // sends explicit values from the mode preset, so these only apply to
+    // direct callers.
     top_k: params.top_k ?? 10,
     chunk_top_k: params.chunk_top_k ?? 5,
     enable_rerank: params.enable_rerank ?? true,
@@ -63,7 +77,7 @@ export async function openQueryStream(params: QueryParams): Promise<Response> {
     body.vlm_enhanced = true
   }
 
-  const response = await fetch('/query/stream', {
+  const response = await fetch('/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -72,5 +86,5 @@ export async function openQueryStream(params: QueryParams): Promise<Response> {
     const err = await response.json().catch(() => ({ detail: response.statusText }))
     throw new Error((err as { detail?: string }).detail ?? 'Query failed')
   }
-  return response
+  return (await response.json()) as QueryResponse
 }

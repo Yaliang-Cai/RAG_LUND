@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import { useStreamQuery } from '@/hooks/useStreamQuery'
+import { useQuery } from '@/hooks/useQuery'
 import { useAppStore } from '@/store'
 import { useQuerySettings } from '@/store/querySettings'
 import { MessageList } from '@/components/chat/MessageList'
@@ -39,9 +39,11 @@ export default function ChatPage() {
   const setMessages = useAppStore((s) => s.setChatMessages)
   const clearMessages = useAppStore((s) => s.clearChatMessages)
 
-  const { send, answer, reasoning, status } = useStreamQuery()
+  const { send, answer, status } = useQuery()
 
-  // Non-streaming (multimodal) busy flag — separate from streaming status.
+  // Multimodal busy flag — separate from text-query status so the input is
+  // disabled during multimodal uploads even though they don't go through
+  // useQuery().
   const [multimodalBusy, setMultimodalBusy] = useState(false)
 
   const messagesRef = useRef<Message[]>([])
@@ -105,13 +107,13 @@ export default function ChatPage() {
       return
     }
 
-    // ── Branch B: text-only → streaming ──
+    // ── Branch B: text-only → POST /query (non-streaming) ──
     const history = buildHistory(messagesRef.current)
 
     // Backend `mode`:
     //   naive  → 'naive'
     //   lightrag/multihop → 'auto' with profile locked
-    //   agentic → 'agentic' (streaming branch in stream_query)
+    //   agentic → 'agentic' (LangGraph agent route on the server)
     // For agentic with explicit profile (not Auto), still send 'auto' so
     // the router locks the profile instead of going through the agent graph.
     let backendMode: QueryParams['mode']
@@ -157,7 +159,6 @@ export default function ChatPage() {
         id: String(++msgId),
         role: 'assistant',
         content: snap.answer,
-        reasoning: snap.reasoning,
         sourceNodes: snap.sourceNodes,
         traceType,
         traceMetadata: snap.metadata,
@@ -167,8 +168,11 @@ export default function ChatPage() {
     ])
   }, [workspaceId, send, setMessages])
 
-  const isStreaming = status === 'streaming'
-  const isBusy = isStreaming || multimodalBusy
+  // MessageList still calls it "streaming" externally — it really just means
+  // "a request is in flight; show the placeholder bubble". The actual
+  // transport is non-streaming now.
+  const isPending = status === 'pending'
+  const isBusy = isPending || multimodalBusy
 
   return (
     <div className="flex flex-col h-full">
@@ -181,8 +185,8 @@ export default function ChatPage() {
       <MessageList
         messages={messages}
         streamingAnswer={answer}
-        streamingReasoning={reasoning}
-        isStreaming={isStreaming}
+        streamingReasoning=""
+        isStreaming={isPending}
         workspaceId={workspaceId}
       />
       <ChatInput onSend={handleSend} disabled={isBusy} />

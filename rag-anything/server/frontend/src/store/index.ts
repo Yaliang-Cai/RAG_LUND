@@ -18,7 +18,9 @@ interface AppStore {
   toggleOpenReference: (id: string) => void
   lastSeenJobStatuses: Record<string, string>
   setLastSeenJobStatuses: (statuses: Record<string, string>) => void
-  // Chat history — persists across navigation (not persisted to localStorage)
+  // Chat history — persisted to localStorage so reload keeps the conversation.
+  // See partialize below; large per-message fields (chunks, sourceNodes,
+  // traceMetadata) are stripped on persist to stay well under the ~5MB quota.
   chatMessages: Message[]
   setChatMessages: (msgs: Message[] | ((prev: Message[]) => Message[])) => void
   clearChatMessages: () => void
@@ -57,7 +59,18 @@ export const useAppStore = create<AppStore>()(
         workspaceId: s.workspaceId,
         theme: s.theme,
         lastSeenJobStatuses: s.lastSeenJobStatuses,
-        // chatMessages intentionally NOT persisted (cleared on page reload)
+        // Persist only the lightweight conversational fields. Chunks /
+        // sourceNodes / traceMetadata are recomputable from the next
+        // backend call and can each be hundreds of KB, so dropping them
+        // keeps localStorage well under the ~5MB browser quota even after
+        // long sessions.
+        chatMessages: s.chatMessages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          query: m.query,
+          traceType: m.traceType,
+        })),
       }),
     }
   )

@@ -86,10 +86,9 @@ _USE_LOCAL_STATIC = all([
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `POST` | `/query` | 一次性查询，返回 `{answer, data, metadata, graph}` |
-| `POST` | `/query/stream` | SSE 流式查询，先发 `meta` 事件，再逐 token 发 `chunk`，最后发 `done` |
+| `POST` | `/query` | 非流式查询，返回 `{answer, data, metadata, source_nodes, graph}`；通过 LightRAG 非流式路径触发 `llm_response_cache` 写入，重复问命中缓存 |
 
-两个端点均支持相同的 `QueryRequest` 参数：
+`QueryRequest` 参数：
 
 ```json
 {
