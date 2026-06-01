@@ -123,8 +123,11 @@ import pytest_asyncio
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
-# Re-export pg_pool fixture
-from tests.governance.conftest import pg_pool, pgtest_dsn_or_skip  # type: ignore  # noqa: F401
+# Re-export pg_pool fixture + the skip marker for PG-dependent tests
+from tests.governance.conftest import pg_pool, pytestmark_pg  # type: ignore  # noqa: F401
+
+# Apply PG-availability skip to every test in this module
+pytestmark = pytestmark_pg
 
 from raganything.governance import GovernanceService
 from server.graph_edit_routes import router as graph_edit_router
@@ -203,9 +206,11 @@ async def app_client(pg_pool, networkx_kg) -> AsyncIterator[AsyncClient]:
 # rag-anything/tests/server/test_graph_edit_routes.py
 import pytest
 
-pytestmark = pytest.mark.asyncio
+# conftest sets pytestmark = pytestmark_pg (PG availability skip).
+# Each test is async, so mark them individually:
 
 
+@pytest.mark.asyncio
 async def test_get_node_returns_full_properties(app_client):
     r = await app_client.get("/graph/ws1/nodes/Alice")
     assert r.status_code == 200
@@ -215,6 +220,7 @@ async def test_get_node_returns_full_properties(app_client):
     assert body["properties"]["entity_type"] == "person"
 
 
+@pytest.mark.asyncio
 async def test_get_node_404_when_missing(app_client):
     r = await app_client.get("/graph/ws1/nodes/NoOne")
     assert r.status_code == 404
@@ -277,6 +283,7 @@ Append to `test_graph_edit_routes.py`:
 from urllib.parse import quote
 
 
+@pytest.mark.asyncio
 async def test_get_edge_returns_properties(app_client):
     edge_id = quote("Alice|Acme", safe="")
     r = await app_client.get(f"/graph/ws1/edges/{edge_id}")
@@ -287,11 +294,13 @@ async def test_get_edge_returns_properties(app_client):
     assert float(body["properties"]["weight"]) == 1.0
 
 
+@pytest.mark.asyncio
 async def test_get_edge_404_when_missing(app_client):
     r = await app_client.get(f"/graph/ws1/edges/{quote('Alice|Nope', safe='')}")
     assert r.status_code == 404
 
 
+@pytest.mark.asyncio
 async def test_get_edge_400_when_malformed(app_client):
     r = await app_client.get("/graph/ws1/edges/no-separator")
     assert r.status_code == 400
@@ -354,6 +363,7 @@ git commit -m "feat(graph-edit): GET /graph/{ws}/edges/{id}"
 Append to `test_graph_edit_routes.py`:
 
 ```python
+@pytest.mark.asyncio
 async def test_put_node_updates_properties_and_returns_fresh(app_client):
     r = await app_client.put(
         "/graph/ws1/nodes/Alice",
@@ -368,6 +378,7 @@ async def test_put_node_updates_properties_and_returns_fresh(app_client):
     assert g.json()["properties"]["description"] == "senior engineer"
 
 
+@pytest.mark.asyncio
 async def test_put_node_rejects_reserved_keys(app_client):
     r = await app_client.put(
         "/graph/ws1/nodes/Alice",
@@ -377,6 +388,7 @@ async def test_put_node_rejects_reserved_keys(app_client):
     assert "source_id" in r.json()["detail"]
 
 
+@pytest.mark.asyncio
 async def test_put_node_404_when_missing(app_client):
     r = await app_client.put(
         "/graph/ws1/nodes/NoOne",
@@ -459,6 +471,7 @@ git commit -m "feat(graph-edit): PUT node with reserved-key guard + audit"
 - [ ] **Step 1: Write failing tests**
 
 ```python
+@pytest.mark.asyncio
 async def test_put_edge_updates_properties(app_client):
     edge_id = quote("Alice|Acme", safe="")
     r = await app_client.put(
@@ -471,6 +484,7 @@ async def test_put_edge_updates_properties(app_client):
     assert float(body["properties"]["weight"]) == 2.5
 
 
+@pytest.mark.asyncio
 async def test_put_edge_rejects_reserved_keys(app_client):
     edge_id = quote("Alice|Acme", safe="")
     r = await app_client.put(
@@ -480,6 +494,7 @@ async def test_put_edge_rejects_reserved_keys(app_client):
     assert r.status_code == 400
 
 
+@pytest.mark.asyncio
 async def test_put_edge_404_when_missing(app_client):
     edge_id = quote("Alice|Nowhere", safe="")
     r = await app_client.put(
@@ -553,6 +568,7 @@ git commit -m "feat(graph-edit): PUT edge with reserved-key guard + audit"
 - [ ] **Step 1: Write failing test**
 
 ```python
+@pytest.mark.asyncio
 async def test_put_node_returns_423_when_frozen(app_client):
     # Freeze the workspace via the test app's gov instance
     gov = app_client._transport.app.state.gov  # type: ignore[attr-defined]
@@ -615,6 +631,7 @@ git commit -m "feat(graph-edit): map WorkspaceFrozenError to 423 Locked"
 - [ ] **Step 1: Write failing test**
 
 ```python
+@pytest.mark.asyncio
 async def test_put_node_writes_audit_row_with_diff(app_client):
     r = await app_client.put(
         "/graph/ws1/nodes/Alice",
@@ -1041,7 +1058,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { Label } from '@/components/ui/label'
+// No Label primitive in this codebase — use a plain <label> element below.
 
 const MULTILINE_KEYS = new Set(['description', 'keywords'])
 
@@ -1083,9 +1100,9 @@ export function PropertyEditDialog({ workspaceId }: { workspaceId: string }) {
             const value = String(editing.draft[k] ?? '')
             return (
               <div key={k} className="flex flex-col gap-1">
-                <Label htmlFor={`field-${k}`} className="text-xs text-muted-foreground uppercase">
+                <label htmlFor={`field-${k}`} className="text-xs text-muted-foreground uppercase">
                   {k}
-                </Label>
+                </label>
                 {MULTILINE_KEYS.has(k) ? (
                   <Textarea
                     id={`field-${k}`}
@@ -1116,7 +1133,7 @@ export function PropertyEditDialog({ workspaceId }: { workspaceId: string }) {
 }
 ```
 
-If `@/components/ui/dialog`, `input`, `textarea`, or `label` does not exist in the repo yet, scaffold them by copying the matching shadcn pattern already used by the other UI primitives in `components/ui/` (the codebase uses `@base-ui/react`). Check first: `ls rag-anything/server/frontend/src/components/ui/`. If any is missing, create it as a thin wrapper following the existing `button.tsx` / `sheet.tsx` style — do **not** invent new APIs.
+Verified present in `components/ui/`: `dialog.tsx`, `input.tsx`, `textarea.tsx`, `button.tsx`, `sheet.tsx`. **No `label.tsx` exists** — use a plain `<label>` HTML element with Tailwind classes (already done above). If any other expected primitive is missing, scaffold it by copying the existing shadcn pattern (the codebase uses `@base-ui/react`); do not invent new APIs.
 
 - [ ] **Step 4: Run — expect pass**
 
