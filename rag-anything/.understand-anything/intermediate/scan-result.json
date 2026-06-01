@@ -1,0 +1,1579 @@
+{
+  "name": "raganything",
+  "description": "基于 LightRAG 构建的多模态文档 RAG 系统：支持 PDF、Office、图片等混合内容的解析（MinerU/Docling），通过 Mixin 模式组合查询/处理/批处理能力，配套 FastAPI 服务与 React + Vite WebUI，并提供集成 vLLM、SentenceTransformer 嵌入与 CrossEncoder 重排序的本地部署服务（LocalRagService）。该项目源文件超过 100 个，建议按子目录范围分析以获得更快结果。",
+  "languages": [
+    "css",
+    "html",
+    "javascript",
+    "json",
+    "markdown",
+    "python",
+    "shell",
+    "sql",
+    "toml",
+    "typescript",
+    "yaml"
+  ],
+  "frameworks": [
+    "FastAPI",
+    "LightRAG",
+    "MinerU",
+    "OpenAI",
+    "Uvicorn",
+    "HuggingFace Hub",
+    "Datasets",
+    "asyncpg",
+    "React",
+    "Vite",
+    "Vitest",
+    "TailwindCSS",
+    "Zustand",
+    "TanStack Query",
+    "React Router",
+    "Axios",
+    "ESLint",
+    "TypeScript",
+    "Pytest"
+  ],
+  "files": [
+    {
+      "path": ".github/dependabot.yml",
+      "language": "yaml",
+      "sizeLines": 11,
+      "fileCategory": "config"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/bug_report.yml",
+      "language": "yaml",
+      "sizeLines": 61,
+      "fileCategory": "config"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "language": "yaml",
+      "sizeLines": 1,
+      "fileCategory": "config"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/feature_request.yml",
+      "language": "yaml",
+      "sizeLines": 26,
+      "fileCategory": "config"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/question.yml",
+      "language": "yaml",
+      "sizeLines": 26,
+      "fileCategory": "config"
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "language": "markdown",
+      "sizeLines": 32,
+      "fileCategory": "docs"
+    },
+    {
+      "path": ".github/workflows/linting.yaml",
+      "language": "yaml",
+      "sizeLines": 36,
+      "fileCategory": "infra"
+    },
+    {
+      "path": ".github/workflows/pypi-publish.yml",
+      "language": "yaml",
+      "sizeLines": 52,
+      "fileCategory": "infra"
+    },
+    {
+      "path": ".pre-commit-config.yaml",
+      "language": "yaml",
+      "sizeLines": 21,
+      "fileCategory": "config"
+    },
+    {
+      "path": ".understand-anything/.understandignore",
+      "language": "unknown",
+      "sizeLines": 38,
+      "fileCategory": "code"
+    },
+    {
+      "path": ".understand-anything/config.json",
+      "language": "json",
+      "sizeLines": 1,
+      "fileCategory": "config"
+    },
+    {
+      "path": "CONSTANTS_FLOW.md",
+      "language": "markdown",
+      "sizeLines": 131,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "env.example",
+      "language": "example",
+      "sizeLines": 8,
+      "fileCategory": "code"
+    },
+    {
+      "path": "MANIFEST.in",
+      "language": "in",
+      "sizeLines": 9,
+      "fileCategory": "code"
+    },
+    {
+      "path": "pyproject.toml",
+      "language": "toml",
+      "sizeLines": 92,
+      "fileCategory": "config"
+    },
+    {
+      "path": "raganything/__init__.py",
+      "language": "python",
+      "sizeLines": 120,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/base.py",
+      "language": "python",
+      "sizeLines": 12,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/batch_parser.py",
+      "language": "python",
+      "sizeLines": 467,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/batch.py",
+      "language": "python",
+      "sizeLines": 421,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/callbacks.py",
+      "language": "python",
+      "sizeLines": 378,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/chunking.py",
+      "language": "python",
+      "sizeLines": 443,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/config.py",
+      "language": "python",
+      "sizeLines": 206,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/constants.py",
+      "language": "python",
+      "sizeLines": 377,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/enhanced_markdown.py",
+      "language": "python",
+      "sizeLines": 534,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/governance/__init__.py",
+      "language": "python",
+      "sizeLines": 37,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/governance/callbacks.py",
+      "language": "python",
+      "sizeLines": 146,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/governance/db.py",
+      "language": "python",
+      "sizeLines": 120,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/governance/jobs.py",
+      "language": "python",
+      "sizeLines": 70,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/governance/migrations/__init__.py",
+      "language": "python",
+      "sizeLines": 0,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/governance/migrations/001_init.sql",
+      "language": "sql",
+      "sizeLines": 65,
+      "fileCategory": "data"
+    },
+    {
+      "path": "raganything/governance/models.py",
+      "language": "python",
+      "sizeLines": 61,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/governance/service.py",
+      "language": "python",
+      "sizeLines": 739,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/governance/settings.py",
+      "language": "python",
+      "sizeLines": 51,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/modalprocessors.py",
+      "language": "python",
+      "sizeLines": 1756,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/observability.py",
+      "language": "python",
+      "sizeLines": 28,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/parser.py",
+      "language": "python",
+      "sizeLines": 1892,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/processor.py",
+      "language": "python",
+      "sizeLines": 3115,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/prompt_internvl2.py",
+      "language": "python",
+      "sizeLines": 297,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/prompt_qwen2_vl.py",
+      "language": "python",
+      "sizeLines": 454,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/prompt.py",
+      "language": "python",
+      "sizeLines": 381,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/query_message_repack.py",
+      "language": "python",
+      "sizeLines": 133,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/query.py",
+      "language": "python",
+      "sizeLines": 1237,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/raganything.py",
+      "language": "python",
+      "sizeLines": 693,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/resilience.py",
+      "language": "python",
+      "sizeLines": 398,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/__init__.py",
+      "language": "python",
+      "sizeLines": 19,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/agent_graph.py",
+      "language": "python",
+      "sizeLines": 479,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/classifier.py",
+      "language": "python",
+      "sizeLines": 94,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/complexity.py",
+      "language": "python",
+      "sizeLines": 77,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/evaluator.py",
+      "language": "python",
+      "sizeLines": 46,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/gfm_retriever.py",
+      "language": "python",
+      "sizeLines": 78,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/grader.py",
+      "language": "python",
+      "sizeLines": 61,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/hallucination_checker.py",
+      "language": "python",
+      "sizeLines": 42,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/paths.py",
+      "language": "python",
+      "sizeLines": 98,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/profiles.py",
+      "language": "python",
+      "sizeLines": 83,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/rewriter.py",
+      "language": "python",
+      "sizeLines": 34,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/router_cache.py",
+      "language": "python",
+      "sizeLines": 65,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/retrieval/router.py",
+      "language": "python",
+      "sizeLines": 186,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/services/__init__.py",
+      "language": "python",
+      "sizeLines": 2,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/services/local_rag.py",
+      "language": "python",
+      "sizeLines": 2670,
+      "fileCategory": "code"
+    },
+    {
+      "path": "raganything/utils.py",
+      "language": "python",
+      "sizeLines": 267,
+      "fileCategory": "code"
+    },
+    {
+      "path": "README_zh.md",
+      "language": "markdown",
+      "sizeLines": 1422,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "README.md",
+      "language": "markdown",
+      "sizeLines": 1482,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "requirements.txt",
+      "language": "txt",
+      "sizeLines": 27,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "run_multihop_evals.py",
+      "language": "python",
+      "sizeLines": 83,
+      "fileCategory": "code"
+    },
+    {
+      "path": "scripts/check_text_chunks_kv.py",
+      "language": "python",
+      "sizeLines": 203,
+      "fileCategory": "code"
+    },
+    {
+      "path": "scripts/create_tiktoken_cache.py",
+      "language": "python",
+      "sizeLines": 17,
+      "fileCategory": "code"
+    },
+    {
+      "path": "scripts/debug_retrieval_ablation.py",
+      "language": "python",
+      "sizeLines": 304,
+      "fileCategory": "code"
+    },
+    {
+      "path": "scripts/export_lightrag_to_gfm.py",
+      "language": "python",
+      "sizeLines": 234,
+      "fileCategory": "code"
+    },
+    {
+      "path": "scripts/extract_docbench_retrieval_stats.py",
+      "language": "python",
+      "sizeLines": 138,
+      "fileCategory": "code"
+    },
+    {
+      "path": "scripts/extract_surge_retrieval_stats.py",
+      "language": "python",
+      "sizeLines": 165,
+      "fileCategory": "code"
+    },
+    {
+      "path": "scripts/link_external_workspace.py",
+      "language": "python",
+      "sizeLines": 159,
+      "fileCategory": "code"
+    },
+    {
+      "path": "scripts/manage_workspace_synonyms.py",
+      "language": "python",
+      "sizeLines": 460,
+      "fileCategory": "code"
+    },
+    {
+      "path": "scripts/query_gfm.py",
+      "language": "python",
+      "sizeLines": 281,
+      "fileCategory": "code"
+    },
+    {
+      "path": "scripts/query_ppr.py",
+      "language": "python",
+      "sizeLines": 259,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/app.py",
+      "language": "python",
+      "sizeLines": 1587,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/download_static.py",
+      "language": "python",
+      "sizeLines": 123,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/components.json",
+      "language": "json",
+      "sizeLines": 25,
+      "fileCategory": "config"
+    },
+    {
+      "path": "server/frontend/eslint.config.js",
+      "language": "javascript",
+      "sizeLines": 22,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/index.html",
+      "language": "html",
+      "sizeLines": 13,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "server/frontend/package.json",
+      "language": "json",
+      "sizeLines": 61,
+      "fileCategory": "config"
+    },
+    {
+      "path": "server/frontend/postcss.config.js",
+      "language": "javascript",
+      "sizeLines": 5,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/README.md",
+      "language": "markdown",
+      "sizeLines": 73,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "server/frontend/src/api/client.ts",
+      "language": "typescript",
+      "sizeLines": 13,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/api/evaluate.ts",
+      "language": "typescript",
+      "sizeLines": 18,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/api/files.ts",
+      "language": "typescript",
+      "sizeLines": 58,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/api/graph.ts",
+      "language": "typescript",
+      "sizeLines": 33,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/api/jobs.ts",
+      "language": "typescript",
+      "sizeLines": 23,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/api/query.ts",
+      "language": "typescript",
+      "sizeLines": 90,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/api/workspace.ts",
+      "language": "typescript",
+      "sizeLines": 24,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/App.css",
+      "language": "css",
+      "sizeLines": 184,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "server/frontend/src/App.tsx",
+      "language": "typescript",
+      "sizeLines": 41,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/__tests__/ReferenceList.test.tsx",
+      "language": "typescript",
+      "sizeLines": 116,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/AdvancedOptions.tsx",
+      "language": "typescript",
+      "sizeLines": 182,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/AgenticTrace.tsx",
+      "language": "typescript",
+      "sizeLines": 91,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/ChatInput.tsx",
+      "language": "typescript",
+      "sizeLines": 127,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/CitationChip.tsx",
+      "language": "typescript",
+      "sizeLines": 28,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/EvalBadge.tsx",
+      "language": "typescript",
+      "sizeLines": 87,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/InlineCitation.tsx",
+      "language": "typescript",
+      "sizeLines": 120,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/MessageBubble.tsx",
+      "language": "typescript",
+      "sizeLines": 162,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/MessageList.tsx",
+      "language": "typescript",
+      "sizeLines": 57,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/QuerySettings.tsx",
+      "language": "typescript",
+      "sizeLines": 126,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/ReasoningTrace.tsx",
+      "language": "typescript",
+      "sizeLines": 18,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/chat/ReferenceList.tsx",
+      "language": "typescript",
+      "sizeLines": 116,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/documents/__tests__/textHighlight.test.ts",
+      "language": "typescript",
+      "sizeLines": 49,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/documents/FileList.tsx",
+      "language": "typescript",
+      "sizeLines": 101,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/documents/FileUpload.tsx",
+      "language": "typescript",
+      "sizeLines": 124,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/documents/MarkdownViewer.tsx",
+      "language": "typescript",
+      "sizeLines": 59,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/documents/PdfViewer.tsx",
+      "language": "typescript",
+      "sizeLines": 77,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/documents/textHighlight.ts",
+      "language": "typescript",
+      "sizeLines": 35,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/graph/__tests__/GraphSearch.test.tsx",
+      "language": "typescript",
+      "sizeLines": 39,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/graph/ForceGraph.tsx",
+      "language": "typescript",
+      "sizeLines": 69,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/graph/GraphSearch.tsx",
+      "language": "typescript",
+      "sizeLines": 43,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/graph/NodeSheet.tsx",
+      "language": "typescript",
+      "sizeLines": 30,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/jobs/JobCard.tsx",
+      "language": "typescript",
+      "sizeLines": 71,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/jobs/JobList.tsx",
+      "language": "typescript",
+      "sizeLines": 14,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/layout/AppShell.tsx",
+      "language": "typescript",
+      "sizeLines": 41,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/layout/ThemeToggle.tsx",
+      "language": "typescript",
+      "sizeLines": 12,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/layout/TopNav.tsx",
+      "language": "typescript",
+      "sizeLines": 67,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/layout/WorkspaceSwitcher.tsx",
+      "language": "typescript",
+      "sizeLines": 103,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/alert-dialog.tsx",
+      "language": "typescript",
+      "sizeLines": 187,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/alert.tsx",
+      "language": "typescript",
+      "sizeLines": 76,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/badge.tsx",
+      "language": "typescript",
+      "sizeLines": 52,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/button.tsx",
+      "language": "typescript",
+      "sizeLines": 58,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/collapsible.tsx",
+      "language": "typescript",
+      "sizeLines": 21,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/command.tsx",
+      "language": "typescript",
+      "sizeLines": 196,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/dialog.tsx",
+      "language": "typescript",
+      "sizeLines": 160,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/dropdown-menu.tsx",
+      "language": "typescript",
+      "sizeLines": 268,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/input-group.tsx",
+      "language": "typescript",
+      "sizeLines": 156,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/input.tsx",
+      "language": "typescript",
+      "sizeLines": 20,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/navigation-menu.tsx",
+      "language": "typescript",
+      "sizeLines": 168,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/progress.tsx",
+      "language": "typescript",
+      "sizeLines": 81,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/scroll-area.tsx",
+      "language": "typescript",
+      "sizeLines": 52,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/select.tsx",
+      "language": "typescript",
+      "sizeLines": 199,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/separator.tsx",
+      "language": "typescript",
+      "sizeLines": 25,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/sheet.tsx",
+      "language": "typescript",
+      "sizeLines": 136,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/switch.tsx",
+      "language": "typescript",
+      "sizeLines": 30,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/components/ui/textarea.tsx",
+      "language": "typescript",
+      "sizeLines": 18,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/config/modePresets.ts",
+      "language": "typescript",
+      "sizeLines": 96,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/hooks/__tests__/store.test.ts",
+      "language": "typescript",
+      "sizeLines": 53,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/hooks/__tests__/useJobs.test.ts",
+      "language": "typescript",
+      "sizeLines": 43,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/hooks/__tests__/useQuery.test.ts",
+      "language": "typescript",
+      "sizeLines": 62,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/hooks/useFiles.ts",
+      "language": "typescript",
+      "sizeLines": 10,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/hooks/useGraph.ts",
+      "language": "typescript",
+      "sizeLines": 19,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/hooks/useJobs.ts",
+      "language": "typescript",
+      "sizeLines": 15,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/hooks/useQuery.ts",
+      "language": "typescript",
+      "sizeLines": 82,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/hooks/useWorkspaces.ts",
+      "language": "typescript",
+      "sizeLines": 10,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/index.css",
+      "language": "css",
+      "sizeLines": 58,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "server/frontend/src/lib/utils.ts",
+      "language": "typescript",
+      "sizeLines": 6,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/main.tsx",
+      "language": "typescript",
+      "sizeLines": 15,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/routes/ChatPage.tsx",
+      "language": "typescript",
+      "sizeLines": 195,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/routes/DocumentsPage.tsx",
+      "language": "typescript",
+      "sizeLines": 108,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/routes/GraphPage.tsx",
+      "language": "typescript",
+      "sizeLines": 61,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/routes/JobsPage.tsx",
+      "language": "typescript",
+      "sizeLines": 46,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/store/index.ts",
+      "language": "typescript",
+      "sizeLines": 77,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/store/querySettings.ts",
+      "language": "typescript",
+      "sizeLines": 64,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/types/index.ts",
+      "language": "typescript",
+      "sizeLines": 133,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/src/vite-env.d.ts",
+      "language": "typescript",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/tsconfig.app.json",
+      "language": "json",
+      "sizeLines": 25,
+      "fileCategory": "config"
+    },
+    {
+      "path": "server/frontend/tsconfig.json",
+      "language": "json",
+      "sizeLines": 22,
+      "fileCategory": "config"
+    },
+    {
+      "path": "server/frontend/tsconfig.node.json",
+      "language": "json",
+      "sizeLines": 25,
+      "fileCategory": "config"
+    },
+    {
+      "path": "server/frontend/vite.config.d.ts",
+      "language": "typescript",
+      "sizeLines": 2,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/vite.config.js",
+      "language": "javascript",
+      "sizeLines": 36,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/frontend/vite.config.ts",
+      "language": "typescript",
+      "sizeLines": 39,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/graph_edit_routes.py",
+      "language": "python",
+      "sizeLines": 61,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/SERVER_ARCH.md",
+      "language": "markdown",
+      "sizeLines": 227,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "server/static/.gitkeep",
+      "language": "unknown",
+      "sizeLines": 0,
+      "fileCategory": "code"
+    },
+    {
+      "path": "server/templates/index.html",
+      "language": "html",
+      "sizeLines": 2587,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "setup.py",
+      "language": "python",
+      "sizeLines": 104,
+      "fileCategory": "code"
+    },
+    {
+      "path": "start_server_internvl2.sh",
+      "language": "shell",
+      "sizeLines": 24,
+      "fileCategory": "script"
+    },
+    {
+      "path": "start_server_qwen3_vl.sh",
+      "language": "shell",
+      "sizeLines": 30,
+      "fileCategory": "script"
+    },
+    {
+      "path": "start_server_qwen3.5.sh",
+      "language": "shell",
+      "sizeLines": 25,
+      "fileCategory": "script"
+    },
+    {
+      "path": "start_vllm.sh",
+      "language": "shell",
+      "sizeLines": 15,
+      "fileCategory": "script"
+    }
+  ],
+  "totalFiles": 172,
+  "filteredByIgnore": 108,
+  "estimatedComplexity": "large",
+  "importMap": {
+    ".github/dependabot.yml": [],
+    ".github/ISSUE_TEMPLATE/bug_report.yml": [],
+    ".github/ISSUE_TEMPLATE/config.yml": [],
+    ".github/ISSUE_TEMPLATE/feature_request.yml": [],
+    ".github/ISSUE_TEMPLATE/question.yml": [],
+    ".github/pull_request_template.md": [],
+    ".github/workflows/linting.yaml": [],
+    ".github/workflows/pypi-publish.yml": [],
+    ".pre-commit-config.yaml": [],
+    ".understand-anything/.understandignore": [],
+    ".understand-anything/config.json": [],
+    "CONSTANTS_FLOW.md": [],
+    "env.example": [],
+    "MANIFEST.in": [],
+    "pyproject.toml": [],
+    "raganything/__init__.py": [
+      "raganything/parser.py"
+    ],
+    "raganything/base.py": [],
+    "raganything/batch_parser.py": [
+      "raganything/parser.py"
+    ],
+    "raganything/batch.py": [
+      "raganything/batch_parser.py"
+    ],
+    "raganything/callbacks.py": [],
+    "raganything/chunking.py": [],
+    "raganything/config.py": [
+      "raganything/constants.py"
+    ],
+    "raganything/constants.py": [],
+    "raganything/enhanced_markdown.py": [],
+    "raganything/governance/__init__.py": [
+      "raganything/governance/callbacks.py",
+      "raganything/governance/db.py",
+      "raganything/governance/jobs.py",
+      "raganything/governance/models.py",
+      "raganything/governance/service.py",
+      "raganything/governance/settings.py"
+    ],
+    "raganything/governance/callbacks.py": [
+      "raganything/callbacks.py"
+    ],
+    "raganything/governance/db.py": [
+      "raganything/governance/settings.py"
+    ],
+    "raganything/governance/jobs.py": [],
+    "raganything/governance/migrations/__init__.py": [],
+    "raganything/governance/migrations/001_init.sql": [],
+    "raganything/governance/models.py": [],
+    "raganything/governance/service.py": [
+      "raganything/governance/models.py"
+    ],
+    "raganything/governance/settings.py": [
+      "raganything/constants.py"
+    ],
+    "raganything/modalprocessors.py": [
+      "raganything/constants.py",
+      "raganything/prompt.py"
+    ],
+    "raganything/observability.py": [],
+    "raganything/parser.py": [],
+    "raganything/processor.py": [
+      "raganything/base.py",
+      "raganything/constants.py",
+      "raganything/parser.py",
+      "raganything/utils.py"
+    ],
+    "raganything/prompt_internvl2.py": [
+      "raganything/prompt.py"
+    ],
+    "raganything/prompt_qwen2_vl.py": [],
+    "raganything/prompt.py": [],
+    "raganything/query_message_repack.py": [],
+    "raganything/query.py": [
+      "raganything/constants.py",
+      "raganything/prompt.py",
+      "raganything/query_message_repack.py",
+      "raganything/retrieval/__init__.py",
+      "raganything/retrieval/gfm_retriever.py",
+      "raganything/utils.py"
+    ],
+    "raganything/raganything.py": [
+      "raganything/batch.py",
+      "raganything/callbacks.py",
+      "raganything/config.py",
+      "raganything/modalprocessors.py",
+      "raganything/parser.py",
+      "raganything/processor.py",
+      "raganything/query.py",
+      "raganything/utils.py"
+    ],
+    "raganything/resilience.py": [],
+    "raganything/retrieval/__init__.py": [
+      "raganything/retrieval/profiles.py"
+    ],
+    "raganything/retrieval/agent_graph.py": [
+      "raganything/constants.py",
+      "raganything/retrieval/classifier.py",
+      "raganything/retrieval/grader.py",
+      "raganything/retrieval/hallucination_checker.py",
+      "raganything/retrieval/rewriter.py",
+      "raganything/retrieval/router_cache.py",
+      "raganything/retrieval/router.py"
+    ],
+    "raganything/retrieval/classifier.py": [
+      "raganything/constants.py",
+      "raganything/retrieval/profiles.py"
+    ],
+    "raganything/retrieval/complexity.py": [],
+    "raganything/retrieval/evaluator.py": [],
+    "raganything/retrieval/gfm_retriever.py": [],
+    "raganything/retrieval/grader.py": [
+      "raganything/constants.py"
+    ],
+    "raganything/retrieval/hallucination_checker.py": [
+      "raganything/retrieval/grader.py"
+    ],
+    "raganything/retrieval/paths.py": [
+      "raganything/constants.py",
+      "raganything/retrieval/gfm_retriever.py"
+    ],
+    "raganything/retrieval/profiles.py": [],
+    "raganything/retrieval/rewriter.py": [],
+    "raganything/retrieval/router_cache.py": [],
+    "raganything/retrieval/router.py": [
+      "raganything/retrieval/classifier.py",
+      "raganything/retrieval/paths.py",
+      "raganything/retrieval/profiles.py"
+    ],
+    "raganything/services/__init__.py": [],
+    "raganything/services/local_rag.py": [
+      "raganything/callbacks.py",
+      "raganything/chunking.py",
+      "raganything/constants.py",
+      "raganything/query_message_repack.py",
+      "raganything/raganything.py",
+      "raganything/resilience.py"
+    ],
+    "raganything/utils.py": [
+      "raganything/constants.py"
+    ],
+    "README_zh.md": [],
+    "README.md": [],
+    "requirements.txt": [],
+    "run_multihop_evals.py": [],
+    "scripts/check_text_chunks_kv.py": [
+      "raganything/services/local_rag.py"
+    ],
+    "scripts/create_tiktoken_cache.py": [],
+    "scripts/debug_retrieval_ablation.py": [
+      "raganything/services/local_rag.py"
+    ],
+    "scripts/export_lightrag_to_gfm.py": [],
+    "scripts/extract_docbench_retrieval_stats.py": [],
+    "scripts/extract_surge_retrieval_stats.py": [],
+    "scripts/link_external_workspace.py": [
+      "raganything/constants.py"
+    ],
+    "scripts/manage_workspace_synonyms.py": [],
+    "scripts/query_gfm.py": [
+      "raganything/constants.py"
+    ],
+    "scripts/query_ppr.py": [
+      "raganything/constants.py",
+      "raganything/services/local_rag.py"
+    ],
+    "server/app.py": [
+      "raganything/chunking.py",
+      "raganything/constants.py",
+      "raganything/governance/__init__.py",
+      "raganything/services/local_rag.py"
+    ],
+    "server/download_static.py": [],
+    "server/frontend/components.json": [],
+    "server/frontend/eslint.config.js": [],
+    "server/frontend/index.html": [],
+    "server/frontend/package.json": [],
+    "server/frontend/postcss.config.js": [],
+    "server/frontend/README.md": [],
+    "server/frontend/src/api/client.ts": [],
+    "server/frontend/src/api/evaluate.ts": [],
+    "server/frontend/src/api/files.ts": [
+      "server/frontend/src/api/client.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/api/graph.ts": [
+      "server/frontend/src/api/client.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/api/jobs.ts": [
+      "server/frontend/src/api/client.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/api/query.ts": [
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/api/workspace.ts": [
+      "server/frontend/src/api/client.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/App.css": [],
+    "server/frontend/src/App.tsx": [
+      "server/frontend/src/components/layout/AppShell.tsx",
+      "server/frontend/src/store/index.ts"
+    ],
+    "server/frontend/src/components/chat/__tests__/ReferenceList.test.tsx": [
+      "server/frontend/src/components/chat/ReferenceList.tsx",
+      "server/frontend/src/store/index.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/components/chat/AdvancedOptions.tsx": [
+      "server/frontend/src/components/ui/input.tsx",
+      "server/frontend/src/components/ui/select.tsx",
+      "server/frontend/src/config/modePresets.ts",
+      "server/frontend/src/store/querySettings.ts"
+    ],
+    "server/frontend/src/components/chat/AgenticTrace.tsx": [
+      "server/frontend/src/lib/utils.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/components/chat/ChatInput.tsx": [
+      "server/frontend/src/components/chat/QuerySettings.tsx",
+      "server/frontend/src/components/ui/button.tsx",
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/chat/CitationChip.tsx": [
+      "server/frontend/src/components/ui/badge.tsx",
+      "server/frontend/src/store/index.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/components/chat/EvalBadge.tsx": [
+      "server/frontend/src/api/evaluate.ts",
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/chat/InlineCitation.tsx": [
+      "server/frontend/src/lib/utils.ts",
+      "server/frontend/src/store/index.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/components/chat/MessageBubble.tsx": [
+      "server/frontend/src/components/chat/AgenticTrace.tsx",
+      "server/frontend/src/components/chat/InlineCitation.tsx",
+      "server/frontend/src/components/chat/ReasoningTrace.tsx",
+      "server/frontend/src/components/chat/ReferenceList.tsx",
+      "server/frontend/src/lib/utils.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/components/chat/MessageList.tsx": [
+      "server/frontend/src/components/chat/MessageBubble.tsx"
+    ],
+    "server/frontend/src/components/chat/QuerySettings.tsx": [
+      "server/frontend/src/components/chat/AdvancedOptions.tsx",
+      "server/frontend/src/components/ui/collapsible.tsx",
+      "server/frontend/src/components/ui/input.tsx",
+      "server/frontend/src/components/ui/select.tsx",
+      "server/frontend/src/config/modePresets.ts",
+      "server/frontend/src/lib/utils.ts",
+      "server/frontend/src/store/querySettings.ts"
+    ],
+    "server/frontend/src/components/chat/ReasoningTrace.tsx": [
+      "server/frontend/src/components/ui/collapsible.tsx"
+    ],
+    "server/frontend/src/components/chat/ReferenceList.tsx": [
+      "server/frontend/src/lib/utils.ts",
+      "server/frontend/src/store/index.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/components/documents/__tests__/textHighlight.test.ts": [
+      "server/frontend/src/components/documents/textHighlight.ts"
+    ],
+    "server/frontend/src/components/documents/FileList.tsx": [
+      "server/frontend/src/api/files.ts",
+      "server/frontend/src/api/workspace.ts",
+      "server/frontend/src/components/ui/alert-dialog.tsx",
+      "server/frontend/src/components/ui/switch.tsx",
+      "server/frontend/src/lib/utils.ts",
+      "server/frontend/src/store/index.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/components/documents/FileUpload.tsx": [
+      "server/frontend/src/api/files.ts",
+      "server/frontend/src/lib/utils.ts",
+      "server/frontend/src/store/index.ts"
+    ],
+    "server/frontend/src/components/documents/MarkdownViewer.tsx": [
+      "server/frontend/src/components/documents/textHighlight.ts"
+    ],
+    "server/frontend/src/components/documents/PdfViewer.tsx": [
+      "server/frontend/src/components/ui/button.tsx"
+    ],
+    "server/frontend/src/components/documents/textHighlight.ts": [],
+    "server/frontend/src/components/graph/__tests__/GraphSearch.test.tsx": [
+      "server/frontend/src/api/graph.ts",
+      "server/frontend/src/components/graph/GraphSearch.tsx"
+    ],
+    "server/frontend/src/components/graph/ForceGraph.tsx": [
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/components/graph/GraphSearch.tsx": [
+      "server/frontend/src/api/graph.ts",
+      "server/frontend/src/components/ui/button.tsx",
+      "server/frontend/src/components/ui/input.tsx"
+    ],
+    "server/frontend/src/components/graph/NodeSheet.tsx": [
+      "server/frontend/src/components/ui/sheet.tsx",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/components/jobs/JobCard.tsx": [
+      "server/frontend/src/api/jobs.ts",
+      "server/frontend/src/components/ui/badge.tsx",
+      "server/frontend/src/components/ui/button.tsx",
+      "server/frontend/src/components/ui/progress.tsx",
+      "server/frontend/src/store/index.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/components/jobs/JobList.tsx": [
+      "server/frontend/src/components/jobs/JobCard.tsx",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/components/layout/AppShell.tsx": [
+      "server/frontend/src/components/layout/TopNav.tsx",
+      "server/frontend/src/hooks/useJobs.ts",
+      "server/frontend/src/store/index.ts"
+    ],
+    "server/frontend/src/components/layout/ThemeToggle.tsx": [
+      "server/frontend/src/components/ui/button.tsx",
+      "server/frontend/src/store/index.ts"
+    ],
+    "server/frontend/src/components/layout/TopNav.tsx": [
+      "server/frontend/src/components/layout/ThemeToggle.tsx",
+      "server/frontend/src/components/layout/WorkspaceSwitcher.tsx",
+      "server/frontend/src/components/ui/badge.tsx",
+      "server/frontend/src/hooks/useJobs.ts",
+      "server/frontend/src/lib/utils.ts",
+      "server/frontend/src/store/index.ts"
+    ],
+    "server/frontend/src/components/layout/WorkspaceSwitcher.tsx": [
+      "server/frontend/src/components/ui/dropdown-menu.tsx",
+      "server/frontend/src/components/ui/input.tsx",
+      "server/frontend/src/hooks/useWorkspaces.ts",
+      "server/frontend/src/lib/utils.ts",
+      "server/frontend/src/store/index.ts"
+    ],
+    "server/frontend/src/components/ui/alert-dialog.tsx": [
+      "server/frontend/src/components/ui/button.tsx",
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/alert.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/badge.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/button.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/collapsible.tsx": [],
+    "server/frontend/src/components/ui/command.tsx": [
+      "server/frontend/src/components/ui/dialog.tsx",
+      "server/frontend/src/components/ui/input-group.tsx",
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/dialog.tsx": [
+      "server/frontend/src/components/ui/button.tsx",
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/dropdown-menu.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/input-group.tsx": [
+      "server/frontend/src/components/ui/button.tsx",
+      "server/frontend/src/components/ui/input.tsx",
+      "server/frontend/src/components/ui/textarea.tsx",
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/input.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/navigation-menu.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/progress.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/scroll-area.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/select.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/separator.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/sheet.tsx": [
+      "server/frontend/src/components/ui/button.tsx",
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/switch.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/components/ui/textarea.tsx": [
+      "server/frontend/src/lib/utils.ts"
+    ],
+    "server/frontend/src/config/modePresets.ts": [],
+    "server/frontend/src/hooks/__tests__/store.test.ts": [
+      "server/frontend/src/store/index.ts"
+    ],
+    "server/frontend/src/hooks/__tests__/useJobs.test.ts": [
+      "server/frontend/src/api/jobs.ts",
+      "server/frontend/src/hooks/useJobs.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/hooks/__tests__/useQuery.test.ts": [
+      "server/frontend/src/api/query.ts",
+      "server/frontend/src/hooks/useQuery.ts"
+    ],
+    "server/frontend/src/hooks/useFiles.ts": [
+      "server/frontend/src/api/files.ts"
+    ],
+    "server/frontend/src/hooks/useGraph.ts": [
+      "server/frontend/src/api/graph.ts"
+    ],
+    "server/frontend/src/hooks/useJobs.ts": [
+      "server/frontend/src/api/jobs.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/hooks/useQuery.ts": [
+      "server/frontend/src/api/query.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/hooks/useWorkspaces.ts": [
+      "server/frontend/src/api/workspace.ts"
+    ],
+    "server/frontend/src/index.css": [],
+    "server/frontend/src/lib/utils.ts": [],
+    "server/frontend/src/main.tsx": [
+      "server/frontend/src/App.tsx",
+      "server/frontend/src/index.css",
+      "server/frontend/src/store/index.ts"
+    ],
+    "server/frontend/src/routes/ChatPage.tsx": [
+      "server/frontend/src/api/query.ts",
+      "server/frontend/src/components/chat/ChatInput.tsx",
+      "server/frontend/src/components/chat/MessageBubble.tsx",
+      "server/frontend/src/components/chat/MessageList.tsx",
+      "server/frontend/src/components/ui/button.tsx",
+      "server/frontend/src/config/modePresets.ts",
+      "server/frontend/src/hooks/useQuery.ts",
+      "server/frontend/src/store/index.ts",
+      "server/frontend/src/store/querySettings.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/routes/DocumentsPage.tsx": [
+      "server/frontend/src/api/files.ts",
+      "server/frontend/src/components/documents/FileList.tsx",
+      "server/frontend/src/components/documents/FileUpload.tsx",
+      "server/frontend/src/components/documents/MarkdownViewer.tsx",
+      "server/frontend/src/components/documents/PdfViewer.tsx",
+      "server/frontend/src/components/ui/button.tsx",
+      "server/frontend/src/hooks/useFiles.ts",
+      "server/frontend/src/hooks/useWorkspaces.ts",
+      "server/frontend/src/store/index.ts"
+    ],
+    "server/frontend/src/routes/GraphPage.tsx": [
+      "server/frontend/src/components/graph/ForceGraph.tsx",
+      "server/frontend/src/components/graph/GraphSearch.tsx",
+      "server/frontend/src/components/graph/NodeSheet.tsx",
+      "server/frontend/src/components/ui/button.tsx",
+      "server/frontend/src/hooks/useGraph.ts",
+      "server/frontend/src/store/index.ts",
+      "server/frontend/src/types/index.ts"
+    ],
+    "server/frontend/src/routes/JobsPage.tsx": [
+      "server/frontend/src/components/jobs/JobList.tsx",
+      "server/frontend/src/components/ui/collapsible.tsx",
+      "server/frontend/src/hooks/useJobs.ts",
+      "server/frontend/src/store/index.ts"
+    ],
+    "server/frontend/src/store/index.ts": [
+      "server/frontend/src/components/chat/MessageBubble.tsx"
+    ],
+    "server/frontend/src/store/querySettings.ts": [
+      "server/frontend/src/config/modePresets.ts"
+    ],
+    "server/frontend/src/types/index.ts": [],
+    "server/frontend/src/vite-env.d.ts": [],
+    "server/frontend/tsconfig.app.json": [],
+    "server/frontend/tsconfig.json": [],
+    "server/frontend/tsconfig.node.json": [],
+    "server/frontend/vite.config.d.ts": [],
+    "server/frontend/vite.config.js": [],
+    "server/frontend/vite.config.ts": [],
+    "server/graph_edit_routes.py": [],
+    "server/SERVER_ARCH.md": [],
+    "server/static/.gitkeep": [],
+    "server/templates/index.html": [],
+    "setup.py": [],
+    "start_server_internvl2.sh": [],
+    "start_server_qwen3_vl.sh": [],
+    "start_server_qwen3.5.sh": [],
+    "start_vllm.sh": []
+  }
+}
