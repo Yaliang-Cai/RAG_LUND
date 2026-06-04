@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "rag-anything"))
 from evaluate_local.MultiHopQA.evaluate_multihop import (
     _build_kg_semantic_cot_user_prompt,
     _build_semantic_cot_user_prompt,
+    _aggregate_agentic_records,
     _build_query_kwargs,
     _load_chunk_source_map,
     _mode_query_kwargs,
@@ -764,3 +765,222 @@ def test_run_mode_kg_semantic_cot_preserves_hybrid_kg_context_and_recall(tmp_pat
     assert rows[0]["pred"] == "1862."
     assert rows[0]["raw_pred"].startswith("Thought:")
     assert rows[0]["recall@1"] == 1.0
+
+
+def test_run_mode_agentic_semantic_cot_uses_final_trace_chunks(tmp_path):
+    class FakeService:
+        def __init__(self):
+            self.retrieval_calls = []
+            self.qa_calls = []
+
+        async def query_with_trace(self, **kwargs):
+            self.retrieval_calls.append(kwargs)
+            return {
+                "answer": "internal agentic answer",
+                "confidence": "high",
+                "grounded": True,
+                "trace": {
+                    "profile": "multihop",
+                    "classifier": {
+                        "candidate_profile": "multihop",
+                        "selected_profile": "multihop",
+                        "fallback_used": False,
+                        "fallback_reason": "",
+                    },
+                    "retrieval_steps": [
+                        {
+                            "type": "initial",
+                            "query": kwargs["query"],
+                            "profile": "multihop",
+                            "cycle": 0,
+                            "paths_activated": ["ppr"],
+                            "paths_failed": [],
+                            "chunks_per_path": {"ppr": 1},
+                            "chunks_after_rrf": 1,
+                            "chunks_after_rerank": 1,
+                            "chunks_after_threshold": 1,
+                            "chunks": 1,
+                        }
+                    ],
+                    "retrieve_cycles_used": 0,
+                    "check_cycles_used": 0,
+                    "grader_events": [
+                        {"sufficient": True, "unanswerable": False, "reason": "enough"}
+                    ],
+                    "hallucination_events": [
+                        {"grounded": True, "ungrounded_claims": []}
+                    ],
+                    "data": {
+                        "chunks": [
+                            {"id": "chunk-a", "content": "Trace title\nTrace text"},
+                        ]
+                    },
+                },
+            }
+
+        async def llm_model_func(self, prompt, system_prompt=None, history_messages=None, **kwargs):
+            self.qa_calls.append(
+                {
+                    "prompt": prompt,
+                    "system_prompt": system_prompt,
+                    "history_messages": history_messages,
+                    "kwargs": kwargs,
+                }
+            )
+            return "Thought: final chunks contain the answer.\nAnswer: 1862."
+
+    service = FakeService()
+    source_map = {
+        "chunk-a": {
+            "source_key": "source-a",
+            "source_paragraph_id": "hotpotqa_000001",
+            "title": "Southampton",
+            "text": "The University of Southampton was founded in 1862.",
+            "content": "Southampton\nThe University of Southampton was founded in 1862.",
+        }
+    }
+
+    metrics = asyncio.run(
+        _run_mode(
+            service=service,
+            workspace_id="hotpotqa_hr2_v0",
+            working_dir="/tmp/ws",
+            items=[
+                {
+                    "id": "q0",
+                    "question": "When was Neville A. Stanton's employer founded?",
+                    "answer": "1862",
+                    "supporting_facts": ["The University of Southampton was founded in 1862."],
+                    "gold_source_keys": ["source-a"],
+                }
+            ],
+            mode="agentic",
+            dataset="hotpotqa",
+            recall_ks=[1],
+            output_dir=tmp_path,
+            resume=False,
+            score_em=lambda pred, gold: 1.0 if pred.rstrip(".") == gold else 0.0,
+            score_f1=lambda pred, gold: 1.0 if pred.rstrip(".") == gold else 0.0,
+            get_eval_query_overrides=lambda dataset: {"response_type": "Short Answer"},
+            chunk_source_map=source_map,
+            query_kwargs={
+                "top_k": 10,
+                "chunk_top_k": 5,
+                "ppr_qa_top_k": 5,
+                "qdrant_retrieval_mode": "hybrid",
+                "keyword_fanout_mode": "joined",
+            },
+            concurrency=1,
+            hybrid_enable_rerank=False,
+            ppr_enable_rerank=False,
+            qa_prompt_style="semantic_cot",
+            answer_parse_mode="answer_marker",
+        )
+    )
+
+    assert metrics["em"] == 1.0
+    assert metrics["agentic_stats"]["profile_counts"] == {"multihop": 1}
+    assert metrics["agentic_stats"]["paths_activated_counts"] == {"ppr": 1}
+    retrieval_call = service.retrieval_calls[0]
+    assert retrieval_call["mode"] == "agentic"
+    assert "only_need_context" not in retrieval_call
+    assert retrieval_call["enable_rerank"] is False
+    assert "Passage 1:" in service.qa_calls[0]["prompt"]
+    assert "Title: Southampton" in service.qa_calls[0]["prompt"]
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "hotpotqa_agentic_results.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["pred"] == "1862."
+    assert rows[0]["raw_pred"].startswith("Thought:")
+    assert rows[0]["agentic_internal_answer"] == "internal agentic answer"
+    assert rows[0]["agentic_trace"]["profile"] == "multihop"
+    assert rows[0]["recall@1"] == 1.0
+
+
+def test_agentic_v2_is_valid_mode_and_aggregates_agentic_stats(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "prog",
+        "--workspace", "w",
+        "--working-dir", str(tmp_path),
+        "--output-dir", str(tmp_path),
+        "--dataset", "hotpotqa",
+        "--modes", "agentic_v2",
+    ])
+    args = _parse_args()
+    assert args.modes == ["agentic_v2"]
+
+
+def test_aggregate_agentic_records_summarizes_trace_fields():
+    records = [
+        {
+            "agentic_trace": {
+                "profile": "semantic",
+                "classifier": {
+                    "selected_profile": "semantic",
+                    "fallback_used": True,
+                    "fallback_reason": "low_confidence",
+                },
+                "retrieve_cycles_used": 1,
+                "check_cycles_used": 0,
+                "retrieval_steps": [
+                    {
+                        "type": "initial",
+                        "paths_activated": ["qdrant_chunks_hybrid"],
+                        "chunks_per_path": {"qdrant_chunks_hybrid": 4},
+                    },
+                    {
+                        "type": "rewrite",
+                        "paths_activated": ["qdrant_chunks_hybrid"],
+                        "chunks_per_path": {"qdrant_chunks_hybrid": 2},
+                    },
+                ],
+                "data": {"chunks": []},
+            }
+        },
+        {
+            "agentic_trace": {
+                "profile": "full",
+                "classifier": {
+                    "selected_profile": "full",
+                    "fallback_used": False,
+                },
+                "retrieve_cycles_used": 2,
+                "check_cycles_used": 1,
+                "rewrite_history": ["q", "q rewritten"],
+                "sub_questions": ["s1", "s2"],
+                "retrieval_steps": [
+                    {
+                        "type": "decompose",
+                        "paths_activated": ["ppr", "qdrant_sparse"],
+                        "chunks_per_path": {"ppr": 5, "qdrant_sparse": 1},
+                    },
+                    {
+                        "type": "targeted",
+                        "paths_activated": ["ppr"],
+                        "chunks_per_path": {"ppr": 3},
+                    },
+                ],
+                "grader_events": [{"sufficient": False}, {"sufficient": True}],
+                "hallucination_events": [{"grounded": False}, {"grounded": True}],
+                "data": {"chunks": [{"id": "c1"}]},
+            }
+        },
+    ]
+
+    stats = _aggregate_agentic_records(records)
+
+    assert stats["profile_counts"] == {"semantic": 1, "full": 1}
+    assert stats["semantic_selected_count"] == 1
+    assert stats["semantic_fallback_count"] == 1
+    assert stats["retrieval_cycle_counts"] == {"1": 1, "2": 1}
+    assert stats["check_cycle_counts"] == {"0": 1, "1": 1}
+    assert stats["rewrite_count"] == 2
+    assert stats["decompose_count"] == 1
+    assert stats["targeted_retrieval_count"] == 1
+    assert stats["grounded_count"] == 1
+    assert stats["empty_final_chunks_count"] == 1
+    assert stats["paths_activated_counts"]["ppr"] == 2
+    assert stats["first_paths_counts"]["qdrant_chunks_hybrid"] == 1
+    assert stats["chunks_per_path_avg"]["ppr"] == 4.0

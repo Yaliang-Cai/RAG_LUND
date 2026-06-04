@@ -27,19 +27,19 @@ async def test_grounded_false_with_claims():
     assert "X is 42" in r["ungrounded_claims"]
 
 
-async def test_exception_defaults_grounded_true():
+async def test_exception_defaults_grounded_false():
     llm = AsyncMock(side_effect=RuntimeError("LLM down"))
     hc = HallucinationChecker(llm)
     r = await hc.verify("q", "answer", _chunks())
-    assert r["grounded"] is True
+    assert r["grounded"] is False
     assert r.get("check_status") == "error"
 
 
-async def test_json_parse_failure_defaults_grounded_true():
+async def test_json_parse_failure_defaults_grounded_false():
     llm = AsyncMock(return_value="not json")
     hc = HallucinationChecker(llm)
     r = await hc.verify("q", "answer", _chunks())
-    assert r["grounded"] is True
+    assert r["grounded"] is False
     assert r.get("check_status") == "error"
 
 

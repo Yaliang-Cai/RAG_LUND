@@ -27,11 +27,12 @@ async def test_grade_insufficient():
     assert result["reason"] == "Missing Y."
 
 
-async def test_grade_json_parse_failure_falls_back_sufficient():
+async def test_grade_json_parse_failure_fails_closed_by_default():
     llm = AsyncMock(return_value="not json at all")
-    g = Grader(llm, fallback_sufficient=True)
+    g = Grader(llm)
     result = await g.grade("query", _chunks())
-    assert result["sufficient"] is True
+    assert result["sufficient"] is False
+    assert result["unanswerable"] is False
 
 
 async def test_grade_json_parse_failure_respects_fallback_false():
@@ -41,11 +42,12 @@ async def test_grade_json_parse_failure_respects_fallback_false():
     assert result["sufficient"] is False
 
 
-async def test_grade_llm_exception_falls_back():
+async def test_grade_llm_exception_fails_closed_by_default():
     llm = AsyncMock(side_effect=RuntimeError("LLM down"))
-    g = Grader(llm, fallback_sufficient=True)
+    g = Grader(llm)
     result = await g.grade("query", _chunks())
-    assert result["sufficient"] is True
+    assert result["sufficient"] is False
+    assert result["unanswerable"] is False
 
 
 async def test_build_shared_prefix_contains_all_chunks():

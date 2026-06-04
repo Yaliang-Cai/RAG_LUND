@@ -13,7 +13,7 @@ class TestGFMMultihopProfile:
         # GFM is commented out by default
         assert "gfm" not in profile.paths
         assert "ppr" in profile.paths
-        assert "hybrid" in profile.paths
+        assert "hybrid" not in profile.paths
 
     def test_gfm_multihop_rrf_weights_match_paths(self):
         from raganything.retrieval.profiles import PROFILE_REGISTRY
