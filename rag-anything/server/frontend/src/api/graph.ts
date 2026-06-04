@@ -10,12 +10,12 @@ export async function getOverview(workspaceId: string, maxNodes = 100): Promise<
 
 export async function getSubgraph(
   workspaceId: string,
-  seed: string,
+  label: string,
   depth = 2,
   maxNodes = 50
 ): Promise<GraphData> {
   const { data } = await client.get<GraphData>(`/graph/${workspaceId}/subgraph`, {
-    params: { seed, depth, max_nodes: maxNodes },
+    params: { label, max_depth: depth, max_nodes: maxNodes },
   })
   return data
 }

@@ -32,6 +32,7 @@ describe('useQuery (non-streaming postQuery)', () => {
     expect(result.current.answer).toBe('Hello world')
     expect(result.current.status).toBe('done')
     expect(result.current.sourceNodes).toEqual([])
+    expect(vi.mocked(queryApi.postQuery).mock.calls[0][1]).toBeInstanceOf(AbortSignal)
   })
 
   it('folds backend data into metadata.data for chunk extraction', async () => {

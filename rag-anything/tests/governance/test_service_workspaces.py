@@ -57,3 +57,19 @@ async def test_backfill_legacy_workspaces(gov):
     rows = [await gov.get_workspace(w) for w in ("w1", "w2", "w3")]
     assert all(r is not None for r in rows)
     assert rows[0].metadata == {"legacy": True}
+
+
+async def test_delete_workspace_cascades_documents_and_provenance(gov):
+    await gov.ensure_workspace("w1")
+    doc_id, _ = await gov.upsert_document("w1", "a.pdf", "h1", 1)
+    await gov.insert_provenance("w1", doc_id, "chunk", ["chunk-1"])
+
+    assert await gov.delete_workspace("w1") is True
+
+    assert await gov.get_workspace("w1") is None
+    assert await gov.list_documents("w1") == []
+    assert await gov.get_provenance_for_doc(doc_id) == {
+        "chunk": [],
+        "entity": [],
+        "relation": [],
+    }

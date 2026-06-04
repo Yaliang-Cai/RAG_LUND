@@ -45,7 +45,7 @@ export function useQuery() {
     let finalStatus: QueryStatus = 'pending'
 
     try {
-      const resp = await postQuery(params)
+      const resp = await postQuery(params, controller.signal)
       finalAnswer = resp.answer && resp.answer.trim() !== '' ? resp.answer : EMPTY_FALLBACK
       finalMetadata = {
         ...(resp.metadata ?? {}),

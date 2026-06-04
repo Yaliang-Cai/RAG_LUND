@@ -46,7 +46,10 @@ export interface QueryResponse {
  * ``llm_response_cache`` on the second call (LightRAG explicitly skips the
  * cache write for streaming responses, which is why we no longer use SSE).
  */
-export async function postQuery(params: QueryParams): Promise<QueryResponse> {
+export async function postQuery(
+  params: QueryParams,
+  signal?: AbortSignal
+): Promise<QueryResponse> {
   const body: Record<string, unknown> = {
     workspace_id: params.workspace_id,
     query: params.query,
@@ -81,6 +84,7 @@ export async function postQuery(params: QueryParams): Promise<QueryResponse> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   })
   if (!response.ok) {
     const err = await response.json().catch(() => ({ detail: response.statusText }))

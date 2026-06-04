@@ -96,6 +96,15 @@ class GovernanceService:
             """, [(w, {"legacy": True}) for w in new])
         return len(new)
 
+    async def delete_workspace(self, workspace_id: str) -> bool:
+        """Delete the governance workspace row and cascade document/provenance rows."""
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM workspaces WHERE workspace_id = $1",
+                workspace_id,
+            )
+        return result.endswith(" 1")
+
     # --- documents -------------------------------------------------------
 
     async def upsert_document(

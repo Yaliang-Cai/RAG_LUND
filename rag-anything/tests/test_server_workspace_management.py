@@ -118,6 +118,22 @@ class _FakeDeleteWorkspaceService:
         return _FakeRagWrapper(self.lightrag)
 
 
+class _FakeWorkspaceGov:
+    def __init__(self):
+        self.audit = []
+        self.deleted = []
+
+    async def ensure_writable(self, workspace_id):
+        return None
+
+    async def record_audit(self, workspace_id, action, *, details=None, **kwargs):
+        self.audit.append((workspace_id, action, details or {}))
+
+    async def delete_workspace(self, workspace_id):
+        self.deleted.append(workspace_id)
+        return True
+
+
 class _FakeService:
     def __init__(self, tmp_path: Path):
         self.docs = {
@@ -320,3 +336,36 @@ def test_delete_workspace_drops_graph_vector_and_kv_storages(monkeypatch, tmp_pa
     assert not (uploads / "ws").exists()
     assert not (Path(fake_service.settings.output_dir) / "ws").exists()
     assert not (Path(fake_service.settings.working_dir_root) / "ws").exists()
+
+
+def test_delete_workspace_purges_governance_record(monkeypatch, tmp_path):
+    dropped = []
+    lightrag = SimpleNamespace(
+        text_chunks=_FakeStorage("text_chunks", dropped),
+        full_docs=None,
+        full_entities=None,
+        full_relations=None,
+        entity_chunks=None,
+        relation_chunks=None,
+        entities_vdb=None,
+        relationships_vdb=None,
+        chunks_vdb=None,
+        chunk_entity_relation_graph=None,
+        doc_status=None,
+    )
+    fake_service = _FakeDeleteWorkspaceService(tmp_path, lightrag)
+    fake_gov = _FakeWorkspaceGov()
+
+    uploads = tmp_path / "uploads"
+    (uploads / "ws").mkdir(parents=True)
+    monkeypatch.setattr(server_app, "UPLOADS_DIR", uploads)
+    server_app.app.dependency_overrides[server_app.get_service] = lambda: fake_service
+    server_app.app.dependency_overrides[server_app.get_optional_gov] = lambda: fake_gov
+    client = TestClient(server_app.app)
+
+    response = client.delete("/workspace/ws")
+
+    assert response.status_code == 200
+    assert fake_gov.deleted == ["ws"]
+    assert fake_gov.audit[0][0:2] == ("ws", "delete_workspace")
+    assert fake_gov.audit[0][2]["deleted"] == ["uploads"]

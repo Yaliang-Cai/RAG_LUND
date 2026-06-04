@@ -1798,6 +1798,7 @@ async def delete_workspace(
             "delete_workspace",
             details={"deleted": deleted, "drop_errors": drop_errors},
         )
+        await gov.delete_workspace(workspace_id)
     return {"status": "ok", "deleted": deleted, "drop_errors": drop_errors}
 
 
