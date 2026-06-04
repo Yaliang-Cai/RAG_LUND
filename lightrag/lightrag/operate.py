@@ -6269,8 +6269,12 @@ async def _build_context_str(
         scope = raw_scope.strip().lower()
         if scope not in {"top_k", "all"}:
             scope = "all"
+        param_min_rerank = getattr(query_param, "min_rerank_score", None)
         try:
-            min_rerank_score = float(global_config.get("min_rerank_score", 0.5))
+            if param_min_rerank is not None:
+                min_rerank_score = float(param_min_rerank)
+            else:
+                min_rerank_score = float(global_config.get("min_rerank_score", 0.5))
         except (TypeError, ValueError):
             min_rerank_score = 0.5
         return {

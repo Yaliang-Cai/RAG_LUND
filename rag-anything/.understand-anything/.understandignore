@@ -1,0 +1,38 @@
+# .understandignore — patterns for files/dirs to exclude from analysis
+# Syntax: same as .gitignore (globs, # comments, ! negation, trailing / for dirs)
+
+# --- Built-in defaults are already excluded (node_modules, .git, dist, *.lock, etc.) ---
+
+# --- Scope reductions for rag-anything ---
+*.egg-info/
+.eggs/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.history/
+.claude/
+.cursor/
+rag_storage*/
+rag_workspace/
+output*/
+uploads/
+inputs/
+data/
+neo4jWorkDir/
+local_neo4jWorkDir/
+tiktoken_cache/
+memory-bank/
+
+# Docs / assets / examples — keep root README, exclude bulky subtrees
+docs/
+examples/
+assets/
+evaluate_local/
+
+# Tests are excluded to reduce subagent dispatches (re-enable if you want test→prod edges)
+tests/
+
+# Misc
+TODO.md
+*.log
+*.log.*

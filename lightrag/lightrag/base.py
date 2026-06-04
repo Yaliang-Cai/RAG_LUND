@@ -246,6 +246,13 @@ class QueryParam:
     - "all": score all chunk candidates before thresholding and truncation (default).
     """
 
+    min_rerank_score: float | None = None
+    """Per-query override for the post-rerank score filter threshold.
+    When None (default), the global `min_rerank_score` (set at LightRAG construction)
+    is used. When set, chunks scoring below this value are dropped after reranking.
+    Only takes effect when reranking is enabled. 0.0 disables filtering.
+    """
+
     include_references: bool = False
     """If True, includes reference list in the response for supported endpoints.
     This parameter controls whether the API response includes a references field

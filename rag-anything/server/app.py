@@ -4,24 +4,34 @@ import logging
 import os
 import shutil
 import tempfile
+from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, List, Literal, Optional, Set
 
-import json as _json
-
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+
+from raganything.governance import (
+    GovernanceService,
+    GovernanceSettings,
+    JobRunner,
+    WorkspaceFrozenError,
+    create_pool,
+    mark_orphaned_jobs_crashed,
+    run_migrations,
+)
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
 from raganything.chunking import CHUNKING_STRATEGIES
 from raganything.constants import (
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
+    MAX_TOP_K as DEFAULT_MAX_TOP_K,
+    MAX_CHUNK_TOP_K as DEFAULT_MAX_CHUNK_TOP_K,
     DEFAULT_SUPPORTED_FILE_EXTENSIONS,
     DEFAULT_UPLOADS_DIR,
     DEFAULT_QUERY_MODE,
@@ -40,8 +50,17 @@ from raganything.constants import (
     DEFAULT_PASSAGE_NODE_WEIGHT,
     DEFAULT_PPR_SYNONYM_WEIGHT_MODE,
     DEFAULT_RECOGNITION_TOP_K,
+    DEFAULT_LINKING_TOP_K,
+    DEFAULT_PPR_QA_TOP_K,
     DEFAULT_QDRANT_RETRIEVAL_MODE,
+    SUPPORTED_IMAGE_EXTENSIONS,
+    DEFAULT_MAX_IMAGE_SIZE_MB,
 )
+from uuid import uuid4
+
+SUPPORTED_IMAGE_EXTS: Set[str] = {e.lower() for e in SUPPORTED_IMAGE_EXTENSIONS}
+MAX_IMAGE_BYTES = DEFAULT_MAX_IMAGE_SIZE_MB * 1024 * 1024
+MAX_IMAGES_PER_QUERY = 4
 
 VALID_CHUNKING_STRATEGIES: Set[str] = set(CHUNKING_STRATEGIES.keys())
 
@@ -49,19 +68,10 @@ logger = logging.getLogger(__name__)
 
 # --- 配置与初始化 ---
 APP_ROOT = Path(__file__).resolve().parent
-TEMPLATES = Jinja2Templates(directory=str(APP_ROOT / "templates"))
-
-# 检测本地静态资源是否已下载（运行 server/download_static.py 后生效）
-_STATIC_DIR = APP_ROOT / "static"
-_USE_LOCAL_STATIC: bool = all([
-    (_STATIC_DIR / "marked.min.js").exists(),
-    (_STATIC_DIR / "katex" / "katex.min.js").exists(),
-    (_STATIC_DIR / "hljs" / "highlight.min.js").exists(),
-])
 
 API_KEY_ENV = "RAGANYTHING_API_KEY"
-MAX_TOP_K = int(os.getenv("RAGANYTHING_MAX_TOP_K", str(DEFAULT_TOP_K)))
-MAX_CHUNK_TOP_K = int(os.getenv("RAGANYTHING_MAX_CHUNK_TOP_K", str(DEFAULT_CHUNK_TOP_K)))
+MAX_TOP_K = int(os.getenv("RAGANYTHING_MAX_TOP_K", str(DEFAULT_MAX_TOP_K)))
+MAX_CHUNK_TOP_K = int(os.getenv("RAGANYTHING_MAX_CHUNK_TOP_K", str(DEFAULT_MAX_CHUNK_TOP_K)))
 
 SUPPORTED_EXTENSIONS: Set[str] = {
     ext.strip().lower()
@@ -71,14 +81,65 @@ SUPPORTED_EXTENSIONS: Set[str] = {
 # 三层存储目录
 UPLOADS_DIR = Path(os.getenv("RAGANYTHING_UPLOADS_DIR", DEFAULT_UPLOADS_DIR)).resolve()
 
-app = FastAPI(title="RAGAnything Local Service")
-app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
-_service: Optional[LocalRagService] = None
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    rag_settings = LocalRagSettings.from_env()
+    gov_settings = GovernanceSettings.from_env()
 
-if _USE_LOCAL_STATIC:
-    logger.info("Offline mode: serving JS/CSS from server/static/")
-else:
-    logger.info("Online mode: loading JS/CSS from CDN")
+    # Phoenix MUST be initialised before any AsyncOpenAI / langgraph object
+    # is constructed: phoenix.otel.register(auto_instrument=True) patches
+    # those modules at call time, but some OpenAI SDK versions bind the
+    # instrumentor in AsyncOpenAI.__init__ — clients created earlier are
+    # missed. The CLI script (scripts/query_ppr.py) already follows this
+    # order; we mirror it here so web UI traces show up too.
+    phoenix_enabled = os.getenv("ENABLE_PHOENIX", "").lower() in ("1", "true", "yes")
+    if phoenix_enabled:
+        from raganything.observability import setup_phoenix
+        setup_phoenix()
+        logger.info("lifespan: Phoenix tracing enabled at http://localhost:6006")
+
+    pg_pool = await create_pool(gov_settings)
+    await run_migrations(pg_pool)
+    crashed = await mark_orphaned_jobs_crashed(pg_pool)
+    if crashed:
+        logger.warning("lifespan: marked %d orphaned jobs as crashed", crashed)
+
+    rag_service = LocalRagService(rag_settings)
+    gov_service = GovernanceService(pg_pool, rag_service)
+    job_runner = JobRunner(gov_service, max_concurrent=gov_settings.job_max_concurrent)
+    await job_runner.start()
+
+    # Discover existing workspaces on disk and register them.
+    working_root = Path(rag_settings.working_dir_root).resolve()
+    output_root = Path(rag_settings.output_dir).resolve()
+    discovered: set[str] = set()
+    for root in (working_root, output_root):
+        if root.exists():
+            for d in root.iterdir():
+                if d.is_dir():
+                    discovered.add(d.name)
+    if discovered:
+        new_count = await gov_service.backfill_legacy_workspaces(sorted(discovered))
+        if new_count:
+            logger.info("lifespan: backfilled %d legacy workspaces", new_count)
+
+    app.state.pg_pool = pg_pool
+    app.state.rag = rag_service
+    app.state.gov = gov_service
+    app.state.jobs = job_runner
+    app.state.gov_settings = gov_settings
+
+    logger.info("lifespan: startup complete")
+    try:
+        yield
+    finally:
+        await job_runner.stop(grace_period=gov_settings.job_shutdown_grace)
+        await rag_service.aclose()
+        await pg_pool.close()
+        logger.info("lifespan: shutdown complete")
+
+
+app = FastAPI(title="RAGAnything Local Service", lifespan=lifespan)
 
 
 def _compute_workspace_id(name: str) -> str:
@@ -140,12 +201,25 @@ def _find_md_in_hybrid_auto(workspace_id: str, filename: str, output_dir: str) -
 
 
 # --- 依赖注入 ---
-def get_service() -> LocalRagService:
-    global _service
-    if _service is None:
-        settings = LocalRagSettings.from_env()
-        _service = LocalRagService(settings)
-    return _service
+def get_service(request: Request) -> LocalRagService:
+    """Backward-compat alias for get_rag(). Prefer Depends(get_rag) in new code."""
+    return request.app.state.rag
+
+
+def get_rag(request: Request) -> LocalRagService:
+    return request.app.state.rag
+
+
+def get_gov(request: Request) -> GovernanceService:
+    return request.app.state.gov
+
+
+def get_optional_gov(request: Request) -> GovernanceService | None:
+    return getattr(request.app.state, "gov", None)
+
+
+def get_jobs(request: Request) -> JobRunner:
+    return request.app.state.jobs
 
 def verify_api_key(x_api_key: Optional[str] = Header(default=None)):
     expected = os.getenv(API_KEY_ENV, "").strip()
@@ -211,6 +285,116 @@ def _document_row(doc_id: str, doc_status: Any) -> dict[str, Any]:
             "updated_at": data.get("updated_at", ""),
         }
     )
+
+
+def _model_dump_json(row: Any) -> dict[str, Any]:
+    if hasattr(row, "model_dump"):
+        return row.model_dump(mode="json")
+    if isinstance(row, dict):
+        return _json_safe(row)
+    return _json_safe(vars(row))
+
+
+def _governance_document_row(row: Any) -> dict[str, Any]:
+    data = _model_dump_json(row)
+    created_at = data.get("created_at") or data.get("ingested_at") or ""
+    updated_at = data.get("updated_at") or data.get("finished_at") or created_at
+    filename = str(data.get("filename") or "")
+    data.update(
+        {
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "file_path": data.get("file_path") or filename,
+            "chunks_count": data.get("chunks_count", 0),
+            "chunks_list": data.get("chunks_list", []),
+            "multimodal_processed": data.get("multimodal_processed", False),
+            "multimodal_stage": data.get("multimodal_stage", ""),
+            "multimodal_failed_items": data.get("multimodal_failed_items", []),
+            "multimodal_chunk_ids": data.get("multimodal_chunk_ids", []),
+        }
+    )
+    return data
+
+
+def _clamp_progress(value: Any) -> int:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(100, int(round(number))))
+
+
+def _job_progress_percent(progress: Any, status: str) -> int:
+    if isinstance(progress, (int, float)):
+        return _clamp_progress(progress)
+    if isinstance(progress, dict):
+        for key in ("percent", "percentage", "value"):
+            if key in progress:
+                return _clamp_progress(progress[key])
+        total = progress.get("total")
+        if total:
+            indexed = progress.get("indexed", 0) or 0
+            parsed = progress.get("parsed", 0) or 0
+            return _clamp_progress((max(indexed, parsed) / float(total)) * 100)
+    if status == "done":
+        return 100
+    return 0
+
+
+async def _job_api_row(gov: GovernanceService, row: Any) -> dict[str, Any]:
+    data = _model_dump_json(row)
+    doc_ids = list(getattr(row, "doc_ids", None) or data.get("doc_ids") or [])
+    documents: list[dict[str, Any]] = []
+    for doc_id in doc_ids:
+        doc = await gov.get_document(doc_id)
+        if doc is not None:
+            documents.append(_governance_document_row(doc))
+
+    filenames = [str(d.get("filename")) for d in documents if d.get("filename")]
+    if filenames:
+        filename = filenames[0] if len(filenames) == 1 else f"{filenames[0]} +{len(filenames) - 1}"
+    elif len(doc_ids) == 1:
+        filename = str(doc_ids[0])
+    elif doc_ids:
+        filename = f"{len(doc_ids)} documents"
+    else:
+        filename = ""
+
+    status = str(data.get("status") or "")
+    progress_detail = data.get("progress") or {}
+    created_at = data.get("created_at") or data.get("started_at") or ""
+    updated_at = data.get("updated_at") or data.get("finished_at") or created_at
+    doc_id_strings = [str(d) for d in doc_ids]
+    data.update(
+        {
+            "doc_ids": doc_id_strings,
+            "doc_id": doc_id_strings[0] if doc_id_strings else None,
+            "documents": documents,
+            "filenames": filenames,
+            "filename": filename,
+            "progress_detail": progress_detail,
+            "progress": _job_progress_percent(progress_detail, status),
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }
+    )
+    return data
+
+
+async def _jobs_api_rows(gov: GovernanceService, rows: list[Any]) -> list[dict[str, Any]]:
+    return [await _job_api_row(gov, row) for row in rows]
+
+
+def _audit_api_rows(rows: list[Any]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for row in rows:
+        data = _model_dump_json(row)
+        timestamp = data.get("timestamp") or data.get("created_at") or ""
+        data["created_at"] = timestamp
+        data.setdefault("details", data.get("detail") or {})
+        data["detail"] = data.get("detail")
+        payload.append(data)
+    return payload
 
 
 async def _workspace_documents(
@@ -319,19 +503,22 @@ class QueryRequest(BaseModel):
     ppr_top_k: int = DEFAULT_PPR_TOP_K
     passage_node_weight: float = DEFAULT_PASSAGE_NODE_WEIGHT
     recognition_top_k: int = DEFAULT_RECOGNITION_TOP_K
-    ppr_synonym_weight_mode: Literal["raw", "plus_one"] = DEFAULT_PPR_SYNONYM_WEIGHT_MODE
+    linking_top_k: int = DEFAULT_LINKING_TOP_K
+    ppr_qa_top_k: int = DEFAULT_PPR_QA_TOP_K
     qdrant_retrieval_mode: Literal["dense", "bm25", "hybrid"] = DEFAULT_QDRANT_RETRIEVAL_MODE
+    profile: Optional[str] = None  # auto mode only; None = LLM classifier decides
+    rerank_candidate_cap: Optional[int] = None  # naive mode only: pre-rerank pool size
+    min_rerank_score: Optional[float] = None  # per-query post-rerank filter; None = global default
+    conversation_history: list[dict] = []
+
+class EvaluateRequest(BaseModel):
+    workspace_id: str
+    query: str
+    answer: str
 
 # =========================================================================
 # 路由
 # =========================================================================
-
-@app.get("/", response_class=HTMLResponse)
-def index(request: Request):
-    return TEMPLATES.TemplateResponse(
-        "index.html",
-        {"request": request, "use_local_static": _USE_LOCAL_STATIC},
-    )
 
 # --- 文件列表 (解析产物) ---
 @app.get("/files/{workspace_id}")
@@ -381,8 +568,11 @@ async def ingest(
     file: UploadFile = File(...),
     workspace_id: Optional[str] = Form(default=None),
     chunking_strategy: Optional[str] = Form(default=None),
+    force: bool = Query(default=False),
     _auth: None = Depends(verify_api_key),
-    service: LocalRagService = Depends(get_service),
+    rag_service: LocalRagService = Depends(get_rag),
+    gov: GovernanceService = Depends(get_gov),
+    jobs: JobRunner = Depends(get_jobs),
 ):
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in SUPPORTED_EXTENSIONS:
@@ -390,29 +580,52 @@ async def ingest(
             status_code=400,
             detail=f"Unsupported file type: '{file_ext}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
         )
-
     if chunking_strategy and chunking_strategy not in VALID_CHUNKING_STRATEGIES:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid chunking_strategy '{chunking_strategy}'. Valid: {', '.join(sorted(VALID_CHUNKING_STRATEGIES))}",
+            detail=f"Invalid chunking_strategy '{chunking_strategy}'.",
         )
 
     file_stem = Path(file.filename).stem
-    final_workspace_id = workspace_id.strip() if workspace_id and workspace_id.strip() else _compute_workspace_id(file_stem)
+    final_workspace_id = (
+        workspace_id.strip() if workspace_id and workspace_id.strip()
+        else _compute_workspace_id(file_stem)
+    )
     _validate_workspace_id(final_workspace_id)
 
     try:
         content = await file.read()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File read failed: {str(e)}")
+    file_hash = hashlib.sha256(content).hexdigest()
 
-    # 保存原始文件到 uploads/{workspace_id}/
-    # basename-only + resolve+relative_to 三重校验，防路径穿越写
-    upload_dir = UPLOADS_DIR / final_workspace_id
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    original_filename = Path(file.filename).name  # strip any directory components
+    # Workspace + frozen check
+    await gov.ensure_workspace(final_workspace_id)
+    try:
+        await gov.ensure_writable(final_workspace_id)
+    except WorkspaceFrozenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    # Idempotency check
+    original_filename = Path(file.filename).name
     if not original_filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
+
+    doc_id, duplicate = await gov.upsert_document(
+        final_workspace_id, original_filename, file_hash, len(content), force=force,
+    )
+    if duplicate:
+        return {
+            "job_id": None,
+            "doc_id": str(doc_id),
+            "workspace_id": final_workspace_id,
+            "status": "duplicate",
+            "duplicate": True,
+        }
+
+    # Save the original to uploads/{ws}/{filename}
+    upload_dir = UPLOADS_DIR / final_workspace_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
     upload_path = upload_dir / original_filename
     try:
         upload_path.resolve().relative_to(upload_dir.resolve())
@@ -420,29 +633,24 @@ async def ingest(
         raise HTTPException(status_code=400, detail="Invalid filename")
     upload_path.write_bytes(content)
 
-    # 写入临时文件供 parser 使用（保留原始文件名以便 MinerU 正确命名输出）
-    tmp_dir = Path(tempfile.mkdtemp())
-    tmp_path = tmp_dir / original_filename
-    tmp_path.write_bytes(content)
+    # Enqueue the job
+    job_id = await gov.create_job(final_workspace_id, [doc_id])
 
-    workspace_output = str(Path(service.settings.output_dir) / final_workspace_id)
-    try:
-        final_id = await service.ingest(
-            str(tmp_path),
-            workspace_id=final_workspace_id,
-            output_dir=workspace_output,
-            chunking_strategy=chunking_strategy or None,
+    async def _run():
+        await gov.run_ingest(
+            job_id, doc_id, final_workspace_id,
+            str(upload_path),
+            chunking_strategy=chunking_strategy,
         )
-        if service.settings.enable_synonym_linking:
-            await service.finalize_workspace_synonyms(
-                final_id,
-                force=False,
-                reset_existing=True,
-            )
-    finally:
-        shutil.rmtree(str(tmp_dir), ignore_errors=True)
 
-    return {"workspace_id": final_id, "filename": original_filename}
+    await jobs.submit(job_id, _run)
+    return {
+        "job_id": str(job_id),
+        "doc_id": str(doc_id),
+        "workspace_id": final_workspace_id,
+        "status": "queued",
+        "duplicate": False,
+    }
 
 
 @app.post("/ingest/batch")
@@ -450,117 +658,183 @@ async def ingest_batch(
     files: List[UploadFile] = File(...),
     workspace_id: Optional[str] = Form(default=None),
     chunking_strategy: Optional[str] = Form(default=None),
+    force: bool = Query(default=False),
     _auth: None = Depends(verify_api_key),
-    service: LocalRagService = Depends(get_service),
+    rag_service: LocalRagService = Depends(get_rag),
+    gov: GovernanceService = Depends(get_gov),
+    jobs: JobRunner = Depends(get_jobs),
 ):
-    """Ingest multiple files into the same workspace in one request.
-
-    All files are written to a temporary directory and processed via
-    ``process_folder_complete``, which applies the configured concurrency
-    (``MAX_CONCURRENT_FILES``) internally.
-    """
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
-
     for f in files:
-        ext = Path(f.filename).suffix.lower()
-        if ext not in SUPPORTED_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file type: '{ext}' ({f.filename}). Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
-            )
-
+        if Path(f.filename).suffix.lower() not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(status_code=400,
+                                detail=f"Unsupported file type: {f.filename}")
     if chunking_strategy and chunking_strategy not in VALID_CHUNKING_STRATEGIES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid chunking_strategy '{chunking_strategy}'. Valid: {', '.join(sorted(VALID_CHUNKING_STRATEGIES))}",
-        )
+        raise HTTPException(status_code=400, detail="Invalid chunking_strategy")
 
     first_stem = Path(files[0].filename).stem
-    final_workspace_id = workspace_id.strip() if workspace_id and workspace_id.strip() else _compute_workspace_id(first_stem)
+    final_workspace_id = (
+        workspace_id.strip() if workspace_id and workspace_id.strip()
+        else _compute_workspace_id(first_stem)
+    )
     _validate_workspace_id(final_workspace_id)
+
+    await gov.ensure_workspace(final_workspace_id)
+    try:
+        await gov.ensure_writable(final_workspace_id)
+    except WorkspaceFrozenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
     upload_dir = UPLOADS_DIR / final_workspace_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    tmp_dir = Path(tempfile.mkdtemp())
 
-    filenames: List[str] = []
-    try:
-        for f in files:
-            content = await f.read()
-            name = Path(f.filename).name
-            if not name:
-                raise HTTPException(status_code=400, detail="Invalid filename")
+    new_doc_specs: list[tuple] = []   # (doc_id, upload_path)
+    duplicates: list[str] = []
 
-            upload_path = upload_dir / name
-            try:
-                upload_path.resolve().relative_to(upload_dir.resolve())
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid filename")
-
-            upload_path.write_bytes(content)
-            (tmp_dir / name).write_bytes(content)
-            filenames.append(name)
-
-        workspace_output = str(Path(service.settings.output_dir) / final_workspace_id)
-        # Pass the temp directory — service.ingest() detects a directory and calls
-        # rag.process_folder_complete(), which applies MAX_CONCURRENT_FILES concurrency.
-        final_id = await service.ingest(
-            str(tmp_dir),
-            workspace_id=final_workspace_id,
-            output_dir=workspace_output,
-            chunking_strategy=chunking_strategy or None,
+    for f in files:
+        content = await f.read()
+        file_hash = hashlib.sha256(content).hexdigest()
+        name = Path(f.filename).name
+        if not name:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        upload_path = upload_dir / name
+        try:
+            upload_path.resolve().relative_to(upload_dir.resolve())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        doc_id, duplicate = await gov.upsert_document(
+            final_workspace_id, name, file_hash, len(content), force=force,
         )
-        if service.settings.enable_synonym_linking:
-            await service.finalize_workspace_synonyms(
-                final_id,
-                force=False,
-                reset_existing=True,
-            )
-    finally:
-        shutil.rmtree(str(tmp_dir), ignore_errors=True)
+        if duplicate:
+            duplicates.append(str(doc_id))
+            continue
+        upload_path.write_bytes(content)
+        new_doc_specs.append((doc_id, upload_path))
 
-    return {"workspace_id": final_id, "files": filenames}
+    if not new_doc_specs:
+        return {
+            "job_id": None,
+            "workspace_id": final_workspace_id,
+            "status": "duplicate",
+            "duplicate_doc_ids": duplicates,
+        }
+
+    job_id = await gov.create_job(final_workspace_id, [d for d, _ in new_doc_specs])
+
+    async def _run():
+        for d, p in new_doc_specs:
+            try:
+                await gov.run_ingest(job_id, d, final_workspace_id, str(p),
+                                     chunking_strategy=chunking_strategy)
+            except Exception:
+                logger.exception("batch ingest doc %s failed", d)
+
+    await jobs.submit(job_id, _run)
+    return {
+        "job_id": str(job_id),
+        "workspace_id": final_workspace_id,
+        "status": "queued",
+        "doc_ids": [str(d) for d, _ in new_doc_specs],
+        "duplicate_doc_ids": duplicates,
+    }
 
 
 @app.post("/retry/{workspace_id}")
 async def retry_ingest(
     workspace_id: str,
-    background_tasks: BackgroundTasks,
     _auth: None = Depends(verify_api_key),
-    service: LocalRagService = Depends(get_service),
+    rag_service: LocalRagService = Depends(get_rag),
+    gov: GovernanceService = Depends(get_gov),
+    jobs: JobRunner = Depends(get_jobs),
 ):
-    """Re-trigger ingest for an existing workspace using its already-uploaded files."""
     _validate_workspace_id(workspace_id)
     upload_dir = UPLOADS_DIR / workspace_id
     if not upload_dir.exists():
-        raise HTTPException(status_code=404, detail=f"No uploads found for workspace '{workspace_id}'")
-
+        raise HTTPException(status_code=404,
+                            detail=f"No uploads for workspace '{workspace_id}'")
     files = sorted(p for p in upload_dir.iterdir() if p.is_file())
     if not files:
-        raise HTTPException(status_code=404, detail=f"No files in workspace '{workspace_id}'")
+        raise HTTPException(status_code=404,
+                            detail=f"No files in workspace '{workspace_id}'")
 
-    workspace_output = str(Path(service.settings.output_dir) / workspace_id)
+    await gov.ensure_workspace(workspace_id)
+    try:
+        await gov.ensure_writable(workspace_id)
+    except WorkspaceFrozenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
-    async def _do_retry():
-        for file_path in files:
+    doc_specs: list[tuple] = []
+    for fp in files:
+        content = fp.read_bytes()
+        file_hash = hashlib.sha256(content).hexdigest()
+        # force=True so repeated retries always re-process; the user explicitly asked to retry
+        doc_id, _ = await gov.upsert_document(
+            workspace_id, fp.name, file_hash, len(content), force=True,
+        )
+        doc_specs.append((doc_id, fp))
+
+    job_id = await gov.create_job(workspace_id, [d for d, _ in doc_specs])
+
+    async def _run():
+        for d, fp in doc_specs:
             try:
-                await service.ingest(
-                    str(file_path),
-                    workspace_id=workspace_id,
-                    output_dir=workspace_output,
-                )
-            except Exception as exc:
-                logger.warning("retry_ingest %s/%s failed: %s", workspace_id, file_path.name, exc)
-        if service.settings.enable_synonym_linking:
-            await service.finalize_workspace_synonyms(
-                workspace_id,
-                force=False,
-                reset_existing=True,
-            )
+                await gov.run_ingest(job_id, d, workspace_id, str(fp))
+            except Exception:
+                logger.exception("retry ingest doc %s failed", d)
 
-    background_tasks.add_task(_do_retry)
-    return {"status": "queued", "workspace_id": workspace_id, "files": [f.name for f in files]}
+    await jobs.submit(job_id, _run)
+    return {"job_id": str(job_id), "workspace_id": workspace_id, "status": "queued"}
+
+
+# =========================================================================
+# Jobs
+# =========================================================================
+
+@app.get("/jobs/{job_id}")
+async def get_job_endpoint(
+    job_id: str,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    from uuid import UUID
+    try:
+        jid = UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+    j = await gov.get_job(jid)
+    if j is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return await _job_api_row(gov, j)
+
+
+@app.get("/jobs")
+async def list_jobs_endpoint(
+    workspace_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    rows = await gov.list_jobs(
+        workspace_id=workspace_id, status=status, limit=max(1, min(limit, 200)),
+    )
+    return {"jobs": await _jobs_api_rows(gov, rows)}
+
+
+@app.delete("/jobs/{job_id}")
+async def cancel_job_endpoint(
+    job_id: str,
+    _auth: None = Depends(verify_api_key),
+    jobs: JobRunner = Depends(get_jobs),
+):
+    from uuid import UUID
+    try:
+        jid = UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+    cancelled = await jobs.cancel(jid)
+    return {"job_id": job_id, "cancelled": cancelled}
 
 
 @app.get("/uploads/{workspace_id}")
@@ -638,112 +912,152 @@ async def query_endpoint(
     _validate_workspace_id(payload.workspace_id)
     top_k = max(1, min(payload.top_k, MAX_TOP_K))
     chunk_top_k = max(1, min(payload.chunk_top_k, MAX_CHUNK_TOP_K))
-
-    rag = await service.get_rag(payload.workspace_id)
-    await rag._ensure_lightrag_initialized()
-
-    # Step 1: 获取结构化检索数据 (不调用 LLM)
-    from lightrag import QueryParam
-    data_param = QueryParam(
-        mode=payload.mode,
-        top_k=top_k,
-        chunk_top_k=chunk_top_k,
-        enable_rerank=payload.enable_rerank,
-        rerank_score_scope="all",
-        multi_hop_depth=payload.multi_hop_depth,
-        ppr_damping=payload.ppr_damping,
-        ppr_top_k=payload.ppr_top_k,
-        passage_node_weight=payload.passage_node_weight,
-        recognition_top_k=payload.recognition_top_k,
-        ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
-        qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
+    min_rerank_score = (
+        None if payload.min_rerank_score is None
+        else max(0.0, min(1.0, payload.min_rerank_score))
     )
-    retrieval = {}
-    try:
-        retrieval = await rag.lightrag.aquery_data(payload.query, param=data_param)
-    except Exception:
-        pass  # 检索数据是增强功能，失败不阻断
 
-    # Step 2: 获取 LLM 答案 (走完整 VLM 增强链路)
-    answer = await service.query(
+    result = await service.run_query(
         payload.workspace_id,
         payload.query,
         mode=payload.mode,
         top_k=top_k,
         chunk_top_k=chunk_top_k,
         enable_rerank=payload.enable_rerank,
+        min_rerank_score=min_rerank_score,
         vlm_enhanced=payload.vlm_enhanced,
         multi_hop_depth=payload.multi_hop_depth,
         ppr_damping=payload.ppr_damping,
         ppr_top_k=payload.ppr_top_k,
         passage_node_weight=payload.passage_node_weight,
         recognition_top_k=payload.recognition_top_k,
-        ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
+        linking_top_k=payload.linking_top_k,
+        ppr_qa_top_k=payload.ppr_qa_top_k,
         qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
+        profile=payload.profile,
+        rerank_candidate_cap=payload.rerank_candidate_cap,
+        conversation_history=payload.conversation_history,
     )
 
-    # Step 3: 可选获取子图数据
+    answer = result.get("answer", "")
+    data = result.get("data", {}) or {}
+    metadata = result.get("metadata", {}) or {}
+
     graph_data = None
     if payload.return_graph:
-        graph_data = await _get_query_subgraph(rag, retrieval, payload)
+        rag = await service.get_rag(payload.workspace_id)
+        graph_data = await _get_query_subgraph(
+            rag, {"data": data, "metadata": metadata}, payload
+        )
+
+    source_nodes = _extract_source_nodes({"data": data, "metadata": metadata})
 
     return {
         "answer": answer,
-        "data": retrieval.get("data", {}),
-        "metadata": retrieval.get("metadata", {}),
+        "data": data,
+        "metadata": metadata,
+        "source_nodes": source_nodes,
         "graph": graph_data,
     }
 
 
-@app.post("/query/stream")
-async def query_stream_endpoint(
-    payload: QueryRequest,
+@app.post("/query/multimodal")
+async def query_multimodal_endpoint(
+    workspace_id: str = Form(...),
+    query: str = Form(...),
+    mode: str = Form(DEFAULT_QUERY_MODE),
+    top_k: int = Form(DEFAULT_TOP_K),
+    chunk_top_k: int = Form(DEFAULT_CHUNK_TOP_K),
+    enable_rerank: bool = Form(DEFAULT_ENABLE_RERANK),
+    images: List[UploadFile] = File(default=[]),
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
 ):
-    """SSE streaming query: yields metadata first, then LLM answer tokens."""
-    _validate_workspace_id(payload.workspace_id)
-    top_k = max(1, min(payload.top_k, MAX_TOP_K))
-    chunk_top_k = max(1, min(payload.chunk_top_k, MAX_CHUNK_TOP_K))
+    """Multimodal query (image + text), non-streaming.
 
-    async def _generate():
-        retrieval_data: dict = {}
+    Saves uploaded images under uploads/{ws}/_inline/<uuid>.<ext> and
+    forwards them as 'image' multimodal_content items to
+    LocalRagService.query_with_multimodal, which delegates to
+    RAGAnything.aquery_with_multimodal -> VLM describe -> normal aquery().
+    """
+    _validate_workspace_id(workspace_id)
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="query must not be empty")
+    if not images:
+        raise HTTPException(
+            status_code=400,
+            detail="No images attached. Use POST /query for text-only queries.",
+        )
+    if len(images) > MAX_IMAGES_PER_QUERY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many images (max {MAX_IMAGES_PER_QUERY})",
+        )
+    top_k = max(1, min(top_k, MAX_TOP_K))
+    chunk_top_k = max(1, min(chunk_top_k, MAX_CHUNK_TOP_K))
 
-        try:
-            async for event in service.stream_query(
-                payload.workspace_id, payload.query,
-                mode=payload.mode, top_k=top_k,
-                chunk_top_k=chunk_top_k, enable_rerank=payload.enable_rerank,
-                multi_hop_depth=payload.multi_hop_depth,
-                ppr_damping=payload.ppr_damping,
-                ppr_top_k=payload.ppr_top_k,
-                passage_node_weight=payload.passage_node_weight,
-                recognition_top_k=payload.recognition_top_k,
-                ppr_synonym_weight_mode=payload.ppr_synonym_weight_mode,
-                qdrant_retrieval_mode=payload.qdrant_retrieval_mode,
-            ):
-                if event["type"] == "meta":
-                    retrieval_data = event  # keep for graph subquery
-                    yield f"data: {_json.dumps({'type': 'meta', 'data': event['data'], 'metadata': event['metadata']}, ensure_ascii=False)}\n\n"
-                elif event["type"] == "chunk":
-                    yield f"data: {_json.dumps({'type': 'chunk', 'text': event['text']}, ensure_ascii=False)}\n\n"
-                elif event["type"] == "error":
-                    yield f"data: {_json.dumps({'type': 'error', 'text': event['text']}, ensure_ascii=False)}\n\n"
-        except Exception as exc:
-            yield f"data: {_json.dumps({'type': 'error', 'text': str(exc)}, ensure_ascii=False)}\n\n"
+    inline_dir = UPLOADS_DIR / workspace_id / "_inline"
+    inline_dir.mkdir(parents=True, exist_ok=True)
 
-        # Event final: done + optional graph
-        graph_data = None
-        if payload.return_graph:
-            rag = await service.get_rag(payload.workspace_id)
-            graph_data = await _get_query_subgraph(rag, retrieval_data, payload)
-        yield f"data: {_json.dumps({'type': 'done', 'graph': graph_data}, ensure_ascii=False)}\n\n"
+    multimodal_content: list[dict] = []
+    for img in images:
+        ext = Path(img.filename or "").suffix.lower()
+        if ext not in SUPPORTED_IMAGE_EXTS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported image type '{ext}'. Allowed: {sorted(SUPPORTED_IMAGE_EXTS)}",
+            )
+        content = await img.read()
+        if len(content) > MAX_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Image '{img.filename}' exceeds {DEFAULT_MAX_IMAGE_SIZE_MB} MB",
+            )
+        saved_path = inline_dir / f"{uuid4().hex}{ext}"
+        saved_path.write_bytes(content)
+        multimodal_content.append({
+            "type": "image",
+            "img_path": str(saved_path.resolve()),
+        })
 
-    return StreamingResponse(
-        _generate(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    answer = await service.query_with_multimodal(
+        workspace_id,
+        query,
+        multimodal_content,
+        mode=mode,
+        top_k=top_k,
+        chunk_top_k=chunk_top_k,
+        enable_rerank=enable_rerank,
     )
+    return {
+        "answer": answer,
+        "workspace_id": workspace_id,
+        "image_count": len(multimodal_content),
+    }
+
+
+@app.post("/evaluate")
+async def evaluate_endpoint(
+    payload: EvaluateRequest,
+    _auth: None = Depends(verify_api_key),
+    service: LocalRagService = Depends(get_service),
+):
+    """Run LLM-based answer quality evaluation. Returns {score: float, gap: str}."""
+    _validate_workspace_id(payload.workspace_id)
+    return await service.evaluate_answer(payload.workspace_id, payload.query, payload.answer)
+
+
+def _kg_node_name(node) -> str:
+    """LightRAG KnowledgeGraphNode 的可读实体名。
+
+    Neo4j 后端把 ``node.id`` 设为实体名，但 Postgres/AGE 后端把 ``node.id`` 设为
+    内部数字 id，真正的名字存在 ``properties['entity_id']`` / ``labels`` 里。
+    展示时始终优先用实体名，避免界面显示一串数字。
+    """
+    name = node.properties.get("entity_id")
+    if not name and node.labels:
+        name = node.labels[0]
+    return name or node.id
 
 
 async def _get_query_subgraph(rag, retrieval, payload):
@@ -773,7 +1087,7 @@ async def _get_query_subgraph(rag, retrieval, payload):
         for n in kg.nodes:
             nodes.append({
                 "id": n.id,
-                "label": n.id,
+                "label": _kg_node_name(n),
                 "type": n.properties.get("entity_type", ""),
                 "description": n.properties.get("description", ""),
             })
@@ -788,6 +1102,46 @@ async def _get_query_subgraph(rag, retrieval, payload):
         return {"nodes": nodes, "edges": edges}
     except Exception:
         return None
+
+
+def _extract_source_nodes(retrieval_data: dict) -> list[dict]:
+    """Extract source file references from LightRAG retrieval meta event.
+
+    page_num is None if LightRAG doesn't surface it — frontend degrades gracefully.
+    """
+    source_nodes: list[dict] = []
+    seen: set[str] = set()
+    data = retrieval_data.get("data", {})
+
+    for key in ("chunks", "references", "sources", "text_chunks"):
+        chunks = data.get(key, [])
+        if not isinstance(chunks, list):
+            continue
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            filename = chunk.get("file_path") or chunk.get("filename") or chunk.get("source")
+            if not filename:
+                continue
+            filename = str(filename).replace("\\", "/").split("/")[-1]
+            doc_id = str(chunk.get("doc_id") or chunk.get("document_id") or "")
+            excerpt = str(chunk.get("content") or chunk.get("text") or "")[:200]
+            page_num = chunk.get("page_num") or chunk.get("page")
+            if isinstance(page_num, float):
+                page_num = int(page_num)
+            elif page_num is not None and not isinstance(page_num, int):
+                page_num = None
+
+            key_id = f"{filename}:{page_num}"
+            if key_id not in seen:
+                seen.add(key_id)
+                source_nodes.append({
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "page_num": page_num,
+                    "excerpt": excerpt,
+                })
+    return source_nodes[:5]
 
 
 # =========================================================================
@@ -917,7 +1271,7 @@ async def get_subgraph(
         nodes = [
             {
                 "id": n.id,
-                "label": n.id,
+                "label": _kg_node_name(n),
                 "type": n.properties.get("entity_type", ""),
                 "description": n.properties.get("description", ""),
             }
@@ -1019,35 +1373,71 @@ async def get_graph_overview(
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
 ):
-    """返回知识图谱概览子图（最高度数节点及其邻域），不依赖 LightRAG async API。"""
+    """返回知识图谱概览子图（最高度数节点及其邻域）。
+
+    优先用 LightRAG `get_knowledge_graph(node_label="*")`（Neo4j/Memgraph/Mongo
+    后端均原生支持），失败时回退到 GraphML 文件。
+    """
     _validate_workspace_id(workspace_id)
+
+    # Try LightRAG API first (works with Neo4j/Memgraph/Mongo backends)
+    try:
+        rag = await service.get_rag(workspace_id)
+        await rag._ensure_lightrag_initialized()
+        kg = await rag.lightrag.get_knowledge_graph(
+            node_label="*", max_depth=1, max_nodes=max_nodes
+        )
+        if kg.nodes:
+            return {
+                "nodes": [
+                    {
+                        "id": n.id,
+                        "label": _kg_node_name(n),
+                        "type": n.properties.get("entity_type", ""),
+                        "description": n.properties.get("description", ""),
+                    }
+                    for n in kg.nodes
+                ],
+                "edges": [
+                    {
+                        "source": e.source,
+                        "target": e.target,
+                        "label": e.properties.get("description", ""),
+                        "weight": float(e.properties.get("weight", 1.0)),
+                    }
+                    for e in kg.edges
+                ],
+            }
+    except Exception as e:
+        logger.warning("get_graph_overview LightRAG fallback: %s", e)
+
+    # Fallback: NetworkX over GraphML file (only present with NetworkX backend)
     G = _read_graphml_safe(_graphml_path(service, workspace_id))
     if G is None or G.number_of_nodes() == 0:
         return {"nodes": [], "edges": []}
 
-    # 选取度数最高的 max_nodes 个节点
     top_nodes = sorted(G.nodes(), key=lambda n: G.degree(n), reverse=True)[:max_nodes]
     sub = G.subgraph(top_nodes)
-
-    nodes = [
-        {
-            "id": n,
-            "label": n,
-            "type": G.nodes[n].get("entity_type", ""),
-            "description": G.nodes[n].get("description", ""),
-        }
-        for n in sub.nodes()
-    ]
-    edges = [
-        {
-            "source": u,
-            "target": v,
-            "label": d.get("description", ""),
-            "weight": float(d.get("weight", 1.0)),
-        }
-        for u, v, d in sub.edges(data=True)
-    ]
-    return {"nodes": nodes, "edges": edges}
+    return {
+        "nodes": [
+            {
+                "id": n,
+                "label": n,
+                "type": G.nodes[n].get("entity_type", ""),
+                "description": G.nodes[n].get("description", ""),
+            }
+            for n in sub.nodes()
+        ],
+        "edges": [
+            {
+                "source": u,
+                "target": v,
+                "label": d.get("description", ""),
+                "weight": float(d.get("weight", 1.0)),
+            }
+            for u, v, d in sub.edges(data=True)
+        ],
+    }
 
 
 _ENTITY_COLORS = {
@@ -1260,9 +1650,20 @@ async def list_workspace_documents(
     workspace_id: str,
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
+    gov: GovernanceService | None = Depends(get_optional_gov),
 ):
     _validate_workspace_id(workspace_id)
-    documents = await _workspace_documents(service, workspace_id)
+    if gov is not None:
+        documents = [_governance_document_row(d) for d in await gov.list_documents(workspace_id)]
+    else:
+        documents = await _workspace_documents(service, workspace_id)
+    if not documents:
+        try:
+            documents = await _workspace_documents(service, workspace_id)
+        except Exception:
+            if gov is None:
+                raise
+            documents = []
     return {
         "workspace_id": workspace_id,
         "count": len(documents),
@@ -1340,9 +1741,16 @@ async def delete_workspace(
     workspace_id: str,
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
+    gov: GovernanceService | None = Depends(get_optional_gov),
 ):
     import asyncio as _asyncio
     _validate_workspace_id(workspace_id)
+
+    if gov is not None:
+        try:
+            await gov.ensure_writable(workspace_id)
+        except WorkspaceFrozenError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     # Step 1: Drop all storages (Neo4j, Qdrant, KV) before touching the filesystem
     drop_errors = []
@@ -1384,6 +1792,12 @@ async def delete_workspace(
             shutil.rmtree(str(d), ignore_errors=True)
             deleted.append(name)
 
+    if gov is not None:
+        await gov.record_audit(
+            workspace_id,
+            "delete_workspace",
+            details={"deleted": deleted, "drop_errors": drop_errors},
+        )
     return {"status": "ok", "deleted": deleted, "drop_errors": drop_errors}
 
 
@@ -1431,6 +1845,65 @@ async def get_workspace_stats(
     }
 
 
+@app.post("/workspace/{workspace_id}/freeze")
+@app.patch("/workspace/{workspace_id}/freeze")
+async def freeze_workspace(
+    workspace_id: str,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    _validate_workspace_id(workspace_id)
+    await gov.ensure_workspace(workspace_id)
+    ws_before = await gov.get_workspace(workspace_id)
+    prev = bool(ws_before.frozen) if ws_before else False
+    ok = await gov.set_frozen(workspace_id, True)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    await gov.record_audit(workspace_id, "freeze", details={"previous_state": prev})
+    return {"workspace_id": workspace_id, "frozen": True}
+
+
+@app.post("/workspace/{workspace_id}/unfreeze")
+@app.patch("/workspace/{workspace_id}/unfreeze")
+async def unfreeze_workspace(
+    workspace_id: str,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    _validate_workspace_id(workspace_id)
+    ws_before = await gov.get_workspace(workspace_id)
+    if ws_before is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    ok = await gov.set_frozen(workspace_id, False)
+    await gov.record_audit(workspace_id, "unfreeze",
+                           details={"previous_state": ws_before.frozen})
+    return {"workspace_id": workspace_id, "frozen": False}
+
+
+@app.delete("/workspace/{workspace_id}/document/{doc_id}")
+async def delete_document_endpoint(
+    workspace_id: str,
+    doc_id: str,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    _validate_workspace_id(workspace_id)
+    from uuid import UUID
+    try:
+        did = UUID(doc_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid doc_id")
+    try:
+        await gov.ensure_writable(workspace_id)
+    except WorkspaceFrozenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    doc = await gov.get_document(did)
+    if doc is None or doc.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="Document not found in workspace")
+    report = await gov.delete_document(workspace_id, did)
+    return {"doc_id": doc_id, "workspace_id": workspace_id, "cleanup": report}
+
+
 # =========================================================================
 # 查询默认配置
 # =========================================================================
@@ -1455,6 +1928,7 @@ async def get_config(_auth: None = Depends(verify_api_key)):
 async def list_workspaces(
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
+    gov: GovernanceService | None = Depends(get_optional_gov),
 ):
     working_root = Path(service.settings.working_dir_root).resolve()
     output_root = Path(service.settings.output_dir).resolve()
@@ -1468,9 +1942,30 @@ async def list_workspaces(
                 if d.is_dir():
                     workspace_ids.add(d.name)
 
+    pg_by_id: dict[str, Any] = {}
+    docs_by_workspace: dict[str, list[Any]] = {}
+    if gov is not None:
+        if workspace_ids:
+            await gov.backfill_legacy_workspaces(sorted(workspace_ids))
+        pg_rows = await gov.list_workspaces()
+        pg_by_id = {row.workspace_id: row for row in pg_rows}
+        for row in pg_rows:
+            docs = [
+                doc
+                for doc in await gov.list_documents(row.workspace_id)
+                if getattr(doc, "status", None) != "deleted"
+            ]
+            docs_by_workspace[row.workspace_id] = docs
+            if docs:
+                workspace_ids.add(row.workspace_id)
+
     for workspace_id in sorted(workspace_ids):
         workspace_dir = working_root / workspace_id
         upload_dir = UPLOADS_DIR / workspace_id
+        ws_row = pg_by_id.get(workspace_id)
+        ws_data = _model_dump_json(ws_row) if ws_row is not None else {}
+        metadata = ws_data.get("metadata") if isinstance(ws_data.get("metadata"), dict) else {}
+        documents = docs_by_workspace.get(workspace_id)
 
         # 基本信息
         has_files = (workspace_dir / "graph_chunk_entity_relation.graphml").exists()
@@ -1484,8 +1979,13 @@ async def list_workspaces(
 
         workspaces.append({
             "workspace_id": workspace_id,
+            "name": metadata.get("name") or workspace_id,
+            "frozen": bool(ws_data.get("frozen", False)),
+            "document_count": len(documents) if documents is not None else len(uploaded_files),
+            "created_at": ws_data.get("created_at"),
             "has_files": has_files,
             "uploaded_files": uploaded_files,
+            "metadata": metadata,
         })
 
     return {
@@ -1496,3 +1996,57 @@ async def list_workspaces(
             "workspace": str(working_root),
         },
     }
+
+
+# =========================================================================
+# 审计日志
+# =========================================================================
+
+@app.get("/workspace/{workspace_id}/audit")
+async def workspace_audit(
+    workspace_id: str,
+    action: Optional[str] = None,
+    limit: int = 100,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    _validate_workspace_id(workspace_id)
+    rows = await gov.list_audit(workspace_id=workspace_id, action=action,
+                                limit=max(1, min(limit, 500)))
+    entries = _audit_api_rows(rows)
+    return {"audit": entries, "entries": entries}
+
+
+@app.get("/admin/audit")
+async def admin_audit(
+    action: Optional[str] = None,
+    limit: int = 100,
+    _auth: None = Depends(verify_api_key),
+    gov: GovernanceService = Depends(get_gov),
+):
+    rows = await gov.list_audit(action=action, limit=max(1, min(limit, 500)))
+    entries = _audit_api_rows(rows)
+    return {"audit": entries, "entries": entries}
+
+
+# --- SPA fallback (must be last — after all API routes) ---
+_DIST_DIR = APP_ROOT / "static" / "dist"
+if _DIST_DIR.exists():
+    # Serve hashed assets directory directly (no HTML fallback needed for assets)
+    _ASSETS_DIR = _DIST_DIR / "assets"
+    if _ASSETS_DIR.exists():
+        app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        """Serve index.html for all unknown paths (SPA client-side routing)."""
+        candidate = _DIST_DIR / full_path
+        if candidate.exists() and candidate.is_file():
+            return FileResponse(str(candidate))
+        return FileResponse(str(_DIST_DIR / "index.html"))
+else:
+    import warnings
+    warnings.warn(
+        "static/dist not found — run `npm run build` in rag-anything/server/frontend/ first",
+        stacklevel=1,
+    )

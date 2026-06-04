@@ -32,6 +32,7 @@ dependencies = [
     "openai",
     "gdown",
     "tqdm",
+    "asyncpg>=0.29",
 ]
 
 [project.optional-dependencies]

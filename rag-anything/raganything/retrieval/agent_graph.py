@@ -14,6 +14,9 @@ from raganything.constants import (
     DEFAULT_AGENTIC_MAX_CHECK_CYCLES,
     DEFAULT_AGENTIC_DECOMPOSE_MAX_SUBQUESTIONS,
     DEFAULT_AGENTIC_PARALLEL_RETRIEVE_CONCURRENCY,
+    DEFAULT_TOP_K,
+    DEFAULT_CHUNK_TOP_K,
+    DEFAULT_ENABLE_RERANK,
 )
 from .classifier import QueryClassifier
 from .grader import Grader, build_shared_prefix
@@ -74,6 +77,11 @@ class AdaptiveAgentGraph:
         lightrag: Any,
         llm_func: Any = None,
         *,
+        top_k: int = DEFAULT_TOP_K,
+        chunk_top_k: int = DEFAULT_CHUNK_TOP_K,
+        enable_rerank: bool = DEFAULT_ENABLE_RERANK,
+        min_rerank_score: float | None = None,
+        qdrant_retrieval_mode: str | None = None,
         _classifier: QueryClassifier | None = None,
         _grader: Grader | None = None,
         _rewriter: Rewriter | None = None,
@@ -85,6 +93,11 @@ class AdaptiveAgentGraph:
     ) -> None:
         self._lightrag = lightrag
         self._llm = llm_func or lightrag.llm_model_func
+        self._top_k = top_k
+        self._chunk_top_k = chunk_top_k
+        self._enable_rerank = enable_rerank
+        self._min_rerank_score = min_rerank_score
+        self._qdrant_retrieval_mode = qdrant_retrieval_mode
         self._clf = _classifier or QueryClassifier(self._llm)
         self._grader = _grader or Grader(self._llm)
         self._rewriter = _rewriter or Rewriter(self._llm)
@@ -94,6 +107,30 @@ class AdaptiveAgentGraph:
         self._max_retrieve_cycles = max_retrieve_cycles
         self._max_check_cycles = max_check_cycles
         self._graph = self._build_graph()
+
+    def _make_param(self, state: AgentState | None = None) -> QueryParam:
+        kwargs: dict[str, Any] = {
+            "top_k": self._top_k,
+            "chunk_top_k": self._chunk_top_k,
+            "enable_rerank": self._enable_rerank,
+        }
+        if self._min_rerank_score is not None:
+            kwargs["min_rerank_score"] = self._min_rerank_score
+        qdrant_retrieval_mode = self._qdrant_retrieval_mode
+        if state is not None:
+            state_kwargs = dict(state.get("query_param_kwargs", {}))
+            qdrant_retrieval_mode = state_kwargs.pop(
+                "qdrant_retrieval_mode",
+                qdrant_retrieval_mode,
+            )
+            kwargs.update(state_kwargs)
+        param = QueryParam(
+            mode="hybrid",
+            **{k: v for k, v in kwargs.items() if k in _QUERY_PARAM_FIELDS},
+        )
+        if qdrant_retrieval_mode is not None:
+            setattr(param, "qdrant_retrieval_mode", qdrant_retrieval_mode)
+        return param
 
     # ── Nodes ──────────────────────────────────────────────────────────────
 
@@ -140,7 +177,7 @@ class AdaptiveAgentGraph:
         }
 
     async def _node_retriever(self, state: AgentState) -> dict:
-        param = _query_param_from_state(state)
+        param = self._make_param(state)
         routing_trace = dict(state.get("routing_trace", {}))
         routing_trace.setdefault("chunks_per_path", {})
         retrieval_steps = list(routing_trace.get("retrieval_steps", []))
@@ -233,7 +270,7 @@ class AdaptiveAgentGraph:
     async def _node_parallel_retriever(self, state: AgentState) -> dict:
         sub_qs = state["routing_trace"].get("sub_questions") or [state["query"]]
         sem = asyncio.Semaphore(DEFAULT_AGENTIC_PARALLEL_RETRIEVE_CONCURRENCY)
-        param = _query_param_from_state(state)
+        param = self._make_param(state)
 
         async def _one(q: str) -> tuple[str, list[dict], dict]:
             async with sem:
@@ -291,7 +328,7 @@ class AdaptiveAgentGraph:
 
     async def _node_targeted_retriever(self, state: AgentState) -> dict:
         new_q = " ".join(state["ungrounded_claims"]) or state["query"]
-        param = _query_param_from_state(state)
+        param = self._make_param(state)
         routing_trace = dict(state.get("routing_trace", {}))
         routing_trace.setdefault("chunks_per_path", {})
         retrieval_steps = list(routing_trace.get("retrieval_steps", []))
@@ -396,6 +433,65 @@ class AdaptiveAgentGraph:
         return builder.compile()
 
     # ── Public API ─────────────────────────────────────────────────────────
+
+    _NODE_LABELS: dict[str, str] = {
+        "router": "Choosing retrieval profile",
+        "retriever": "Retrieving chunks",
+        "grader": "Checking if chunks are sufficient",
+        "rewriter": "Rewriting the query",
+        "decomposer": "Splitting into sub-questions",
+        "parallel_retriever": "Retrieving sub-questions in parallel",
+        "generator": "Generating answer",
+        "hallucination_check": "Verifying answer against sources",
+        "targeted_retriever": "Re-retrieving for ungrounded claims",
+        "end_grounded": "Done - answer is grounded",
+        "end_insufficient": "Done - insufficient evidence",
+    }
+
+    async def astream_run(self, query: str):
+        initial: AgentState = {
+            "query": query,
+            "current_query": query,
+            "profile": "semantic",
+            "chunks": [],
+            "grader_sufficient": False,
+            "grader_unanswerable": False,
+            "grader_reason": "",
+            "answer": "",
+            "grounded": False,
+            "ungrounded_claims": [],
+            "retrieve_cycle": 0,
+            "check_cycle": 0,
+            "routing_trace": {},
+            "query_param_kwargs": {},
+        }
+        final: dict | None = None
+        async for update in self._graph.astream(initial, stream_mode="updates"):
+            for node_name, state_diff in update.items():
+                yield "step", self._NODE_LABELS.get(node_name, node_name)
+                if final is None:
+                    final = dict(state_diff or {})
+                elif isinstance(state_diff, dict):
+                    final.update(state_diff)
+        final = final or {}
+        answer = final.get("answer") or None
+        grounded = bool(final.get("grounded", False))
+        if not grounded:
+            answer = None
+        yield "final", {
+            "answer": answer,
+            "confidence": "high" if grounded else "none",
+            "grounded": grounded,
+            "ungrounded_claims": final.get("ungrounded_claims", []),
+            "chunks": final.get("chunks", []),
+            "trace": {
+                **final.get("routing_trace", {}),
+                "grounded": grounded,
+                "retrieve_cycles_used": final.get("retrieve_cycle", 0),
+                "check_cycles_used": final.get("check_cycle", 0),
+                "data": {"chunks": final.get("chunks", [])},
+            },
+        }
 
     async def run(self, query: str, return_trace: bool = False, **kwargs: Any) -> str | dict:
         query_param_kwargs = {k: v for k, v in kwargs.items() if k in _QUERY_PARAM_FIELDS}

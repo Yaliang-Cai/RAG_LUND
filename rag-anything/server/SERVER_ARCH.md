@@ -86,10 +86,9 @@ _USE_LOCAL_STATIC = all([
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `POST` | `/query` | 一次性查询，返回 `{answer, data, metadata, graph}` |
-| `POST` | `/query/stream` | SSE 流式查询，先发 `meta` 事件，再逐 token 发 `chunk`，最后发 `done` |
+| `POST` | `/query` | 非流式查询，返回 `{answer, data, metadata, source_nodes, graph}`；通过 LightRAG 非流式路径触发 `llm_response_cache` 写入，重复问命中缓存 |
 
-两个端点均支持相同的 `QueryRequest` 参数：
+`QueryRequest` 参数：
 
 ```json
 {
@@ -159,6 +158,55 @@ python server/download_static.py --force
 ```
 
 下载完成后重启服务，`app.py` 会自动检测并切换到离线模式。
+
+---
+
+## Governance layer (Phase 1)
+
+The service uses PostgreSQL as a metadata layer for document governance. It does NOT replace Neo4j, Qdrant, or LightRAG's KV — it sits alongside them.
+
+### New tables (in `raganything.governance.migrations/001_init.sql`)
+
+| Table | Purpose |
+|---|---|
+| `workspaces` | Per-workspace flags (frozen, owner, metadata) |
+| `documents` | One row per ingested file. `UNIQUE (workspace_id, file_hash)` enforces idempotency |
+| `provenance` | Maps `(workspace_id, doc_id) → (chunk_id \| entity_name \| relation_key)` for surgical deletion |
+| `ingest_jobs` | Background job state with progress JSONB |
+| `ingest_audit` | Append-only governance audit log |
+
+### New endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/jobs/{job_id}` | Poll job status |
+| `GET` | `/jobs?workspace_id=&status=` | List jobs |
+| `DELETE` | `/jobs/{job_id}` | Cancel a queued/running job |
+| `PATCH` | `/workspace/{ws}/freeze` | Mark workspace read-only |
+| `PATCH` | `/workspace/{ws}/unfreeze` | Re-enable writes |
+| `DELETE` | `/workspace/{ws}/document/{doc_id}` | Per-document delete with shared-entity protection |
+| `GET` | `/workspace/{ws}/audit` | Per-workspace audit log |
+| `GET` | `/admin/audit` | Cross-workspace audit log |
+
+### Behavior changes
+
+- `POST /ingest` returns `{job_id, doc_id, status: "queued"}` immediately and runs ingest in the background. Re-uploads of the same file return `{status: "duplicate"}`.
+- `POST /ingest/batch` and `POST /retry/{ws}` follow the same job-based contract.
+- `DELETE /workspace/{ws}` rejects with 409 if the workspace is frozen.
+
+### Lifespan management
+
+`server/app.py` uses an `@asynccontextmanager lifespan` that creates the PG pool, runs migrations, marks orphaned jobs as crashed, and exposes everything via `app.state`. On shutdown, in-flight jobs get a 30s grace period before cancellation; LightRAG storages and httpx clients are closed cleanly.
+
+### Configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `RAGANYTHING_PG_DSN` | `postgresql://localhost:5432/raganything` | PG connection string |
+| `RAGANYTHING_PG_POOL_MIN` / `_MAX` | `2` / `10` | asyncpg pool sizing |
+| `RAGANYTHING_JOB_MAX_CONCURRENT` | `1` | parallel jobs across all workspaces |
+| `RAGANYTHING_JOB_PROGRESS_INTERVAL` | `5` | seconds between progress flushes |
+| `RAGANYTHING_JOB_SHUTDOWN_GRACE` | `30` | seconds to wait for in-flight jobs at shutdown |
 
 ---
 

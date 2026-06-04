@@ -127,11 +127,11 @@ async def test_router_returns_chunks_and_trace():
                new=AsyncMock(side_effect=lambda **kw: kw["retrieved_docs"])):
         router = RetrievalRouter(lightrag, llm_func=AsyncMock())
         param = QueryParam(mode="hybrid", chunk_top_k=10)
-        final_chunks, trace = await router.route("test query", param, profile_name="local")
+        final_chunks, trace = await router.route("test query", param, profile_name="semantic")
 
     assert isinstance(final_chunks, list)
     assert isinstance(trace, dict)
-    assert trace["profile"] == "local"
+    assert trace["profile"] == "semantic"
     assert "latency_per_path" in trace
     assert "classifier" in trace["latency_per_path"]
 
@@ -142,7 +142,7 @@ async def test_router_trace_has_all_fields():
                new=AsyncMock(side_effect=lambda **kw: kw["retrieved_docs"])):
         router = RetrievalRouter(lightrag, llm_func=AsyncMock())
         param = QueryParam(mode="hybrid", chunk_top_k=10)
-        _, trace = await router.route("q", param, profile_name="local")
+        _, trace = await router.route("q", param, profile_name="semantic")
 
     required = {
         "profile", "confidence", "reasoning", "paths_activated",
@@ -159,7 +159,7 @@ async def test_router_all_paths_fail_raises():
         router = RetrievalRouter(lightrag, llm_func=AsyncMock())
         param = QueryParam(mode="hybrid", chunk_top_k=10)
         with pytest.raises(RetrievalError):
-            await router.route("q", param, profile_name="local")
+            await router.route("q", param, profile_name="semantic")
 
 
 async def test_router_explicit_profile_skips_classifier():
@@ -170,6 +170,6 @@ async def test_router_explicit_profile_skips_classifier():
         router = RetrievalRouter(lightrag, llm_func=AsyncMock())
         router._classifier.classify = AsyncMock(side_effect=lambda q: classifier_called.append(q))
         param = QueryParam(mode="hybrid", chunk_top_k=10)
-        await router.route("q", param, profile_name="local")
+        await router.route("q", param, profile_name="semantic")
 
     assert classifier_called == [], "Classifier should not be called when profile_name is explicit"

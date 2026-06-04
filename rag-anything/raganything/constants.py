@@ -108,8 +108,13 @@ SUPPORTED_IMAGE_EXTENSIONS = [
 # =============================================================================
 # Query defaults (used by server and QueryRequest)
 # =============================================================================
-DEFAULT_TOP_K = 20        # default and max allowed value for top_k
-DEFAULT_CHUNK_TOP_K = 10  # final window size after reranking (chunk_top_k)
+DEFAULT_TOP_K = 10        # KG entity recall when caller sends no top_k
+DEFAULT_CHUNK_TOP_K = 5   # final chunk window after reranking (chunk_top_k)
+# Clamp ceilings are decoupled from the defaults above: the server caps incoming
+# top_k/chunk_top_k at these maxima, so lowering defaults does not shrink the
+# range a power user (or the multihop ppr_qa_top_k mirror) can request.
+MAX_TOP_K = 20
+MAX_CHUNK_TOP_K = 10
 DEFAULT_NAIVE_TOP_K = 20  # naive VDB retrieval count (mix/naive modes); independent of chunk_top_k
 DEFAULT_QUERY_MODE = "hybrid"   # "naive" | "local" | "global" | "hybrid" | "mix" | "rrf" | "ppr_local" | "ppr" | "gfm"
 DEFAULT_ENABLE_RERANK = True
@@ -210,7 +215,7 @@ DEFAULT_QDRANT_RETRIEVAL_MODE = "dense"
 # =============================================================================
 # V1: Entity disambiguation
 # =============================================================================
-DEFAULT_ENABLE_ENTITY_DISAMBIGUATION = False
+DEFAULT_ENABLE_ENTITY_DISAMBIGUATION = True
 
 # =============================================================================
 # Entity surface normalization (ingest-time, optional)
@@ -365,3 +370,17 @@ DEFAULT_AGENTIC_ROUTER_FALLBACK_PROFILE = "semantic"
 DEFAULT_AGENTIC_DECOMPOSE_MAX_SUBQUESTIONS = 4
 DEFAULT_AGENTIC_PARALLEL_RETRIEVE_CONCURRENCY = 3
 DEFAULT_AGENTIC_GRADER_FALLBACK_SUFFICIENT = False
+
+# ---------------------------------------------------------------------------
+# Governance layer (PostgreSQL-backed)
+# ---------------------------------------------------------------------------
+
+DEFAULT_PG_DSN: str = "postgresql://localhost:5432/raganything"
+DEFAULT_PG_POOL_MIN: int = 2
+DEFAULT_PG_POOL_MAX: int = 10
+DEFAULT_PG_COMMAND_TIMEOUT_SECONDS: int = 30
+
+DEFAULT_JOB_MAX_CONCURRENT: int = 1
+DEFAULT_JOB_PROGRESS_INTERVAL_SECONDS: int = 5
+DEFAULT_JOB_PROGRESS_CHUNK_INTERVAL: int = 10
+DEFAULT_JOB_SHUTDOWN_GRACE_SECONDS: int = 30

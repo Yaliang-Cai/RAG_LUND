@@ -22,6 +22,7 @@ from raganything.constants import (
     DEFAULT_MULTIMODAL_TOP_K,
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
+    DEFAULT_ENABLE_RERANK,
     DEFAULT_QDRANT_RETRIEVAL_MODE,
     SUPPORTED_IMAGE_EXTENSIONS,
     GFM_DATA_DIR,
@@ -190,6 +191,7 @@ class QueryMixin:
                 "enable_rerank",
                 "enable_kg_rerank",
                 "rerank_score_scope",
+                "min_rerank_score",
                 "max_tokens",
                 "temperature",
                 "user_prompt",
@@ -287,10 +289,8 @@ class QueryMixin:
             if return_trace_auto:
                 return {
                     "answer": answer,
-                    "trace": {
-                        "routing": routing_trace,
-                        "data": {"chunks": final_chunks},
-                    },
+                    "trace": {"routing": routing_trace},
+                    "data": {"chunks": final_chunks},
                 }
             return answer
         # ── end mode="auto" ───────────────────────────────────────────────
@@ -677,7 +677,12 @@ class QueryMixin:
                     history_summary=query_param.history_summary,
                 )
                 if return_trace:
-                    return {"answer": fallback_answer, "trace": prompt_result}
+                    return {
+                        "answer": fallback_answer,
+                        "data": prompt_result.get("data", {}),
+                        "metadata": prompt_result.get("metadata", {}),
+                        "trace": prompt_result,
+                    }
                 return fallback_answer
             except Exception as exc:
                 self.logger.warning(
@@ -694,7 +699,12 @@ class QueryMixin:
                     fallback_answer = (
                         fallback_result.get("llm_response", {}) or {}
                     ).get("content") or ""
-                    return {"answer": fallback_answer, "trace": fallback_result}
+                    return {
+                        "answer": fallback_answer,
+                        "data": fallback_result.get("data", {}),
+                        "metadata": fallback_result.get("metadata", {}),
+                        "trace": fallback_result,
+                    }
                 return await self.lightrag.aquery(
                     query, param=fallback_param, system_prompt=system_prompt
                 )
@@ -716,7 +726,12 @@ class QueryMixin:
 
         self.logger.info("VLM enhanced query completed")
         if return_trace:
-            return {"answer": result, "trace": prompt_result}
+            return {
+                "answer": result,
+                "data": prompt_result.get("data", {}),
+                "metadata": prompt_result.get("metadata", {}),
+                "trace": prompt_result,
+            }
         return result
 
     async def _generate_answer_from_chunks(
