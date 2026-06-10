@@ -34,3 +34,8 @@ rag-anything/server/static/dist/
 # Local runtime / debug junk
 *.stackdump
 /data/
+
+# 忽略本地 PostgreSQL 数据库目录
+database/
+query_cache/
+
