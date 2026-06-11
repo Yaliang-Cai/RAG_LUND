@@ -64,3 +64,30 @@ uvicorn server.app:app --host 0.0.0.0 --port 9621
 Web 服务依赖前面 1–4 的后端，请先确保 PostgreSQL、Qdrant、Neo4j（必要时 Phoenix）已启动。
 若只改了后端代码无需重新 npm run build，直接重启 uvicorn 即可。
 调试时可加 --reload，但生产/常规使用不要加。
+
+```
+## add pre-built workspace
+
+cp -r /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/ablation_runs/graphbm25_20260421/_workspace_cache/docbench_shared/v0_v1_v2/rag_workspaces/docbench_shared_graphbm25_20260421_v0_v1_v2 ./rag_data/rag_workspace/
+
+chmod -R 755 ./rag_data/rag_workspace/docbench_shared_graphbm25_20260421_v0_v1_v2
+
+## Multi-hop databse
+/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/MultiHopQA/workspaces/multihopqa_hr2_v0/2wiki/2wiki_hr2_v0
+
+/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/MultiHopQA/workspaces/multihopqa_hr2_v0/musique/musique_hr2_v0
+
+/data/y50056788/Yaliang/projects/rag-anything/evaluate_local/MultiHopQA/workspaces/multihopqa_hr2_v0/musique/musique_hr2_v0
+
+
+## link workspace to pdf and minerU parser result
+python scripts/link_external_workspace.py --workspace-id docbench_shared_graphbm25_20260421_v0_v1_v2 --docbench-root /data/y50056788/Yaliang/datasets_for_eval/data_for_DocBench --mineru-root /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/DocBench/docbench_shared_results/mineru_outputs --dry-run
+
+python scripts/link_external_workspace.py --workspace-id docbench_shared_graphbm25_20260421_v0_v1_v2 --docbench-root /data/y50056788/Yaliang/datasets_for_eval/data_for_DocBench --mineru-root /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/DocBench/docbench_shared_results/mineru_outputs
+### Error here
+
+(lightRAG) h50056787@huawei-ws-arch1:/data/h50056787/workspaces/RAG_LUND/rag-anything$ rm -rf /data/h50056787/workspaces/RAG_LUND/rag-anything/rag_data/output/docbench_shared_graphbm25_20260421_v0_v1_v2/*
+(lightRAG) h50056787@huawei-ws-arch1:/data/h50056787/workspaces/RAG_LUND/rag-anything$ cp -r /data/y50056788/Yaliang/projects/rag-anything/evaluate_local/DocBench/docbench_shared_results/mineru_outputs/* /data/h50056787/workspaces/RAG_LUND/rag-anything/rag_data/output/docbench_shared_graphbm25_20260421_v0_v1_v2/
+
+
+```
