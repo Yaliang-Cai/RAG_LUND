@@ -136,12 +136,14 @@ PoolEntry:
 grader 维护跨步骤账本：
 
 ```python
-ledger = {"facts": [{"id","text","status: found|missing","chunks":[...]}], "coverage": found/total}
+ledger = {"facts": [{"id","text","status: found|missing|unverifiable","chunks":[...],"attempts":[tool,...]}],
+          "coverage": found / (total - unverifiable)}
 ```
 
 - 每步 grader 输入 = 上版账本 + 新增 chunk + **池内与当前 missing facts 相关的旧 chunk（按 canonical score 取前几条）**——后者修复结构性盲区：后发现的 fact 必须能拿早期入池 chunk 核对，否则假阴性 missing 导致定点检索全命中旧 chunk（去重后 grader 永远看不到）而死循环
 - coverage 定义可解释：必要事实确认比例
 - missing facts 直接作为定点补检的查询目标
+- **unverifiable 放弃阈值（防死循环）**：同一 missing fact 被 ≥2 个不同工具定点补检仍无法证实 → 标记 `unverifiable`，退出补检目标集。防止 grader/planner 幻觉出的"缺失细节"或语料中根本不存在的细节耗尽预算与步数。有效 coverage 分母同步剔除（否则永远到不了 sufficient，死循环换个形式存在）；unverifiable 事实必须在最终答案中显式披露（"以下细节在语料中无法证实：…"）
 - supports 反向标记：装填时支撑事实的 chunk 优先于高分但未关联事实的 chunk
 
 ### 5.4 条件终审（锚定保险）
@@ -161,6 +163,16 @@ ledger = {"facts": [{"id","text","status: found|missing","chunks":[...]}], "cove
 | session 缓存 | chunk_id → content/meta（无分数） | ~1000 LRU | LRU | session（随 TTL） |
 
 跨轮：新轮工作池清空（规范查询变了，旧分数全失效）；检索命中 session 缓存跳过取内容 IO，rerank 照常做（毫秒级，不省）。
+
+**三级预算的角色区分**（易混淆，明确）：
+
+| 数字 | 角色 | 边界对象 |
+|---|---|---|
+| 池上限 ~200 条 | 候选管理边界（内存/管理成本） | 轮内工作池 |
+| `max_context_tokens`（默认 12k） | **单次生成调用**的上下文预算，装填器严格按 canonical_score + supports 优先级装填，装不下即抛弃——低分无支撑 chunk 即使在池中也进不了 prompt | 每次 LLM 调用 |
+| 30k token 护栏（§8.1） | **全轮累计**全部 LLM 调用的总量护栏 | 一轮问答 |
+
+200 条候选远超 12k 装填容量是预期内状态：池是"可供挑选的候选集"，prompt 是"装填结果"，两者天然不等。
 
 ### 5.6 失效（与治理层联动）
 
@@ -198,8 +210,16 @@ chunk_id 内容寻址 → 新增文档不产生过期内容：
 ### 6.4 生命周期与并发
 
 - 内存 dict + 滑动 TTL 2h（访问续期），后台清扫；session 总数上限 256，LRU 逐出
-- 同 session 串行（per-session asyncio.Lock）；全局信号量限制并发 agent loop 数保护 vLLM 端点
+- **同 session 并发请求直接拒绝，不排队**：第一个查询运行中收到同 session 第二个请求 → `409 Conflict`，响应体含进行中查询摘要与动作提示（等待 / 调用 cancel）。理由：静默排队导致意外 token 消耗，且排队请求会基于完成后的 session 状态做指代消解，偏离用户发问时的意图
+- 跨 session 用全局信号量限制并发 agent loop 数保护 vLLM 端点
 - 预留 `dump()/load()`（JSON 可序列化），对接后续 PG 持久化（目标架构 WorkingMemory→存储抽象层预埋）
+
+### 6.5 取消与改问
+
+- `POST /agent/sessions/{id}/cancel`：置取消标志，loop 在**每个决策步边界**（天然检查点）优雅退出，返回结构化部分结果（账本快照 + 当前最优候选答案或拒答）
+- 取消后状态处理：session 缓存中已取 chunk 保留（内容寻址，依然有效）；轮内工作池丢弃；recent_turns 记录该轮为"已取消"，不进 history_summary
+- vLLM 侧客户端断连即中止生成，取消的计算浪费极小
+- "改问" = 前端"停止并重新提问"（cancel + 新请求），与 §6.4 的 409 形成闭环
 
 ## 7. 工具清单与性价比路由
 
@@ -314,7 +334,7 @@ factoid / summary / multihop / comparison / unknown。画像唯一职责是定**
 
 ## 10. 生成模式
 
-- **direct**：装填器按 canonical score + fact 支撑优先装填至 token 预算 → 单次生成
+- **direct**：装填器按 canonical score + fact 支撑优先装填至 `max_context_tokens`（§5.5 三级预算）→ 单次生成
 - **map_reduce**（summary 且池超上下文预算才触发）：按 file_path 聚类分组 → 并行 map（每组就问题总结，~300 token，vLLM 自然 batch）→ reduce 综合作答，引用保留组→chunk 映射。池在预算内退化为 direct
 - **cot_reflect**（multihop）：账本作推理脚手架（"已确认事实 f1(c12)、f3(c7)…沿事实链推理"）→ checker 验证 → ungrounded 声明定点检索 + 约束重生成，修复上限 1 次（预算不足 0 次），不过则部分答案+声明缺口返回。**检索修复归 loop（answer 前），生成修复归 cot_reflect（answer 后）**
 
@@ -335,7 +355,7 @@ factoid / summary / multihop / comparison / unknown。画像唯一职责是定**
 安全护栏：max_images_in_prompt=6（针对 VLM 多图退化，非相关性机制）
 ```
 
-map_reduce 下图片只进 reduce 阶段。
+`max_images_in_prompt` 是**每次生成调用（per-generation-call）**的限制：direct/cot_reflect 生成调用 ≤6；map_reduce 下 map 调用 0 张（纯文本）、reduce 调用 ≤6；inspect_image 单次调用同受此上限约束。非 session 级、非每轮累计。
 
 ### 11.3 inspect_image 工具
 
@@ -391,17 +411,23 @@ VLM 定向看图，提取事实以**文字**进证据池与账本（T2/2 点）�
 |---|---|---|
 | 质量 | 答案正确率（沿用各 benchmark 评分）、grounded 率、不可答正确拒答率 | 不退步 |
 | 成本 | 每问检索次数 / rerank 对数 / LLM 调用与 token / 墙钟 p50、p95 | 显著改善 |
-| 行为 | 快速通道命中率、改判率、RecoveryPolicy 降级率、预算利用分布、终审触发率 | 验证设计假设、定位问题模块 |
+| 行为 | 快速通道命中率、改判率、RecoveryPolicy 降级率、预算利用分布、终审触发率、unverifiable 标记率 | 验证设计假设、定位问题模块 |
+
+**降级查询的统计处理**（防止 fallback 污染对比）：每条查询的 trace 标记是否触发过 RecoveryPolicy 降级。质量报告**分层呈现**：纯 v3（无降级）/ v3 含降级（ITT 口径）/ v2 三列。注意**不采用"剔除降级查询"的做法**——降级非随机发生（难题更易触发），剔除等于从 v3 卷面撕掉最难的题，会反向人为拔高纯 v3 指标。分层用于诊断，门槛判定见 §14.3。
 
 ### 14.3 切换判据（写死）
 
 ```
-质量门槛：DocBench 与 MultiHopQA 正确率均 ≥ v2 基线（容差 -1pp）
+质量门槛：DocBench 与 MultiHopQA 正确率均 ≥ v2 基线（容差 -1pp），ITT 口径（含降级查询）
+        ——上线后的真实表现就含降级，质量门槛必须按真实口径
+降级率门槛：RecoveryPolicy 降级率 ≤ 10%
+        ——防止 v3 靠 v2 的大脑考试及格；降级率本身是 30B 决策能力的直接度量，
+          超限说明该修决策 prompt 而非该上线
 成本门槛：每问 LLM token 降 ≥30%，墙钟 p95 降 ≥40%（v2 同批实测对照）
-新能力门槛：自建 ~30 题多轮 session 测试集（指代/追问/跨轮复用），人工评审通过
+新能力门槛：自建 ~30 题多轮 session 测试集（指代/追问/跨轮复用/中途取消改问），人工评审通过
 ```
 
-三关全过 → `agentic_mode` 默认切 `agent`；v2 保留至少一个版本周期作回退 flag。任一不过 → 行为组指标定位模块，修后重跑。
+四关全过 → `agentic_mode` 默认切 `agent`；v2 保留至少一个版本周期作回退 flag。任一不过 → 行为组指标定位模块，修后重跑。
 
 ## 15. 与目标记忆架构的关系
 
