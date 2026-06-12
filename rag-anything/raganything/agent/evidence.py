@@ -97,3 +97,60 @@ class EvidencePool:
             "scored": sum(1 for e in self.entries.values() if e.canonical_score is not None),
             "last_dup_rate": round(self.last_dup_rate, 2),
         }
+
+
+class FactLedger:
+    """事实账本：found/missing/unverifiable + 有效 coverage（spec §5.3）。"""
+
+    GIVE_UP_DISTINCT_TOOLS = 2
+
+    def __init__(self) -> None:
+        self.facts: dict[str, dict] = {}
+
+    def update(self, payload: dict) -> None:
+        for f in payload.get("facts", []):
+            fid = str(f.get("id") or f"f{len(self.facts) + 1}")
+            existing = self.facts.get(fid)
+            status = str(f.get("status", "missing"))
+            if existing and existing["status"] == "unverifiable":
+                status = "unverifiable"  # 已放弃事实不被 grader 复活
+            attempts = existing["attempts"] if existing else set()
+            self.facts[fid] = {
+                "id": fid, "text": str(f.get("text", "")), "status": status,
+                "chunks": [str(c) for c in f.get("chunks", [])], "attempts": attempts,
+            }
+
+    def record_attempt(self, fact_id: str, tool: str) -> None:
+        f = self.facts.get(fact_id)
+        if not f or f["status"] != "missing":
+            return
+        f["attempts"].add(tool)
+        if len(f["attempts"]) >= self.GIVE_UP_DISTINCT_TOOLS:
+            f["status"] = "unverifiable"
+
+    @property
+    def coverage(self) -> float:
+        effective = [f for f in self.facts.values() if f["status"] != "unverifiable"]
+        if not effective:
+            return 0.0
+        return sum(1 for f in effective if f["status"] == "found") / len(effective)
+
+    def missing(self) -> list[dict]:
+        return [f for f in self.facts.values() if f["status"] == "missing"]
+
+    def unverifiable(self) -> list[dict]:
+        return [f for f in self.facts.values() if f["status"] == "unverifiable"]
+
+    def supported_chunks(self) -> dict[str, set[str]]:
+        out: dict[str, set[str]] = {}
+        for f in self.facts.values():
+            if f["status"] == "found":
+                for cid in f["chunks"]:
+                    out.setdefault(cid, set()).add(f["id"])
+        return out
+
+    def to_dict(self) -> dict:
+        return {
+            "coverage": round(self.coverage, 3),
+            "facts": [{**f, "attempts": sorted(f["attempts"])} for f in self.facts.values()],
+        }
