@@ -43,3 +43,18 @@ def test_top_sorted_by_canonical_then_hits():
     pool.add([chunk("c1"), chunk("c2")], step=0, tool="t", sub_query="q")
     pool.set_scores({"c1": 0.3, "c2": 0.8})
     assert [e.chunk_id for e in pool.top(2)] == ["c2", "c1"]
+
+
+def test_top_tiebreak_by_hit_count():
+    pool = EvidencePool()
+    pool.add([chunk("c1"), chunk("c2")], step=0, tool="t", sub_query="q")
+    pool.add([chunk("c2")], step=1, tool="t2", sub_query="q2")  # c2 hit_count=2
+    pool.set_scores({"c1": 0.5, "c2": 0.5})
+    assert [e.chunk_id for e in pool.top(2)] == ["c2", "c1"]
+
+
+def test_non_numeric_score_does_not_crash():
+    pool = EvidencePool()
+    new = pool.add([{"chunk_id": "c1", "content": "x", "rrf_score": "N/A"}],
+                   step=0, tool="t", sub_query="q")
+    assert new[0].provenance[0]["rrf_score"] == 0.0

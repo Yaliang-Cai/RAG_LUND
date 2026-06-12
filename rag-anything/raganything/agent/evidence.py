@@ -14,6 +14,13 @@ def _content_id(content: str) -> str:
     return "syn-" + hashlib.sha1(content.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class PoolEntry:
     chunk_id: str
@@ -44,7 +51,7 @@ class EvidencePool:
             content = str(c.get("content") or "")
             cid = str(c.get("chunk_id") or c.get("id") or _content_id(content))
             prov = {"step": step, "tool": tool, "sub_query": sub_query,
-                    "rrf_score": float(c.get("rrf_score") or c.get("score") or 0.0)}
+                    "rrf_score": _safe_float(c.get("rrf_score") or c.get("score") or 0.0)}
             if cid in self.entries:
                 self.entries[cid].provenance.append(prov)
                 self.entries[cid].hit_count += 1
@@ -71,6 +78,9 @@ class EvidencePool:
         overflow = len(self.entries) - self.max_entries
         if overflow <= 0:
             return
+        # 软上限：支撑 found fact 的条目按 spec §5.5 豁免淘汰。极端情况下（几乎全部
+        # 条目被保护）池可暂超 max_entries，代价仅为少量内存，属故意行为。
+        # sorted 升序 = 最低 canonical_score 优先被逐出；top() 则用 reverse=True。
         victims = sorted(
             (e for e in self.entries.values() if not e.supports),
             key=lambda e: e.sort_key(),
