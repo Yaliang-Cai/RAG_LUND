@@ -65,7 +65,7 @@ class PlanResult:
 
 
 def _cache_key(query: str) -> str:
-    return re.sub(r"\s+", "", query)
+    return re.sub(r"\s+", " ", query).strip()
 
 
 async def make_plan(model_pool: Any, query: str, session: SessionMemory) -> PlanResult:

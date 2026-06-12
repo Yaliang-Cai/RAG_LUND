@@ -67,3 +67,29 @@ def test_presets_match_spec_table():
     assert ARCHETYPE_PRESETS["summary"]["top_k"] == 25
     assert ARCHETYPE_PRESETS["multihop"]["generation_mode"] == "cot_reflect"
     assert ARCHETYPE_PRESETS["factoid"]["top_k"] == 5
+
+
+@pytest.mark.asyncio
+async def test_semantic_factoid_uses_dense():
+    s = SessionMemory(session_id="s", workspace_id="w")
+    plan = await make_plan(
+        FakePool({**PAYLOAD, "archetype": "factoid", "confidence": 0.9, "exact_terms": []}),
+        "什么是注意力机制", s)
+    assert plan.preset["tool"] == "search_dense"  # 语义型 factoid 无精确词项 §9.2
+
+
+@pytest.mark.asyncio
+async def test_factoid_with_exact_terms_uses_sparse():
+    s = SessionMemory(session_id="s", workspace_id="w")
+    plan = await make_plan(
+        FakePool({**PAYLOAD, "archetype": "factoid", "confidence": 0.9, "exact_terms": ["RTX 5090"]}),
+        "RTX 5090 显存多大", s)
+    assert plan.preset["tool"] == "search_sparse"
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_downgraded_to_unknown():
+    s = SessionMemory(session_id="s", workspace_id="w")
+    plan = await make_plan(
+        FakePool({**PAYLOAD, "archetype": "multihop", "confidence": 0.4}), "某问题", s)
+    assert plan.archetype == "unknown"  # <0.6 非 unknown 降级 §9.2
