@@ -30,3 +30,33 @@ async def test_quote_whitespace_tolerated_but_fabrication_rejected():
     )
     assert grounded is False
     assert len(ungrounded) == 1
+
+
+@pytest.mark.asyncio
+async def test_cross_chunk_spliced_quote_rejected():
+    chunks = [{"chunk_id": "a", "content": "太阳能板很常见"},
+              {"chunk_id": "b", "content": "发电效率逐年提升"}]
+    payload = {"claims": [
+        {"id": 0, "quote": "太阳能板很常见发电效率逐年提升", "supported": True},  # 跨块拼接 → 拒
+    ]}
+    grounded, ungrounded = await verify_citations(
+        FakePool(payload), "q", "太阳能板很常见发电效率逐年提升。", chunks)
+    assert grounded is False and len(ungrounded) == 1
+
+
+@pytest.mark.asyncio
+async def test_supported_with_empty_quote_rejected():
+    chunks = [{"chunk_id": "c1", "content": "任何内容"}]
+    payload = {"claims": [{"id": 0, "quote": "", "supported": True}]}
+    grounded, ungrounded = await verify_citations(
+        FakePool(payload), "q", "这是一个足够长的声明。", chunks)
+    assert grounded is False
+
+
+def test_known_behavior_abbreviation_splitting():
+    # 已知局限（启发式分句）："Fig. " 缩写被当作句界切开；短片段被 min_len 过滤。
+    # 固化当前行为——未来改进分句器时需有意识更新本测试。
+    # 实际输出：['3 shows the result clearly']（"Fig" 仅 3 字符，被过滤）
+    claims = split_claims("Fig. 3 shows the result clearly.")
+    assert "3 shows the result clearly" in claims
+    assert all(len(c) >= 6 for c in claims)

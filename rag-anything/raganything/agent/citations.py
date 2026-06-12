@@ -41,7 +41,9 @@ async def verify_citations(
     if not claims:
         return False, [query]
     chunk_text = "\n---\n".join(str(c.get("content", ""))[:1500] for c in chunks[:20])
-    normalized_corpus = _norm(chunk_text)
+    # 逐 chunk 归一化：引文必须完整存在于单个 chunk 内，
+    # 防止跨 chunk 边界拼接出的伪造引文通过裁决（分隔符被 _norm 抹除的漏洞）
+    normalized_chunks = [_norm(str(c.get("content", ""))[:1500]) for c in chunks[:20]]
     prompt = _VERIFY_PROMPT.format(
         chunks=chunk_text, query=query,
         claims="\n".join(f"{i}. {c}" for i, c in enumerate(claims)),
@@ -66,7 +68,7 @@ async def verify_citations(
     for i, claim in enumerate(claims):
         v = verdicts.get(i, {})
         quote = _norm(str(v.get("quote", "")))
-        # 代码裁决：声称 supported 必须有真实引文（归一化后包含于语料）
-        if not (v.get("supported") and quote and quote in normalized_corpus):
+        # 代码裁决：声称 supported 必须有真实引文（归一化后完整存在于某一单个 chunk 内）
+        if not (v.get("supported") and quote and any(quote in nc for nc in normalized_chunks)):
             ungrounded.append(claim)
     return (len(ungrounded) == 0), ungrounded
