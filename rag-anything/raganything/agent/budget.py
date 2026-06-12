@@ -11,6 +11,7 @@ ARCHETYPE_POINTS: dict[str, int] = {
 DEFAULT_MAX_TOKENS = 30_000
 DEFAULT_MAX_SECONDS = 60.0
 SOFT_RATIO = 0.2
+SOFT_TIME_RATIO = 0.75
 
 
 @dataclass
@@ -20,8 +21,8 @@ class Budget:
     max_seconds: float | None = DEFAULT_MAX_SECONDS
     spent_points: float = 0.0
     spent_tokens: int = 0
-    _upgraded: bool = False
-    _start: float = field(default_factory=time.monotonic)
+    _upgraded: bool = field(default=False, init=False, repr=False)
+    _start: float = field(default_factory=time.monotonic, init=False, repr=False)
 
     @classmethod
     def for_archetype(cls, archetype: str, **kwargs) -> "Budget":
@@ -51,7 +52,7 @@ class Budget:
     def low(self) -> bool:
         if self.remaining_points <= self.points * SOFT_RATIO:
             return True
-        if self.max_seconds is not None and self.elapsed >= self.max_seconds * (1 - SOFT_RATIO * 1.25):
+        if self.max_seconds is not None and self.elapsed >= self.max_seconds * SOFT_TIME_RATIO:
             return True  # 60s 护栏 → 45s 软阈值
         return False
 

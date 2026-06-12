@@ -21,7 +21,7 @@ def test_charge_and_exhaustion():
 
 def test_wall_clock_guardrail_optional():
     b = Budget(points=5, max_seconds=0.01)
-    time.sleep(0.02)
+    time.sleep(0.1)
     assert b.exhausted() == "wall_clock"
     b2 = Budget(points=5, max_seconds=None)  # 评测模式关护栏 §8.1
     assert b2.exhausted() is None
