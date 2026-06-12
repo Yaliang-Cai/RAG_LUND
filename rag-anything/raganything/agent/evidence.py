@@ -109,14 +109,19 @@ class FactLedger:
 
     def update(self, payload: dict) -> None:
         for f in payload.get("facts", []):
-            fid = str(f.get("id") or f"f{len(self.facts) + 1}")
+            text = str(f.get("text", ""))
+            # 无 id 时用文本哈希作回退：避免与 grader 自供的 "fN" 撞键导致静默覆盖，
+            # 且同文本事实跨周期得到稳定 id（与 EvidencePool 内容寻址同风格）。
+            fid = str(f.get("id") or "") or "fx-" + hashlib.sha1(
+                text.encode("utf-8", errors="replace")).hexdigest()[:8]
             existing = self.facts.get(fid)
             status = str(f.get("status", "missing"))
             if existing and existing["status"] == "unverifiable":
                 status = "unverifiable"  # 已放弃事实不被 grader 复活
             attempts = existing["attempts"] if existing else set()
             self.facts[fid] = {
-                "id": fid, "text": str(f.get("text", "")), "status": status,
+                "id": fid, "text": text, "status": status,
+                # chunks 整体替换而非合并：grader 每周期重推导完整支撑列表（约定不变量）
                 "chunks": [str(c) for c in f.get("chunks", [])], "attempts": attempts,
             }
 

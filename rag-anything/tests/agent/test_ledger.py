@@ -39,3 +39,17 @@ def test_update_merge_keeps_unverifiable():
     led.record_attempt("f2", "a"); led.record_attempt("f2", "b")
     led.update({"facts": [{"id": "f2", "text": "C 的数值", "status": "missing", "chunks": []}]})
     assert led.facts["f2"]["status"] == "unverifiable"  # grader 不能复活已放弃事实
+
+
+def test_synthetic_id_no_collision_with_grader_ids():
+    led = FactLedger()
+    led.update({"facts": [
+        {"id": "f1", "text": "a", "status": "found", "chunks": []},
+        {"id": "f3", "text": "b", "status": "missing", "chunks": []},
+        {"text": "无 id 的事实", "status": "missing", "chunks": []},  # 不得覆盖 f3
+    ]})
+    assert len(led.facts) == 3
+    assert led.facts["f3"]["text"] == "b"
+    # 同文本无 id 事实再次出现 → 同一条目，不重复
+    led.update({"facts": [{"text": "无 id 的事实", "status": "found", "chunks": ["c9"]}]})
+    assert len(led.facts) == 3
