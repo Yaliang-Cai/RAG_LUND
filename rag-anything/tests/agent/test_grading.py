@@ -56,3 +56,31 @@ def test_final_review_triggers():
     assert should_final_review(ledger_steps=1, ledger=led, pool=pool, recent_dup_rates=[0.0]) is False
     assert should_final_review(ledger_steps=3, ledger=led, pool=pool, recent_dup_rates=[0.0]) is True
     assert should_final_review(ledger_steps=1, ledger=led, pool=pool, recent_dup_rates=[0.6, 0.7]) is True
+
+
+@pytest.mark.asyncio
+async def test_grade_exception_leaves_ledger_unchanged():
+    class Broken:
+        async def call(self, role, prompt, **kw):
+            raise RuntimeError("grader endpoint down")
+    pool = _pool_with("c1")
+    ledger = FactLedger()
+    ledger.update({"facts": [{"id": "f1", "text": "原事实", "status": "found", "chunks": ["c1"]}]})
+    before = ledger.to_dict()
+    result = await LedgerGrader(Broken()).grade("q", ledger, pool, new_entries=list(pool.entries.values()))
+    assert result == {"sufficient": False, "facts": []}
+    assert ledger.to_dict() == before  # 异常不改账本
+
+
+@pytest.mark.asyncio
+async def test_ledger_prompt_capped_on_large_ledger():
+    pool = _pool_with("c1")
+    ledger = FactLedger()
+    ledger.update({"facts": [
+        {"id": f"f{i}", "text": f"事实{i}", "status": "found", "chunks": ["c1"]}
+        for i in range(60)
+    ]})
+    fake = FakePool({"sufficient": True, "facts": []})
+    await LedgerGrader(fake).grade("q", ledger, pool, new_entries=list(pool.entries.values()))
+    # prompt 中账本事实数被截断（不应包含全部 60 条）
+    assert fake.prompts[0].count('"text"') <= 41  # <=cap(40)+余量

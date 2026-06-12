@@ -14,6 +14,7 @@ _RELATED_OLD_LIMIT = 5
 _FINAL_REVIEW_STEPS = 3
 _FINAL_REVIEW_LOW_SCORE = 0.4
 _FINAL_REVIEW_DUP_RATE = 0.5
+_LEDGER_PROMPT_FACT_CAP = 40
 
 _GRADE_PROMPT = """\
 You maintain a fact ledger for answering a question. Update it incrementally.
@@ -39,6 +40,19 @@ def _format_chunks(entries: list[PoolEntry]) -> str:
     return "\n---\n".join(f"[{e.chunk_id}] {e.content[:800]}" for e in entries) or "(none)"
 
 
+def _ledger_for_prompt(ledger: FactLedger) -> dict:
+    """账本进 prompt 时的体积保护：事实过多时优先保留 missing（检索目标）
+    与最近的 found，避免长 session 账本撑爆 grader 上下文。"""
+    data = ledger.to_dict()
+    facts = data["facts"]
+    if len(facts) <= _LEDGER_PROMPT_FACT_CAP:
+        return data
+    missing = [f for f in facts if f["status"] == "missing"]
+    others = [f for f in facts if f["status"] != "missing"]
+    kept = (missing + others)[:_LEDGER_PROMPT_FACT_CAP]
+    return {"coverage": data["coverage"], "facts": kept}
+
+
 class LedgerGrader:
     def __init__(self, model_pool: Any) -> None:
         self._pool = model_pool
@@ -53,7 +67,7 @@ class LedgerGrader:
             seen = {e.chunk_id for e in window}
             window += [e for e in pool.top(_RELATED_OLD_LIMIT) if e.chunk_id not in seen]
         prompt = _GRADE_PROMPT.format(
-            query=query, ledger=json.dumps(ledger.to_dict(), ensure_ascii=False),
+            query=query, ledger=json.dumps(_ledger_for_prompt(ledger), ensure_ascii=False),
             chunks=_format_chunks(window),
         )
         try:
