@@ -30,7 +30,8 @@ def pack_context(
     max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
     visual_intent: bool = False, max_images: int = MAX_IMAGES_PER_CALL,
 ) -> PackedContext:
-    supporters = [e for e in pool.entries.values() if e.supports]
+    supporters = sorted((e for e in pool.entries.values() if e.supports),
+                        key=lambda e: e.sort_key(), reverse=True)
     others = sorted((e for e in pool.entries.values() if not e.supports),
                     key=lambda e: e.sort_key(), reverse=True)
     packed = PackedContext()
@@ -44,11 +45,14 @@ def pack_context(
     packed.chunks.sort(key=lambda e: e.sort_key(), reverse=True)
     if visual_intent:  # 三道门：意图门已过，再过相关门 §11.2
         for e in packed.chunks:
+            if len(packed.images) >= max_images:
+                break
+            if not (e.supports or (e.canonical_score or 0.0) >= _IMAGE_SCORE_FLOOR):
+                continue
             for path in e.image_paths:
                 if len(packed.images) >= max_images:
                     break
-                if e.supports or (e.canonical_score or 0.0) >= _IMAGE_SCORE_FLOOR:
-                    packed.images.append(path)
+                packed.images.append(path)
     return packed
 
 

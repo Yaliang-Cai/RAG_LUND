@@ -72,3 +72,31 @@ async def test_cot_reflect_includes_ledger_scaffold():
     led.update({"facts": [{"id": "f1", "text": "已证实的桥事实", "status": "found", "chunks": ["c0"]}]})
     await generate_answer(Pool(), "q", _pool(2), led, mode="cot_reflect", max_context_tokens=2000)
     assert "已证实的桥事实" in prompts[0]  # 账本作脚手架 §10
+
+
+@pytest.mark.asyncio
+async def test_cot_reflect_discloses_unverifiable():
+    prompts = []
+    class Pool:
+        async def call(self, role, prompt, **kw):
+            prompts.append(prompt)
+            return "答案"
+    led = FactLedger()
+    led.update({"facts": [{"id": "f1", "text": "待查细节", "status": "missing", "chunks": []}]})
+    led.record_attempt("f1", "search_dense")
+    led.record_attempt("f1", "search_hybrid")  # 2 个不同工具 → unverifiable
+    assert led.unverifiable()  # 前置确认
+    await generate_answer(Pool(), "q", _pool(1), led, mode="cot_reflect", max_context_tokens=2000)
+    assert "待查细节" in prompts[0]  # 无法证实细节进入 prompt 披露段
+
+
+@pytest.mark.asyncio
+async def test_cot_reflect_none_fallback_when_no_facts():
+    prompts = []
+    class Pool:
+        async def call(self, role, prompt, **kw):
+            prompts.append(prompt)
+            return "答案"
+    await generate_answer(Pool(), "q", _pool(1), FactLedger(), mode="cot_reflect",
+                          max_context_tokens=2000)
+    assert "(none)" in prompts[0]  # 空账本两段均回退 (none)
