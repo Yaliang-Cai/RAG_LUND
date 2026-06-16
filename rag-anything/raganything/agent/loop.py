@@ -226,8 +226,14 @@ class AgentLoop:
                 tb.add_rewrite(cq)
                 budget.charge(points=self.registry.get(decision.action).cost)
                 continue
+            # PPR seeds best from clean entity anchors, not the context-laden
+            # rewrite — swap the query for multihop only (within-repo #5 mitigation).
+            search_params = decision.params
+            if decision.action == "search_multihop":
+                search_params = {**decision.params,
+                                 "query": _multihop_seed(plan, decision.params.get("query") or cq)}
             new_entries = await self._execute_search(
-                decision.action, decision.params, pool, session, cq, tb,
+                decision.action, search_params, pool, session, cq, tb,
                 step=step, budget=budget)
             if new_entries is None:
                 return self._cancelled_result(ledger, tb, session, query)
@@ -445,6 +451,16 @@ class AgentLoop:
                            ledger=ledger.to_dict(),
                            trace=tb.build(terminal_reason="cancelled", grounded=False),
                            cancelled=True)
+
+
+def _multihop_seed(plan: PlanResult, fallback: str) -> str:
+    """Seed PPR with the planner's clean entity anchors (exact_terms) rather than
+    the verbose, context-laden standalone rewrite. Cross-turn coreference text is
+    what pollutes PPR seeds via LightRAG's low/high keyword extraction; exact_terms
+    are the proper nouns / IDs the question actually pivots on. Falls back to the
+    given query when the planner extracted none."""
+    terms = [t.strip() for t in plan.exact_terms if t and t.strip()]
+    return " ".join(terms) if terms else fallback
 
 
 def _result_chunks(pool: EvidencePool, n: int = 12) -> list[dict]:

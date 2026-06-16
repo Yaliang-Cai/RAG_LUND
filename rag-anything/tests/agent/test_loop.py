@@ -2,10 +2,25 @@ import asyncio
 import json
 import pytest
 from raganything.agent.budget import Budget
-from raganything.agent.loop import AgentLoop, AgentResult
+from raganything.agent.loop import AgentLoop, AgentResult, _multihop_seed
+from raganything.agent.planner import PlanResult
 from raganything.agent.models import ModelPool
 from raganything.agent.session import SessionMemory
 from raganything.agent.tools import build_default_registry
+
+
+def test_multihop_seed_prefers_exact_terms():
+    plan = PlanResult(standalone_query="given the earlier company, what is its 5G revenue",
+                      archetype="multihop", confidence=0.9,
+                      exact_terms=["Huawei", "Ericsson"])
+    # Clean entity anchors replace the context-laden rewrite for PPR seeding.
+    assert _multihop_seed(plan, plan.standalone_query) == "Huawei Ericsson"
+
+
+def test_multihop_seed_falls_back_without_terms():
+    plan = PlanResult(standalone_query="how do A and B compare", archetype="multihop",
+                      confidence=0.9, exact_terms=[])
+    assert _multihop_seed(plan, plan.standalone_query) == "how do A and B compare"
 
 
 def make_llm(script):
