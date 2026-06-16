@@ -56,3 +56,30 @@ def test_cancel_endpoint_sets_event():
     r = client.post("/agent/sessions/s/cancel", params={"workspace_id": "w"})
     assert r.status_code == 200
     assert session.cancel_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_rerank_adapter_remaps_to_input_order():
+    from server.agent_routes import WorkspaceAgentRunner
+
+    class FakeService:
+        async def rerank_func(self, query, documents, top_n):
+            # 模拟 reranker：按相关性乱序返回，index 指回原始输入下标
+            return [{"index": 2, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.5}]
+            # 注意：下标 1 缺失 → 该文档分数应回退 0.0
+
+    runner = WorkspaceAgentRunner(FakeService())
+    rerank_fn = runner._make_rerank_fn()
+    scores = await rerank_fn("q", ["doc0", "doc1", "doc2"])
+    assert scores == [0.5, 0.0, 0.9]  # 按输入顺序，缺失项 0.0
+
+
+@pytest.mark.asyncio
+async def test_rerank_adapter_none_when_service_lacks_reranker():
+    from server.agent_routes import WorkspaceAgentRunner
+
+    class NoRerank:
+        pass
+
+    assert WorkspaceAgentRunner(NoRerank())._make_rerank_fn() is None

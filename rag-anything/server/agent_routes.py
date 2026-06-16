@@ -2,6 +2,7 @@
 """Agent 端点：/agent/chat、/agent/sessions/{id}/cancel（spec §6.4/6.5）。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -17,7 +18,6 @@ class AgentChatRequest(BaseModel):
     workspace_id: str
     session_id: str
     query: str
-    top_k: int | None = None
     max_seconds: float | None = None
 
 
@@ -75,6 +75,7 @@ class WorkspaceAgentRunner:
     def __init__(self, service: Any) -> None:
         self._service = service
         self._loops: dict[str, Any] = {}
+        self._build_locks: dict[str, Any] = {}
 
     async def run(self, query: str, session: Any, **kw: Any):
         loop = await self._get_loop(session.workspace_id)
@@ -84,29 +85,34 @@ class WorkspaceAgentRunner:
         cached = self._loops.get(workspace_id)
         if cached is not None:
             return cached
+        lock = self._build_locks.setdefault(workspace_id, asyncio.Lock())
+        async with lock:
+            cached = self._loops.get(workspace_id)  # 双检：等锁期间可能已被另一请求构建
+            if cached is not None:
+                return cached
 
-        from raganything.agent.loop import AgentLoop
-        from raganything.agent.models import ModelPool
-        from raganything.agent.tools import build_default_registry
+            from raganything.agent.loop import AgentLoop
+            from raganything.agent.models import ModelPool
+            from raganything.agent.tools import build_default_registry
 
-        rag = await self._service.get_rag(workspace_id)
-        await rag._ensure_lightrag_initialized()
-        lightrag = rag.lightrag
+            rag = await self._service.get_rag(workspace_id)
+            await rag._ensure_lightrag_initialized()
+            lightrag = rag.lightrag
 
-        model_pool = ModelPool(main_func=self._service.llm_model_func)
-        registry = build_default_registry()
-        retrieve_fn = self._make_retrieve_fn(lightrag, registry)
-        rerank_fn = self._make_rerank_fn()
+            model_pool = ModelPool(main_func=self._service.llm_model_func)
+            registry = build_default_registry()
+            retrieve_fn = self._make_retrieve_fn(lightrag, registry)
+            rerank_fn = self._make_rerank_fn()
 
-        loop = AgentLoop(
-            model_pool=model_pool,
-            registry=registry,
-            retrieve_fn=retrieve_fn,
-            rerank_fn=rerank_fn,
-            vision_fn=None,  # VP4：inspect_image 本阶段禁用
-        )
-        self._loops[workspace_id] = loop
-        return loop
+            loop = AgentLoop(
+                model_pool=model_pool,
+                registry=registry,
+                retrieve_fn=retrieve_fn,
+                rerank_fn=rerank_fn,
+                vision_fn=None,  # VP4：inspect_image 本阶段禁用
+            )
+            self._loops[workspace_id] = loop
+            return loop
 
     def _make_retrieve_fn(self, lightrag, registry):
         from lightrag import QueryParam
