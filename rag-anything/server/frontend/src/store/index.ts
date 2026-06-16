@@ -55,6 +55,17 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: 'raganything-store',
+      // Bump when the persisted shape changes. v1 drops any chatMessages array left
+      // in localStorage by older builds so upgraded clients don't rehydrate stale
+      // chat history once (workspace/theme/job statuses are preserved by migrate).
+      version: 1,
+      migrate: (persisted) => {
+        if (persisted && typeof persisted === 'object') {
+          const { chatMessages: _drop, ...rest } = persisted as Record<string, unknown>
+          return rest as never
+        }
+        return persisted as never
+      },
       // chatMessages is intentionally NOT persisted: a reload / server restart
       // should begin a clean conversation (fresh session memory), not replay
       // old turns that would pollute the new session's context.

@@ -31,6 +31,8 @@ def normalize_decision(raw: dict, registry: ToolRegistry, default_query: str) ->
     params = spec.clamp(dict(raw.get("params") or {}))
     if "query" in spec.params and not str(params.get("query", "")).strip():
         params["query"] = default_query
+    if "expand" in params and str(params["expand"]) not in spec.allowed_expand:
+        params["expand"] = "none"
     reclassify = raw.get("reclassify")
     return Decision(
         thought=str(raw.get("thought", ""))[:300],

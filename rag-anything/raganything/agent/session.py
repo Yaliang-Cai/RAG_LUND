@@ -24,6 +24,9 @@ class SessionMemory:
     cache_max: int = CACHE_MAX
     active_entities: list[dict] = field(default_factory=list)
     recent_turns: list[dict] = field(default_factory=list)
+    open_gaps: list[str] = field(default_factory=list)  # facts left unresolved last turn,
+                                                        # so a "continue/refine" follow-up
+                                                        # can be rewritten against them
     history_summary: str = ""
     chunk_cache: OrderedDict = field(default_factory=OrderedDict)  # chunk_id -> {content, file_path}
     plan_cache: dict = field(default_factory=dict)                 # 规范化 query -> PlanResult dict
@@ -75,6 +78,7 @@ class SessionMemory:
         return {
             "session_id": self.session_id, "workspace_id": self.workspace_id,
             "active_entities": self.active_entities, "recent_turns": self.recent_turns,
+            "open_gaps": self.open_gaps,
             "history_summary": self.history_summary, "chunk_cache": dict(self.chunk_cache),
         }
 
@@ -83,6 +87,7 @@ class SessionMemory:
         s = cls(session_id=data["session_id"], workspace_id=data["workspace_id"])
         s.active_entities = list(data.get("active_entities", []))
         s.recent_turns = list(data.get("recent_turns", []))
+        s.open_gaps = list(data.get("open_gaps", []))
         s.history_summary = str(data.get("history_summary", ""))
         s.chunk_cache = OrderedDict(data.get("chunk_cache", {}))
         return s

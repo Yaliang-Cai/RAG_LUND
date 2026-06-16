@@ -100,3 +100,50 @@ async def test_cot_reflect_none_fallback_when_no_facts():
     await generate_answer(Pool(), "q", _pool(1), FactLedger(), mode="cot_reflect",
                           max_context_tokens=2000)
     assert "(none)" in prompts[0]  # 空账本两段均回退 (none)
+
+
+class _TextPool:
+    def __init__(self):
+        self.text_calls = 0
+    async def call(self, role, prompt, **kw):
+        self.text_calls += 1
+        return "text answer"
+
+
+@pytest.mark.asyncio
+async def test_generate_routes_to_vlm_when_visual_intent_and_images(monkeypatch):
+    from raganything.agent import vision
+    monkeypatch.setattr(vision, "validate_image_file", lambda p: True)
+    monkeypatch.setattr(vision, "encode_image_to_base64", lambda p: "B64")
+    pool = _pool(2, with_image=True)  # c0 score ~1.0 clears the relevance floor
+    vlm_calls = {"n": 0}
+    async def vision_fn(prompt, messages=None):
+        vlm_calls["n"] += 1
+        return "vlm answer"
+    text = _TextPool()
+    out = await generate_answer(text, "q", pool, FactLedger(), mode="direct",
+                                max_context_tokens=5000, visual_intent=True,
+                                vision_fn=vision_fn)
+    assert out == "vlm answer"
+    assert vlm_calls["n"] == 1 and text.text_calls == 0  # VLM, not the text generator
+
+
+@pytest.mark.asyncio
+async def test_generate_text_path_without_vision_fn():
+    pool = _pool(2, with_image=True)
+    text = _TextPool()
+    out = await generate_answer(text, "q", pool, FactLedger(), mode="direct",
+                                max_context_tokens=5000, visual_intent=True, vision_fn=None)
+    assert out == "text answer" and text.text_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_text_path_without_visual_intent():
+    pool = _pool(2, with_image=True)
+    text = _TextPool()
+    async def vision_fn(prompt, messages=None):
+        raise AssertionError("VLM must not be called when visual_intent is False")
+    out = await generate_answer(text, "q", pool, FactLedger(), mode="direct",
+                                max_context_tokens=5000, visual_intent=False,
+                                vision_fn=vision_fn)
+    assert out == "text answer" and text.text_calls == 1

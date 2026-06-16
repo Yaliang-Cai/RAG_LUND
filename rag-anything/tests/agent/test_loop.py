@@ -23,6 +23,19 @@ def test_multihop_seed_falls_back_without_terms():
     assert _multihop_seed(plan, plan.standalone_query) == "how do A and B compare"
 
 
+def test_apply_expand_default_planner_suggestion_then_decider_override():
+    loop = _loop([], [])
+    plan = PlanResult(standalone_query="q", archetype="factoid", confidence=0.9,
+                      suggested_expand="mqe")
+    # Planner suggestion fills in when the decider didn't choose.
+    assert loop._apply_expand_default("search", {"query": "q"}, plan)["expand"] == "mqe"
+    # An explicit decider choice wins over the planner suggestion.
+    assert loop._apply_expand_default(
+        "search", {"query": "q", "expand": "hyde"}, plan)["expand"] == "hyde"
+    # search_multihop never expands (allowed_expand == ("none",)).
+    assert "expand" not in loop._apply_expand_default("search_multihop", {"query": "q"}, plan)
+
+
 def make_llm(script):
     """script: list of(matcher_substring, reply_json_or_text)，按序消费匹配项。"""
     async def llm(prompt, **kw):
@@ -159,6 +172,60 @@ async def test_token_guardrail_charges_per_run():
     assert result.trace["terminal_reason"] in ("tokens", "no_action", "max_steps")
     # 关键断言：ModelPool 计数确实累加了
     assert loop.model_pool.approx_tokens_used > 0
+
+
+@pytest.mark.asyncio
+async def test_search_expands_with_mqe_when_planner_suggests():
+    chunks = [{"chunk_id": "c1", "content": "证据内容证据内容", "score": 1.0}]
+    script = [("prepare a user question", {**PLAN, "suggested_expand": "mqe"}),
+              ("alternative search queries", {"queries": ["变体一", "变体二"]}),
+              ("fact ledger", GRADE_OK),
+              ("Answer based ONLY", "答案：证据内容证据内容。"),
+              ("verify answer claims", VERIFY_OK)]
+    loop = _loop(script, chunks)
+    await loop.run("问题", SessionMemory(session_id="s", workspace_id="w"))
+    # base query + 2 MQE variants = 3 retrievals into the shared pool
+    assert len(loop.retrieve_fn.calls) == 3
+    queried = {c[1]["query"] for c in loop.retrieve_fn.calls}
+    assert "变体一" in queried and "变体二" in queried
+    # the retrieve_fn never sees the non-retrieval 'expand' param
+    assert all("expand" not in c[1] for c in loop.retrieve_fn.calls)
+
+
+@pytest.mark.asyncio
+async def test_open_gaps_carried_after_ungrounded_turn():
+    chunks = [{"chunk_id": "c1", "content": "无关内容", "score": 1.0}]
+    script = [("prepare a user question", PLAN),
+              ("fact ledger", GRADE_OK),
+              ("Answer based ONLY", "一个无法被证据支撑的断言。"),
+              ("verify answer claims",
+               {"claims": [{"id": 0, "quote": "完全不在证据里的引文", "supported": True}]})]
+    session = SessionMemory(session_id="s", workspace_id="w")
+    result = await _loop(script, chunks).run("问题", session)
+    assert result.grounded is False
+    assert session.open_gaps  # unresolved items carried to the next turn's planner
+
+
+@pytest.mark.asyncio
+async def test_multihop_never_expands_even_if_suggested():
+    chunks = [{"chunk_id": "c1", "content": "证据内容证据内容", "score": 1.0}]
+    plan = {**PLAN, "archetype": "multihop", "confidence": 0.9,
+            "suggested_expand": "mqe", "exact_terms": ["Huawei"]}
+    decision = {"thought": "hop", "action": "search_multihop",
+                "params": {"query": "context-laden rewrite", "top_k": 20}}
+    script = [("prepare a user question", plan),
+              ("decide the next action", decision),
+              ("fact ledger", GRADE_OK),
+              ("Answer based ONLY", "答案：证据内容证据内容。"),
+              ("verify answer claims", VERIFY_OK)]
+    loop = _loop(script, chunks)
+    await loop.run("问题", SessionMemory(session_id="s", workspace_id="w"),
+                   budget=Budget(points=8, max_seconds=None))
+    # exactly one retrieval (the seed) — no MQE fan-out on the multihop path
+    assert len(loop.retrieve_fn.calls) == 1
+    assert loop.retrieve_fn.calls[0][0] == "search_multihop"
+    # seeded from the clean entity anchor, not the context-laden rewrite
+    assert loop.retrieve_fn.calls[0][1]["query"] == "Huawei"
 
 
 @pytest.mark.asyncio

@@ -109,8 +109,11 @@ def build_default_registry() -> ToolRegistry:
         "search", 2,
         "General retrieval: LightRAG local+global knowledge graph fused with hybrid "
         "(dense+BM25) vectors. Use for any question about facts, entities, attributes, "
-        "definitions, summaries. This is the default.",
-        "agent_search", _TOPK(12, 30), rerank=True))
+        "definitions, summaries. This is the default. Optional 'expand' broadens recall: "
+        "'mqe' fans out paraphrase queries, 'hyde' retrieves against a hypothetical "
+        "answer passage — leave it at the planner's suggestion unless recall is thin.",
+        "agent_search", {**_TOPK(12, 30), "expand": ParamSpec(default="none")},
+        allowed_expand=("none", "mqe", "hyde"), rerank=True))
     reg.register(ToolSpec(
         "search_multihop", 4,
         "Multi-hop retrieval via Personalized PageRank over the entity graph. Use ONLY "

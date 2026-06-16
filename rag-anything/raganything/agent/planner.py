@@ -33,13 +33,23 @@ You prepare a user question for retrieval. Given conversation context, output JS
   "visual_intent": false,
   "entities_referenced": [{{"name": "...", "note": "<role in conversation>", "last_turn": 0}}]}}
 
-archetype rules: factoid=single specific fact; summary=broad survey/summarize;
-multihop=requires chaining facts across documents; comparison=compare two+ entities;
-unknown=unclear. visual_intent=true only if answering requires inspecting image pixels
-beyond textual descriptions (read chart values, layout, colors).
+standalone_query rules: it must be a concrete, retrievable question on its own — it is
+the ONLY text used to search. If the current question is a follow-up that continues or
+refines the previous turn (e.g. "continue searching", "give me the full/combined
+answer", "what about its ...", "more details"), DO NOT copy that bare instruction.
+Instead recover the underlying concrete question from the recent turns and fold in the
+unresolved items listed below, so the rewrite names the actual entities/facts to find.
+
+archetype rules: pick the BEST fit and commit — factoid=single specific fact;
+summary=broad survey/summarize; multihop=requires chaining facts across documents;
+comparison=compare two+ entities; unknown=only when genuinely unclear. confidence is
+how sure you are of the archetype (use >=0.8 when obvious, lower when uncertain — do
+not default everything to a low value). visual_intent=true only if answering requires
+inspecting image pixels beyond textual descriptions (read chart values, layout, colors).
 
 History summary: {summary}
 Active entities: {entities}
+Unresolved from previous turn: {open_gaps}
 Recent turns:
 {turns}
 
@@ -69,7 +79,10 @@ def _cache_key(query: str) -> str:
 
 
 async def make_plan(model_pool: Any, query: str, session: SessionMemory) -> PlanResult:
-    key = _cache_key(query)
+    # Cache is per conversational position: the same surface text means different
+    # things across turns (a "continue ..." follow-up resolves against the current
+    # gaps), so the turn index + gap signature must invalidate a stale rewrite.
+    key = f"{len(session.recent_turns)}|{len(session.open_gaps)}::{_cache_key(query)}"
     if key in session.plan_cache:
         return PlanResult(**session.plan_cache[key])
 
@@ -77,6 +90,7 @@ async def make_plan(model_pool: Any, query: str, session: SessionMemory) -> Plan
     prompt = _PLAN_PROMPT.format(
         summary=session.history_summary or "(none)",
         entities=", ".join(e["name"] for e in session.active_entities) or "(none)",
+        open_gaps="; ".join(session.open_gaps) or "(none)",
         turns=turns, query=query,
     )
     try:
@@ -90,8 +104,12 @@ async def make_plan(model_pool: Any, query: str, session: SessionMemory) -> Plan
     if archetype not in ARCHETYPES:
         archetype = "unknown"
     confidence = float(parsed.get("confidence") or 0.0)
-    if confidence < 0.6 and archetype != "unknown":
-        archetype = "unknown"  # 低置信走稳妥默认 §9.2
+    # Keep the archetype as a prior unless the planner is genuinely unsure. The old
+    # <0.6 cutoff collapsed nearly every turn to "unknown" (so the preset matrix never
+    # fired); confidence now only gates the fast path (see PlanResult.fast_path below),
+    # and the decide loop can still reclassify when evidence disagrees.
+    if confidence < 0.3 and archetype != "unknown":
+        archetype = "unknown"
     entities = [e for e in parsed.get("entities_referenced", []) if isinstance(e, dict)]
     if entities:
         session.register_entities(entities)

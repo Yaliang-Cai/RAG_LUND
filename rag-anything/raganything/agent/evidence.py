@@ -21,12 +21,23 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _safe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class PoolEntry:
     chunk_id: str
     content: str
     file_path: str = ""
     modal_type: str = ""
+    page_idx: int | None = None   # 0-based source page (LightRAG ingestion metadata)
+    page_num: int | None = None   # 1-based source page, when present
     image_paths: list[str] = field(default_factory=list)
     canonical_score: float | None = None
     provenance: list[dict] = field(default_factory=list)
@@ -61,6 +72,8 @@ class EvidencePool:
                 chunk_id=cid, content=content,
                 file_path=str(c.get("file_path") or c.get("source") or ""),
                 modal_type=str(c.get("modal_type") or ""),
+                page_idx=_safe_int(c.get("page_idx")),
+                page_num=_safe_int(c.get("page_num")),
                 image_paths=_IMAGE_PATH_RE.findall(content),
                 provenance=[prov],
             )

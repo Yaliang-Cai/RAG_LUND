@@ -69,6 +69,8 @@ export interface ChunkRef {
   filename?: string
   page_idx?: number | null
   page_num?: number | null
+  modal_type?: string
+  image_paths?: string[]
   content?: string
   text?: string
   excerpt?: string

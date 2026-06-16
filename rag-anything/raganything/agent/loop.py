@@ -15,6 +15,7 @@ from raganything.agent.budget import Budget
 from raganything.agent.citations import split_claims, verify_citations
 from raganything.agent.decision import Decision, decision_signature, normalize_decision
 from raganything.agent.evidence import EvidencePool, FactLedger
+from raganything.agent.expand import hyde_query, mqe_queries
 from raganything.agent.generate import generate_answer
 from raganything.agent.grading import LedgerGrader, should_final_review
 from raganything.agent.models import ModelPool
@@ -167,8 +168,9 @@ class AgentLoop:
         cq = plan.standalone_query
 
         if plan.fast_path:
-            new = await self._execute_search(plan.preset["tool"],
-                                             {"query": cq, "top_k": plan.preset["top_k"]},
+            fp_params = self._apply_expand_default(
+                plan.preset["tool"], {"query": cq, "top_k": plan.preset["top_k"]}, plan)
+            new = await self._execute_search(plan.preset["tool"], fp_params,
                                              pool, session, cq, tb, step=0, budget=budget)
             if new is None:
                 return self._cancelled_result(ledger, tb, session, query)
@@ -228,10 +230,14 @@ class AgentLoop:
                 continue
             # PPR seeds best from clean entity anchors, not the context-laden
             # rewrite — swap the query for multihop only (within-repo #5 mitigation).
-            search_params = decision.params
+            # `search` instead gets the planner's expand suggestion (unless the
+            # decider explicitly chose one); multihop is never expanded.
             if decision.action == "search_multihop":
                 search_params = {**decision.params,
                                  "query": _multihop_seed(plan, decision.params.get("query") or cq)}
+            else:
+                search_params = self._apply_expand_default(
+                    decision.action, dict(decision.params), plan)
             new_entries = await self._execute_search(
                 decision.action, search_params, pool, session, cq, tb,
                 step=step, budget=budget)
@@ -272,26 +278,73 @@ class AgentLoop:
             pass
         return None
 
+    def _apply_expand_default(self, tool_name, params, plan) -> dict:
+        """Resolve the effective ``expand`` strategy for a retrieval tool. An explicit
+        non-"none" choice by the decider wins; otherwise the planner's
+        ``suggested_expand`` applies. Tools that don't support expansion are untouched."""
+        spec = self.registry.get(tool_name)
+        if spec.allowed_expand == ("none",):
+            return params
+        chosen = str(params.get("expand", "none"))
+        if chosen == "none" and plan.suggested_expand in spec.allowed_expand:
+            chosen = plan.suggested_expand
+        return {**params, "expand": chosen}
+
+    async def _expanded_queries(self, base_q: str, expand: str) -> list[str]:
+        """Base query plus any expansion probes (MQE paraphrases / HyDE passage),
+        traced as an ``expand`` child span so Phoenix shows what was generated."""
+        if expand not in ("mqe", "hyde"):
+            return [base_q]
+        with _span("expand", "CHAIN",
+                   **{"input.value": base_q, "expand.strategy": expand}) as esp:
+            queries = [base_q]
+            if expand == "mqe":
+                queries += await mqe_queries(self.model_pool, base_q)
+            else:  # hyde
+                hypo = await hyde_query(self.model_pool, base_q)
+                if hypo:
+                    queries.append(hypo)
+            _set_out(esp, f"{len(queries)} queries")
+            return queries
+
     async def _execute_search(self, tool_name, params, pool, session, cq, tb, *,
                               step, budget):
         spec = self.registry.get(tool_name)
-        budget.charge(points=spec.cost)
+        expand = str(params.get("expand", "none"))
+        if expand not in spec.allowed_expand:
+            expand = "none"
+        # Expansion adds an LLM call + extra retrievals; charge a flat surcharge so
+        # the budget guardrail still bounds the turn.
+        budget.charge(points=spec.cost + (1.0 if expand != "none" else 0.0))
+        base_q = str(params.get("query", cq))
+        queries = await self._expanded_queries(base_q, expand)
+        # Strip non-retrieval params before handing to the retrieve_fn.
+        retrieve_base = {k: v for k, v in params.items() if k != "expand"}
+
         with _span("retrieve", "RETRIEVER",
-                   **{"input.value": str(params.get("query", cq)),
-                      "tool.name": tool_name,
-                      "retrieval.top_k": params.get("top_k")}) as sp:
-            result = await self._cancellable(self.retrieve_fn(tool_name, dict(params)), session)
-            if result is None:
+                   **{"input.value": base_q, "tool.name": tool_name,
+                      "retrieval.top_k": params.get("top_k"),
+                      "retrieval.queries": len(queries)}) as sp:
+            results = await self._cancellable(
+                asyncio.gather(*(self.retrieve_fn(tool_name, {**retrieve_base, "query": q})
+                                 for q in queries)), session)
+            if results is None:
                 return None
-            chunks, rtrace = result
-            _set_out(sp, f"{len(chunks)} chunks via {rtrace.get('profile', tool_name)}")
-        new_entries = pool.add(chunks, step=step, tool=tool_name,
-                               sub_query=str(params.get("query", cq)))
-        session.cache_chunks(chunks)
+            new_entries: list = []
+            total_chunks = 0
+            last_trace: dict = {}
+            for (chunks, rtrace), q in zip(results, queries):
+                total_chunks += len(chunks)
+                last_trace = rtrace
+                new_entries.extend(pool.add(chunks, step=step, tool=tool_name, sub_query=q))
+                session.cache_chunks(chunks)
+            _set_out(sp, f"{total_chunks} chunks via "
+                         f"{last_trace.get('profile', tool_name)} ({len(queries)} q)")
         if new_entries:
             # PPR (rerank=False) already ranks by multi-hop relevance — never
             # cross-encoder-rerank it (user requirement). Other tools rerank at
-            # the pool admission point.
+            # the pool admission point. Expansion results are reranked together
+            # against the canonical query, fusing the variants by relevance.
             if self.rerank_fn is not None and spec.rerank:
                 scores = await self.rerank_fn(cq, [e.content for e in new_entries])
                 pool.set_scores({e.chunk_id: s for e, s in zip(new_entries, scores)})
@@ -300,8 +353,8 @@ class AgentLoop:
                                                  default=0.0)
                                  for e in new_entries})
         pool.evict()
-        tb.add_retrieval_step(step_type=tool_name, query=str(params.get("query", cq)),
-                              tool=tool_name, chunks=len(chunks), trace=rtrace, cycle=step)
+        tb.add_retrieval_step(step_type=tool_name, query=base_q,
+                              tool=tool_name, chunks=total_chunks, trace=last_trace, cycle=step)
         return new_entries
 
     async def _grade(self, grader, cq, ledger, pool, new_entries) -> dict:
@@ -364,7 +417,8 @@ class AgentLoop:
             answer = await self._cancellable(
                 generate_answer(self.model_pool, cq, pool, ledger, mode=generation_mode,
                                 max_context_tokens=self.max_context_tokens,
-                                visual_intent=plan.visual_intent), session)
+                                visual_intent=plan.visual_intent,
+                                vision_fn=self.vision_fn), session)
             _set_out(sp, answer)
         if answer is None:
             return self._cancelled_result(ledger, tb, session, cq)
@@ -381,7 +435,8 @@ class AgentLoop:
             answer = await generate_answer(self.model_pool, cq, pool, ledger,
                                            mode=generation_mode,
                                            max_context_tokens=self.max_context_tokens,
-                                           visual_intent=plan.visual_intent)
+                                           visual_intent=plan.visual_intent,
+                                           vision_fn=self.vision_fn)
             chunks = [{"chunk_id": e.chunk_id, "content": e.content} for e in pool.top(20)]
             grounded, ungrounded = await verify_citations(self.model_pool, cq, answer, chunks)
             tb.add_hallucination_event({"grounded": grounded,
@@ -396,6 +451,10 @@ class AgentLoop:
         refs = _result_chunks(pool)
         session.add_turn(cq, answer if deliverable else "")
         unver = ledger.unverifiable()
+        # Carry what's still unresolved so a "continue / give me the full answer"
+        # follow-up can be rewritten against concrete gaps, not the bare instruction.
+        session.open_gaps = ([f["text"] for f in unver]
+                             + (list(ungrounded) if not deliverable else []))
 
         if deliverable:
             notes = []
@@ -422,10 +481,14 @@ class AgentLoop:
     async def _exhausted(self, cq, plan, pool, ledger, tb, budget, session,
                          reason) -> AgentResult:
         refs = _result_chunks(pool)
+        # Unresolved facts carry to the next turn so a follow-up can target them.
+        session.open_gaps = ([f["text"] for f in ledger.missing()]
+                             + [f["text"] for f in ledger.unverifiable()])
         if ledger.coverage >= 0.5 and pool.entries:
             answer = await generate_answer(
                 self.model_pool, cq, pool, ledger, mode="direct",
-                max_context_tokens=self.max_context_tokens)
+                max_context_tokens=self.max_context_tokens,
+                visual_intent=plan.visual_intent, vision_fn=self.vision_fn)
             missing = ledger.missing()
             if missing:
                 answer += ("\n\n_Answered from partial evidence; not covered: "
@@ -464,9 +527,13 @@ def _multihop_seed(plan: PlanResult, fallback: str) -> str:
 
 
 def _result_chunks(pool: EvidencePool, n: int = 12) -> list[dict]:
-    """Top pool entries as UI reference records (id / file_path / content)."""
+    """Top pool entries as UI reference records. Carries page/modal metadata so the
+    frontend ReferenceList can jump to the right PDF page — including for multimodal
+    chunks, which previously lost their page and fell back to text-highlight only."""
     return [
         {"id": e.chunk_id, "file_path": e.file_path,
-         "content": e.content, "score": e.canonical_score}
+         "content": e.content, "score": e.canonical_score,
+         "page_idx": e.page_idx, "page_num": e.page_num,
+         "modal_type": e.modal_type, "image_paths": e.image_paths}
         for e in pool.top(n)
     ]

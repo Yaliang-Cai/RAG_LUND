@@ -5,6 +5,22 @@ def chunk(cid, content="text", score=0.5, file_path="a.md"):
     return {"chunk_id": cid, "content": content, "rrf_score": score, "file_path": file_path}
 
 
+def test_pool_captures_page_and_modal_metadata():
+    pool = EvidencePool()
+    pool.add([{"chunk_id": "c1", "content": "x", "file_path": "doc.pdf",
+               "page_idx": 4, "page_num": 5, "modal_type": "image"}],
+             step=0, tool="t", sub_query="q")
+    e = pool.entries["c1"]
+    assert e.page_idx == 4 and e.page_num == 5 and e.modal_type == "image"
+
+
+def test_pool_page_metadata_defaults_none():
+    pool = EvidencePool()
+    pool.add([{"chunk_id": "c2", "content": "y"}], step=0, tool="t", sub_query="q")
+    e = pool.entries["c2"]
+    assert e.page_idx is None and e.page_num is None
+
+
 def test_dedup_appends_provenance_and_hit_count():
     pool = EvidencePool()
     new = pool.add([chunk("c1")], step=0, tool="search_dense", sub_query="q")

@@ -122,7 +122,7 @@ Question: {query}
 async def generate_answer(
     model_pool: Any, query: str, pool: EvidencePool, ledger: FactLedger, *,
     mode: str = "direct", max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
-    visual_intent: bool = False,
+    visual_intent: bool = False, vision_fn: Any = None,
 ) -> str:
     packed = pack_context(pool, ledger, max_context_tokens=max_context_tokens,
                           visual_intent=visual_intent)
@@ -139,6 +139,12 @@ async def generate_answer(
                                     context=packed.text(), query=query)
     else:
         prompt = _DIRECT_PROMPT.format(context=packed.text(), query=query)
+    # Generation-time VLM (spec §11.2): when the planner flagged visual intent and
+    # relevant images survived the pack-context gates, answer with the vision model
+    # so it reads the pixels, not just the textual captions.
+    if visual_intent and vision_fn is not None and packed.images:
+        from raganything.agent.vision import vlm_generate
+        return await vlm_generate(vision_fn, prompt, packed.images)
     return str(await model_pool.call("generator", prompt))
 
 

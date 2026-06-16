@@ -91,8 +91,30 @@ async def test_multihop_uses_search_multihop():
 
 
 @pytest.mark.asyncio
-async def test_low_confidence_downgraded_to_unknown():
+async def test_moderate_confidence_keeps_archetype_as_prior():
     s = SessionMemory(session_id="s", workspace_id="w")
+    # 0.4 used to collapse to "unknown" (killing the preset matrix); now a moderately
+    # confident archetype is kept as a prior — only the fast path is withheld.
     plan = await make_plan(
         FakePool({**PAYLOAD, "archetype": "multihop", "confidence": 0.4}), "某问题", s)
-    assert plan.archetype == "unknown"  # <0.6 非 unknown 降级 §9.2
+    assert plan.archetype == "multihop" and plan.fast_path is False
+
+
+@pytest.mark.asyncio
+async def test_very_low_confidence_still_downgraded_to_unknown():
+    s = SessionMemory(session_id="s", workspace_id="w")
+    plan = await make_plan(
+        FakePool({**PAYLOAD, "archetype": "multihop", "confidence": 0.2}), "某问题", s)
+    assert plan.archetype == "unknown"  # genuinely unsure → safe default
+
+
+@pytest.mark.asyncio
+async def test_continuation_query_gets_gaps_and_rule_in_prompt():
+    s = SessionMemory(session_id="s", workspace_id="w")
+    s.recent_turns.append({"q": "华为2023年5G营收", "a": "", "cancelled": False})
+    s.open_gaps = ["华为2023年5G营收具体数字"]
+    pool = FakePool({**PAYLOAD, "standalone_query": "华为2023年5G营收具体数字"})
+    await make_plan(pool, "继续检索相关事实，给我综合答案", s)
+    prompt = pool.calls[0][1]
+    assert "华为2023年5G营收具体数字" in prompt   # unresolved gaps surfaced to planner
+    assert "continue" in prompt.lower()          # continuation/refine rewrite rule present
