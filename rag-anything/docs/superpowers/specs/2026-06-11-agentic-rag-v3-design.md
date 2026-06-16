@@ -1,8 +1,20 @@
 # Agentic RAG v3 设计：真 Agent Loop + Session 记忆
 
 日期：2026-06-11
-状态：已与需求方逐节讨论定稿，待审阅
+状态：核心已实现（`raganything/agent/`，14 任务 TDD 完成，75 测试通过）；下列能力本期延后
 前置讨论：v2（`raganything/retrieval/agent_graph_v2.py`）问题诊断 + 八个细节专题讨论
+
+## 本期已实现 vs 延后（实现收口记录 2026-06-16）
+
+已实现：决策循环 + 快速通道（§4）、EvidencePool + 事实账本 + unverifiable 阈值 + 条件终审（§5）、SessionMemory/TTL/治理失效（§6）、ToolRegistry + 成本档位 + 无 rerank agent profile（§7）、成本点预算 + 墙钟护栏 + token 护栏（近似 per-run 计量，§8）、画像分类 + reclassify 升档（§9）、direct/map_reduce/cot_reflect（§10）、多模态三道门装填（§11.2）、ModelPool 角色分离 + 熔断（§12）、v2 兼容 trace（§13）、`/agent/chat` + cancel + 409（§6.4/6.5）。
+
+延后到后续相（已在代码留接口/标注，不阻塞 `/agent/chat` 可用）：
+- **MQE / HyDE expand 执行器（§7.4）**：`expand` 已贯穿 planner 输出/工具卡片/preset，但检索执行层（`agent_routes._make_retrieve_fn`）尚未实现变体生成与 RRF 合并；当前 `expand` 入参被 clamp 丢弃，等价 `none`。
+- **inspect_image / PerceptualMemory（§11.3）**：`vision_fn=None`，runner 启动时从工具集移除该工具，planner 不可选。接 VLM 适配器后恢复注册即启用。
+- **summarizer 滚动摘要（§6.2）**：`summarizer` 角色与 `history_summary` 写入路径未实现；当前仅靠 `recent_turns`（N=6）窗口承载上下文，超窗历史不压缩。
+- **预算运行时校准（§8.2）**：仅静态档位，trace 实测滑动平均回写未实现。
+- **token 护栏精度**：当前为 `(len(prompt)+len(result))//4` 的近似 per-run 计量（非真实 tokenizer 用量），作为粗保护；接入端点 usage 字段后可精确化。
+- **A/B 评测脚本接入 evaluate_local + 前端 stop 按钮 + PPR 后台预热挂载（§7.3 第1点）**：独立后续计划。
 
 ---
 
