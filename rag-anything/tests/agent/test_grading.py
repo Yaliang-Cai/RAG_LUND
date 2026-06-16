@@ -34,6 +34,34 @@ async def test_grade_updates_ledger_and_marks_supports():
 
 
 @pytest.mark.asyncio
+async def test_found_fact_with_phantom_chunk_demoted_and_not_sufficient():
+    # Grader declares sufficiency but cites a chunk id that is not in the pool
+    # (fabricated/empty support) — the recall guard demotes it and blocks sufficiency.
+    pool = _pool_with("c1")
+    ledger = FactLedger()
+    grader = LedgerGrader(FakePool({"sufficient": True, "facts": [
+        {"id": "f1", "text": "真有支撑", "status": "found", "chunks": ["c1"]},
+        {"id": "f2", "text": "幻觉支撑", "status": "found", "chunks": ["c999"]},
+    ]}))
+    result = await grader.grade("q", ledger, pool, new_entries=list(pool.entries.values()))
+    assert result["sufficient"] is False           # invariant: a missing fact blocks it
+    assert ledger.facts["f2"]["status"] == "missing"
+    assert "f1" in pool.entries["c1"].supports
+
+
+@pytest.mark.asyncio
+async def test_all_found_real_support_is_sufficient():
+    pool = _pool_with("c1", "c2")
+    ledger = FactLedger()
+    grader = LedgerGrader(FakePool({"sufficient": True, "facts": [
+        {"id": "f1", "text": "事实一", "status": "found", "chunks": ["c1"]},
+        {"id": "f2", "text": "事实二", "status": "found", "chunks": ["c2"]},
+    ]}))
+    result = await grader.grade("q", ledger, pool, new_entries=list(pool.entries.values()))
+    assert result["sufficient"] is True
+
+
+@pytest.mark.asyncio
 async def test_missing_related_old_chunks_in_window():
     pool = _pool_with("c1", "c2", "c3")
     pool.set_scores({"c1": 0.9, "c2": 0.5, "c3": 0.1})

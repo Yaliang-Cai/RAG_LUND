@@ -461,7 +461,7 @@ class AgentLoop:
             if unver:
                 notes.append("Some details could not be verified against the sources: "
                              + "; ".join(f["text"] for f in unver))
-            if ungrounded:
+            if ungrounded and unsupported_ratio >= 0.34:
                 notes.append("Some statements may need verification against the cited sources.")
             if notes:
                 answer += "\n\n_" + " ".join(notes) + "_"

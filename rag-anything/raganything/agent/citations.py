@@ -9,6 +9,12 @@ from raganything.retrieval.json_utils import call_json_object
 _SENT_SPLIT = re.compile(r"[。！？!?\n]+|(?<=[a-zA-Z0-9])\.\s")
 _MIN_CLAIM_LEN = 6
 
+# Markdown structure lines carry no verifiable claim — headings, horizontal rules and
+# table separator rows would otherwise become "claims" no chunk can support, flooding
+# verification with empty/false verdicts.
+_STRUCTURE_LINE = re.compile(
+    r"^\s*(?:#{1,6}\s+\S|[-*_=]{3,}\s*$|\|?[\s:|+-]+\|?\s*$)")
+
 _VERIFY_PROMPT = """\
 You verify answer claims against retrieved evidence chunks.
 For EACH claim below, quote the supporting span VERBATIM from the chunks,
@@ -29,9 +35,41 @@ def _norm(text: str) -> str:
     return re.sub(r"\W+", "", text)
 
 
+def _strip_markup(text: str) -> str:
+    """Drop inline Markdown/LaTeX/citation scaffolding so a claim is the prose a
+    reader would actually verify, not formatting tokens."""
+    text = re.sub(r"\[[^\]]*\]", " ", text)    # inline [chunk_id] citations
+    text = re.sub(r"\$+[^$]*\$+", " ", text)   # LaTeX spans $inline$ / $$display$$
+    text = re.sub(r"[*_`>#|]+", " ", text)     # emphasis / code / quote / table pipes
+    text = re.sub(r"^\s*[-+]\s+", "", text)    # leading list bullet
+    return text
+
+
+def _is_substantive(claim: str) -> bool:
+    # Require enough word characters (CJK counts as \w in Unicode mode) so bare
+    # punctuation or formatting residue is never treated as a claim.
+    return len(re.findall(r"\w", claim)) >= _MIN_CLAIM_LEN
+
+
 def split_claims(answer: str, min_len: int = _MIN_CLAIM_LEN) -> list[str]:
-    parts = [p.strip().rstrip("。！？!?.") for p in _SENT_SPLIT.split(answer) if p and p.strip()]
-    return [p for p in parts if len(p) >= min_len]
+    """Factual sentences from a Markdown answer: structure lines dropped, inline
+    markup stripped, and duplicates removed — the unit citation verification works
+    on. Keeps verification focused on real claims instead of headings/tables/LaTeX."""
+    claims: list[str] = []
+    seen: set[str] = set()
+    for line in answer.splitlines():
+        if _STRUCTURE_LINE.match(line):
+            continue
+        for part in _SENT_SPLIT.split(_strip_markup(line)):
+            c = part.strip().rstrip("。！？!?.").strip()
+            if len(c) < min_len or not _is_substantive(c):
+                continue
+            key = re.sub(r"\s+", "", c).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            claims.append(c)
+    return claims
 
 
 async def verify_citations(

@@ -53,6 +53,33 @@ async def test_supported_with_empty_quote_rejected():
     assert grounded is False
 
 
+def test_markdown_structure_excluded_from_claims():
+    answer = (
+        "华为2023年5G营收约1234亿元。\n"
+        "### 业务概述\n"
+        "| 指标 | 数值 |\n"
+        "| --- | --- |\n"
+        "- **营收**：同比增长5% [c1]\n"
+        "公式为 $E = mc^2$ 表示能量。\n"
+        "---\n"
+    )
+    claims = split_claims(answer)
+    # Real prose survives; headings / separators / list scaffolding / inline citation
+    # tokens / LaTeX spans do not become "claims".
+    assert any("华为2023年5G营收" in c for c in claims)
+    assert any("营收" in c and "同比增长5" in c for c in claims)
+    assert not any("###" in c or "业务概述" == c for c in claims)
+    assert not any(set(c) <= set("|-: ") for c in claims)   # no table separator rows
+    assert not any("[c1]" in c for c in claims)              # citation token stripped
+    assert not any("mc^2" in c for c in claims)              # LaTeX span stripped
+
+
+def test_duplicate_claims_deduplicated():
+    # The same sentence appearing as both lead and a restated bullet collapses to one.
+    answer = "结论是营收增长。\n- 结论是营收增长 [c1]\n"
+    assert split_claims(answer) == ["结论是营收增长"]
+
+
 def test_known_behavior_abbreviation_splitting():
     # 已知局限（启发式分句）："Fig. " 缩写被当作句界切开；短片段被 min_len 过滤。
     # 固化当前行为——未来改进分句器时需有意识更新本测试。

@@ -27,12 +27,15 @@ Current ledger (facts needed to answer; found facts list supporting chunk ids):
 Evidence chunks to evaluate (new + relevant old):
 {chunks}
 
-Task: re-derive the COMPLETE fact list needed to answer the question.
-For each fact: status "found" (with chunk ids from evidence above that support it) or "missing".
-Keep fact ids stable when the fact is unchanged. Add new facts if discovered necessary.
+Task: decompose the question into the COMPLETE set of atomic facts a full answer
+requires — INCLUDING facts not yet present in the evidence (list those as "missing";
+never omit a needed fact just because no chunk covers it). For each fact: status
+"found" ONLY if a chunk above explicitly states it (cite those chunk ids); otherwise
+"missing". Do not infer "found" from indirect, partial, or merely related text.
+Keep fact ids stable when the fact is unchanged.
 Output JSON only:
 {{"sufficient": true|false, "facts": [{{"id": "f1", "text": "...", "status": "found|missing", "chunks": ["..."]}}]}}
-sufficient=true only when every necessary fact is found.
+sufficient=true ONLY when every necessary fact is "found" with supporting chunk ids.
 """
 
 
@@ -77,11 +80,19 @@ class LedgerGrader:
             logger.warning("LedgerGrader failed; keeping ledger unchanged", exc_info=True)
             return {"sufficient": False, "facts": []}
         ledger.update(parsed)
+        # Recall guard: a fact claimed "found" must point at a chunk that actually
+        # exists in the pool. The grader sometimes cites fabricated/empty chunk ids
+        # and then declares sufficiency on evidence we never retrieved — demote those
+        # to "missing" so the loop keeps searching instead of shipping a thin answer.
+        for f in ledger.facts.values():
+            if f["status"] == "found" and not any(c in pool.entries for c in f["chunks"]):
+                f["status"] = "missing"
         for cid, fact_ids in ledger.supported_chunks().items():
             if cid in pool.entries:
                 pool.entries[cid].supports |= fact_ids
-        return {"sufficient": bool(parsed.get("sufficient", False)),
-                "facts": parsed.get("facts", [])}
+        # Sufficiency is an invariant, not the model's say-so: no fact may be missing.
+        sufficient = bool(parsed.get("sufficient", False)) and not ledger.missing()
+        return {"sufficient": sufficient, "facts": parsed.get("facts", [])}
 
     async def final_review(self, query: str, pool: EvidencePool, top_n: int = 20) -> dict:
         """无账本全池终审：fresh grade（spec §5.4）。"""
