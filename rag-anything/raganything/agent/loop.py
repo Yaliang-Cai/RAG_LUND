@@ -125,6 +125,10 @@ class AgentLoop:
                 # 过早作答守卫 §8.3：证据池为空、预算未低/未耗尽时，不允许凭零证据收尾，
                 # 降级为一次确定性 preset 检索，确保账本被填充后再走耗尽/拒答路径。
                 if not pool.entries and not budget.low() and not budget.exhausted():
+                    # 守卫替换 _decide 已记录的 answer 决策，避免轨迹出现未执行的幽灵决策
+                    if (tb._trace["agent_decisions"]
+                            and tb._trace["agent_decisions"][-1]["action"] == "answer"):
+                        tb._trace["agent_decisions"].pop()
                     decision = Decision(
                         thought="premature answer rejected: gather evidence first",
                         action=plan.preset["tool"],
@@ -238,9 +242,13 @@ class AgentLoop:
             except Exception as exc:
                 prompt += f"\nPrevious output invalid: {exc}. Output ONLY the JSON object."
         failure = ledger.missing()[0]["text"] if ledger.missing() else "partial_evidence"
+        # 把已尝试动作签名喂给 RecoveryPolicy，使其跨步逐级升级而非每次返回首选
+        tried_profiles = {self.registry.get(a).profile for a in
+                          (d["action"] for d in tb._trace["agent_decisions"])
+                          if a in self.registry.names()}
         action = self.recovery.choose(
             failure_type="partial_evidence", original_profile="semantic",
-            original_query=cq, tried_profiles=set(), tried_signatures=set())
+            original_query=cq, tried_profiles=tried_profiles, tried_signatures=set())
         if action is None:
             return None
         tool = "decompose_search" if action.action_type == "decompose" else \
@@ -275,13 +283,20 @@ class AgentLoop:
                                         "ungrounded_claims": ungrounded}, cycle=1)
         session.add_turn(cq, answer if grounded else "")
         unver = ledger.unverifiable()
-        if unver and grounded:
-            answer += "\n\n（以下细节在语料中无法证实：" + "；".join(f["text"] for f in unver) + "）"
-        return AgentResult(answer=answer if grounded else answer,
-                           grounded=grounded, refusal=None,
+        if grounded:
+            if unver:
+                answer += "\n\n（以下细节在语料中无法证实：" + "；".join(
+                    f["text"] for f in unver) + "）"
+            return AgentResult(answer=answer, grounded=True, refusal=None,
+                               ledger=ledger.to_dict(),
+                               trace=tb.build(terminal_reason="grounded", grounded=True))
+        # 未接地：返回部分答案 + 缺口披露 + 结构化 refusal 元数据 §8.3/§10
+        partial = (answer + "\n\n（注意：以下内容未能由检索证据完全支撑，请谨慎采信）"
+                   ) if answer else None
+        return AgentResult(answer=partial, grounded=False,
+                           refusal={"reason": "ungrounded", "ungrounded_claims": ungrounded},
                            ledger=ledger.to_dict(),
-                           trace=tb.build(terminal_reason="grounded" if grounded else "ungrounded",
-                                          grounded=grounded))
+                           trace=tb.build(terminal_reason="ungrounded", grounded=False))
 
     async def _exhausted(self, cq, plan, pool, ledger, tb, budget, session,
                          reason) -> AgentResult:

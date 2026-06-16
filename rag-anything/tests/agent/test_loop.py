@@ -107,3 +107,40 @@ async def test_cancellation_mid_tool_call():
     session.cancel_event.set()
     result = await asyncio.wait_for(task, timeout=2)  # 秒级中断，不等 10s
     assert result.cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_empty_pool_answer_is_guarded_into_retrieval():
+    # LLM 立刻想 answer，但池为空且预算充足 → 守卫降级为一次 preset 检索（fallback=True）
+    chunks = [{"chunk_id": "c1", "content": "实际检索到的内容"}]
+    script = [("prepare a user question", {**PLAN, "archetype": "unknown", "confidence": 0.9}),
+              ("decide the next action",
+               {"thought": "想直接答", "action": "answer",
+                "params": {"generation_mode": "direct"}}),
+              ("fact ledger", GRADE_OK),
+              ("Answer based ONLY", "答案：实际检索到的内容。"),
+              ("verify answer claims",
+               {"claims": [{"id": 0, "quote": "实际检索到的内容", "supported": True}]})]
+    loop = _loop(script, chunks)
+    result = await loop.run("问题", SessionMemory(session_id="s", workspace_id="w"),
+                            budget=Budget(points=8, max_seconds=None))
+    decisions = result.trace["agent_decisions"]
+    assert decisions and decisions[0]["fallback"] is True
+    assert decisions[0]["action"] != "answer"  # 被替换成检索工具
+    assert len(loop.retrieve_fn.calls) >= 1
+
+
+@pytest.mark.asyncio
+async def test_ungrounded_returns_partial_answer_and_refusal_meta():
+    chunks = [{"chunk_id": "c1", "content": "无关内容"}]
+    script = [("prepare a user question", PLAN),  # factoid 高置信 → 快速通道
+              ("fact ledger", GRADE_OK),
+              ("Answer based ONLY", "一个无法被证据支撑的断言。"),
+              ("verify answer claims",
+               {"claims": [{"id": 0, "quote": "完全不在证据里的引文", "supported": True}]})]
+    result = await _loop(script, chunks).run(
+        "问题", SessionMemory(session_id="s", workspace_id="w"))
+    assert result.grounded is False
+    assert result.answer is not None and "谨慎采信" in result.answer  # 部分答案+披露
+    assert result.refusal and result.refusal["reason"] == "ungrounded"
+    assert result.refusal["ungrounded_claims"]  # 结构化缺口元数据
