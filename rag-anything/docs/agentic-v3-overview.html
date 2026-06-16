@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agentic RAG v3 — Overview</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
+    --fg: #e6edf3; --mut: #8b949e; --amber: #f0b429; --green: #3fb950;
+    --blue: #58a6ff; --violet: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #05070a; color: var(--fg);
+    font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  .slide {
+    width: 1280px; height: 720px; background:
+      radial-gradient(1200px 500px at 80% -10%, #15233b 0%, transparent 60%), var(--bg);
+    border: 1px solid var(--line); border-radius: 16px; padding: 40px 48px;
+    display: flex; flex-direction: column; gap: 18px; overflow: hidden;
+  }
+  header { display: flex; align-items: baseline; justify-content: space-between; }
+  h1 { font-size: 34px; font-weight: 700; letter-spacing: -.5px; }
+  h1 .v { color: var(--amber); }
+  .tag { color: var(--mut); font-size: 14px; }
+  .lead { color: var(--mut); font-size: 15px; max-width: 1100px; line-height: 1.5; }
+  .lead b { color: var(--fg); font-weight: 600; }
+  .grid { display: grid; grid-template-columns: 1.35fr 1fr; gap: 20px; flex: 1; min-height: 0; }
+  .col { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--mut); margin-bottom: 12px; font-weight: 600; }
+  /* agent loop */
+  .loop { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .node { background: #0d1b2e; border: 1px solid #234; border-radius: 9px; padding: 8px 11px; font-size: 13px; font-weight: 600; }
+  .node small { display: block; color: var(--mut); font-weight: 400; font-size: 11px; }
+  .arrow { color: var(--blue); font-size: 18px; }
+  .loopback { color: var(--amber); font-size: 12px; margin-top: 8px; }
+  /* tools */
+  .tool { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-top: 1px solid var(--line); }
+  .tool:first-of-type { border-top: 0; }
+  .tool .name { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--blue); min-width: 138px; font-weight: 600; }
+  .tool .name.mh { color: var(--violet); }
+  .tool .name.ans { color: var(--green); }
+  .tool .desc { font-size: 12.5px; color: var(--mut); line-height: 1.45; }
+  /* features */
+  ul.feat { list-style: none; display: flex; flex-direction: column; gap: 9px; }
+  ul.feat li { font-size: 13px; line-height: 1.4; padding-left: 18px; position: relative; color: #c9d4e0; }
+  ul.feat li::before { content: "▹"; position: absolute; left: 0; color: var(--amber); }
+  ul.feat b { color: var(--fg); }
+  footer { display: flex; justify-content: space-between; align-items: center; color: var(--mut); font-size: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+  .chips span { border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; margin-left: 6px; font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="slide">
+  <header>
+    <h1>Agentic RAG <span class="v">v3</span></h1>
+    <div class="tag">LLM-driven retrieval agent · built on RAG-Anything + LightRAG</div>
+  </header>
+
+  <p class="lead">
+    Replaces the fixed retrieval pipeline with a <b>real agent loop</b>: the model decides
+    <b>which tool to call, with what query and budget</b>, accumulates evidence across steps,
+    self-grades coverage, and answers only when the evidence supports it — with a hard
+    cost/time budget and per-turn session memory for multi-turn conversations.
+  </p>
+
+  <div class="grid">
+    <div class="col">
+      <div class="panel" style="flex:1;">
+        <h2>How one turn works</h2>
+        <div class="loop">
+          <div class="node">Plan<small>rewrite + classify</small></div>
+          <span class="arrow">→</span>
+          <div class="node">Decide<small>pick tool + params</small></div>
+          <span class="arrow">→</span>
+          <div class="node">Retrieve<small>into evidence pool</small></div>
+          <span class="arrow">→</span>
+          <div class="node">Grade<small>fact ledger / coverage</small></div>
+          <span class="arrow">→</span>
+          <div class="node">Answer<small>+ cite check</small></div>
+        </div>
+        <div class="loopback">↺ insufficient evidence → loop back (cheap → escalate), bounded by cost-points · 60 s · token guardrails</div>
+      </div>
+
+      <div class="panel" style="flex:1.2;">
+        <h2>Minimal retrieval toolset — one clear choice per step</h2>
+        <div class="tool">
+          <div class="name">search</div>
+          <div class="desc">LightRAG <b>local + global knowledge graph</b> fused with <b>hybrid (dense + BM25)</b> chunk vectors, reranked at admission. The default for facts, entities, definitions, summaries.</div>
+        </div>
+        <div class="tool">
+          <div class="name mh">search_multihop</div>
+          <div class="desc"><b>Personalized PageRank</b> over the entity graph for bridge / comparison / causal / cross-document reasoning. No rerank — PPR already ranks by multi-hop relevance.</div>
+        </div>
+        <div class="tool">
+          <div class="name ans">answer</div>
+          <div class="desc">Finish and generate from gathered evidence (direct · map-reduce · CoT-reflect).</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="panel" style="flex:1;">
+        <h2>Why it is better</h2>
+        <ul class="feat">
+          <li><b>Evidence accumulates</b> across steps; reranking is incremental (no repeated work).</li>
+          <li><b>Fact ledger</b> drives coverage and targeted re-retrieval; abandons unverifiable details instead of looping.</li>
+          <li><b>Grounding by citation</b> — claims are checked verbatim against sources by code, not self-judged.</li>
+          <li><b>Budget-aware</b>: cost-points + wall-clock + token guardrails; fast-path for simple questions.</li>
+          <li><b>Session memory</b>: coreference resolution + cross-turn evidence cache.</li>
+          <li><b>Answers in the user's language</b>; full chain trace per turn in Phoenix.</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h2>Stack</h2>
+        <div class="lead" style="font-size:13px;">
+          Qwen3-VL-30B (vLLM) · Neo4j · Qdrant (dense + BM25) · PostgreSQL governance ·
+          role-separated model pool (pluggable small judge) · React UI · Arize Phoenix tracing.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div>Two-tool design: a human engineer can always say which to use — so the agent can too.</div>
+    <div class="chips">v2 retained as fallback<span>A/B gated</span><span>2026</span></div>
+  </footer>
+</div>
+</body>
+</html>
