@@ -25,11 +25,46 @@ from raganything.agent.trace import TraceBuilder
 
 logger = logging.getLogger(__name__)
 
+from contextlib import contextmanager
+
 try:  # OTEL is pulled in by Phoenix; degrade to no-op span if absent.
     from opentelemetry import trace as _otel_trace
     _TRACER = _otel_trace.get_tracer("raganything.agent")
 except Exception:  # pragma: no cover - observability optional
     _TRACER = None
+
+
+@contextmanager
+def _span(name: str, kind: str = "CHAIN", **attrs: Any):
+    """A child OTEL span tagged with the OpenInference span *kind* so Phoenix
+    renders a typed tree (AGENT → CHAIN/RETRIEVER/LLM …) instead of one opaque
+    node. Spans nest under whatever span is current (the per-turn agent.turn),
+    so child LLM calls auto-instrumented by Phoenix land under the right phase.
+    No-op when tracing is unavailable. The yielded span (or None) lets callers
+    attach an ``output.value`` after the awaited work completes."""
+    if _TRACER is None:
+        yield None
+        return
+    with _TRACER.start_as_current_span(name) as sp:
+        try:
+            sp.set_attribute("openinference.span.kind", kind)
+            for k, v in attrs.items():
+                if v is None:
+                    continue
+                sp.set_attribute(k, v if isinstance(v, (int, float, bool)) else str(v)[:1000])
+        except Exception:  # pragma: no cover - attributes best-effort
+            pass
+        yield sp
+
+
+def _set_out(sp: Any, value: Any) -> None:
+    """Best-effort ``output.value`` on a span returned by :func:`_span`."""
+    if sp is None:
+        return
+    try:
+        sp.set_attribute("output.value", str(value)[:1000])
+    except Exception:  # pragma: no cover
+        pass
 
 MAX_STEPS = 5  # hard cap on agent steps (spec §4.3; lowered for latency)
 # RecoveryPolicy profile → tool name (deterministic fallback brain, spec §4.4).
@@ -95,6 +130,8 @@ class AgentLoop:
         if _TRACER is None:
             return await self._run_inner(query, session, budget=budget, **qp_kwargs)
         with _TRACER.start_as_current_span("agent.turn") as span:
+            span.set_attribute("openinference.span.kind", "AGENT")
+            span.set_attribute("input.value", query[:500])
             span.set_attribute("agent.query", query[:200])
             span.set_attribute("agent.workspace", session.workspace_id)
             span.set_attribute("agent.session", session.session_id)
@@ -107,13 +144,17 @@ class AgentLoop:
                     str(result.trace.get("terminal_reason", "")))
                 span.set_attribute(
                     "agent.steps", len(result.trace.get("agent_decisions", [])))
+                span.set_attribute("output.value", str(result.answer or
+                                   (result.refusal or {}).get("reason", ""))[:1000])
             except Exception:  # pragma: no cover - attribute best-effort
                 pass
             return result
 
     async def _run_inner(self, query: str, session: SessionMemory, *,
                          budget: Budget | None = None, **qp_kwargs: Any) -> AgentResult:
-        plan = await make_plan(self.model_pool, query, session)
+        with _span("plan", "CHAIN", **{"input.value": query}) as sp:
+            plan = await make_plan(self.model_pool, query, session)
+            _set_out(sp, f"archetype={plan.archetype} | {plan.standalone_query}")
         budget = budget or Budget.for_archetype(plan.archetype)
         tokens_at_start = self.model_pool.approx_tokens_used
         pool, ledger = EvidencePool(), FactLedger()
@@ -229,10 +270,15 @@ class AgentLoop:
                               step, budget):
         spec = self.registry.get(tool_name)
         budget.charge(points=spec.cost)
-        result = await self._cancellable(self.retrieve_fn(tool_name, dict(params)), session)
-        if result is None:
-            return None
-        chunks, rtrace = result
+        with _span("retrieve", "RETRIEVER",
+                   **{"input.value": str(params.get("query", cq)),
+                      "tool.name": tool_name,
+                      "retrieval.top_k": params.get("top_k")}) as sp:
+            result = await self._cancellable(self.retrieve_fn(tool_name, dict(params)), session)
+            if result is None:
+                return None
+            chunks, rtrace = result
+            _set_out(sp, f"{len(chunks)} chunks via {rtrace.get('profile', tool_name)}")
         new_entries = pool.add(chunks, step=step, tool=tool_name,
                                sub_query=str(params.get("query", cq)))
         session.cache_chunks(chunks)
@@ -256,28 +302,35 @@ class AgentLoop:
         if self._grade_override is not None:
             ledger.update(self._grade_override)
             return dict(self._grade_override)
-        return await grader.grade(cq, ledger, pool, new_entries=new_entries)
+        with _span("grade", "CHAIN", **{"input.value": cq}) as sp:
+            grade = await grader.grade(cq, ledger, pool, new_entries=new_entries)
+            _set_out(sp, f"sufficient={grade.get('sufficient')} "
+                         f"coverage={grade.get('coverage')}")
+            return grade
 
     async def _decide(self, plan, cq, pool, ledger, tb, budget, tried, step) -> Decision | None:
         history = "\n".join(
             f"{i + 1}. {d['action']}({d['params']}) " for i, d in
             enumerate(tb._trace["agent_decisions"])) or "(none)"
-        tool_status = "search_ppr: ready"
+        tool_status = "search, search_multihop: ready"
         prompt = _DECIDE_PROMPT.format(
             cards=self.registry.card_text(), archetype=plan.archetype, query=cq,
             pool_summary=pool.summary(), ledger=str(ledger.to_dict())[:1500],
             history=history, tool_status=tool_status, budget=budget.snapshot())
-        for attempt in range(2):
-            try:
-                raw = await call_json_object(
-                    lambda p, **kw: self.model_pool.call("planner", p, **kw),
-                    prompt, max_tokens=256)
-                d = normalize_decision(raw, self.registry, cq)
-                tb.add_decision(thought=d.thought, action=d.action, params=d.params,
-                                budget_snapshot=budget.snapshot(), fallback=False)
-                return d
-            except Exception as exc:
-                prompt += f"\nPrevious output invalid: {exc}. Output ONLY the JSON object."
+        with _span("decide", "CHAIN",
+                   **{"input.value": cq, "agent.archetype": plan.archetype}) as sp:
+            for attempt in range(2):
+                try:
+                    raw = await call_json_object(
+                        lambda p, **kw: self.model_pool.call("planner", p, **kw),
+                        prompt, max_tokens=256)
+                    d = normalize_decision(raw, self.registry, cq)
+                    tb.add_decision(thought=d.thought, action=d.action, params=d.params,
+                                    budget_snapshot=budget.snapshot(), fallback=False)
+                    _set_out(sp, f"{d.action}({d.params}) :: {d.thought}")
+                    return d
+                except Exception as exc:
+                    prompt += f"\nPrevious output invalid: {exc}. Output ONLY the JSON object."
         failure = ledger.missing()[0]["text"] if ledger.missing() else "partial_evidence"
         # 把已尝试动作签名喂给 RecoveryPolicy，使其跨步逐级升级而非每次返回首选
         tried_profiles = {self.registry.get(a).profile for a in
@@ -288,8 +341,10 @@ class AgentLoop:
             original_query=cq, tried_profiles=tried_profiles, tried_signatures=set())
         if action is None:
             return None
-        tool = "decompose_search" if action.action_type == "decompose" else \
-            _FALLBACK_TOOL.get(action.profile, "search_hybrid")
+        # Map the recovery brain's profile onto the minimal toolset. Decomposition
+        # is inherently multi-hop; everything else falls back to plain search.
+        tool = "search_multihop" if action.action_type == "decompose" else \
+            _FALLBACK_TOOL.get(action.profile, "search")
         d = Decision(thought=f"fallback:{failure[:50]}", action=tool,
                      params=self.registry.get(tool).clamp({"query": cq}), fallback=True)
         tb.add_decision(thought=d.thought, action=d.action, params=d.params,
@@ -298,14 +353,19 @@ class AgentLoop:
 
     async def _finish(self, cq, plan, pool, ledger, tb, budget, session, *,
                       generation_mode) -> AgentResult:
-        answer = await self._cancellable(
-            generate_answer(self.model_pool, cq, pool, ledger, mode=generation_mode,
-                            max_context_tokens=self.max_context_tokens,
-                            visual_intent=plan.visual_intent), session)
+        with _span("generate", "LLM",
+                   **{"input.value": cq, "llm.generation_mode": generation_mode}) as sp:
+            answer = await self._cancellable(
+                generate_answer(self.model_pool, cq, pool, ledger, mode=generation_mode,
+                                max_context_tokens=self.max_context_tokens,
+                                visual_intent=plan.visual_intent), session)
+            _set_out(sp, answer)
         if answer is None:
             return self._cancelled_result(ledger, tb, session, cq)
         chunks = [{"chunk_id": e.chunk_id, "content": e.content} for e in pool.top(20)]
-        grounded, ungrounded = await verify_citations(self.model_pool, cq, answer, chunks)
+        with _span("verify_citations", "CHAIN", **{"input.value": cq}) as sp:
+            grounded, ungrounded = await verify_citations(self.model_pool, cq, answer, chunks)
+            _set_out(sp, f"grounded={grounded} ungrounded={len(ungrounded)}")
         tb.add_hallucination_event({"grounded": grounded,
                                     "ungrounded_claims": ungrounded}, cycle=0)
         if not grounded and generation_mode == "cot_reflect" and not budget.exhausted():

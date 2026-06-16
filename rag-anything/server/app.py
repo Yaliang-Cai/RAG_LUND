@@ -94,7 +94,9 @@ async def lifespan(app: FastAPI):
     # instrumentor in AsyncOpenAI.__init__ — clients created earlier are
     # missed. The CLI script (scripts/query_ppr.py) already follows this
     # order; we mirror it here so web UI traces show up too.
-    phoenix_enabled = os.getenv("ENABLE_PHOENIX", "").lower() in ("1", "true", "yes")
+    # Default ON so the per-turn agent chain trace shows up without any extra
+    # flag (set ENABLE_PHOENIX=0 to disable, e.g. when no collector is running).
+    phoenix_enabled = os.getenv("ENABLE_PHOENIX", "1").strip().lower() not in ("0", "false", "no")
     if phoenix_enabled:
         from raganything.observability import setup_phoenix
         setup_phoenix()

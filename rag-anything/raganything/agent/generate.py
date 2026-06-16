@@ -60,9 +60,21 @@ def pack_context(
 _LANG_RULE = ("Write the answer in the SAME language as the question "
               "(Chinese question → Chinese answer; English question → English answer).")
 
+# Presentation contract — the UI renders Markdown + KaTeX, so emit renderable,
+# well-structured output and cite sources inline.
+_FORMAT_RULE = (
+    "Format the answer as clean Markdown the UI renders directly: lead with a "
+    "one-sentence direct answer, then expand with short '###' section headings, "
+    "bullet lists, and tables where they aid clarity; bold key terms; write any "
+    "mathematics in LaTeX ($inline$ or $$display$$). Be complete but do not pad. "
+    "Cite every factual claim inline using the bracketed chunk id shown in the "
+    "evidence, e.g. [DC1] — cite only ids that actually appear in the evidence.")
+
+_RULES = _LANG_RULE + " " + _FORMAT_RULE
+
 _DIRECT_PROMPT = """\
 Answer based ONLY on the evidence below. If evidence is insufficient, say what is missing.
-""" + _LANG_RULE + """
+""" + _RULES + """
 
 Evidence:
 {context}
@@ -81,7 +93,7 @@ Evidence:
 
 _REDUCE_PROMPT = """\
 Synthesize the per-document summaries into a final answer to the question.
-""" + _LANG_RULE + """
+""" + _RULES + """
 
 Question: {query}
 
@@ -92,7 +104,7 @@ Summaries:
 _COT_PROMPT = """\
 Answer step by step, anchoring EVERY reasoning step on the verified facts below.
 Do not introduce claims unsupported by the facts or evidence.
-""" + _LANG_RULE + """
+""" + _RULES + """
 
 Verified facts:
 {facts}

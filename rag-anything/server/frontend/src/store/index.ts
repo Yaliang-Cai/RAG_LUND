@@ -18,9 +18,9 @@ interface AppStore {
   toggleOpenReference: (id: string) => void
   lastSeenJobStatuses: Record<string, string>
   setLastSeenJobStatuses: (statuses: Record<string, string>) => void
-  // Chat history — persisted to localStorage so reload keeps the conversation.
-  // See partialize below; large per-message fields (chunks, sourceNodes,
-  // traceMetadata) are stripped on persist to stay well under the ~5MB quota.
+  // Chat history — in-memory only (NOT persisted). Reloading the page or
+  // restarting the server starts a fresh conversation, so stale turns never
+  // leak into a new session's context.
   chatMessages: Message[]
   setChatMessages: (msgs: Message[] | ((prev: Message[]) => Message[])) => void
   clearChatMessages: () => void
@@ -55,22 +55,13 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: 'raganything-store',
+      // chatMessages is intentionally NOT persisted: a reload / server restart
+      // should begin a clean conversation (fresh session memory), not replay
+      // old turns that would pollute the new session's context.
       partialize: (s) => ({
         workspaceId: s.workspaceId,
         theme: s.theme,
         lastSeenJobStatuses: s.lastSeenJobStatuses,
-        // Persist only the lightweight conversational fields. Chunks /
-        // sourceNodes / traceMetadata are recomputable from the next
-        // backend call and can each be hundreds of KB, so dropping them
-        // keeps localStorage well under the ~5MB browser quota even after
-        // long sessions.
-        chatMessages: s.chatMessages.map((m) => ({
-          id: m.id,
-          role: m.role,
-          content: m.content,
-          query: m.query,
-          traceType: m.traceType,
-        })),
       }),
     }
   )
