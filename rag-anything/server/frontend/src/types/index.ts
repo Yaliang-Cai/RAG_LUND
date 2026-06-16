@@ -111,6 +111,23 @@ export interface AgentDecision {
   fallback: boolean
 }
 
+/** A verified verbatim span behind one inline [chunk_id] citation. */
+export interface AgentCitation {
+  claim: string
+  chunk_id: string
+  quote: string
+}
+
+/** Answer-quality numbers for the confidence panel (loop.py _answer_metrics). */
+export interface AgentMetrics {
+  faithfulness?: number
+  claims_total?: number
+  claims_supported?: number
+  citations?: number
+  coverage?: number
+  grounded?: boolean
+}
+
 /** Response shape of POST /agent/chat (raganything/agent/loop.py AgentResult). */
 export interface AgentChatResponse {
   answer: string | null
@@ -120,7 +137,20 @@ export interface AgentChatResponse {
   trace: Record<string, unknown>
   cancelled: boolean
   chunks: ChunkRef[]
+  citations?: AgentCitation[]
+  metrics?: AgentMetrics
 }
+
+/** One live event from POST /agent/chat/stream (SSE). */
+export interface AgentPhaseEvent { type: 'phase'; phase: string; detail: string }
+export interface AgentTokenEvent { type: 'token'; text: string }
+export interface AgentDoneEvent extends AgentChatResponse { type: 'done' }
+export interface AgentStreamErrorEvent { type: 'error'; message: string }
+export type AgentStreamEvent =
+  | AgentPhaseEvent
+  | AgentTokenEvent
+  | AgentDoneEvent
+  | AgentStreamErrorEvent
 
 export interface QueryParams {
   workspace_id: string

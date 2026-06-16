@@ -91,6 +91,24 @@ async def test_fast_path_zero_decision_calls():
 
 
 @pytest.mark.asyncio
+async def test_stream_emits_phase_events_and_metrics():
+    chunks = [{"chunk_id": "c1", "content": "证据内容证据内容", "score": 1.0}]
+    script = [("prepare a user question", PLAN),
+              ("fact ledger", GRADE_OK),
+              ("Answer based ONLY", "答案：证据内容证据内容。"),
+              ("verify answer claims", VERIFY_OK)]
+    events: list[dict] = []
+    async def cb(ev):
+        events.append(ev)
+    result = await _loop(script, chunks).run(
+        "问题", SessionMemory(session_id="s", workspace_id="w"), event_cb=cb)
+    phases = {e["phase"] for e in events if e.get("type") == "phase"}
+    assert {"plan", "retrieve", "grade", "generate"} <= phases   # live thinking chain
+    assert result.metrics["faithfulness"] == 1.0                 # confidence panel
+    assert result.citations and result.citations[0]["chunk_id"] == "c1"  # precise span
+
+
+@pytest.mark.asyncio
 async def test_budget_exhaustion_returns_structured_refusal():
     chunks = [{"chunk_id": "c1", "content": "无关内容"}]
     grade_bad = {"sufficient": False, "facts": [

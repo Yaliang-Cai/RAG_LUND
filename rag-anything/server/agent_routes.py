@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from typing import Any
+from typing import Any, Iterator
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from raganything.agent.session import SessionStore
@@ -21,6 +23,42 @@ class AgentChatRequest(BaseModel):
     max_seconds: float | None = None
 
 
+def _result_payload(result: Any) -> dict:
+    """AgentResult → JSON the frontend consumes (non-stream body and SSE done event)."""
+    return {
+        "answer": result.answer, "grounded": result.grounded,
+        "refusal": result.refusal, "ledger": result.ledger,
+        "trace": result.trace, "cancelled": result.cancelled,
+        "chunks": result.chunks,
+        "citations": getattr(result, "citations", []),
+        "metrics": getattr(result, "metrics", {}),
+    }
+
+
+def _busy_detail(session: Any) -> dict:
+    return {
+        "error": "session_busy",
+        "running_query": session.recent_turns[-1]["q"] if session.recent_turns else "",
+        "hint": "wait or POST /agent/sessions/{id}/cancel first",
+    }
+
+
+def _run_kwargs(req: AgentChatRequest) -> dict:
+    if req.max_seconds is None:
+        return {}
+    from raganything.agent.budget import Budget
+    return {"budget": Budget(points=10, max_seconds=req.max_seconds)}
+
+
+def _token_pieces(text: str, size: int = 28) -> Iterator[str]:
+    for i in range(0, len(text), size):
+        yield text[i:i + size]
+
+
+def _sse(obj: dict) -> str:
+    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+
 def build_agent_router(store: SessionStore, agent_loop: Any) -> APIRouter:
     router = APIRouter()
 
@@ -28,24 +66,61 @@ def build_agent_router(store: SessionStore, agent_loop: Any) -> APIRouter:
     async def agent_chat(req: AgentChatRequest):
         session = store.get(req.workspace_id, req.session_id)
         if session.lock.locked():
-            raise HTTPException(status_code=409, detail={
-                "error": "session_busy",
-                "running_query": session.recent_turns[-1]["q"] if session.recent_turns else "",
-                "hint": "wait or POST /agent/sessions/{id}/cancel first",
-            })
+            raise HTTPException(status_code=409, detail=_busy_detail(session))
         async with session.lock:
             session.cancel_event.clear()
-            kwargs: dict = {}
-            if req.max_seconds is not None:
-                from raganything.agent.budget import Budget
-                kwargs["budget"] = Budget(points=10, max_seconds=req.max_seconds)
-            result = await agent_loop.run(req.query, session, **kwargs)
-        return {
-            "answer": result.answer, "grounded": result.grounded,
-            "refusal": result.refusal, "ledger": result.ledger,
-            "trace": result.trace, "cancelled": result.cancelled,
-            "chunks": result.chunks,
-        }
+            result = await agent_loop.run(req.query, session, **_run_kwargs(req))
+        return _result_payload(result)
+
+    @router.post("/agent/chat/stream")
+    async def agent_chat_stream(req: AgentChatRequest):
+        """SSE variant: streams live ``phase`` events (the agent's thinking chain) as
+        the loop runs, then the answer as ``token`` events, then a final ``done``
+        event carrying chunks / citations / metrics."""
+        session = store.get(req.workspace_id, req.session_id)
+        if session.lock.locked():
+            raise HTTPException(status_code=409, detail=_busy_detail(session))
+
+        async def event_stream():
+            queue: asyncio.Queue = asyncio.Queue()
+
+            async def cb(ev: dict) -> None:
+                await queue.put(ev)
+
+            async def runner():
+                try:
+                    async with session.lock:
+                        session.cancel_event.clear()
+                        result = await agent_loop.run(
+                            req.query, session, event_cb=cb, **_run_kwargs(req))
+                    await queue.put({"__result__": result})
+                except Exception as exc:  # pragma: no cover - surfaced to client
+                    logger.exception("agent stream turn failed")
+                    await queue.put({"type": "error", "message": str(exc)})
+                finally:
+                    await queue.put(None)
+
+            task = asyncio.create_task(runner())
+            try:
+                while True:
+                    ev = await queue.get()
+                    if ev is None:
+                        break
+                    if "__result__" in ev:
+                        result = ev["__result__"]
+                        for piece in _token_pieces(result.answer or ""):
+                            yield _sse({"type": "token", "text": piece})
+                            await asyncio.sleep(0.012)  # gentle typewriter cadence
+                        yield _sse({"type": "done", **_result_payload(result)})
+                    else:
+                        yield _sse(ev)
+            finally:
+                if not task.done():
+                    task.cancel()
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
 
     @router.post("/agent/sessions/{session_id}/cancel")
     async def agent_cancel(session_id: str, workspace_id: str):

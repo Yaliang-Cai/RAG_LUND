@@ -1,6 +1,6 @@
 import json
 import pytest
-from raganything.agent.citations import split_claims, verify_citations
+from raganything.agent.citations import split_claims, verify_citations, verify_answer
 
 
 def test_split_claims_cjk_and_ascii():
@@ -51,6 +51,22 @@ async def test_supported_with_empty_quote_rejected():
     grounded, ungrounded = await verify_citations(
         FakePool(payload), "q", "这是一个足够长的声明。", chunks)
     assert grounded is False
+
+
+@pytest.mark.asyncio
+async def test_verify_answer_returns_supporting_spans():
+    chunks = [{"chunk_id": "c1", "content": "华为2023年5G营收为1234亿元。"},
+              {"chunk_id": "c2", "content": "无关内容。"}]
+    payload = {"claims": [
+        {"id": 0, "quote": "华为2023年5G营收为1234亿元", "supported": True},
+        {"id": 1, "quote": "捏造引文", "supported": True},
+    ]}
+    res = await verify_answer(
+        FakePool(payload), "q", "华为2023年5G营收为1234亿元。另一个无法支撑的断言。", chunks)
+    assert res.grounded is False                      # one claim fabricated
+    assert len(res.citations) == 1                    # only the real span survives
+    assert res.citations[0]["chunk_id"] == "c1"       # mapped to the matching chunk
+    assert "1234" in res.citations[0]["quote"]
 
 
 def test_markdown_structure_excluded_from_claims():

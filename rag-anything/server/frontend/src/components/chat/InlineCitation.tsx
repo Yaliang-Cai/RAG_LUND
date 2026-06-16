@@ -7,6 +7,7 @@ import type { ChunkRef } from '@/types'
 interface InlineCitationProps {
   refId: string
   chunk?: ChunkRef
+  quote?: string   // verified verbatim span → precise source highlight
 }
 
 function pickFilename(c?: ChunkRef): string | null {
@@ -29,9 +30,23 @@ function pickExcerpt(c?: ChunkRef): string {
   return String(c.content ?? c.text ?? c.excerpt ?? '').slice(0, 240)
 }
 
-export function InlineCitation({ refId, chunk }: InlineCitationProps) {
+/** Render an excerpt with the verified quote emphasized, if it occurs in it. */
+function highlightExcerpt(excerpt: string, quote?: string) {
+  if (!quote) return excerpt
+  const idx = excerpt.indexOf(quote)
+  if (idx < 0) return excerpt
+  return (
+    <>
+      {excerpt.slice(0, idx)}
+      <mark className="rounded bg-amber-500/30 text-foreground">{quote}</mark>
+      {excerpt.slice(idx + quote.length)}
+    </>
+  )
+}
+
+export function InlineCitation({ refId, chunk, quote }: InlineCitationProps) {
   const navigate = useNavigate()
-  const { setSelectedFile, setPendingPageNum } = useAppStore()
+  const { setSelectedFile, setPendingPageNum, setPendingChunkText } = useAppStore()
   const [open, setOpen] = useState(false)
   const wrapperRef = useRef<HTMLSpanElement>(null)
 
@@ -47,14 +62,22 @@ export function InlineCitation({ refId, chunk }: InlineCitationProps) {
 
   const filename = pickFilename(chunk)
   const page = pickPage(chunk)
-  const excerpt = pickExcerpt(chunk)
+  const rawExcerpt = pickExcerpt(chunk)
+  // Prefer showing the verified span when the plain excerpt doesn't already contain it.
+  const excerpt = quote && !rawExcerpt.includes(quote) ? quote : rawExcerpt
   const hasInfo = Boolean(filename || excerpt)
 
   function jumpToSource(e: React.MouseEvent) {
     e.stopPropagation()
     if (!filename) return
     setSelectedFile(filename)
-    if (page != null) setPendingPageNum(page)
+    // A verified quote drives precise text highlighting; fall back to page jump.
+    if (quote) {
+      setPendingChunkText(quote)
+      setPendingPageNum(null)
+    } else if (page != null) {
+      setPendingPageNum(page)
+    }
     setOpen(false)
     navigate('/documents')
   }
@@ -73,8 +96,11 @@ export function InlineCitation({ refId, chunk }: InlineCitationProps) {
         className={cn(
           'mx-0.5 inline-flex items-center justify-center rounded',
           'px-1 text-[10px] font-medium leading-none align-super',
-          'border border-border bg-secondary text-muted-foreground',
-          'hover:bg-accent hover:text-foreground transition-colors',
+          'border bg-secondary transition-colors',
+          // A verified span gives the chip a confident accent.
+          quote
+            ? 'border-green-700 text-green-500 hover:bg-accent'
+            : 'border-border text-muted-foreground hover:bg-accent hover:text-foreground',
           hasInfo ? 'cursor-pointer' : 'cursor-default'
         )}
         title={hasInfo ? undefined : `[${refId}]`}
@@ -110,7 +136,7 @@ export function InlineCitation({ refId, chunk }: InlineCitationProps) {
           )}
           {excerpt && (
             <p className="text-muted-foreground leading-snug line-clamp-5">
-              {excerpt}
+              {highlightExcerpt(excerpt, quote)}
             </p>
           )}
         </span>

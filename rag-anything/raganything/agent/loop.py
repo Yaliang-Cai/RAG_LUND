@@ -2,6 +2,7 @@
 """Agent 主循环（spec §4/§6.5/§8.3/§9.3）。"""
 from __future__ import annotations
 
+import contextvars
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -12,7 +13,7 @@ from raganything.retrieval.json_utils import call_json_object
 from raganything.retrieval.recovery_policy import RecoveryPolicy
 
 from raganything.agent.budget import Budget
-from raganything.agent.citations import split_claims, verify_citations
+from raganything.agent.citations import split_claims, verify_answer
 from raganything.agent.decision import Decision, decision_signature, normalize_decision
 from raganything.agent.evidence import EvidencePool, FactLedger
 from raganything.agent.expand import hyde_query, mqe_queries
@@ -67,6 +68,23 @@ def _set_out(sp: Any, value: Any) -> None:
     except Exception:  # pragma: no cover
         pass
 
+
+# Per-run UI event sink (the SSE endpoint sets it). A ContextVar keeps it isolated
+# across concurrent turns that share one AgentLoop instance, unlike an attribute.
+_event_sink: contextvars.ContextVar = contextvars.ContextVar("agent_event_sink", default=None)
+
+
+async def _emit(phase: str, detail: str = "") -> None:
+    """Push a live ``phase`` event to the current run's sink (no-op when absent),
+    so the UI can render the agent's thinking chain in real time."""
+    sink = _event_sink.get()
+    if sink is None:
+        return
+    try:
+        await sink({"type": "phase", "phase": phase, "detail": str(detail)[:300]})
+    except Exception:  # pragma: no cover - UI streaming is best-effort
+        pass
+
 MAX_STEPS = 5  # hard cap on agent steps (spec §4.3; lowered for latency)
 # RecoveryPolicy profile → tool name (deterministic fallback brain, spec §4.4).
 # Minimal toolset: anything non-multihop falls back to `search`; bridge/decompose
@@ -111,6 +129,8 @@ class AgentResult:
     trace: dict
     cancelled: bool = False
     chunks: list[dict] = field(default_factory=list)  # references for the UI
+    citations: list[dict] = field(default_factory=list)  # verbatim supporting spans
+    metrics: dict = field(default_factory=dict)  # faithfulness / coverage panel
 
 
 @dataclass
@@ -125,9 +145,20 @@ class AgentLoop:
     _grade_override: dict | None = None
 
     async def run(self, query: str, session: SessionMemory, *,
-                  budget: Budget | None = None, **qp_kwargs: Any) -> AgentResult:
+                  budget: Budget | None = None,
+                  event_cb: Callable[[dict], Awaitable[None]] | None = None,
+                  **qp_kwargs: Any) -> AgentResult:
         """Run one turn under a single OTEL span so every child LLM/retrieval call
-        nests into one chain trace per Q&A in Phoenix (spec §13 / observability)."""
+        nests into one chain trace per Q&A in Phoenix (spec §13 / observability).
+        ``event_cb`` (when given) receives live phase events for UI streaming."""
+        token = _event_sink.set(event_cb)
+        try:
+            return await self._run_traced(query, session, budget=budget, **qp_kwargs)
+        finally:
+            _event_sink.reset(token)
+
+    async def _run_traced(self, query: str, session: SessionMemory, *,
+                          budget: Budget | None = None, **qp_kwargs: Any) -> AgentResult:
         if _TRACER is None:
             return await self._run_inner(query, session, budget=budget, **qp_kwargs)
         with _TRACER.start_as_current_span("agent.turn") as span:
@@ -156,6 +187,7 @@ class AgentLoop:
         with _span("plan", "CHAIN", **{"input.value": query}) as sp:
             plan = await make_plan(self.model_pool, query, session)
             _set_out(sp, f"archetype={plan.archetype} | {plan.standalone_query}")
+        await _emit("plan", f"{plan.archetype} · {plan.standalone_query}")
         budget = budget or Budget.for_archetype(plan.archetype)
         tokens_at_start = self.model_pool.approx_tokens_used
         pool, ledger = EvidencePool(), FactLedger()
@@ -305,6 +337,7 @@ class AgentLoop:
                 if hypo:
                     queries.append(hypo)
             _set_out(esp, f"{len(queries)} queries")
+            await _emit("expand", f"{expand}: {len(queries)} queries")
             return queries
 
     async def _execute_search(self, tool_name, params, pool, session, cq, tb, *,
@@ -355,6 +388,8 @@ class AgentLoop:
         pool.evict()
         tb.add_retrieval_step(step_type=tool_name, query=base_q,
                               tool=tool_name, chunks=total_chunks, trace=last_trace, cycle=step)
+        await _emit("retrieve", f"{tool_name} → {total_chunks} chunks"
+                                + (f" ({len(queries)} queries)" if len(queries) > 1 else ""))
         return new_entries
 
     async def _grade(self, grader, cq, ledger, pool, new_entries) -> dict:
@@ -365,7 +400,10 @@ class AgentLoop:
             grade = await grader.grade(cq, ledger, pool, new_entries=new_entries)
             _set_out(sp, f"sufficient={grade.get('sufficient')} "
                          f"coverage={grade.get('coverage')}")
-            return grade
+        found = sum(1 for f in ledger.facts.values() if f["status"] == "found")
+        await _emit("grade", f"facts {found}/{len(ledger.facts)} · "
+                             f"sufficient={bool(grade.get('sufficient'))}")
+        return grade
 
     async def _decide(self, plan, cq, pool, ledger, tb, budget, tried, step) -> Decision | None:
         history = "\n".join(
@@ -387,6 +425,7 @@ class AgentLoop:
                     tb.add_decision(thought=d.thought, action=d.action, params=d.params,
                                     budget_snapshot=budget.snapshot(), fallback=False)
                     _set_out(sp, f"{d.action}({d.params}) :: {d.thought}")
+                    await _emit("decide", f"{d.action} — {d.thought}")
                     return d
                 except Exception as exc:
                     prompt += f"\nPrevious output invalid: {exc}. Output ONLY the JSON object."
@@ -412,6 +451,7 @@ class AgentLoop:
 
     async def _finish(self, cq, plan, pool, ledger, tb, budget, session, *,
                       generation_mode) -> AgentResult:
+        await _emit("generate", "writing answer")
         with _span("generate", "LLM",
                    **{"input.value": cq, "llm.generation_mode": generation_mode}) as sp:
             answer = await self._cancellable(
@@ -424,8 +464,9 @@ class AgentLoop:
             return self._cancelled_result(ledger, tb, session, cq)
         chunks = [{"chunk_id": e.chunk_id, "content": e.content} for e in pool.top(20)]
         with _span("verify_citations", "CHAIN", **{"input.value": cq}) as sp:
-            grounded, ungrounded = await verify_citations(self.model_pool, cq, answer, chunks)
-            _set_out(sp, f"grounded={grounded} ungrounded={len(ungrounded)}")
+            vres = await verify_answer(self.model_pool, cq, answer, chunks)
+            _set_out(sp, f"grounded={vres.grounded} ungrounded={len(vres.ungrounded)}")
+        grounded, ungrounded, citations = vres.grounded, vres.ungrounded, vres.citations
         tb.add_hallucination_event({"grounded": grounded,
                                     "ungrounded_claims": ungrounded}, cycle=0)
         if not grounded and generation_mode == "cot_reflect" and not budget.exhausted():
@@ -438,7 +479,8 @@ class AgentLoop:
                                            visual_intent=plan.visual_intent,
                                            vision_fn=self.vision_fn)
             chunks = [{"chunk_id": e.chunk_id, "content": e.content} for e in pool.top(20)]
-            grounded, ungrounded = await verify_citations(self.model_pool, cq, answer, chunks)
+            vres = await verify_answer(self.model_pool, cq, answer, chunks)
+            grounded, ungrounded, citations = vres.grounded, vres.ungrounded, vres.citations
             tb.add_hallucination_event({"grounded": grounded,
                                         "ungrounded_claims": ungrounded}, cycle=1)
 
@@ -448,6 +490,7 @@ class AgentLoop:
         total_claims = max(1, len(split_claims(answer))) if answer else 1
         unsupported_ratio = len(ungrounded) / total_claims
         deliverable = bool(answer) and unsupported_ratio <= 0.5
+        metrics = _answer_metrics(total_claims, ungrounded, citations, ledger, grounded)
         refs = _result_chunks(pool)
         session.add_turn(cq, answer if deliverable else "")
         unver = ledger.unverifiable()
@@ -467,6 +510,7 @@ class AgentLoop:
                 answer += "\n\n_" + " ".join(notes) + "_"
             return AgentResult(answer=answer, grounded=grounded, refusal=None,
                                ledger=ledger.to_dict(), chunks=refs,
+                               citations=citations, metrics=metrics,
                                trace=tb.build(
                                    terminal_reason="grounded" if grounded else "partial",
                                    grounded=grounded))
@@ -476,6 +520,7 @@ class AgentLoop:
         return AgentResult(answer=partial, grounded=False,
                            refusal={"reason": "ungrounded", "ungrounded_claims": ungrounded},
                            ledger=ledger.to_dict(), chunks=refs,
+                           citations=citations, metrics=metrics,
                            trace=tb.build(terminal_reason="ungrounded", grounded=False))
 
     async def _exhausted(self, cq, plan, pool, ledger, tb, budget, session,
@@ -496,6 +541,8 @@ class AgentLoop:
             session.add_turn(cq, answer)
             return AgentResult(answer=answer, grounded=False, refusal=None,
                                ledger=ledger.to_dict(), chunks=refs,
+                               metrics={"coverage": ledger.to_dict().get("coverage", 0.0),
+                                        "grounded": False},
                                trace=tb.build(terminal_reason=reason, grounded=False))
         refusal = {"reason": reason,
                    "missing_facts": [f["text"] for f in ledger.missing()],
@@ -514,6 +561,22 @@ class AgentLoop:
                            ledger=ledger.to_dict(),
                            trace=tb.build(terminal_reason="cancelled", grounded=False),
                            cancelled=True)
+
+
+def _answer_metrics(total_claims: int, ungrounded: list, citations: list,
+                    ledger: Any, grounded: bool) -> dict:
+    """Answer-quality numbers for the UI confidence panel. Faithfulness = share of
+    sentences with a verified verbatim source; coverage = found/needed facts."""
+    total = max(1, total_claims)
+    supported = max(0, total - len(ungrounded))
+    return {
+        "faithfulness": round(supported / total, 3),
+        "claims_total": total,
+        "claims_supported": supported,
+        "citations": len(citations),
+        "coverage": ledger.to_dict().get("coverage", 0.0),
+        "grounded": bool(grounded),
+    }
 
 
 def _multihop_seed(plan: PlanResult, fallback: str) -> str:

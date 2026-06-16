@@ -7,9 +7,12 @@ import { ChatInput } from '@/components/chat/ChatInput'
 import { Button } from '@/components/ui/button'
 import { SquarePen, CircleStop } from 'lucide-react'
 import { postMultimodalQuery } from '@/api/query'
-import { postAgentChat, cancelAgent, AgentBusyError } from '@/api/agent'
+import { streamAgentChat, cancelAgent, AgentBusyError } from '@/api/agent'
 import type { Message } from '@/components/chat/MessageBubble'
-import type { TraceType, QueryParams, ChunkRef, AgentChatResponse } from '@/types'
+import type { PhaseStep } from '@/components/chat/ThinkingTrace'
+import type {
+  TraceType, QueryParams, ChunkRef, AgentChatResponse, AgentDoneEvent,
+} from '@/types'
 import { MODE_PRESETS, type ModeKey } from '@/config/modePresets'
 
 let msgId = 0
@@ -78,6 +81,8 @@ export default function ChatPage() {
   // v3 agent loop runs through /agent/chat (not useQuery). It needs its own
   // busy flag, a stable per-conversation session id, and an abort controller.
   const [agentBusy, setAgentBusy] = useState(false)
+  const [agentAnswer, setAgentAnswer] = useState('')
+  const [agentPhases, setAgentPhases] = useState<PhaseStep[]>([])
   const sessionIdRef = useRef<string>(newSessionId())
   const agentAbortRef = useRef<AbortController | null>(null)
 
@@ -157,13 +162,34 @@ export default function ChatPage() {
     // server-side (coreference + cross-turn cache), so we send no history/knobs.
     if (MODE_PRESETS[mode].usesAgentEndpoint) {
       setAgentBusy(true)
+      setAgentAnswer('')
+      setAgentPhases([])
       const controller = new AbortController()
       agentAbortRef.current = controller
+      const phases: PhaseStep[] = []
+      let answerText = ''
+      let done: AgentDoneEvent | null = null
       try {
-        const resp = await postAgentChat(
+        for await (const ev of streamAgentChat(
           { workspace_id: workspaceId, session_id: sessionIdRef.current, query },
           controller.signal,
-        )
+        )) {
+          if (ev.type === 'phase') {
+            phases.push({ phase: ev.phase, detail: ev.detail })
+            setAgentPhases([...phases])
+          } else if (ev.type === 'token') {
+            answerText += ev.text
+            setAgentAnswer(answerText)
+          } else if (ev.type === 'done') {
+            done = ev
+          } else if (ev.type === 'error') {
+            throw new Error(ev.message)
+          }
+        }
+        const resp: AgentChatResponse = done ?? {
+          answer: answerText, grounded: false, refusal: null,
+          ledger: {}, trace: {}, cancelled: false, chunks: [],
+        }
         setMessages((prev) => [
           ...prev,
           {
@@ -175,6 +201,9 @@ export default function ChatPage() {
             traceType: 'agentv3',
             traceMetadata: { agent_v3: resp },
             chunks: (resp.chunks ?? []) as ChunkRef[],
+            citations: resp.citations ?? [],
+            metrics: resp.metrics,
+            phases,
             query,
           },
         ])
@@ -198,6 +227,8 @@ export default function ChatPage() {
         ])
       } finally {
         setAgentBusy(false)
+        setAgentAnswer('')
+        setAgentPhases([])
         agentAbortRef.current = null
       }
       return
@@ -287,9 +318,10 @@ export default function ChatPage() {
       </div>
       <MessageList
         messages={messages}
-        streamingAnswer={answer}
+        streamingAnswer={agentBusy ? agentAnswer : answer}
         streamingReasoning=""
         isStreaming={isPending || agentBusy}
+        streamingPhases={agentBusy ? agentPhases : undefined}
         workspaceId={workspaceId}
       />
       <ChatInput onSend={handleSend} disabled={isBusy} />

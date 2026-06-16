@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from raganything.retrieval.json_utils import call_json_object
@@ -72,12 +73,23 @@ def split_claims(answer: str, min_len: int = _MIN_CLAIM_LEN) -> list[str]:
     return claims
 
 
-async def verify_citations(
+@dataclass
+class VerifyResult:
+    """Outcome of claim-level citation checking. ``citations`` holds the verbatim
+    supporting spans that survived code adjudication — the UI uses them to highlight
+    the exact sentence behind each [chunk_id], not just the page."""
+    grounded: bool
+    ungrounded: list[str] = field(default_factory=list)
+    citations: list[dict] = field(default_factory=list)  # {claim, chunk_id, quote}
+
+
+async def verify_answer(
     model_pool: Any, query: str, answer: str, chunks: list[dict],
-) -> tuple[bool, list[str]]:
+) -> VerifyResult:
     claims = split_claims(answer)
     if not claims:
-        return False, [query]
+        return VerifyResult(grounded=False, ungrounded=[query])
+    chunk_ids = [str(c.get("chunk_id") or c.get("id") or "") for c in chunks[:20]]
     chunk_text = "\n---\n".join(str(c.get("content", ""))[:1500] for c in chunks[:20])
     # 逐 chunk 归一化：引文必须完整存在于单个 chunk 内，
     # 防止跨 chunk 边界拼接出的伪造引文通过裁决（分隔符被 _norm 抹除的漏洞）
@@ -91,7 +103,7 @@ async def verify_citations(
             lambda p, **kw: model_pool.call("checker", p, **kw), prompt, max_tokens=1024,
         )
     except Exception:
-        return False, claims  # checker 失效 → 保守判全不支持
+        return VerifyResult(grounded=False, ungrounded=list(claims))  # checker 失效 → 保守判全不支持
     verdicts: dict[int, dict] = {}
     for c in parsed.get("claims", []):
         if not isinstance(c, dict):
@@ -103,10 +115,25 @@ async def verify_citations(
             # 跳过 LLM 返回非数字 id 的条目（如 "abc"），避免 ValueError 扩散
             continue
     ungrounded: list[str] = []
+    citations: list[dict] = []
     for i, claim in enumerate(claims):
         v = verdicts.get(i, {})
-        quote = _norm(str(v.get("quote", "")))
+        raw_quote = str(v.get("quote", ""))
+        quote = _norm(raw_quote)
         # 代码裁决：声称 supported 必须有真实引文（归一化后完整存在于某一单个 chunk 内）
-        if not (v.get("supported") and quote and any(quote in nc for nc in normalized_chunks)):
+        match = next((j for j, nc in enumerate(normalized_chunks)
+                      if quote and quote in nc), -1)
+        if v.get("supported") and quote and match >= 0:
+            citations.append({"claim": claim, "chunk_id": chunk_ids[match],
+                              "quote": raw_quote.strip()})
+        else:
             ungrounded.append(claim)
-    return (len(ungrounded) == 0), ungrounded
+    return VerifyResult(grounded=(not ungrounded), ungrounded=ungrounded, citations=citations)
+
+
+async def verify_citations(
+    model_pool: Any, query: str, answer: str, chunks: list[dict],
+) -> tuple[bool, list[str]]:
+    """Backward-compatible 2-tuple wrapper around :func:`verify_answer`."""
+    res = await verify_answer(model_pool, query, answer, chunks)
+    return res.grounded, res.ungrounded

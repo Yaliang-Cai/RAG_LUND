@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { MessageBubble } from './MessageBubble'
 import type { Message } from './MessageBubble'
+import { ThinkingTrace, type PhaseStep } from './ThinkingTrace'
 
 interface MessageListProps {
   messages: Message[]
   streamingAnswer: string
   streamingReasoning: string
   isStreaming: boolean
+  streamingPhases?: PhaseStep[]
   workspaceId?: string
 }
 
@@ -15,6 +17,7 @@ export function MessageList({
   streamingAnswer,
   streamingReasoning,
   isStreaming,
+  streamingPhases,
   workspaceId,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -23,7 +26,7 @@ export function MessageList({
 
   useEffect(() => {
     if (autoScroll) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, streamingAnswer, autoScroll])
+  }, [messages, streamingAnswer, streamingPhases, autoScroll])
 
   function handleScroll() {
     const el = containerRef.current
@@ -42,14 +45,23 @@ export function MessageList({
         <MessageBubble key={m.id} message={m} workspaceId={workspaceId} />
       ))}
       {isStreaming && (
-        <MessageBubble
-          message={{
-            id: '__streaming__',
-            role: 'assistant',
-            content: streamingAnswer || '_Thinking…_',
-            reasoning: streamingReasoning,
-          }}
-        />
+        <div className="flex flex-col gap-1 items-start">
+          {streamingPhases && streamingPhases.length > 0 && (
+            <ThinkingTrace steps={streamingPhases} live />
+          )}
+          {/* While only phases stream (no answer yet), the live trace is enough; once
+              tokens arrive show the answer bubble. Non-agent paths keep the spinner. */}
+          {(streamingAnswer || !streamingPhases?.length) && (
+            <MessageBubble
+              message={{
+                id: '__streaming__',
+                role: 'assistant',
+                content: streamingAnswer || '_Thinking…_',
+                reasoning: streamingReasoning,
+              }}
+            />
+          )}
+        </div>
       )}
       <div ref={bottomRef} />
     </div>

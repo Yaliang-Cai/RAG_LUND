@@ -5,11 +5,13 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 import { AgenticTrace } from './AgenticTrace'
+import { ConfidencePanel } from './ConfidencePanel'
 import { InlineCitation } from './InlineCitation'
 import { ReasoningTrace } from './ReasoningTrace'
 import { ReferenceList } from './ReferenceList'
+import { ThinkingTrace, type PhaseStep } from './ThinkingTrace'
 import { cn } from '@/lib/utils'
-import type { SourceNode, TraceType, ChunkRef } from '@/types'
+import type { SourceNode, TraceType, ChunkRef, AgentCitation, AgentMetrics } from '@/types'
 
 export interface Message {
   id: string
@@ -20,6 +22,9 @@ export interface Message {
   traceType?: TraceType
   traceMetadata?: Record<string, unknown>
   chunks?: ChunkRef[]
+  citations?: AgentCitation[]   // verified verbatim spans → precise highlight
+  metrics?: AgentMetrics        // confidence panel
+  phases?: PhaseStep[]          // agent thinking chain (collapsed after the turn)
   images?: string[]   // blob URLs for user-attached images (multimodal queries)
   query?: string   // original user question (kept for future eval/review use)
 }
@@ -52,12 +57,28 @@ function buildChunkMap(chunks?: ChunkRef[]): Map<string, ChunkRef> {
   return map
 }
 
+/** chunk_id → verified verbatim quote, for precise source highlighting. */
+function buildQuoteMap(citations?: AgentCitation[]): Map<string, string> {
+  const map = new Map<string, string>()
+  if (!citations) return map
+  for (const c of citations) {
+    if (c.chunk_id && c.quote && !map.has(String(c.chunk_id))) {
+      map.set(String(c.chunk_id), c.quote)
+    }
+  }
+  return map
+}
+
 // Citation tokens: pure digits ([1], [12]) or upper-case prefix + digits ([DC1], [E12]).
 // Avoids false matches on free-text brackets like [note] or [TODO].
 const CITATION_RE = /\[([A-Z]{0,4}\d{1,4})\]/g
 
 /** Replace [N] tokens in a string with InlineCitation components. */
-function injectCitations(text: string, chunkMap: Map<string, ChunkRef>): ReactNode[] {
+function injectCitations(
+  text: string,
+  chunkMap: Map<string, ChunkRef>,
+  quoteMap: Map<string, string>,
+): ReactNode[] {
   const out: ReactNode[] = []
   let last = 0
   let m: RegExpExecArray | null
@@ -70,6 +91,7 @@ function injectCitations(text: string, chunkMap: Map<string, ChunkRef>): ReactNo
         key={`cite-${m.index}-${refId}`}
         refId={refId}
         chunk={chunkMap.get(refId)}
+        quote={quoteMap.get(refId)}
       />,
     )
     last = CITATION_RE.lastIndex
@@ -82,13 +104,14 @@ function injectCitations(text: string, chunkMap: Map<string, ChunkRef>): ReactNo
 function processChildren(
   children: ReactNode,
   chunkMap: Map<string, ChunkRef>,
+  quoteMap: Map<string, string>,
 ): ReactNode {
   return Children.map(children, (child) => {
-    if (typeof child === 'string') return injectCitations(child, chunkMap)
+    if (typeof child === 'string') return injectCitations(child, chunkMap, quoteMap)
     if (isValidElement(child)) {
       const el = child as React.ReactElement<{ children?: ReactNode }>
       if (el.props?.children !== undefined) {
-        const next = processChildren(el.props.children, chunkMap)
+        const next = processChildren(el.props.children, chunkMap, quoteMap)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return { ...el, props: { ...(el.props as any), children: next } }
       }
@@ -100,6 +123,7 @@ function processChildren(
 export function MessageBubble({ message, workspaceId: _workspaceId }: MessageBubbleProps) {
   const isUser = message.role === 'user'
   const chunkMap = buildChunkMap(message.chunks)
+  const quoteMap = buildQuoteMap(message.citations)
   const hasChunks = chunkMap.size > 0
   const content = !isUser && !message.content.trim() ? EMPTY_PLACEHOLDER : message.content
 
@@ -108,13 +132,13 @@ export function MessageBubble({ message, workspaceId: _workspaceId }: MessageBub
   const mdComponents = hasChunks
     ? {
         p: ({ children, ...rest }: { children?: ReactNode }) => (
-          <p {...rest}>{processChildren(children, chunkMap)}</p>
+          <p {...rest}>{processChildren(children, chunkMap, quoteMap)}</p>
         ),
         li: ({ children, ...rest }: { children?: ReactNode }) => (
-          <li {...rest}>{processChildren(children, chunkMap)}</li>
+          <li {...rest}>{processChildren(children, chunkMap, quoteMap)}</li>
         ),
         td: ({ children, ...rest }: { children?: ReactNode }) => (
-          <td {...rest}>{processChildren(children, chunkMap)}</td>
+          <td {...rest}>{processChildren(children, chunkMap, quoteMap)}</td>
         ),
       }
     : undefined
@@ -154,6 +178,10 @@ export function MessageBubble({ message, workspaceId: _workspaceId }: MessageBub
         )}
       </div>
       {!isUser && message.reasoning && <ReasoningTrace text={message.reasoning} />}
+      {!isUser && message.phases && message.phases.length > 0 && (
+        <ThinkingTrace steps={message.phases} />
+      )}
+      {!isUser && <ConfidencePanel metrics={message.metrics} />}
       {!isUser && <ReferenceList messageId={message.id} chunks={message.chunks} />}
       {!isUser && (message.traceType === 'agentic' || message.traceType === 'agentv3') && (
         <AgenticTrace
