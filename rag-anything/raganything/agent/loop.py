@@ -74,14 +74,18 @@ def _set_out(sp: Any, value: Any) -> None:
 _event_sink: contextvars.ContextVar = contextvars.ContextVar("agent_event_sink", default=None)
 
 
-async def _emit(phase: str, detail: str = "") -> None:
+async def _emit(phase: str, detail: str = "", items: list | None = None) -> None:
     """Push a live ``phase`` event to the current run's sink (no-op when absent),
-    so the UI can render the agent's thinking chain in real time."""
+    so the UI can render the agent's thinking chain in real time. ``items`` carries
+    short sub-lines (e.g. the MQE/HyDE variants, the PPR entity-anchor seed)."""
     sink = _event_sink.get()
     if sink is None:
         return
+    ev: dict = {"type": "phase", "phase": phase, "detail": str(detail)[:300]}
+    if items:
+        ev["items"] = [str(x)[:200] for x in items][:6]
     try:
-        await sink({"type": "phase", "phase": phase, "detail": str(detail)[:300]})
+        await sink(ev)
     except Exception:  # pragma: no cover - UI streaming is best-effort
         pass
 
@@ -265,8 +269,11 @@ class AgentLoop:
             # `search` instead gets the planner's expand suggestion (unless the
             # decider explicitly chose one); multihop is never expanded.
             if decision.action == "search_multihop":
-                search_params = {**decision.params,
-                                 "query": _multihop_seed(plan, decision.params.get("query") or cq)}
+                seed = _multihop_seed(plan, decision.params.get("query") or cq)
+                search_params = {**decision.params, "query": seed}
+                # Show the entity-anchor seed PPR actually walks from (vs. the verbose
+                # rewrite) — the differentiator over plain vector RAG.
+                await _emit("seed", "PPR seed (entity anchors)", items=[seed])
             else:
                 search_params = self._apply_expand_default(
                     decision.action, dict(decision.params), plan)
@@ -337,7 +344,10 @@ class AgentLoop:
                 if hypo:
                     queries.append(hypo)
             _set_out(esp, f"{len(queries)} queries")
-            await _emit("expand", f"{expand}: {len(queries)} queries")
+            # Surface the actual variants so the demo shows the recall-broadening
+            # chain (original → N paraphrases/hypothetical → fused), not just a count.
+            await _emit("expand", f"{expand}: original + {len(queries) - 1} variants",
+                        items=queries[1:])
             return queries
 
     async def _execute_search(self, tool_name, params, pool, session, cq, tb, *,

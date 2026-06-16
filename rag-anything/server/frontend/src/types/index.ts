@@ -142,7 +142,12 @@ export interface AgentChatResponse {
 }
 
 /** One live event from POST /agent/chat/stream (SSE). */
-export interface AgentPhaseEvent { type: 'phase'; phase: string; detail: string }
+export interface AgentPhaseEvent {
+  type: 'phase'
+  phase: string
+  detail: string
+  items?: string[]   // sub-lines: MQE/HyDE variants, PPR entity-anchor seed
+}
 export interface AgentTokenEvent { type: 'token'; text: string }
 export interface AgentDoneEvent extends AgentChatResponse { type: 'done' }
 export interface AgentStreamErrorEvent { type: 'error'; message: string }

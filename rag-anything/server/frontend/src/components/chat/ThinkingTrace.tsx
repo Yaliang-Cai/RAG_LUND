@@ -6,6 +6,7 @@ import {
   Layers,
   ClipboardCheck,
   PenLine,
+  Anchor,
   Loader2,
   ChevronDown,
   ChevronRight,
@@ -16,6 +17,7 @@ import { cn } from '@/lib/utils'
 export interface PhaseStep {
   phase: string
   detail: string
+  items?: string[]
 }
 
 // Phase → human label + icon. Keeps the UI English-only.
@@ -23,6 +25,7 @@ const PHASE_META: Record<string, { label: string; icon: LucideIcon }> = {
   plan: { label: 'Plan', icon: Brain },
   decide: { label: 'Decide', icon: Compass },
   expand: { label: 'Expand query', icon: Layers },
+  seed: { label: 'PPR seed', icon: Anchor },
   retrieve: { label: 'Retrieve', icon: Search },
   grade: { label: 'Grade evidence', icon: ClipboardCheck },
   generate: { label: 'Generate', icon: PenLine },
@@ -32,10 +35,21 @@ function PhaseRow({ step, active }: { step: PhaseStep; active: boolean }) {
   const meta = PHASE_META[step.phase] ?? { label: step.phase, icon: Compass }
   const Icon = active ? Loader2 : meta.icon
   return (
-    <div className="flex items-start gap-2 text-[11px] leading-snug">
-      <Icon className={cn('mt-0.5 h-3 w-3 shrink-0', active ? 'animate-spin text-primary' : 'text-muted-foreground')} />
-      <span className="font-medium text-foreground">{meta.label}</span>
-      {step.detail && <span className="text-muted-foreground truncate">— {step.detail}</span>}
+    <div className="space-y-0.5">
+      <div className="flex items-start gap-2 text-[11px] leading-snug">
+        <Icon className={cn('mt-0.5 h-3 w-3 shrink-0', active ? 'animate-spin text-primary' : 'text-muted-foreground')} />
+        <span className="font-medium text-foreground">{meta.label}</span>
+        {step.detail && <span className="text-muted-foreground truncate">— {step.detail}</span>}
+      </div>
+      {step.items && step.items.length > 0 && (
+        <ul className="ml-5 space-y-0.5">
+          {step.items.map((it, i) => (
+            <li key={i} className="text-[10px] text-muted-foreground leading-snug">
+              <span className="text-primary/70">›</span> <span className="break-words">{it}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

@@ -175,7 +175,7 @@ export default function ChatPage() {
           controller.signal,
         )) {
           if (ev.type === 'phase') {
-            phases.push({ phase: ev.phase, detail: ev.detail })
+            phases.push({ phase: ev.phase, detail: ev.detail, items: ev.items })
             setAgentPhases([...phases])
           } else if (ev.type === 'token') {
             answerText += ev.text

@@ -211,6 +211,45 @@ async def test_search_expands_with_mqe_when_planner_suggests():
 
 
 @pytest.mark.asyncio
+async def test_phase_event_exposes_mqe_variants():
+    chunks = [{"chunk_id": "c1", "content": "证据内容证据内容", "score": 1.0}]
+    script = [("prepare a user question", {**PLAN, "suggested_expand": "mqe"}),
+              ("alternative search queries", {"queries": ["变体一", "变体二"]}),
+              ("fact ledger", GRADE_OK),
+              ("Answer based ONLY", "答案：证据内容证据内容。"),
+              ("verify answer claims", VERIFY_OK)]
+    events: list[dict] = []
+    async def cb(ev):
+        events.append(ev)
+    await _loop(script, chunks).run(
+        "问题", SessionMemory(session_id="s", workspace_id="w"), event_cb=cb)
+    expand_ev = next(e for e in events if e.get("phase") == "expand")
+    assert expand_ev["items"] == ["变体一", "变体二"]  # variants visible to the UI
+
+
+@pytest.mark.asyncio
+async def test_phase_event_exposes_multihop_seed():
+    chunks = [{"chunk_id": "c1", "content": "证据内容证据内容", "score": 1.0}]
+    plan = {**PLAN, "archetype": "multihop", "confidence": 0.9,
+            "suggested_expand": "mqe", "exact_terms": ["Huawei"]}
+    decision = {"thought": "hop", "action": "search_multihop",
+                "params": {"query": "context-laden rewrite", "top_k": 20}}
+    script = [("prepare a user question", plan),
+              ("decide the next action", decision),
+              ("fact ledger", GRADE_OK),
+              ("Answer based ONLY", "答案：证据内容证据内容。"),
+              ("verify answer claims", VERIFY_OK)]
+    events: list[dict] = []
+    async def cb(ev):
+        events.append(ev)
+    await _loop(script, chunks).run(
+        "问题", SessionMemory(session_id="s", workspace_id="w"),
+        budget=Budget(points=8, max_seconds=None), event_cb=cb)
+    seed_ev = next(e for e in events if e.get("phase") == "seed")
+    assert seed_ev["items"] == ["Huawei"]  # entity anchor, not the verbose rewrite
+
+
+@pytest.mark.asyncio
 async def test_open_gaps_carried_after_ungrounded_turn():
     chunks = [{"chunk_id": "c1", "content": "无关内容", "score": 1.0}]
     script = [("prepare a user question", PLAN),
