@@ -26,6 +26,8 @@ from raganything.governance import (
 )
 
 from raganything.services.local_rag import LocalRagService, LocalRagSettings
+from raganything.agent.session import SessionStore
+from server.agent_routes import WorkspaceAgentRunner, build_agent_router
 from raganything.chunking import CHUNKING_STRATEGIES
 from raganything.constants import (
     DEFAULT_TOP_K,
@@ -128,6 +130,15 @@ async def lifespan(app: FastAPI):
     app.state.gov = gov_service
     app.state.jobs = job_runner
     app.state.gov_settings = gov_settings
+
+    # Agentic RAG v3：会话工作记忆 + /agent/chat、/agent/sessions/{id}/cancel 端点。
+    app.state.session_store = SessionStore()
+    app.include_router(
+        build_agent_router(
+            app.state.session_store,
+            WorkspaceAgentRunner(rag_service),
+        )
+    )
 
     logger.info("lifespan: startup complete")
     try:
@@ -1739,12 +1750,17 @@ async def delete_workspace_document(
 @app.delete("/workspace/{workspace_id}")
 async def delete_workspace(
     workspace_id: str,
+    request: Request,
     _auth: None = Depends(verify_api_key),
     service: LocalRagService = Depends(get_service),
     gov: GovernanceService | None = Depends(get_optional_gov),
 ):
     import asyncio as _asyncio
     _validate_workspace_id(workspace_id)
+    # Agentic RAG v3：删除整个 workspace 时清空所有相关会话（含其 chunk 缓存）。
+    session_store = getattr(request.app.state, "session_store", None)
+    if session_store is not None:
+        session_store.invalidate_workspace(workspace_id)
 
     if gov is not None:
         try:
@@ -1885,6 +1901,7 @@ async def unfreeze_workspace(
 async def delete_document_endpoint(
     workspace_id: str,
     doc_id: str,
+    request: Request,
     _auth: None = Depends(verify_api_key),
     gov: GovernanceService = Depends(get_gov),
 ):
@@ -1901,7 +1918,18 @@ async def delete_document_endpoint(
     doc = await gov.get_document(did)
     if doc is None or doc.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Document not found in workspace")
+    # Capture chunk provenance before the cascade delete so we can purge the
+    # agent session chunk caches (spec §6: cache invalidation on doc delete).
+    chunk_ids: list[str] = []
+    try:
+        prov = await gov.get_provenance_for_doc(did)
+        chunk_ids = list(prov.get("chunk", []))
+    except Exception:
+        logger.warning("delete_document: provenance lookup failed for %s", doc_id, exc_info=True)
     report = await gov.delete_document(workspace_id, did)
+    session_store = getattr(request.app.state, "session_store", None)
+    if session_store is not None and chunk_ids:
+        session_store.drop_chunks(workspace_id, chunk_ids)
     return {"doc_id": doc_id, "workspace_id": workspace_id, "cleanup": report}
 
 
