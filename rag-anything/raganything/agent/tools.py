@@ -49,6 +49,9 @@ class ToolRegistry:
     def get(self, name: str) -> ToolSpec:
         return self._tools[name]
 
+    def remove(self, name: str) -> None:
+        self._tools.pop(name, None)
+
     def names(self) -> list[str]:
         return list(self._tools)
 

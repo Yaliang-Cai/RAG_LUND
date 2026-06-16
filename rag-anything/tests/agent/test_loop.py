@@ -131,6 +131,22 @@ async def test_empty_pool_answer_is_guarded_into_retrieval():
 
 
 @pytest.mark.asyncio
+async def test_token_guardrail_charges_per_run():
+    from raganything.agent.models import ModelPool
+    chunks = [{"chunk_id": "c1", "content": "x" * 4000}]
+    # 长 prompt 让近似 token 迅速累计；max_tokens 很小 → 应触发 token 护栏而非点数
+    grade_bad = {"sufficient": False, "facts": [{"id": "f1", "text": "缺", "status": "missing", "chunks": []}]}
+    script = [("prepare a user question", {**PLAN, "archetype": "unknown", "confidence": 0.9})]
+    loop = _loop(script, chunks)
+    loop._grade_override = grade_bad
+    result = await loop.run("问题", SessionMemory(session_id="s", workspace_id="w"),
+                            budget=Budget(points=100, max_tokens=50, max_seconds=None))
+    assert result.trace["terminal_reason"] in ("tokens", "no_action", "max_steps")
+    # 关键断言：ModelPool 计数确实累加了
+    assert loop.model_pool.approx_tokens_used > 0
+
+
+@pytest.mark.asyncio
 async def test_ungrounded_returns_partial_answer_and_refusal_meta():
     chunks = [{"chunk_id": "c1", "content": "无关内容"}]
     script = [("prepare a user question", PLAN),  # factoid 高置信 → 快速通道

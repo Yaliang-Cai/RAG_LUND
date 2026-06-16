@@ -83,6 +83,7 @@ class AgentLoop:
                   budget: Budget | None = None, **qp_kwargs: Any) -> AgentResult:
         plan = await make_plan(self.model_pool, query, session)
         budget = budget or Budget.for_archetype(plan.archetype)
+        tokens_at_start = self.model_pool.approx_tokens_used
         pool, ledger = EvidencePool(), FactLedger()
         grader = LedgerGrader(self.model_pool)
         tb = TraceBuilder(profile=f"agent:{plan.archetype}", query=query)
@@ -108,6 +109,7 @@ class AgentLoop:
         for step in range(MAX_STEPS):
             if session.cancel_event.is_set():
                 return self._cancelled_result(ledger, tb, session, query)
+            budget.spent_tokens = self.model_pool.approx_tokens_used - tokens_at_start
             reason = budget.exhausted()
             if reason:
                 return await self._exhausted(cq, plan, pool, ledger, tb, budget,
@@ -277,7 +279,9 @@ class AgentLoop:
                                        pool, session, cq, tb, step=MAX_STEPS, budget=budget)
             answer = await generate_answer(self.model_pool, cq, pool, ledger,
                                            mode=generation_mode,
-                                           max_context_tokens=self.max_context_tokens)
+                                           max_context_tokens=self.max_context_tokens,
+                                           visual_intent=plan.visual_intent)
+            chunks = [{"chunk_id": e.chunk_id, "content": e.content} for e in pool.top(20)]
             grounded, ungrounded = await verify_citations(self.model_pool, cq, answer, chunks)
             tb.add_hallucination_event({"grounded": grounded,
                                         "ungrounded_claims": ungrounded}, cycle=1)

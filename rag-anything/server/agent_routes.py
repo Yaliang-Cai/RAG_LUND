@@ -101,6 +101,8 @@ class WorkspaceAgentRunner:
 
             model_pool = ModelPool(main_func=self._service.llm_model_func)
             registry = build_default_registry()
+            # inspect_image 依赖 vision_fn，本阶段未接通 → 从工具集移除，避免 planner 选中后空转
+            registry.remove("inspect_image")
             retrieve_fn = self._make_retrieve_fn(lightrag, registry)
             rerank_fn = self._make_rerank_fn()
 

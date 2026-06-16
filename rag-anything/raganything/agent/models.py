@@ -27,6 +27,7 @@ class ModelPool:
         self._probe_interval = probe_interval
         self._consecutive_failures = 0
         self._opened_at: float | None = None
+        self.approx_tokens_used = 0
 
     @property
     def breaker_open(self) -> bool:
@@ -42,10 +43,13 @@ class ModelPool:
                 result = await self._judge(prompt, **kwargs)
                 self._consecutive_failures = 0
                 self._opened_at = None
+                self.approx_tokens_used += (len(prompt) + len(result)) // 4
                 return result
             except Exception:
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= self._threshold:
                     self._opened_at = time.monotonic()
                 logger.warning("judge endpoint failed (role=%s), fallback to main", role, exc_info=True)
-        return await self._main(prompt, **kwargs)
+        result = await self._main(prompt, **kwargs)
+        self.approx_tokens_used += (len(prompt) + len(result)) // 4
+        return result
