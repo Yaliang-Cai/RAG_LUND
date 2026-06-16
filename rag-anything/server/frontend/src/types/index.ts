@@ -117,6 +117,7 @@ export interface AgentChatResponse {
   ledger: Record<string, unknown>
   trace: Record<string, unknown>
   cancelled: boolean
+  chunks: ChunkRef[]
 }
 
 export interface QueryParams {

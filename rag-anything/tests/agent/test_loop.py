@@ -157,6 +157,7 @@ async def test_ungrounded_returns_partial_answer_and_refusal_meta():
     result = await _loop(script, chunks).run(
         "问题", SessionMemory(session_id="s", workspace_id="w"))
     assert result.grounded is False
-    assert result.answer is not None and "谨慎采信" in result.answer  # 部分答案+披露
+    # All claims unsupported (ratio 1.0 > 0.5) → partial answer + English verify note.
+    assert result.answer is not None and "verify" in result.answer.lower()
     assert result.refusal and result.refusal["reason"] == "ungrounded"
-    assert result.refusal["ungrounded_claims"]  # 结构化缺口元数据
+    assert result.refusal["ungrounded_claims"]  # structured gap metadata

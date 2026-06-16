@@ -39,18 +39,18 @@ function newSessionId(): string {
 // appends unverifiable / partial-evidence disclosures to `answer`; here we only
 // handle the no-answer cases (refusal / cancellation).
 function agentContent(resp: AgentChatResponse): string {
-  if (resp.cancelled) return '_（已取消本次回答）_'
+  if (resp.cancelled) return '_(This answer was cancelled.)_'
   if (resp.answer && resp.answer.trim() !== '') return resp.answer
   const refusal = resp.refusal ?? {}
   const reason = String((refusal as { reason?: string }).reason ?? 'unanswered')
   const missing = (refusal as { missing_facts?: unknown[] }).missing_facts ?? []
   const attempts = (refusal as { attempts?: unknown[] }).attempts ?? []
-  const lines = [`**未能作答**（${reason}）`]
+  const lines = [`**Unable to answer** (${reason})`]
   if (Array.isArray(missing) && missing.length > 0) {
-    lines.push('', '缺失的关键事实：', ...missing.map((m) => `- ${String(m)}`))
+    lines.push('', 'Missing key facts:', ...missing.map((m) => `- ${String(m)}`))
   }
   if (Array.isArray(attempts) && attempts.length > 0) {
-    lines.push('', `已尝试检索：${attempts.map((a) => String(a)).join(' → ')}`)
+    lines.push('', `Retrieval attempts: ${attempts.map((a) => String(a)).join(' → ')}`)
   }
   return lines.join('\n')
 }
@@ -174,6 +174,7 @@ export default function ChatPage() {
             sourceNodes: [],
             traceType: 'agentv3',
             traceMetadata: { agent_v3: resp },
+            chunks: (resp.chunks ?? []) as ChunkRef[],
             query,
           },
         ])
@@ -186,7 +187,7 @@ export default function ChatPage() {
             id: String(++msgId),
             role: 'assistant',
             content: busy
-              ? `_该会话已有一个查询在运行。请等待或点击停止后重试。_`
+              ? `_This session already has a query running. Wait for it to finish or press Stop, then retry._`
               : `Agent query failed: ${(err as Error).message}`,
             reasoning: '',
             sourceNodes: [],

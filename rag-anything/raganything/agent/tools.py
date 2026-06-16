@@ -18,9 +18,12 @@ class ToolSpec:
     name: str
     cost: float
     description: str
-    profile: str                       # 对应 PROFILE_REGISTRY 键；非检索工具为 ""
+    profile: str                       # PROFILE_REGISTRY key; "" for non-retrieval tools
     params: dict[str, ParamSpec] = field(default_factory=dict)
     allowed_expand: tuple[str, ...] = ("none",)
+    rerank: bool = True                # whether the evidence pool cross-encoder-reranks
+                                       # this tool's new chunks (False = trust the tool's
+                                       # own scores, e.g. PPR)
 
     def clamp(self, raw: dict) -> dict:
         out = {}
@@ -64,44 +67,57 @@ class ToolRegistry:
 
 
 def register_agent_profiles() -> None:
-    """注册 enable_rerank=False 的单路 profile；幂等。"""
+    """Register the two agent retrieval profiles (idempotent).
+
+    Minimal-viable toolset (single responsibility, low overlap, clear boundary):
+      - agent_search:   LightRAG local+global KG fused with hybrid (dense+BM25)
+                        chunk vectors. The general workhorse. Router rerank is OFF;
+                        the evidence pool cross-encoder-reranks at admission.
+      - agent_multihop: PPR over the entity graph for bridge / comparison / causal /
+                        multi-document reasoning. NO rerank anywhere — PPR scores
+                        already rank chunks by multi-hop relevance.
+    """
     defs = [
-        ("agent_sparse", ["qdrant_sparse"]),
-        ("agent_dense", ["naive"]),
-        ("agent_hybrid", ["qdrant_hybrid"]),
-        ("agent_graph", ["local_kg", "global_kg"]),
-        ("agent_ppr", ["ppr"]),
+        ("agent_search", ["local_kg", "global_kg", "qdrant_chunks_hybrid"], {
+            "local_kg": {"qdrant_retrieval_mode": "hybrid", "exclude_synonym_edges": True},
+            "global_kg": {"qdrant_retrieval_mode": "hybrid", "exclude_synonym_edges": True},
+            "qdrant_chunks_hybrid": {"qdrant_retrieval_mode": "hybrid", "exclude_synonym_edges": True},
+        }),
+        ("agent_multihop", ["ppr"], {
+            "ppr": {"qdrant_retrieval_mode": "hybrid", "exclude_synonym_edges": False},
+        }),
     ]
-    for name, paths in defs:
+    for name, paths, overrides in defs:
         if name in PROFILE_REGISTRY:
             continue
         PROFILE_REGISTRY[name] = RetrievalProfile(
-            name=name, description=f"agent tool path: {'+'.join(paths)}",
-            paths=paths, rrf_weights={p: 1.0 for p in paths}, enable_rerank=False,
+            name=name, description=f"agent profile: {'+'.join(paths)}",
+            paths=paths, rrf_weights={p: 1.0 for p in paths},
+            enable_rerank=False, min_rrf_score=0.0, path_overrides=overrides,
         )
 
 
-def _TOPK(d: int) -> dict[str, ParamSpec]:
-    return {"top_k": ParamSpec(default=d, min=1, max=60), "query": ParamSpec(default="")}
+def _TOPK(d: int, mx: int = 30) -> dict[str, ParamSpec]:
+    return {"top_k": ParamSpec(default=d, min=1, max=mx), "query": ParamSpec(default="")}
 
 
 def build_default_registry() -> ToolRegistry:
+    """The minimal viable retrieval toolset. Three tools, one clear decision each."""
     register_agent_profiles()
     reg = ToolRegistry()
-    reg.register(ToolSpec("search_sparse", 1, "BM25 精确词项检索；型号/ID/专名首选", "agent_sparse",
-                          _TOPK(10), ("none", "mqe")))
-    reg.register(ToolSpec("search_dense", 1, "稠密语义检索；语义型问题首选", "agent_dense",
-                          _TOPK(10), ("none", "mqe", "hyde")))
-    reg.register(ToolSpec("rewrite_query", 1, "重写当前检索查询", "",
-                          {"query": ParamSpec(default="")}))
-    reg.register(ToolSpec("search_hybrid", 2, "稠密+BM25 RRF 混合；标准武器", "agent_hybrid",
-                          _TOPK(15), ("none", "mqe")))
-    reg.register(ToolSpec("search_graph", 2, "知识图谱 local+global 检索", "agent_graph", _TOPK(15)))
-    reg.register(ToolSpec("inspect_image", 2, "VLM 定向看图，提取文字事实入池", "",
-                          {"chunk_ids": ParamSpec(default=[]), "question": ParamSpec(default="")}))
-    reg.register(ToolSpec("search_ppr", 4, "全图 PPR 多跳检索；仅缺桥事实时使用", "agent_ppr", _TOPK(20)))
-    reg.register(ToolSpec("decompose_search", 8, "问题分解+并行混合检索；最后手段", "agent_hybrid",
-                          _TOPK(15)))
-    reg.register(ToolSpec("answer", 0, "终结：生成答案", "",
-                          {"generation_mode": ParamSpec(default="direct")}))
+    reg.register(ToolSpec(
+        "search", 2,
+        "General retrieval: LightRAG local+global knowledge graph fused with hybrid "
+        "(dense+BM25) vectors. Use for any question about facts, entities, attributes, "
+        "definitions, summaries. This is the default.",
+        "agent_search", _TOPK(12, 30), rerank=True))
+    reg.register(ToolSpec(
+        "search_multihop", 4,
+        "Multi-hop retrieval via Personalized PageRank over the entity graph. Use ONLY "
+        "when answering requires connecting facts across documents: bridge questions, "
+        "comparisons, causal chains, compositional reasoning.",
+        "agent_multihop", _TOPK(20, 40), rerank=False))
+    reg.register(ToolSpec(
+        "answer", 0, "Finish and generate the answer from gathered evidence.", "",
+        {"generation_mode": ParamSpec(default="direct")}))
     return reg

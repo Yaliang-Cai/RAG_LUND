@@ -1,6 +1,9 @@
 import { Children, isValidElement, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import 'katex/dist/katex.min.css'
 import { AgenticTrace } from './AgenticTrace'
 import { InlineCitation } from './InlineCitation'
 import { ReasoningTrace } from './ReasoningTrace'
@@ -142,7 +145,8 @@ export function MessageBubble({ message, workspaceId: _workspaceId }: MessageBub
           <p className="whitespace-pre-wrap">{content}</p>
         ) : (
           <ReactMarkdown
-            rehypePlugins={[rehypeHighlight]}
+            remarkPlugins={[remarkMath]}
+            rehypePlugins={[rehypeKatex, rehypeHighlight]}
             components={mdComponents}
           >
             {content}

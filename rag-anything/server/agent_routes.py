@@ -44,6 +44,7 @@ def build_agent_router(store: SessionStore, agent_loop: Any) -> APIRouter:
             "answer": result.answer, "grounded": result.grounded,
             "refusal": result.refusal, "ledger": result.ledger,
             "trace": result.trace, "cancelled": result.cancelled,
+            "chunks": result.chunks,
         }
 
     @router.post("/agent/sessions/{session_id}/cancel")
@@ -55,14 +56,11 @@ def build_agent_router(store: SessionStore, agent_loop: Any) -> APIRouter:
     return router
 
 
-# 工具名 → agent profile（spec §7；ToolSpec.profile 是权威来源，此处仅作降级兜底）。
+# Tool name → agent profile. ToolSpec.profile is authoritative; this is only a
+# defensive fallback for the minimal toolset.
 _TOOL_PROFILE_FALLBACK = {
-    "search_sparse": "agent_sparse",
-    "search_dense": "agent_dense",
-    "search_hybrid": "agent_hybrid",
-    "search_graph": "agent_graph",
-    "search_ppr": "agent_ppr",
-    "decompose_search": "agent_hybrid",  # 完整 decompose 执行器按计划延后；v1 退化为 hybrid
+    "search": "agent_search",
+    "search_multihop": "agent_multihop",
 }
 
 
@@ -100,9 +98,7 @@ class WorkspaceAgentRunner:
             lightrag = rag.lightrag
 
             model_pool = ModelPool(main_func=self._service.llm_model_func)
-            registry = build_default_registry()
-            # inspect_image 依赖 vision_fn，本阶段未接通 → 从工具集移除，避免 planner 选中后空转
-            registry.remove("inspect_image")
+            registry = build_default_registry()  # minimal toolset: search / search_multihop / answer
             retrieve_fn = self._make_retrieve_fn(lightrag, registry)
             rerank_fn = self._make_rerank_fn()
 
@@ -125,11 +121,11 @@ class WorkspaceAgentRunner:
         async def retrieve_fn(tool_name: str, params: dict):
             try:
                 spec = registry.get(tool_name)
-                profile = spec.profile or _TOOL_PROFILE_FALLBACK.get(tool_name, "agent_hybrid")
+                profile = spec.profile or _TOOL_PROFILE_FALLBACK.get(tool_name, "agent_search")
             except KeyError:
-                profile = _TOOL_PROFILE_FALLBACK.get(tool_name, "agent_hybrid")
+                profile = _TOOL_PROFILE_FALLBACK.get(tool_name, "agent_search")
             query = str(params.get("query", ""))
-            top_k = int(params.get("top_k", 10) or 10)
+            top_k = int(params.get("top_k", 12) or 12)
             param = QueryParam(top_k=top_k, chunk_top_k=top_k, enable_rerank=False)
             chunks, trace = await router.route(query, param, profile_name=profile)
             return chunks, trace

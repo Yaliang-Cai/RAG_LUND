@@ -61,30 +61,33 @@ async def test_unknown_on_parse_failure():
     assert plan.archetype == "unknown" and plan.standalone_query == "问题"
 
 
-def test_presets_match_spec_table():
-    assert ARCHETYPE_PRESETS["summary"]["tool"] == "search_hybrid"
-    assert ARCHETYPE_PRESETS["summary"]["expand"] == "mqe"
-    assert ARCHETYPE_PRESETS["summary"]["top_k"] == 25
+def test_presets_match_minimal_toolset():
+    # Minimal toolset: search for everything except true multi-hop / comparison
+    # (which use PPR via search_multihop).
+    assert ARCHETYPE_PRESETS["factoid"]["tool"] == "search"
+    assert ARCHETYPE_PRESETS["summary"]["tool"] == "search"
+    assert ARCHETYPE_PRESETS["unknown"]["tool"] == "search"
+    assert ARCHETYPE_PRESETS["multihop"]["tool"] == "search_multihop"
+    assert ARCHETYPE_PRESETS["comparison"]["tool"] == "search_multihop"
     assert ARCHETYPE_PRESETS["multihop"]["generation_mode"] == "cot_reflect"
-    assert ARCHETYPE_PRESETS["factoid"]["top_k"] == 5
 
 
 @pytest.mark.asyncio
-async def test_semantic_factoid_uses_dense():
+async def test_factoid_uses_search():
     s = SessionMemory(session_id="s", workspace_id="w")
     plan = await make_plan(
         FakePool({**PAYLOAD, "archetype": "factoid", "confidence": 0.9, "exact_terms": []}),
         "什么是注意力机制", s)
-    assert plan.preset["tool"] == "search_dense"  # 语义型 factoid 无精确词项 §9.2
+    assert plan.preset["tool"] == "search"
 
 
 @pytest.mark.asyncio
-async def test_factoid_with_exact_terms_uses_sparse():
+async def test_multihop_uses_search_multihop():
     s = SessionMemory(session_id="s", workspace_id="w")
     plan = await make_plan(
-        FakePool({**PAYLOAD, "archetype": "factoid", "confidence": 0.9, "exact_terms": ["RTX 5090"]}),
-        "RTX 5090 显存多大", s)
-    assert plan.preset["tool"] == "search_sparse"
+        FakePool({**PAYLOAD, "archetype": "multihop", "confidence": 0.9}),
+        "A 和 B 通过谁联系起来", s)
+    assert plan.preset["tool"] == "search_multihop"
 
 
 @pytest.mark.asyncio

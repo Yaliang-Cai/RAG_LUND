@@ -41,7 +41,7 @@ export function MessageList({
       {messages.map((m) => (
         <MessageBubble key={m.id} message={m} workspaceId={workspaceId} />
       ))}
-      {isStreaming && (streamingAnswer || streamingReasoning) && (
+      {isStreaming && (
         <MessageBubble
           message={{
             id: '__streaming__',

@@ -6,15 +6,15 @@ REG = build_default_registry()
 
 
 def test_unknown_action_difflib_matched():
-    d = normalize_decision({"thought": "t", "action": "serch_hybird", "params": {}}, REG, "默认查询")
-    assert d.action == "search_hybrid"
-    assert d.params["query"] == "默认查询"  # 缺 query 回填 §4.3
+    d = normalize_decision({"thought": "t", "action": "serch", "params": {}}, REG, "默认查询")
+    assert d.action == "search"  # difflib fuzzy-matches the typo to the real tool
+    assert d.params["query"] == "默认查询"  # missing query backfilled §4.3
 
 
 def test_params_clamped_and_unknown_dropped():
     d = normalize_decision(
-        {"thought": "t", "action": "search_dense", "params": {"top_k": 9999, "evil": 1}}, REG, "q")
-    assert d.params["top_k"] == 60 and "evil" not in d.params
+        {"thought": "t", "action": "search", "params": {"top_k": 9999, "evil": 1}}, REG, "q")
+    assert d.params["top_k"] == 30 and "evil" not in d.params  # search top_k max is 30
 
 
 def test_answer_overrides_stop_flag():

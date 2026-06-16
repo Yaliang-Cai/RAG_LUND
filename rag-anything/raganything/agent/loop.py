@@ -12,7 +12,7 @@ from raganything.retrieval.json_utils import call_json_object
 from raganything.retrieval.recovery_policy import RecoveryPolicy
 
 from raganything.agent.budget import Budget
-from raganything.agent.citations import verify_citations
+from raganything.agent.citations import split_claims, verify_citations
 from raganything.agent.decision import Decision, decision_signature, normalize_decision
 from raganything.agent.evidence import EvidencePool, FactLedger
 from raganything.agent.generate import generate_answer
@@ -25,11 +25,19 @@ from raganything.agent.trace import TraceBuilder
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS = 8  # 硬上限 §4.3
-# RecoveryPolicy profile → 工具名映射（降级大脑 §4.4）
-_FALLBACK_TOOL = {"precise": "search_sparse", "semantic": "search_dense",
-                  "multihop": "search_ppr", "full_v2": "search_hybrid",
-                  "global": "search_graph", "local": "search_graph"}
+try:  # OTEL is pulled in by Phoenix; degrade to no-op span if absent.
+    from opentelemetry import trace as _otel_trace
+    _TRACER = _otel_trace.get_tracer("raganything.agent")
+except Exception:  # pragma: no cover - observability optional
+    _TRACER = None
+
+MAX_STEPS = 5  # hard cap on agent steps (spec §4.3; lowered for latency)
+# RecoveryPolicy profile → tool name (deterministic fallback brain, spec §4.4).
+# Minimal toolset: anything non-multihop falls back to `search`; bridge/decompose
+# profiles fall back to `search_multihop`.
+_FALLBACK_TOOL = {"precise": "search", "semantic": "search",
+                  "multihop": "search_multihop", "full_v2": "search_multihop",
+                  "global": "search", "local": "search"}
 
 _DECIDE_PROMPT = """\
 You decide the next action for an evidence-gathering agent. Tools:
@@ -66,6 +74,7 @@ class AgentResult:
     ledger: dict
     trace: dict
     cancelled: bool = False
+    chunks: list[dict] = field(default_factory=list)  # references for the UI
 
 
 @dataclass
@@ -81,6 +90,29 @@ class AgentLoop:
 
     async def run(self, query: str, session: SessionMemory, *,
                   budget: Budget | None = None, **qp_kwargs: Any) -> AgentResult:
+        """Run one turn under a single OTEL span so every child LLM/retrieval call
+        nests into one chain trace per Q&A in Phoenix (spec §13 / observability)."""
+        if _TRACER is None:
+            return await self._run_inner(query, session, budget=budget, **qp_kwargs)
+        with _TRACER.start_as_current_span("agent.turn") as span:
+            span.set_attribute("agent.query", query[:200])
+            span.set_attribute("agent.workspace", session.workspace_id)
+            span.set_attribute("agent.session", session.session_id)
+            result = await self._run_inner(query, session, budget=budget, **qp_kwargs)
+            try:
+                span.set_attribute("agent.grounded", bool(result.grounded))
+                span.set_attribute("agent.cancelled", bool(result.cancelled))
+                span.set_attribute(
+                    "agent.terminal_reason",
+                    str(result.trace.get("terminal_reason", "")))
+                span.set_attribute(
+                    "agent.steps", len(result.trace.get("agent_decisions", [])))
+            except Exception:  # pragma: no cover - attribute best-effort
+                pass
+            return result
+
+    async def _run_inner(self, query: str, session: SessionMemory, *,
+                         budget: Budget | None = None, **qp_kwargs: Any) -> AgentResult:
         plan = await make_plan(self.model_pool, query, session)
         budget = budget or Budget.for_archetype(plan.archetype)
         tokens_at_start = self.model_pool.approx_tokens_used
@@ -205,7 +237,10 @@ class AgentLoop:
                                sub_query=str(params.get("query", cq)))
         session.cache_chunks(chunks)
         if new_entries:
-            if self.rerank_fn is not None:
+            # PPR (rerank=False) already ranks by multi-hop relevance — never
+            # cross-encoder-rerank it (user requirement). Other tools rerank at
+            # the pool admission point.
+            if self.rerank_fn is not None and spec.rerank:
                 scores = await self.rerank_fn(cq, [e.content for e in new_entries])
                 pool.set_scores({e.chunk_id: s for e, s in zip(new_entries, scores)})
             else:
@@ -275,7 +310,7 @@ class AgentLoop:
                                     "ungrounded_claims": ungrounded}, cycle=0)
         if not grounded and generation_mode == "cot_reflect" and not budget.exhausted():
             repair_q = " ".join(ungrounded)[:300]
-            await self._execute_search("search_dense", {"query": repair_q, "top_k": 10},
+            await self._execute_search("search", {"query": repair_q, "top_k": 12},
                                        pool, session, cq, tb, step=MAX_STEPS, budget=budget)
             answer = await generate_answer(self.model_pool, cq, pool, ledger,
                                            mode=generation_mode,
@@ -285,34 +320,53 @@ class AgentLoop:
             grounded, ungrounded = await verify_citations(self.model_pool, cq, answer, chunks)
             tb.add_hallucination_event({"grounded": grounded,
                                         "ungrounded_claims": ungrounded}, cycle=1)
-        session.add_turn(cq, answer if grounded else "")
+
+        # Grounding is a quality signal, not a gate: one unsupported sentence must
+        # not bury an otherwise good answer. Treat the answer as deliverable unless
+        # a *majority* of its claims are unsupported (then a brief note is added).
+        total_claims = max(1, len(split_claims(answer))) if answer else 1
+        unsupported_ratio = len(ungrounded) / total_claims
+        deliverable = bool(answer) and unsupported_ratio <= 0.5
+        refs = _result_chunks(pool)
+        session.add_turn(cq, answer if deliverable else "")
         unver = ledger.unverifiable()
-        if grounded:
+
+        if deliverable:
+            notes = []
             if unver:
-                answer += "\n\n（以下细节在语料中无法证实：" + "；".join(
-                    f["text"] for f in unver) + "）"
-            return AgentResult(answer=answer, grounded=True, refusal=None,
-                               ledger=ledger.to_dict(),
-                               trace=tb.build(terminal_reason="grounded", grounded=True))
-        # 未接地：返回部分答案 + 缺口披露 + 结构化 refusal 元数据 §8.3/§10
-        partial = (answer + "\n\n（注意：以下内容未能由检索证据完全支撑，请谨慎采信）"
-                   ) if answer else None
+                notes.append("Some details could not be verified against the sources: "
+                             + "; ".join(f["text"] for f in unver))
+            if ungrounded:
+                notes.append("Some statements may need verification against the cited sources.")
+            if notes:
+                answer += "\n\n_" + " ".join(notes) + "_"
+            return AgentResult(answer=answer, grounded=grounded, refusal=None,
+                               ledger=ledger.to_dict(), chunks=refs,
+                               trace=tb.build(
+                                   terminal_reason="grounded" if grounded else "partial",
+                                   grounded=grounded))
+        # Mostly-unsupported: return what we have, flagged, with structured metadata.
+        partial = (answer + "\n\n_Note: the retrieved sources do not fully support this "
+                   "answer; please verify._") if answer else None
         return AgentResult(answer=partial, grounded=False,
                            refusal={"reason": "ungrounded", "ungrounded_claims": ungrounded},
-                           ledger=ledger.to_dict(),
+                           ledger=ledger.to_dict(), chunks=refs,
                            trace=tb.build(terminal_reason="ungrounded", grounded=False))
 
     async def _exhausted(self, cq, plan, pool, ledger, tb, budget, session,
                          reason) -> AgentResult:
+        refs = _result_chunks(pool)
         if ledger.coverage >= 0.5 and pool.entries:
             answer = await generate_answer(
                 self.model_pool, cq, pool, ledger, mode="direct",
                 max_context_tokens=self.max_context_tokens)
-            answer += "\n\n（基于不完整证据作答，未覆盖：" + \
-                "；".join(f["text"] for f in ledger.missing()) + "）"
+            missing = ledger.missing()
+            if missing:
+                answer += ("\n\n_Answered from partial evidence; not covered: "
+                           + "; ".join(f["text"] for f in missing) + "_")
             session.add_turn(cq, answer)
             return AgentResult(answer=answer, grounded=False, refusal=None,
-                               ledger=ledger.to_dict(),
+                               ledger=ledger.to_dict(), chunks=refs,
                                trace=tb.build(terminal_reason=reason, grounded=False))
         refusal = {"reason": reason,
                    "missing_facts": [f["text"] for f in ledger.missing()],
@@ -320,7 +374,7 @@ class AgentLoop:
                    "attempts": [d["action"] for d in tb._trace["agent_decisions"]]}
         session.add_turn(cq, "")
         return AgentResult(answer=None, grounded=False, refusal=refusal,
-                           ledger=ledger.to_dict(),
+                           ledger=ledger.to_dict(), chunks=refs,
                            trace=tb.build(terminal_reason=reason, grounded=False))
 
     def _cancelled_result(self, ledger, tb, session, query) -> AgentResult:
@@ -331,3 +385,12 @@ class AgentLoop:
                            ledger=ledger.to_dict(),
                            trace=tb.build(terminal_reason="cancelled", grounded=False),
                            cancelled=True)
+
+
+def _result_chunks(pool: EvidencePool, n: int = 12) -> list[dict]:
+    """Top pool entries as UI reference records (id / file_path / content)."""
+    return [
+        {"id": e.chunk_id, "file_path": e.file_path,
+         "content": e.content, "score": e.canonical_score}
+        for e in pool.top(n)
+    ]

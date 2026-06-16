@@ -16,11 +16,11 @@ FAST_PATH_CONFIDENCE = 0.8
 
 # spec §9.2 画像→策略矩阵
 ARCHETYPE_PRESETS: dict[str, dict] = {
-    "factoid":    {"tool": "search_sparse", "top_k": 5,  "expand": "none", "generation_mode": "direct"},
-    "summary":    {"tool": "search_hybrid", "top_k": 25, "expand": "mqe",  "generation_mode": "map_reduce"},
-    "multihop":   {"tool": "search_hybrid", "top_k": 15, "expand": "none", "generation_mode": "cot_reflect"},
-    "comparison": {"tool": "search_hybrid", "top_k": 10, "expand": "none", "generation_mode": "direct"},
-    "unknown":    {"tool": "search_hybrid", "top_k": 15, "expand": "none", "generation_mode": "direct"},
+    "factoid":    {"tool": "search",          "top_k": 8,  "expand": "none", "generation_mode": "direct"},
+    "summary":    {"tool": "search",          "top_k": 20, "expand": "none", "generation_mode": "map_reduce"},
+    "multihop":   {"tool": "search_multihop", "top_k": 20, "expand": "none", "generation_mode": "cot_reflect"},
+    "comparison": {"tool": "search_multihop", "top_k": 20, "expand": "none", "generation_mode": "direct"},
+    "unknown":    {"tool": "search",          "top_k": 12, "expand": "none", "generation_mode": "direct"},
 }
 
 _PLAN_PROMPT = """\
@@ -106,9 +106,5 @@ async def make_plan(model_pool: Any, query: str, session: SessionMemory) -> Plan
         fast_path=(archetype == "factoid" and confidence >= FAST_PATH_CONFIDENCE),
         preset=dict(ARCHETYPE_PRESETS[archetype]),
     )
-    if plan.exact_terms and plan.archetype == "factoid":
-        plan.preset["tool"] = "search_sparse"
-    elif plan.archetype == "factoid":
-        plan.preset["tool"] = "search_dense"  # 语义型 factoid §9.2
     session.plan_cache[key] = plan.to_dict()
     return plan

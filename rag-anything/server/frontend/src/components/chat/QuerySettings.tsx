@@ -62,7 +62,7 @@ export function QuerySettings() {
 
         {agentManaged && (
           <span className="text-muted-foreground ml-2 italic">
-            agent 自管检索 / 预算（top_k、rerank 由 LLM 按需决定）
+            Agent self-manages retrieval &amp; budget (top_k / rerank chosen by the LLM)
           </span>
         )}
 

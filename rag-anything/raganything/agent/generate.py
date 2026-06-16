@@ -56,8 +56,13 @@ def pack_context(
     return packed
 
 
+# Answer in the question's language (Chinese question → Chinese answer, English → English).
+_LANG_RULE = ("Write the answer in the SAME language as the question "
+              "(Chinese question → Chinese answer; English question → English answer).")
+
 _DIRECT_PROMPT = """\
 Answer based ONLY on the evidence below. If evidence is insufficient, say what is missing.
+""" + _LANG_RULE + """
 
 Evidence:
 {context}
@@ -76,6 +81,7 @@ Evidence:
 
 _REDUCE_PROMPT = """\
 Synthesize the per-document summaries into a final answer to the question.
+""" + _LANG_RULE + """
 
 Question: {query}
 
@@ -86,6 +92,7 @@ Summaries:
 _COT_PROMPT = """\
 Answer step by step, anchoring EVERY reasoning step on the verified facts below.
 Do not introduce claims unsupported by the facts or evidence.
+""" + _LANG_RULE + """
 
 Verified facts:
 {facts}
