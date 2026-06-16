@@ -71,10 +71,71 @@ function AgenticPanel({ metadata }: { metadata: Record<string, unknown> }) {
   )
 }
 
+function AgentV3Panel({ metadata }: { metadata: Record<string, unknown> }) {
+  const resp = (metadata.agent_v3 ?? {}) as Record<string, unknown>
+  const trace = (resp.trace ?? {}) as Record<string, unknown>
+  const ledger = (resp.ledger ?? {}) as Record<string, unknown>
+  if (!('terminal_reason' in trace) && !('answer' in resp)) return null
+
+  const grounded = Boolean(resp.grounded)
+  const usedFallback = Boolean(trace.used_fallback)
+  const decisions = Array.isArray(trace.agent_decisions)
+    ? (trace.agent_decisions as Record<string, unknown>[])
+    : []
+  const reclass = Array.isArray(trace.reclassify_events)
+    ? (trace.reclassify_events as Record<string, unknown>[])
+    : []
+  const retrievals = Array.isArray(trace.retrieval_steps)
+    ? (trace.retrieval_steps as unknown[])
+    : []
+  const facts = Array.isArray(ledger.facts) ? (ledger.facts as Record<string, unknown>[]) : []
+  const unverifiable = facts.filter((f) => f.status === 'unverifiable').length
+
+  return (
+    <>
+      <PillRow>
+        <Pill className={grounded ? 'text-green-500 border-green-800' : 'text-red-500 border-red-800'}>
+          {grounded ? '✓ grounded' : '✗ not grounded'}
+        </Pill>
+        <Pill>{String(trace.terminal_reason ?? '?')}</Pill>
+        <Pill>{String(trace.profile ?? '?')}</Pill>
+        {usedFallback && <Pill className="text-amber-500 border-amber-800">fallback</Pill>}
+        {Boolean(resp.cancelled) && <Pill className="text-amber-500 border-amber-800">cancelled</Pill>}
+      </PillRow>
+      <TraceGrid items={[
+        { label: 'coverage', value: ledger.coverage },
+        { label: 'decisions', value: decisions.length },
+        { label: 'retrievals', value: retrievals.length },
+        { label: 'reclassify', value: reclass.length },
+        { label: 'unverifiable', value: unverifiable, red: unverifiable > 0 },
+        { label: 'grounded', value: String(grounded), green: grounded, red: !grounded },
+      ]} />
+      {decisions.length > 0 && (
+        <div className="px-3 pb-2 pt-1 space-y-1">
+          <div className="text-[10px] uppercase tracking-wide text-muted-foreground">decision chain</div>
+          {decisions.map((d, i) => (
+            <div key={i} className="text-[11px] leading-snug">
+              <span className="font-medium text-foreground">{i + 1}. {String(d.action ?? '?')}</span>
+              {d.fallback ? <span className="text-amber-500"> (fallback)</span> : null}
+              {d.thought ? <span className="text-muted-foreground"> — {String(d.thought)}</span> : null}
+            </div>
+          ))}
+        </div>
+      )}
+      {Boolean(resp.refusal) && (
+        <div className="px-3 pb-2 text-[11px] text-red-400">
+          refusal: {String((resp.refusal as { reason?: string }).reason ?? 'unanswered')}
+        </div>
+      )}
+    </>
+  )
+}
+
 export function AgenticTrace({ traceType, metadata }: AgenticTraceProps) {
   const [open, setOpen] = useState(false)
 
-  if (traceType !== 'agentic') return null
+  if (traceType !== 'agentic' && traceType !== 'agentv3') return null
+  const label = traceType === 'agentv3' ? 'Agent v3 trace' : 'Agentic trace'
 
   return (
     <div className="mt-1 rounded-lg border border-border bg-secondary/50 text-xs overflow-hidden max-w-[80%]">
@@ -83,9 +144,11 @@ export function AgenticTrace({ traceType, metadata }: AgenticTraceProps) {
         onClick={() => setOpen((o) => !o)}
       >
         {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
-        <span>Agentic trace</span>
+        <span>{label}</span>
       </button>
-      {open && <AgenticPanel metadata={metadata} />}
+      {open && (traceType === 'agentv3'
+        ? <AgentV3Panel metadata={metadata} />
+        : <AgenticPanel metadata={metadata} />)}
     </div>
   )
 }

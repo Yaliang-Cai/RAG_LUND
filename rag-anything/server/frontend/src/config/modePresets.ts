@@ -3,7 +3,7 @@
 // overrides below match the design spec at
 // docs/superpowers/specs/2026-05-21-agentic-modes-ui-refactor-design.md.
 
-export type ModeKey = 'naive' | 'lightrag' | 'multihop' | 'agentic'
+export type ModeKey = 'naive' | 'lightrag' | 'multihop' | 'agentic' | 'agentv3'
 
 export type QdrantRetrievalMode = 'hybrid' | 'bm25' | 'dense'
 export type AgenticProfile = 'auto' | 'semantic' | 'multihop' | 'full'
@@ -34,6 +34,10 @@ export interface ModeConfig {
   // Agentic only — UI dropdown for picking the router profile
   agenticProfile?: AgenticProfile
 
+  // When true the chat calls POST /agent/chat (v3 agent loop) instead of /query.
+  // The agent self-manages top_k / rerank / budget, so retrieval knobs are hidden.
+  usesAgentEndpoint?: boolean
+
   // UI affordances
   topKVisible: boolean   // Naive hides top_k
 }
@@ -45,6 +49,7 @@ export const MODE_LABELS: Record<ModeKey, string> = {
   lightrag: 'LightRAG',
   multihop: 'Multi-hop',
   agentic: 'Agentic',
+  agentv3: 'Agent v3',
 }
 
 export const MODE_PRESETS: Record<ModeKey, ModeConfig> = {
@@ -92,5 +97,16 @@ export const MODE_PRESETS: Record<ModeKey, ModeConfig> = {
     qdrant_retrieval_mode: 'hybrid',
     agenticProfile: 'auto',
     topKVisible: true,
+  },
+  // v3 真 agent loop：参数由后端 agent 自管，前端不暴露检索旋钮。
+  agentv3: {
+    backendMode: 'auto',
+    top_k: 10,
+    chunk_top_k: 5,
+    enable_rerank: true,
+    min_rerank_score: 0.3,
+    qdrant_retrieval_mode: 'hybrid',
+    usesAgentEndpoint: true,
+    topKVisible: false,
   },
 }

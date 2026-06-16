@@ -98,7 +98,26 @@ export interface StreamErrorEvent {
 
 export type StreamEvent = StreamMetaEvent | StreamChunkEvent | StreamDoneEvent | StreamErrorEvent
 
-export type TraceType = 'agentic' | null
+export type TraceType = 'agentic' | 'agentv3' | null
+
+/** One planner decision in the v3 agent loop trace. */
+export interface AgentDecision {
+  thought: string
+  action: string
+  params: Record<string, unknown>
+  budget: Record<string, unknown>
+  fallback: boolean
+}
+
+/** Response shape of POST /agent/chat (raganything/agent/loop.py AgentResult). */
+export interface AgentChatResponse {
+  answer: string | null
+  grounded: boolean
+  refusal: Record<string, unknown> | null
+  ledger: Record<string, unknown>
+  trace: Record<string, unknown>
+  cancelled: boolean
+}
 
 export interface QueryParams {
   workspace_id: string

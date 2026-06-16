@@ -8,7 +8,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { cn } from '@/lib/utils'
 import { AdvancedOptions } from './AdvancedOptions'
 
-const MODES: ModeKey[] = ['naive', 'lightrag', 'multihop', 'agentic']
+const MODES: ModeKey[] = ['naive', 'lightrag', 'multihop', 'agentic', 'agentv3']
 
 function ResetButton({ onClick, title }: { onClick: () => void; title: string }) {
   return (
@@ -27,7 +27,9 @@ export function QuerySettings() {
   const s = useQuerySettings()
   const preset = MODE_PRESETS[s.mode]
   const [advancedOpen, setAdvancedOpen] = useState(false)
-  const hasAdvanced = s.mode === 'agentic' || s.mode === 'multihop' || s.mode === 'lightrag'
+  // v3 agent self-manages retrieval/budget — hide the per-query knobs.
+  const agentManaged = Boolean(preset.usesAgentEndpoint)
+  const hasAdvanced = !agentManaged && (s.mode === 'agentic' || s.mode === 'multihop' || s.mode === 'lightrag')
 
   return (
     <div className="border-t border-border px-3 pt-2 pb-1 flex flex-col gap-1.5 shrink-0">
@@ -58,7 +60,13 @@ export function QuerySettings() {
           </>
         )}
 
-        {s.mode !== 'multihop' && (
+        {agentManaged && (
+          <span className="text-muted-foreground ml-2 italic">
+            agent 自管检索 / 预算（top_k、rerank 由 LLM 按需决定）
+          </span>
+        )}
+
+        {!agentManaged && s.mode !== 'multihop' && (
           <>
             <span className="text-muted-foreground ml-2">chunk_top_k</span>
             <Input
@@ -72,36 +80,40 @@ export function QuerySettings() {
           </>
         )}
 
-        <label className="flex items-center gap-1.5 ml-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={s.enable_rerank}
-            onChange={(e) => s.setField('enable_rerank', e.target.checked)}
-            className="cursor-pointer"
-          />
-          <span className="text-muted-foreground">Rerank</span>
-        </label>
-        <ResetButton onClick={() => s.resetField('enable_rerank')} title="Reset rerank" />
+        {!agentManaged && (
+          <>
+            <label className="flex items-center gap-1.5 ml-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={s.enable_rerank}
+                onChange={(e) => s.setField('enable_rerank', e.target.checked)}
+                className="cursor-pointer"
+              />
+              <span className="text-muted-foreground">Rerank</span>
+            </label>
+            <ResetButton onClick={() => s.resetField('enable_rerank')} title="Reset rerank" />
 
-        <span
-          className={cn('text-muted-foreground ml-2', !s.enable_rerank && 'opacity-40')}
-          title="Minimum rerank score: chunks scoring below this are dropped after reranking. 0 = no filtering. Only active when Rerank is on."
-        >
-          min score
-        </span>
-        <Input
-          type="number"
-          min={0}
-          max={1}
-          step={0.05}
-          disabled={!s.enable_rerank}
-          value={s.min_rerank_score}
-          onChange={(e) =>
-            s.setField('min_rerank_score', Math.min(1, Math.max(0, Number(e.target.value) || 0)))
-          }
-          className={cn('h-7 w-16 text-xs', !s.enable_rerank && 'opacity-40')}
-        />
-        <ResetButton onClick={() => s.resetField('min_rerank_score')} title="Reset min rerank score" />
+            <span
+              className={cn('text-muted-foreground ml-2', !s.enable_rerank && 'opacity-40')}
+              title="Minimum rerank score: chunks scoring below this are dropped after reranking. 0 = no filtering. Only active when Rerank is on."
+            >
+              min score
+            </span>
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              disabled={!s.enable_rerank}
+              value={s.min_rerank_score}
+              onChange={(e) =>
+                s.setField('min_rerank_score', Math.min(1, Math.max(0, Number(e.target.value) || 0)))
+              }
+              className={cn('h-7 w-16 text-xs', !s.enable_rerank && 'opacity-40')}
+            />
+            <ResetButton onClick={() => s.resetField('min_rerank_score')} title="Reset min rerank score" />
+          </>
+        )}
 
         {hasAdvanced && (
           <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} className="ml-auto">
