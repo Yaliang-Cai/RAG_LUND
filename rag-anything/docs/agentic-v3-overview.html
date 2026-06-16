@@ -6,73 +6,130 @@
 <title>Agentic RAG v3 — Overview</title>
 <style>
   :root {
-    --bg: #0d1117; --panel: #161b22; --line: #30363d;
-    --fg: #e6edf3; --mut: #8b949e; --amber: #f0b429; --green: #3fb950;
-    --blue: #58a6ff; --violet: #bc8cff;
+    --bg: #ffffff; --soft: #f8fafc; --panel: #ffffff; --line: #e5e7eb;
+    --fg: #0f172a; --mut: #64748b; --faint: #94a3b8;
+    --amber: #d97706; --green: #16a34a; --blue: #2563eb; --violet: #7c3aed;
+    --shadow: 0 1px 2px rgba(15,23,42,.04), 0 8px 24px rgba(15,23,42,.06);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; }
   body {
-    background: #05070a; color: var(--fg);
-    font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
-    display: flex; align-items: center; justify-content: center; padding: 24px;
+    background: var(--soft); color: var(--fg);
+    font-family: "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+    line-height: 1.5; padding: 40px 20px;
   }
-  .slide {
-    width: 1280px; height: 720px; background:
-      radial-gradient(1200px 500px at 80% -10%, #15233b 0%, transparent 60%), var(--bg);
-    border: 1px solid var(--line); border-radius: 16px; padding: 40px 48px;
-    display: flex; flex-direction: column; gap: 18px; overflow: hidden;
+  .wrap { max-width: 1120px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+
+  /* header */
+  header.top {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 16px;
+    box-shadow: var(--shadow); padding: 28px 32px;
   }
-  header { display: flex; align-items: baseline; justify-content: space-between; }
-  h1 { font-size: 34px; font-weight: 700; letter-spacing: -.5px; }
-  h1 .v { color: var(--amber); }
+  .titlerow { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  h1 { font-size: 32px; font-weight: 700; letter-spacing: -.5px; }
+  h1 .v {
+    color: var(--amber); background: #fff7ed; border: 1px solid #fdba74;
+    border-radius: 8px; padding: 0 8px; font-size: 24px; margin-left: 2px;
+  }
   .tag { color: var(--mut); font-size: 14px; }
-  .lead { color: var(--mut); font-size: 15px; max-width: 1100px; line-height: 1.5; }
+  .lead { color: #334155; font-size: 15.5px; max-width: 980px; margin-top: 14px; }
   .lead b { color: var(--fg); font-weight: 600; }
-  .grid { display: grid; grid-template-columns: 1.35fr 1fr; gap: 20px; flex: 1; min-height: 0; }
-  .col { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
-  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--mut); margin-bottom: 12px; font-weight: 600; }
+
+  /* section + panels */
+  section { display: flex; flex-direction: column; gap: 14px; }
+  .h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--faint); font-weight: 700; }
+  .grid { display: grid; gap: 18px; }
+  .g2 { grid-template-columns: 1.4fr 1fr; }
+  .g3 { grid-template-columns: repeat(3, 1fr); }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: var(--shadow); padding: 20px 22px;
+  }
+  .panel h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--mut); font-weight: 700; margin-bottom: 14px; }
+
   /* agent loop */
-  .loop { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .node { background: #0d1b2e; border: 1px solid #234; border-radius: 9px; padding: 8px 11px; font-size: 13px; font-weight: 600; }
-  .node small { display: block; color: var(--mut); font-weight: 400; font-size: 11px; }
-  .arrow { color: var(--blue); font-size: 18px; }
-  .loopback { color: var(--amber); font-size: 12px; margin-top: 8px; }
+  .loop { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; }
+  .node { background: var(--soft); border: 1px solid var(--line); border-radius: 10px; padding: 10px 13px; font-size: 13.5px; font-weight: 600; flex: 1; min-width: 120px; }
+  .node small { display: block; color: var(--mut); font-weight: 400; font-size: 11.5px; margin-top: 2px; }
+  .arrow { color: var(--blue); font-size: 18px; align-self: center; }
+  .loopback { color: var(--amber); font-size: 12.5px; margin-top: 12px; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: 8px 12px; }
+
   /* tools */
-  .tool { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-top: 1px solid var(--line); }
-  .tool:first-of-type { border-top: 0; }
-  .tool .name { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--blue); min-width: 138px; font-weight: 600; }
+  .tool { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; border-top: 1px solid var(--line); }
+  .tool:first-of-type { border-top: 0; padding-top: 2px; }
+  .tool .name { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px; color: var(--blue); min-width: 142px; font-weight: 700; }
   .tool .name.mh { color: var(--violet); }
   .tool .name.ans { color: var(--green); }
-  .tool .desc { font-size: 12.5px; color: var(--mut); line-height: 1.45; }
+  .tool .desc { font-size: 13px; color: #475569; }
+  .tool .desc b { color: var(--fg); }
+
   /* features */
-  ul.feat { list-style: none; display: flex; flex-direction: column; gap: 9px; }
-  ul.feat li { font-size: 13px; line-height: 1.4; padding-left: 18px; position: relative; color: #c9d4e0; }
-  ul.feat li::before { content: "▹"; position: absolute; left: 0; color: var(--amber); }
+  ul.feat { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+  ul.feat li { font-size: 13.5px; padding-left: 20px; position: relative; color: #475569; }
+  ul.feat li::before { content: "▹"; position: absolute; left: 0; color: var(--amber); font-weight: 700; }
   ul.feat b { color: var(--fg); }
-  footer { display: flex; justify-content: space-between; align-items: center; color: var(--mut); font-size: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
-  .chips span { border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; margin-left: 6px; font-size: 11px; }
+
+  /* ---- demo mockups ---- */
+  .demo-card { display: flex; flex-direction: column; gap: 10px; }
+  .demo-card .cap { font-size: 13px; color: #475569; }
+  .demo-card .cap b { color: var(--fg); }
+  .mock { background: var(--soft); border: 1px solid var(--line); border-radius: 10px; padding: 12px 13px; font-size: 12px; }
+
+  /* thinking chain mock */
+  .step { display: flex; flex-direction: column; gap: 2px; padding: 3px 0; }
+  .step .row { display: flex; gap: 7px; align-items: center; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); flex: none; }
+  .dot.run { background: var(--amber); box-shadow: 0 0 0 3px #fef3c7; }
+  .step .lbl { font-weight: 700; color: var(--fg); font-size: 12px; }
+  .step .det { color: var(--mut); font-size: 11.5px; }
+  .sub { margin-left: 14px; color: var(--faint); font-size: 11px; }
+  .sub .c { color: var(--violet); }
+
+  /* citation mock */
+  .cite-chip { font-size: 10px; font-weight: 700; color: var(--green); border: 1px solid #86efac; background: #f0fdf4; border-radius: 5px; padding: 0 5px; vertical-align: super; }
+  .pop { margin-top: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; box-shadow: var(--shadow); }
+  .pop .f { display: flex; justify-content: space-between; font-weight: 600; font-size: 11.5px; }
+  .pop .f .open { color: var(--blue); font-weight: 600; }
+  .pop .ex { color: var(--mut); font-size: 11.5px; margin-top: 5px; }
+  mark { background: #fef08a; color: var(--fg); border-radius: 3px; padding: 0 2px; }
+
+  /* confidence mock */
+  .pill { display: inline-flex; align-items: center; font-size: 10.5px; border-radius: 999px; padding: 2px 9px; border: 1px solid #86efac; color: var(--green); background: #f0fdf4; }
+  .meta { color: var(--mut); font-size: 11.5px; margin-left: 8px; }
+  .bar-row { display: flex; align-items: center; gap: 9px; margin-top: 9px; }
+  .bar-row .k { width: 84px; color: var(--mut); font-size: 11.5px; }
+  .bar { flex: 1; height: 7px; background: var(--line); border-radius: 999px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; border-radius: 999px; }
+  .bar .g { background: var(--green); } .bar .a { background: var(--amber); }
+  .bar-row .pct { width: 34px; text-align: right; font-weight: 700; font-size: 11.5px; }
+
+  /* stack + footer */
+  .stack-list { display: flex; flex-wrap: wrap; gap: 8px; }
+  .stack-list span { font-size: 12px; color: #475569; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; }
+  footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; color: var(--mut); font-size: 12.5px; padding: 4px 6px 8px; }
+  .chips span { border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 3px 11px; margin-left: 6px; font-size: 11.5px; }
 </style>
 </head>
 <body>
-<div class="slide">
-  <header>
-    <h1>Agentic RAG <span class="v">v3</span></h1>
-    <div class="tag">LLM-driven retrieval agent · built on RAG-Anything + LightRAG</div>
+<div class="wrap">
+
+  <header class="top">
+    <div class="titlerow">
+      <h1>Agentic RAG <span class="v">v3</span></h1>
+      <div class="tag">LLM-driven retrieval agent · built on RAG-Anything + LightRAG</div>
+    </div>
+    <p class="lead">
+      Replaces the fixed retrieval pipeline with a <b>real agent loop</b>: the model decides
+      <b>which tool to call, with what query and budget</b>, accumulates evidence across steps,
+      self-grades coverage, and answers only when the evidence supports it — under a hard
+      cost / time budget, with per-turn session memory for multi-turn conversations.
+    </p>
   </header>
 
-  <p class="lead">
-    Replaces the fixed retrieval pipeline with a <b>real agent loop</b>: the model decides
-    <b>which tool to call, with what query and budget</b>, accumulates evidence across steps,
-    self-grades coverage, and answers only when the evidence supports it — with a hard
-    cost/time budget and per-turn session memory for multi-turn conversations.
-  </p>
-
-  <div class="grid">
-    <div class="col">
-      <div class="panel" style="flex:1;">
-        <h2>How one turn works</h2>
+  <!-- ROW 1: loop + toolset -->
+  <section>
+    <div class="grid g2">
+      <div class="panel">
+        <h3>How one turn works</h3>
         <div class="loop">
           <div class="node">Plan<small>rewrite + classify</small></div>
           <span class="arrow">→</span>
@@ -84,18 +141,18 @@
           <span class="arrow">→</span>
           <div class="node">Answer<small>+ cite check</small></div>
         </div>
-        <div class="loopback">↺ insufficient evidence → loop back (cheap → escalate), bounded by cost-points · 60 s · token guardrails</div>
+        <div class="loopback">↺ insufficient evidence → loop back (cheap → escalate), bounded by cost-points · 60&nbsp;s · token guardrails</div>
       </div>
 
-      <div class="panel" style="flex:1.2;">
-        <h2>Minimal retrieval toolset — one clear choice per step</h2>
+      <div class="panel">
+        <h3>Minimal retrieval toolset</h3>
         <div class="tool">
           <div class="name">search</div>
-          <div class="desc">LightRAG <b>local + global knowledge graph</b> fused with <b>hybrid (dense + BM25)</b> chunk vectors, reranked at admission. The default for facts, entities, definitions, summaries.</div>
+          <div class="desc">LightRAG <b>local + global KG</b> fused with <b>hybrid (dense + BM25)</b> chunk vectors, reranked at admission. Default for facts, entities, definitions, summaries.</div>
         </div>
         <div class="tool">
           <div class="name mh">search_multihop</div>
-          <div class="desc"><b>Personalized PageRank</b> over the entity graph for bridge / comparison / causal / cross-document reasoning. No rerank — PPR already ranks by multi-hop relevance.</div>
+          <div class="desc"><b>Personalized PageRank</b> over the entity graph for bridge / comparison / causal reasoning. No rerank — PPR already ranks by multi-hop relevance.</div>
         </div>
         <div class="tool">
           <div class="name ans">answer</div>
@@ -103,33 +160,97 @@
         </div>
       </div>
     </div>
+  </section>
 
-    <div class="col">
-      <div class="panel" style="flex:1;">
-        <h2>Why it is better</h2>
+  <!-- ROW 2: DEMO HIGHLIGHTS -->
+  <section>
+    <div class="h2">Demo highlights — what you see live</div>
+    <div class="grid g3">
+
+      <!-- 1. thinking chain -->
+      <div class="panel demo-card">
+        <h3>Live thinking chain</h3>
+        <p class="cap">The agent's reasoning streams in <b>real time</b>, with the query variants and PPR seed it actually uses.</p>
+        <div class="mock">
+          <div class="step"><div class="row"><span class="dot"></span><span class="lbl">Plan</span></div><div class="det">factoid · “Huawei 2023 5G revenue”</div></div>
+          <div class="step"><div class="row"><span class="dot"></span><span class="lbl">Expand query</span></div><div class="det">mqe: original + 2 variants</div>
+            <div class="sub"><span class="c">›</span> Huawei 5G carrier revenue 2023</div>
+            <div class="sub"><span class="c">›</span> Huawei annual report 5G segment</div>
+          </div>
+          <div class="step"><div class="row"><span class="dot"></span><span class="lbl">Retrieve</span></div><div class="det">search → 12 chunks (3 queries)</div></div>
+          <div class="step"><div class="row"><span class="dot"></span><span class="lbl">PPR seed</span></div><div class="det">entity anchors</div>
+            <div class="sub"><span class="c">›</span> Huawei · Ericsson</div>
+          </div>
+          <div class="step"><div class="row"><span class="dot"></span><span class="lbl">Grade evidence</span></div><div class="det">facts 3/4 · sufficient = false</div></div>
+          <div class="step"><div class="row"><span class="dot run"></span><span class="lbl">Generate</span></div><div class="det">writing answer…</div></div>
+        </div>
+      </div>
+
+      <!-- 2. precise citations -->
+      <div class="panel demo-card">
+        <h3>Clickable precise citations</h3>
+        <p class="cap">Each claim is verified <b>verbatim by code</b>; the chip jumps to the exact sentence in the source.</p>
+        <div class="mock">
+          Huawei’s 5G carrier business revenue reached ¥38.2&nbsp;billion in 2023 <span class="cite-chip">c1</span>, up year over year <span class="cite-chip">c3</span>.
+          <div class="pop">
+            <div class="f"><span>huawei-annual-2023.pdf · p.12</span><span class="open">Open →</span></div>
+            <div class="ex">…5G carrier business <mark>revenue reached ¥38.2 billion in 2023</mark>, reflecting continued…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. confidence panel -->
+      <div class="panel demo-card">
+        <h3>Confidence panel</h3>
+        <p class="cap">Every answer carries <b>faithfulness &amp; coverage</b> — RAGAS-style credibility, computed not self-claimed.</p>
+        <div class="mock">
+          <div>
+            <span class="pill">✓ grounded</span>
+            <span class="meta">4/5 claims cited · 6 sources</span>
+          </div>
+          <div class="bar-row"><span class="k">Faithfulness</span><span class="bar"><span class="g" style="width:92%"></span></span><span class="pct">92%</span></div>
+          <div class="bar-row"><span class="k">Coverage</span><span class="bar"><span class="a" style="width:80%"></span></span><span class="pct">80%</span></div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ROW 3: why better + stack -->
+  <section>
+    <div class="grid g2">
+      <div class="panel">
+        <h3>Why it is better</h3>
         <ul class="feat">
           <li><b>Evidence accumulates</b> across steps; reranking is incremental (no repeated work).</li>
           <li><b>Fact ledger</b> drives coverage and targeted re-retrieval; abandons unverifiable details instead of looping.</li>
-          <li><b>Grounding by citation</b> — claims are checked verbatim against sources by code, not self-judged.</li>
+          <li><b>Grounding by citation</b> — claims checked verbatim against sources by code, not self-judged.</li>
           <li><b>Budget-aware</b>: cost-points + wall-clock + token guardrails; fast-path for simple questions.</li>
           <li><b>Session memory</b>: coreference resolution + cross-turn evidence cache.</li>
           <li><b>Answers in the user's language</b>; full chain trace per turn in Phoenix.</li>
         </ul>
       </div>
       <div class="panel">
-        <h2>Stack</h2>
-        <div class="lead" style="font-size:13px;">
-          Qwen3-VL-30B (vLLM) · Neo4j · Qdrant (dense + BM25) · PostgreSQL governance ·
-          role-separated model pool (pluggable small judge) · React UI · Arize Phoenix tracing.
+        <h3>Stack</h3>
+        <div class="stack-list">
+          <span>Qwen3-VL-30B (vLLM)</span>
+          <span>Neo4j</span>
+          <span>Qdrant · dense + BM25</span>
+          <span>PostgreSQL governance</span>
+          <span>Role-separated model pool</span>
+          <span>Pluggable small judge</span>
+          <span>React UI · SSE streaming</span>
+          <span>Arize Phoenix tracing</span>
         </div>
       </div>
     </div>
-  </div>
+  </section>
 
   <footer>
-    <div>Two-tool design: a human engineer can always say which to use — so the agent can too.</div>
+    <div>Minimal-toolset design: a human engineer can always say which tool to use — so the agent can too.</div>
     <div class="chips">v2 retained as fallback<span>A/B gated</span><span>2026</span></div>
   </footer>
+
 </div>
 </body>
 </html>
