@@ -1,11 +1,11 @@
-# RAG_LUND 部署与同步指南
+# RAG_LUND 同机部署与交接指南
 
 本仓库是本地化 RAG 实验与服务代码集合，主要由两个子项目组成：
 
 - `lightrag/`：LightRAG 核心库、API Server、WebUI、存储后端适配与示例。
 - `rag-anything/`：基于 LightRAG 的本地多模态 RAG 服务，包含 FastAPI 后端、React 前端、文档解析、入库、查询、图谱浏览和评测脚本。
 
-根目录下的 `DocBench/` 和 `docs/` 是评测/内部文档目录；子项目内部的 `lightrag/docs/`、`rag-anything/docs/` 属于项目说明文档。
+本文用于同一台 Linux 机器上的项目交接，默认代码路径为 `/data/h50056787/workspaces/RAG_LUND`。根目录下的 `DocBench/` 和 `docs/` 是已跟踪的评测/内部文档目录；子项目内部的 `lightrag/docs/`、`rag-anything/docs/` 属于项目说明文档。
 
 ## 目录结构
 
@@ -29,13 +29,13 @@
 
 ## Linux 环境准备
 
-推荐使用已有 conda 环境：
+同机交接优先使用已有 conda 环境，不要在没有确认的情况下升级 Python、PostgreSQL、Neo4j、CUDA、vLLM 或模型目录：
 
 ```bash
 conda activate lightRAG
 ```
 
-如果是新机器，建议使用 Python 3.10 或更高版本：
+只有在环境损坏或需要重建时，才重新创建 Python 3.10+ 环境：
 
 ```bash
 conda create -n lightRAG python=3.10 -y
@@ -58,14 +58,14 @@ pip install -e "./lightrag[api,offline-storage]"
 pip install -e "./rag-anything[all]"
 ```
 
-Office 文档解析需要 LibreOffice：
+Office 文档解析依赖 LibreOffice。同机环境通常已经具备；缺失时再安装：
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y libreoffice
 ```
 
-离线机器不要随意升级关键运行环境。当前本地 PostgreSQL 数据目录由 PostgreSQL 16 初始化，如果使用本文中的本地 PostgreSQL 数据目录，必须用 PostgreSQL 16 启动。
+当前本地 PostgreSQL 数据目录由 PostgreSQL 16 初始化，如果使用本文中的本地 PostgreSQL 数据目录，必须用 PostgreSQL 16 启动。
 
 ## 配置文件
 
@@ -76,7 +76,16 @@ cd /data/h50056787/workspaces/RAG_LUND
 cp .env.example .env
 ```
 
-启动 `rag-anything` 前加载根级 `.env`：
+同机交接建议在 `.env` 中使用绝对路径，避免从不同目录启动服务时把数据写到不同位置：
+
+```bash
+RAGANYTHING_WORKDIR_ROOT=/data/h50056787/workspaces/RAG_LUND/rag-anything/rag_data/rag_workspace
+RAGANYTHING_OUTPUT_DIR=/data/h50056787/workspaces/RAG_LUND/rag-anything/rag_data/output
+RAGANYTHING_UPLOADS_DIR=/data/h50056787/workspaces/RAG_LUND/rag-anything/rag_data/uploads
+RAGANYTHING_LOG_DIR=/data/h50056787/workspaces/RAG_LUND/rag-anything/rag_data/logs
+```
+
+如果不设置这些变量，代码默认也会写入 `rag-anything/rag_data/` 下的对应目录。启动 `rag-anything` 前加载根级 `.env`：
 
 ```bash
 set -a
@@ -112,10 +121,10 @@ set +a
 | `RAGANYTHING_RERANK_MODEL_PATH` | 本地 reranker 模型路径 | `/path/to/bge-reranker-v2-m3` |
 | `VISION_MODEL_PATH` | 本地视觉模型/tokenizer 路径 | `/path/to/vision_model` |
 | `TIKTOKEN_CACHE_DIR` | 离线 tiktoken cache | `/path/to/tiktoken_cache` |
-| `RAGANYTHING_WORKDIR_ROOT` | LightRAG KV/图谱工作区根目录 | `./rag_workspace` |
-| `RAGANYTHING_OUTPUT_DIR` | MinerU/Markdown 输出目录 | `./output` |
-| `RAGANYTHING_UPLOADS_DIR` | 上传文件目录 | `./uploads` |
-| `RAGANYTHING_LOG_DIR` | 日志目录 | `./logs` |
+| `RAGANYTHING_WORKDIR_ROOT` | LightRAG KV/图谱工作区根目录 | `/data/h50056787/workspaces/RAG_LUND/rag-anything/rag_data/rag_workspace` |
+| `RAGANYTHING_OUTPUT_DIR` | MinerU/Markdown 输出目录 | `/data/h50056787/workspaces/RAG_LUND/rag-anything/rag_data/output` |
+| `RAGANYTHING_UPLOADS_DIR` | 上传文件目录 | `/data/h50056787/workspaces/RAG_LUND/rag-anything/rag_data/uploads` |
+| `RAGANYTHING_LOG_DIR` | 日志目录 | `/data/h50056787/workspaces/RAG_LUND/rag-anything/rag_data/logs` |
 | `RAGANYTHING_DEVICE` | 推理设备 | `cuda:0` |
 | `CHUNKING_STRATEGY` | 切块策略 | `token` |
 | `CHUNK_SIZE` | chunk token 长度 | `1200` |
@@ -358,6 +367,8 @@ WebUI 使用同一个 FastAPI 服务。常用端点：
 | `DELETE` | `/workspace/{workspace_id}` | 删除工作区 |
 | `GET` | `/config` | 服务端默认查询配置 |
 
+完整交互式 API 文档可在服务启动后访问 `http://localhost:9621/docs`。
+
 如果设置了 `RAGANYTHING_API_KEY`，请求需要带 `X-API-Key`：
 
 ```bash
@@ -405,7 +416,7 @@ docker compose up
 
 ## 预构建工作区与外部解析结果
 
-如果需要挂载已有 DocBench 工作区，可以复制工作区数据到当前运行目录：
+以下路径只适用于当前同机实验环境。如果需要挂载已有 DocBench 工作区，可以复制工作区数据到当前运行目录：
 
 ```bash
 cd /data/h50056787/workspaces/RAG_LUND/rag-anything
@@ -515,7 +526,7 @@ git push origin HEAD:main
 
 ## 不要提交的内容
 
-根级 `.gitignore` 已覆盖常见本地文件、构建产物和运行数据。尤其不要提交：
+根级 `.gitignore` 已覆盖常见本地文件、构建产物和运行数据。注意：`.gitignore` 只阻止未跟踪文件进入索引，已经被 git 跟踪的文件仍会记录修改。尤其不要提交：
 
 - `.env`
 - `.env.local`
@@ -526,8 +537,11 @@ git push origin HEAD:main
 - `query_cache/`
 - `uploads/`
 - `logs/`
+- `rag-anything/rag_data/`
 - `rag-anything/server/frontend/node_modules/`
 - `rag-anything/server/static/dist/`
-- 根级 `DocBench/`
-- 根级 `docs/`
+- 根级 `DocBench/` 中新增的大文件、数据文件或敏感内容
+- 根级 `docs/` 中新增的大文件、临时笔记或敏感内容
 - `LightRAG-Qwen3VL-Local/`
+
+根级 `DocBench/` 和 `docs/` 当前包含已跟踪历史文件；如果后续决定不再跟踪它们，需要单独做一次索引清理提交，不要在普通功能提交里混入。

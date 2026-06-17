@@ -45,5 +45,6 @@ query_cache/
 /LightRAG-Qwen3VL-Local/
 /rag_workspace/
 /output/
+rag-anything/rag_data/
 rag-anything/.tmp_pytest/
 
