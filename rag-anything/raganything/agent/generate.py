@@ -10,6 +10,11 @@ from raganything.agent.evidence import EvidencePool, FactLedger, PoolEntry
 DEFAULT_MAX_CONTEXT_TOKENS = 12_000
 MAX_IMAGES_PER_CALL = 6  # per-generation-call 上限 §11.2
 _IMAGE_SCORE_FLOOR = 0.3
+# Precision-over-recall cap for generation: feed only the top-relevance chunks, not
+# the whole multi-step accumulated pool. The cross-encoder rerank already ordered the
+# pool; packing every chunk diluted the context with marginal evidence and degraded
+# answers. Grader-verified supporters are always kept regardless of this cap.
+DEFAULT_MAX_GEN_CHUNKS = 15
 
 
 def estimate_tokens(text: str) -> int:
@@ -29,10 +34,20 @@ def pack_context(
     pool: EvidencePool, ledger: FactLedger, *,
     max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
     visual_intent: bool = False, max_images: int = MAX_IMAGES_PER_CALL,
+    max_chunks: int = DEFAULT_MAX_GEN_CHUNKS,
 ) -> PackedContext:
-    supporters = sorted((e for e in pool.entries.values() if e.supports),
+    # Consider only the highest-relevance chunks (rerank-ordered), never the whole
+    # accumulated pool — plus every grader-verified supporter, even if it ranks below
+    # the cut. This is the key precision lever for generation quality.
+    candidates: dict[str, PoolEntry] = {
+        e.chunk_id: e for e in (pool.top(max_chunks) if max_chunks else pool.entries.values())
+    }
+    for e in pool.entries.values():
+        if e.supports:
+            candidates[e.chunk_id] = e
+    supporters = sorted((e for e in candidates.values() if e.supports),
                         key=lambda e: e.sort_key(), reverse=True)
-    others = sorted((e for e in pool.entries.values() if not e.supports),
+    others = sorted((e for e in candidates.values() if not e.supports),
                     key=lambda e: e.sort_key(), reverse=True)
     packed = PackedContext()
     budget = max_context_tokens

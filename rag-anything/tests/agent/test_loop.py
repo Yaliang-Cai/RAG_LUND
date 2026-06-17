@@ -9,18 +9,19 @@ from raganything.agent.session import SessionMemory
 from raganything.agent.tools import build_default_registry
 
 
-def test_multihop_seed_prefers_exact_terms():
+def test_multihop_seed_keeps_question_and_reinforces_anchors():
     plan = PlanResult(standalone_query="given the earlier company, what is its 5G revenue",
                       archetype="multihop", confidence=0.9,
                       exact_terms=["Huawei", "Ericsson"])
-    # Clean entity anchors replace the context-laden rewrite for PPR seeding.
-    assert _multihop_seed(plan, plan.standalone_query) == "Huawei Ericsson"
+    # The full question drives the PPR walk; entity anchors merely reinforce the
+    # pivot nodes (anchors-only dropped the question's meaning and hurt recall).
+    assert _multihop_seed(plan, "what is the 5G revenue") == "what is the 5G revenue Huawei Ericsson"
 
 
 def test_multihop_seed_falls_back_without_terms():
     plan = PlanResult(standalone_query="how do A and B compare", archetype="multihop",
                       confidence=0.9, exact_terms=[])
-    assert _multihop_seed(plan, plan.standalone_query) == "how do A and B compare"
+    assert _multihop_seed(plan, "how do A and B compare") == "how do A and B compare"
 
 
 def test_apply_expand_default_planner_suggestion_then_decider_override():
@@ -88,6 +89,34 @@ async def test_fast_path_zero_decision_calls():
     assert isinstance(result, AgentResult)
     assert result.grounded is True and result.answer
     assert result.trace["agent_decisions"] == []  # 快速通道零决策 §4.5
+
+
+@pytest.mark.asyncio
+async def test_first_turn_retrieves_with_raw_query_not_rewrite():
+    # v2 parity: a fresh standalone question is searched on its own surface form;
+    # the LLM rewrite ("规范查询") is reserved for follow-ups that need coref resolution.
+    chunks = [{"chunk_id": "c1", "content": "证据内容证据内容"}]
+    script = [("prepare a user question", PLAN),  # standalone_query == "规范查询"
+              ("fact ledger", GRADE_OK),
+              ("Answer based ONLY", "答案：证据内容证据内容。"),
+              ("verify answer claims", VERIFY_OK)]
+    loop = _loop(script, chunks)
+    await loop.run("问题", SessionMemory(session_id="s", workspace_id="w"))
+    assert loop.retrieve_fn.calls[0][1]["query"] == "问题"  # raw, not the rewrite
+
+
+@pytest.mark.asyncio
+async def test_followup_turn_uses_coref_resolved_rewrite():
+    chunks = [{"chunk_id": "c1", "content": "证据内容证据内容"}]
+    script = [("prepare a user question", PLAN),  # standalone_query == "规范查询"
+              ("fact ledger", GRADE_OK),
+              ("Answer based ONLY", "答案：证据内容证据内容。"),
+              ("verify answer claims", VERIFY_OK)]
+    loop = _loop(script, chunks)
+    session = SessionMemory(session_id="s", workspace_id="w")
+    session.add_turn("上一轮问题", "上一轮答案")  # prior context exists → follow-up
+    await loop.run("它的收入呢", session)
+    assert loop.retrieve_fn.calls[0][1]["query"] == "规范查询"  # self-contained rewrite
 
 
 @pytest.mark.asyncio
@@ -246,7 +275,9 @@ async def test_phase_event_exposes_multihop_seed():
         "问题", SessionMemory(session_id="s", workspace_id="w"),
         budget=Budget(points=8, max_seconds=None), event_cb=cb)
     seed_ev = next(e for e in events if e.get("phase") == "seed")
-    assert seed_ev["items"] == ["Huawei"]  # entity anchor, not the verbose rewrite
+    # First turn → canonical query is the raw question; anchors reinforce it. The
+    # decider's verbose "context-laden rewrite" is deliberately NOT used for seeding.
+    assert seed_ev["items"] == ["问题 Huawei"]
 
 
 @pytest.mark.asyncio
@@ -281,8 +312,9 @@ async def test_multihop_never_expands_even_if_suggested():
     # exactly one retrieval (the seed) — no MQE fan-out on the multihop path
     assert len(loop.retrieve_fn.calls) == 1
     assert loop.retrieve_fn.calls[0][0] == "search_multihop"
-    # seeded from the clean entity anchor, not the context-laden rewrite
-    assert loop.retrieve_fn.calls[0][1]["query"] == "Huawei"
+    # seeded from the canonical question (raw query on a first turn) + entity anchor,
+    # never the decider's context-laden rewrite
+    assert loop.retrieve_fn.calls[0][1]["query"] == "问题 Huawei"
 
 
 @pytest.mark.asyncio

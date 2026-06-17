@@ -9,7 +9,10 @@ ARCHETYPE_POINTS: dict[str, int] = {
     "factoid": 6, "comparison": 10, "summary": 12, "multihop": 16, "unknown": 10,
 }
 DEFAULT_MAX_TOKENS = 30_000
-DEFAULT_MAX_SECONDS = 60.0
+# Interactive wall-clock guardrail. Relaxed from 60s: the deeper agent loop (raw-query
+# first retrieval, multi-step grading, rerank) needs more headroom to gather and verify
+# evidence before the budget cuts it off and forces a premature/exhausted answer.
+DEFAULT_MAX_SECONDS = 120.0
 SOFT_RATIO = 0.2
 SOFT_TIME_RATIO = 0.75
 
@@ -53,7 +56,7 @@ class Budget:
         if self.remaining_points <= self.points * SOFT_RATIO:
             return True
         if self.max_seconds is not None and self.elapsed >= self.max_seconds * SOFT_TIME_RATIO:
-            return True  # 60s 护栏 → 45s 软阈值
+            return True  # 120s 护栏 → 90s 软阈值（SOFT_TIME_RATIO=0.75）
         return False
 
     def upgrade(self, archetype: str) -> bool:

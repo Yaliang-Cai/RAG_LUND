@@ -27,6 +27,24 @@ def test_pack_respects_token_budget_and_score_order():
     assert scores == sorted(scores, reverse=True)
 
 
+def test_pack_limits_to_top_n_chunks():
+    # Generation feeds only the top-relevance chunks, not the whole accumulated pool,
+    # even when the token budget could hold more — precision over recall.
+    pool = _pool(40)
+    packed = pack_context(pool, FactLedger(), max_context_tokens=10**9, max_chunks=15)
+    assert len(packed.chunks) == 15
+    kept = {e.chunk_id for e in packed.chunks}
+    assert "c0" in kept and "c39" not in kept  # highest scores kept, long tail dropped
+
+
+def test_pack_keeps_supporters_below_top_n_cut():
+    pool = _pool(40)
+    pool.entries["c39"].supports.add("f1")  # lowest score but grader-verified
+    packed = pack_context(pool, FactLedger(), max_context_tokens=10**9, max_chunks=10)
+    kept = {e.chunk_id for e in packed.chunks}
+    assert "c39" in kept  # a verified supporter survives the top-N cap
+
+
 def test_fact_supporters_packed_first():
     pool = _pool(10)
     pool.entries["c9"].supports.add("f1")  # 最低分但支撑事实

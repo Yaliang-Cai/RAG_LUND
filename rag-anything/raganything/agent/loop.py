@@ -197,11 +197,15 @@ class AgentLoop:
         pool, ledger = EvidencePool(), FactLedger()
         grader = LedgerGrader(self.model_pool)
         tb = TraceBuilder(profile=f"agent:{plan.archetype}", query=query)
-        tb.add_rewrite(plan.standalone_query)
+        # v2 parity: a first-turn question retrieves best on its own surface form.
+        # The coreference-resolved rewrite is only needed for follow-ups; applying it
+        # to a fresh standalone question tends to narrow or embellish it and poison
+        # every downstream retrieval (the rewrite is the ONLY text we search with).
+        cq = plan.standalone_query if session.recent_turns else query
+        tb.add_rewrite(cq)
         tried: set[tuple] = set()
         dup_rates: list[float] = []
         ledger_steps = 0
-        cq = plan.standalone_query
 
         if plan.fast_path:
             fp_params = self._apply_expand_default(
@@ -269,11 +273,12 @@ class AgentLoop:
             # `search` instead gets the planner's expand suggestion (unless the
             # decider explicitly chose one); multihop is never expanded.
             if decision.action == "search_multihop":
-                seed = _multihop_seed(plan, decision.params.get("query") or cq)
+                # Seed PPR from the canonical question (its semantics drive the graph
+                # walk), augmented with entity anchors — not the decider's free-form
+                # query, which can be verbose and dilute the keyword extraction.
+                seed = _multihop_seed(plan, cq)
                 search_params = {**decision.params, "query": seed}
-                # Show the entity-anchor seed PPR actually walks from (vs. the verbose
-                # rewrite) — the differentiator over plain vector RAG.
-                await _emit("seed", "PPR seed (entity anchors)", items=[seed])
+                await _emit("seed", "PPR seed (question + entity anchors)", items=[seed])
             else:
                 search_params = self._apply_expand_default(
                     decision.action, dict(decision.params), plan)
@@ -589,14 +594,18 @@ def _answer_metrics(total_claims: int, ungrounded: list, citations: list,
     }
 
 
-def _multihop_seed(plan: PlanResult, fallback: str) -> str:
-    """Seed PPR with the planner's clean entity anchors (exact_terms) rather than
-    the verbose, context-laden standalone rewrite. Cross-turn coreference text is
-    what pollutes PPR seeds via LightRAG's low/high keyword extraction; exact_terms
-    are the proper nouns / IDs the question actually pivots on. Falls back to the
-    given query when the planner extracted none."""
+def _multihop_seed(plan: PlanResult, query: str) -> str:
+    """Seed PPR with the full question so its semantics drive the graph walk,
+    augmented with the planner's entity anchors (exact_terms) to strengthen the
+    pivot nodes. An earlier revision seeded from entity anchors ALONE, which dropped
+    the question's meaning and hurt multi-hop recall — LightRAG's low/high keyword
+    extraction already distills the pivots from the full question text, so the right
+    move is to keep the question and merely reinforce its anchors."""
     terms = [t.strip() for t in plan.exact_terms if t and t.strip()]
-    return " ".join(terms) if terms else fallback
+    base = (query or "").strip()
+    if terms:
+        return f"{base} {' '.join(terms)}".strip()
+    return base
 
 
 def _result_chunks(pool: EvidencePool, n: int = 12) -> list[dict]:
