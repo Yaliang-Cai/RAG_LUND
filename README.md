@@ -5,7 +5,7 @@
 - `lightrag/`：LightRAG 核心库、API Server、WebUI、存储后端适配与示例。
 - `rag-anything/`：基于 LightRAG 的本地多模态 RAG 服务，包含 FastAPI 后端、React 前端、文档解析、入库、查询、图谱浏览和评测脚本。
 
-根目录下的 `DocBench/` 和 `docs/` 是评测/内部文档目录。如果需要把代码同步到 GitLab，但不希望包含这两个根级目录，请使用本文后面的 GitLab 导出步骤，不要直接把当前仓库历史原样 push 到 GitLab。
+根目录下的 `DocBench/` 和 `docs/` 是评测/内部文档目录；子项目内部的 `lightrag/docs/`、`rag-anything/docs/` 属于项目说明文档。
 
 ## 目录结构
 
@@ -20,12 +20,12 @@
 │   │   └── frontend/                    # React/Vite 前端源码
 │   ├── scripts/                         # 工作区、评测、导出辅助脚本
 │   └── examples/
-├── DocBench/                            # 根级评测数据/脚本，不导出到 GitLab
-├── docs/                                # 根级内部文档，不导出到 GitLab
+├── DocBench/                            # 根级评测数据/脚本
+├── docs/                                # 根级内部文档
 └── RAGAnything_LocalRAG_VLM_Refactor_2026-02-20.md
 ```
 
-只排除根级 `DocBench/` 和 `docs/`。子项目内部的 `lightrag/docs/`、`rag-anything/docs/` 属于项目说明文档，应保留。
+项目说明以根级 README 和两个子项目 README 为主：`lightrag/README.md`、`rag-anything/README.md`。
 
 ## Linux 环境准备
 
@@ -501,7 +501,7 @@ git pull --ff-only origin main
 
 ```bash
 git fetch origin
-git worktree add -b docs/readme-linux-gitlab ../projects-readme origin/main
+git worktree add -b docs/readme-update ../projects-readme origin/main
 cd ../projects-readme
 ```
 
@@ -509,97 +509,9 @@ cd ../projects-readme
 
 ```bash
 git add README.md .gitignore
-git commit -m "docs: add Linux deployment and GitLab export guide"
+git commit -m "docs: update Linux deployment guide"
 git push origin HEAD:main
 ```
-
-## 在 Linux 上导出到 GitLab
-
-目标：只把 `lightrag/`、`rag-anything/` 和其他必要根级文件同步到 GitLab，不包含根级 `DocBench/` 和 `docs/`。
-
-重要：根级 `DocBench/` 和 `docs/` 目前在源仓库历史里已经被跟踪。直接执行 `git remote add gitlab ... && git push gitlab main` 会把历史和这两个目录一起推过去。推荐用 `git archive` 导出干净快照，再初始化 GitLab 仓库。
-
-### 新建 GitLab 仓库的推荐做法
-
-```bash
-git clone https://github.com/Yaliang-Cai/RAG_LUND.git rag-lund
-cd rag-lund
-git checkout main
-git pull --ff-only origin main
-```
-
-导出不含根级 `DocBench/`、`docs/`、`LightRAG-Qwen3VL-Local/` 的快照：
-
-```bash
-mkdir -p ../rag-lund-gitlab
-git archive --format=tar HEAD -- \
-  . \
-  ':(exclude)DocBench' ':(exclude)DocBench/**' \
-  ':(exclude)docs' ':(exclude)docs/**' \
-  ':(exclude)LightRAG-Qwen3VL-Local' ':(exclude)LightRAG-Qwen3VL-Local/**' \
-  | tar -x -C ../rag-lund-gitlab
-```
-
-初始化并推送到 GitLab：
-
-```bash
-cd ../rag-lund-gitlab
-git init -b main
-git add .
-git status --short
-git commit -m "Initial GitLab export"
-git remote add origin <GITLAB_REPO_URL>
-git push -u origin main
-```
-
-验证排除成功：
-
-```bash
-test ! -e DocBench
-test ! -e docs
-test ! -e LightRAG-Qwen3VL-Local
-git ls-files | grep -E '^(DocBench|docs|LightRAG-Qwen3VL-Local)(/|$)' && exit 1 || echo "GitLab export scope OK"
-```
-
-### 同步到已存在的 GitLab 仓库
-
-如果 GitLab 仓库已经存在，建议先 clone GitLab 仓库，再用导出的快照覆盖工作区：
-
-```bash
-git clone <GITLAB_REPO_URL> rag-lund-gitlab
-cd rag-lund-gitlab
-git checkout main
-```
-
-从 GitHub 源仓库导出快照到临时目录：
-
-```bash
-cd ..
-git clone https://github.com/Yaliang-Cai/RAG_LUND.git rag-lund-source
-cd rag-lund-source
-git checkout main
-git pull --ff-only origin main
-mkdir -p ../rag-lund-export
-git archive --format=tar HEAD -- \
-  . \
-  ':(exclude)DocBench' ':(exclude)DocBench/**' \
-  ':(exclude)docs' ':(exclude)docs/**' \
-  ':(exclude)LightRAG-Qwen3VL-Local' ':(exclude)LightRAG-Qwen3VL-Local/**' \
-  | tar -x -C ../rag-lund-export
-```
-
-覆盖 GitLab 工作区并推送：
-
-```bash
-cd ../rag-lund-gitlab
-rsync -a --delete --exclude='.git' ../rag-lund-export/ ./
-git add -A
-git status --short
-git commit -m "Sync from RAG_LUND main"
-git push origin main
-```
-
-如果 `git status --short` 没有输出，说明这次没有需要同步的变化。
 
 ## 不要提交的内容
 

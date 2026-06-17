@@ -39,7 +39,7 @@ rag-anything/server/static/dist/
 database/
 query_cache/
 
-# Root-level directories excluded from GitLab export / local sync
+# Root-level local/internal directories
 /DocBench/
 /docs/
 /LightRAG-Qwen3VL-Local/
