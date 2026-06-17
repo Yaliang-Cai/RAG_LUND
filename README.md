@@ -1,7 +1,9 @@
 RAG_LUND 后端启动指南
 启动顺序：PostgreSQL → Qdrant → Neo4j → Phoenix。所有服务无需 sudo。
 0. 环境
-bashconda activate lightRAG
+```bash
+conda activate lightRAG
+```
 1. PostgreSQL (端口 5433)
 数据目录由 PostgreSQL 16 初始化，必须用 16 启动（环境内已装好 16，不要升级到 17）。
 ```bash
